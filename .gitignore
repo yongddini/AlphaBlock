@@ -1,0 +1,25 @@
+# Secrets / env
+.env
+
+# Virtual environments
+.venv/
+
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Data artifacts
+data/*.db
+data/*.parquet
+
+# Tool caches
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# macOS
+.DS_Store

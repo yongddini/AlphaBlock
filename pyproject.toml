@@ -1,0 +1,45 @@
+[project]
+name = "alphablock"
+version = "0.1.0"
+description = "오더블록 기반 암호화폐 자동매매 (AlphaBlock)"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "ccxt>=4.0.0",
+    "pandas>=2.0.0",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "python-dotenv>=1.0.0",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.5.0",
+    "mypy>=1.10.0",
+    "pre-commit>=3.7.0",
+    "pytest>=8.0.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["config", "data", "strategy", "execution", "backtest"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+plugins = ["pydantic.mypy"]
+files = ["main.py", "config", "data", "strategy", "execution", "backtest", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
