@@ -1,5 +1,7 @@
 # AlphaBlock
 
+![CI](../../actions/workflows/ci.yml/badge.svg)
+
 오더블록(Order Block) 기반 암호화폐 자동매매 프로그램.
 
 ## 개발 환경
@@ -52,6 +54,10 @@ pre-commit 훅으로 커밋 시 자동 검사:
 ```bash
 uv run pre-commit install
 ```
+
+## CI
+
+`main` 브랜치로의 push와 모든 PR에서 [GitHub Actions](.github/workflows/ci.yml)가 로컬과 동일한 품질 게이트(`ruff check`, `ruff format --check`, `mypy`, `pytest`)를 순서대로 실행한다. 하나라도 실패하면 워크플로우가 실패로 표시된다.
 
 ## 설정
 
