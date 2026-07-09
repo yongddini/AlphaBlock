@@ -40,6 +40,11 @@ strict = true
 plugins = ["pydantic.mypy"]
 files = ["main.py", "config", "data", "strategy", "execution", "backtest", "tests"]
 
+# ccxt/pandas는 타입 스텁을 제공하지 않으므로 미싱 임포트를 허용한다.
+[[tool.mypy.overrides]]
+module = ["ccxt.*", "pandas.*"]
+ignore_missing_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
