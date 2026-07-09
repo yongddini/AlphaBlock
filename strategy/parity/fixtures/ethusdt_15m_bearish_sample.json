@@ -1,0 +1,38 @@
+{
+  "symbol": "ETHUSDT",
+  "timeframe": "15m",
+  "source": "PLACEHOLDER: strategy/reference/README.md 명세를 기준으로 손으로 계산한 값 (tests/test_order_blocks.py::test_bearish_order_block_parity_via_price_mirror 와 동일 시나리오, 강세 시나리오를 (200-price)로 미러링). 실제 TradingView 스크린샷 캡처로 교체되지 않았다 — strategy/parity/README.md의 '정답 확보 절차'에 따라 실 데이터로 교체할 것.",
+  "params": {
+    "swing_length": 3,
+    "atr_length": 3,
+    "max_atr_mult": 100.0,
+    "combine_obs": false,
+    "zone_count": "high"
+  },
+  "candles": [
+    {"open_time": 0, "open": 100, "high": 110, "low": 98, "close": 105, "volume": 10},
+    {"open_time": 900000, "open": 105, "high": 107, "low": 100, "close": 102, "volume": 10},
+    {"open_time": 1800000, "open": 102, "high": 106, "low": 99, "close": 101, "volume": 10},
+    {"open_time": 2700000, "open": 101, "high": 105, "low": 97, "close": 99, "volume": 10},
+    {"open_time": 3600000, "open": 99, "high": 100, "low": 90, "close": 92, "volume": 10},
+    {"open_time": 4500000, "open": 92, "high": 96, "low": 91, "close": 94, "volume": 15},
+    {"open_time": 5400000, "open": 94, "high": 97, "low": 93, "close": 95, "volume": 20},
+    {"open_time": 6300000, "open": 95, "high": 98, "low": 94, "close": 96, "volume": 25},
+    {"open_time": 7200000, "open": 96, "high": 100, "low": 95, "close": 98, "volume": 10},
+    {"open_time": 8100000, "open": 98, "high": 101, "low": 96, "close": 99, "volume": 10},
+    {"open_time": 9000000, "open": 99, "high": 102, "low": 97, "close": 100, "volume": 10},
+    {"open_time": 9900000, "open": 100, "high": 101, "low": 85, "close": 88, "volume": 30},
+    {"open_time": 10800000, "open": 88, "high": 105, "low": 87, "close": 103, "volume": 10}
+  ],
+  "tv_order_blocks": [
+    {
+      "direction": "bear",
+      "top": 102.0,
+      "bottom": 97.0,
+      "start_time": 9000000,
+      "invalidated": true,
+      "break_time": 10800000,
+      "note": "강세 시나리오를 (200-price)로 미러링한 손 계산 약세 OB. obLow/obHigh volume이 강세와 반대로 배정된다."
+    }
+  ]
+}

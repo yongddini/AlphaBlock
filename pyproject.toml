@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "ccxt>=4.0.0",
+    "matplotlib>=3.8.0",
     "pandas>=2.0.0",
     "pydantic>=2.0.0",
     "pydantic-settings>=2.0.0",
@@ -39,11 +40,11 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 python_version = "3.11"
 strict = true
 plugins = ["pydantic.mypy"]
-files = ["main.py", "config", "data", "strategy", "execution", "backtest", "tests"]
+files = ["main.py", "config", "data", "strategy", "execution", "backtest", "tests", "scripts"]
 
-# ccxt/pandas는 타입 스텁을 제공하지 않으므로 미싱 임포트를 허용한다.
+# ccxt/pandas/matplotlib은 타입 스텁을 제공하지 않으므로 미싱 임포트를 허용한다.
 [[tool.mypy.overrides]]
-module = ["ccxt.*", "pandas.*"]
+module = ["ccxt.*", "pandas.*", "matplotlib.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
