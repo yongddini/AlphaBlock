@@ -18,14 +18,22 @@ claude mcp add --transport http linear-server https://mcp.linear.app/mcp
 
 세션에서 `/mcp`로 인증. 팀은 **Alphabot** (key: `WAN`).
 
+## GitHub 연동
+
+원격: `github.com/yongddini/AlphaBlock` (기본 브랜치 `main`). Linear ↔ GitHub 기본 연동을 사용해 **GitHub 동작이 Linear 상태를 자동 동기화**한다: 브랜치/커밋 → In Progress, PR 열림 → In Review, PR 머지 → Done. 따라서 개발자는 상태를 손으로 바꾸기보다 브랜치·PR·머지 행위로 상태가 흐르게 한다. 이슈 연결은 브랜치명 또는 PR 제목/본문의 이슈 식별자(`WAN-x`)로 이뤄진다.
+
 ## 개발 워크플로우
 
 1. **Approved 이슈만 개발한다.** Linear에서 team=Alphabot, state=`Approved` 이슈를 우선순위 순으로 가져온다. Backlog/Todo/Rejected 는 절대 개발하지 않는다.
-2. 착수할 이슈를 **In Progress**로 바꾼다.
+2. **착수 = 브랜치 생성.** 이슈의 Linear 제안 브랜치명(이슈 식별자 포함, 예 `yu04038/wan-7-...`)으로 `main`에서 브랜치를 만든다. 브랜치·첫 커밋이 올라가면 Linear GitHub 연동이 이슈를 자동으로 **In Progress**로 옮긴다(안 되면 수동 전환).
 3. 이슈의 완료 기준(Acceptance Criteria)을 충족하도록 이 저장소에서 개발한다.
 4. 커밋 메시지 앞에 이슈 식별자를 붙인다. 예: `WAN-7: 오더블록 탐지 로직 추가`.
-5. 완료하면: 변경 요약(변경 파일, 커밋/PR, 완료기준 충족 여부, 테스트 결과)을 이슈에 코멘트로 남기고 상태를 **In Review**로 옮긴다. (Done으로 직접 옮기지 않는다 — 완료 판단은 PM 러너가 한다.)
-6. PM 러너가 미흡하다고 판단해 **Approved로 되돌리고** 변경요청 코멘트를 달면, 그 피드백을 반영해 다시 3~5를 수행한다.
+5. **완료 = 브랜치 push + PR 생성.** 브랜치를 `origin`에 push하고 `main`으로 향하는 GitHub **Pull Request**를 연다.
+   - PR 제목/본문에 이슈 식별자(`WAN-7`)를 넣어 이슈에 자동 연결한다. PR 본문에는 변경 파일·완료기준 체크리스트·테스트/품질게이트 결과를 적는다.
+   - PR이 열리면 Linear 연동이 이슈를 자동으로 **In Review**로 옮긴다(연동이 상태를 관리하므로 직접 Done으로 옮기지 않는다).
+   - CI(WAN-10)가 PR에서 자동 실행된다. **CI 초록불이 아니면 리뷰 대상이 아니다** — 실패를 고쳐 다시 push한다.
+6. PM 러너가 미흡하다고 판단해 **Approved로 되돌리고** 변경요청 코멘트를 달면, 그 피드백을 반영해 **같은 브랜치/PR에 추가 커밋**하고 다시 3~5를 수행한다.
+7. **머지는 사람이 한다.** PM 검증 + CI green 확인 후, 사용자가 PR을 `main`에 머지한다. 머지되면 Linear 연동이 이슈를 자동으로 **Done**으로 옮긴다. **Claude Code는 PR을 자동 머지하지 않는다.**
 
 ## 품질 게이트 (커밋/리뷰요청 전 필수 통과)
 
@@ -42,7 +50,9 @@ uv run pytest
 
 - **실거래 자동 활성화 금지.** `ALPHABLOCK_LIVE_TRADING` 기본값은 `false`. 실주문/자금 이동 코드는 사용자가 명시적으로 승인·수행하기 전까지 활성화하지 않는다.
 - API 키·시크릿은 코드에 하드코딩하지 않는다. `.env`(커밋 금지, `.gitignore` 포함)나 환경변수로만 주입하고, 새 설정은 `.env.example`에 예시를 추가한다.
-- 테스트가 실패하거나 완료기준을 못 채운 상태로 In Review로 넘기지 않는다.
+- 테스트가 실패하거나 완료기준을 못 채운 상태로 PR을 열지 않는다(= In Review로 넘기지 않는다).
+- **PR을 자동으로 머지하지 않는다.** main 반영(머지)은 CI green + PM 검증 후 사용자가 수행한다.
+- `.github/`(CI·릴리즈 워크플로우)는 승인된 이슈 범위 내에서만 수정한다.
 
 ## 프로젝트 구조
 
