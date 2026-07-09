@@ -13,6 +13,21 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def _default_symbols() -> list[str]:
+    """수집 대상 기본 심볼 (USDT 무기한 선물)."""
+    return ["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT"]
+
+
+def _default_timeframes() -> list[str]:
+    """수집 대상 기본 타임프레임."""
+    return ["1m", "5m", "15m", "1h", "4h", "1d"]
+
+
+def _default_backfill_lookback_days() -> dict[str, int]:
+    """타임프레임별 백필 룩백(일). 과도한 과거 요청을 막기 위한 기본값."""
+    return {"1m": 3, "5m": 10, "15m": 30, "1h": 120, "4h": 365, "1d": 1825}
+
+
 class Settings(BaseSettings):
     """환경변수/.env 기반 설정 값."""
 
@@ -27,20 +42,34 @@ class Settings(BaseSettings):
     binance_api_key: str = Field(default="")
     binance_api_secret: str = Field(default="")
 
-    # 거래 시장: 현물(spot) 또는 선물(future)
-    market_type: Literal["spot", "future"] = Field(default="spot")
+    # 거래 시장: 현물(spot) 또는 선물(future). 본 프로젝트는 USDⓈ-M 무기한 선물이 기본.
+    market_type: Literal["spot", "future"] = Field(default="future")
 
-    # 기본 심볼 / 타임프레임
-    symbol: str = Field(default="BTC/USDT")
+    # 레거시 단일 심볼 / 타임프레임 (엔트리포인트 요약 등에서 사용)
+    symbol: str = Field(default="BTC/USDT:USDT")
     timeframe: str = Field(default="1h")
 
-    # 안전장치: 실제 주문 실행 여부. 기본은 반드시 False.
+    # 수집 대상 심볼·타임프레임 목록 (설정으로 추가·변경 가능)
+    symbols: list[str] = Field(default_factory=_default_symbols)
+    timeframes: list[str] = Field(default_factory=_default_timeframes)
+
+    # 타임프레임별 백필 룩백(일). 저장된 데이터가 없을 때 이만큼 과거부터 수집한다.
+    backfill_lookback_days: dict[str, int] = Field(default_factory=_default_backfill_lookback_days)
+
+    # 수집 데이터 SQLite 경로
+    db_path: str = Field(default="data/ohlcv.db")
+
+    # 안전장치: 실제 주문 실행 여부. 기본은 반드시 False. (본 이슈에서는 미사용)
     live_trading: bool = Field(default=False)
 
     @property
     def has_credentials(self) -> bool:
         """API 키와 시크릿이 모두 설정됐는지 여부."""
         return bool(self.binance_api_key) and bool(self.binance_api_secret)
+
+    def lookback_days_for(self, timeframe: str, *, default: int = 30) -> int:
+        """타임프레임의 백필 룩백(일)을 반환한다. 없으면 `default`."""
+        return self.backfill_lookback_days.get(timeframe, default)
 
 
 @lru_cache(maxsize=1)
