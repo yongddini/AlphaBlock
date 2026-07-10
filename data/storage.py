@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from collections.abc import Iterable
 from pathlib import Path
 from types import TracebackType
@@ -60,6 +61,10 @@ _COLUMNS = [
 class OhlcvStore:
     """OHLCV 봉을 저장·조회하는 SQLite 래퍼.
 
+    스레드 안전하다: 백필은 ``asyncio.to_thread``로 워커 스레드에서, 실시간
+    스트림은 이벤트 루프 스레드에서 같은 저장소를 사용하므로, 커넥션을
+    ``check_same_thread=False``로 열고 모든 접근을 락으로 직렬화한다.
+
     컨텍스트 매니저로 사용할 수 있다::
 
         with OhlcvStore("data/ohlcv.db") as store:
@@ -71,7 +76,10 @@ class OhlcvStore:
         # ":memory:"가 아니면 상위 디렉터리를 보장한다.
         if self._path != ":memory:":
             Path(self._path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(self._path)
+        # check_same_thread=False + 락: 백필(워커 스레드)과 스트림(루프 스레드)이
+        # 같은 커넥션을 사용해도 안전하도록 모든 접근을 self._lock으로 직렬화한다.
+        self._lock = threading.Lock()
+        self._conn = sqlite3.connect(self._path, check_same_thread=False)
         self._conn.execute(_SCHEMA)
         self._conn.commit()
 
@@ -91,17 +99,18 @@ class OhlcvStore:
         rows = [c.as_row() for c in candles]
         if not rows:
             return 0
-        with self._conn:  # 트랜잭션 자동 커밋/롤백
+        with self._lock, self._conn:  # 락으로 스레드 직렬화 + 트랜잭션 자동 커밋/롤백
             self._conn.executemany(_UPSERT, rows)
         return len(rows)
 
     def last_open_time(self, symbol: str, timeframe: str) -> int | None:
         """해당 심볼·타임프레임의 가장 최근 `open_time`. 없으면 None."""
-        cur = self._conn.execute(
-            "SELECT MAX(open_time) FROM ohlcv WHERE symbol = ? AND timeframe = ?",
-            (symbol, timeframe),
-        )
-        (value,) = cur.fetchone()
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT MAX(open_time) FROM ohlcv WHERE symbol = ? AND timeframe = ?",
+                (symbol, timeframe),
+            )
+            (value,) = cur.fetchone()
         return int(value) if value is not None else None
 
     def count(self, symbol: str | None = None, timeframe: str | None = None) -> int:
@@ -115,16 +124,19 @@ class OhlcvStore:
             clauses.append("timeframe = ?")
             params.append(timeframe)
         where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
-        cur = self._conn.execute(f"SELECT COUNT(*) FROM ohlcv{where}", params)
-        (value,) = cur.fetchone()
+        with self._lock:
+            cur = self._conn.execute(f"SELECT COUNT(*) FROM ohlcv{where}", params)
+            (value,) = cur.fetchone()
         return int(value)
 
     def list_series(self) -> list[tuple[str, str]]:
         """저장된 (symbol, timeframe) 조합 목록을 정렬해 반환한다."""
-        cur = self._conn.execute(
-            "SELECT DISTINCT symbol, timeframe FROM ohlcv ORDER BY symbol, timeframe"
-        )
-        return [(row[0], row[1]) for row in cur.fetchall()]
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT DISTINCT symbol, timeframe FROM ohlcv ORDER BY symbol, timeframe"
+            )
+            rows = cur.fetchall()
+        return [(row[0], row[1]) for row in rows]
 
     def load(
         self,
@@ -149,7 +161,8 @@ class OhlcvStore:
             params.append(end_ms)
         query += " ORDER BY open_time ASC"
 
-        df = pd.read_sql_query(query, self._conn, params=params)
+        with self._lock:
+            df = pd.read_sql_query(query, self._conn, params=params)
         if df.empty:
             df = pd.DataFrame(columns=_COLUMNS)
         df["closed"] = df["closed"].astype(bool)
@@ -158,4 +171,5 @@ class OhlcvStore:
 
     def close(self) -> None:
         """연결을 닫는다."""
-        self._conn.close()
+        with self._lock:
+            self._conn.close()

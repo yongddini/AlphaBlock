@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from collections.abc import Iterator
 
 import pytest
@@ -65,3 +67,38 @@ def test_load_empty_returns_schema(store: OhlcvStore) -> None:
 
 def test_upsert_empty_is_noop(store: OhlcvStore) -> None:
     assert store.upsert_candles([]) == 0
+
+
+def test_store_usable_from_worker_thread(store: OhlcvStore) -> None:
+    """메인 스레드에서 생성한 store를 다른 스레드에서 써도 오류가 없어야 한다(WAN-21).
+
+    회귀 방지: 예전에는 sqlite3 기본값(check_same_thread=True) 때문에
+    ``asyncio.to_thread``로 넘긴 워커 스레드에서 store를 쓰면
+    ProgrammingError가 났다.
+    """
+
+    async def run() -> int:
+        # store는 이 테스트(메인) 스레드에서 생성됨. 다른 스레드에서 사용한다.
+        await asyncio.to_thread(store.upsert_candles, [_candle(1000, 1.5)])
+        return await asyncio.to_thread(store.count)
+
+    assert asyncio.run(run()) == 1
+
+
+def test_store_concurrent_multithreaded_writes(store: OhlcvStore) -> None:
+    """여러 스레드가 동시에 store에 써도 락으로 직렬화되어 안전해야 한다(WAN-21)."""
+    threads = [
+        threading.Thread(
+            target=lambda base=base: store.upsert_candles(
+                [_candle(base + i, float(i)) for i in range(50)]
+            )
+        )
+        # 서로 다른 open_time 구간을 써서 총 8×50=400 봉이 쌓인다.
+        for base in range(0, 8_000, 1_000)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert store.count() == 400
