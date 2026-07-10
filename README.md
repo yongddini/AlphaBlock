@@ -33,12 +33,28 @@ AlphaBlock/
 ├── strategy/    # 오더블록 탐지·시그널 생성
 ├── execution/   # 주문 실행·포지션 관리
 ├── backtest/    # 백테스팅 엔진
+├── dashboard/   # 통합 트레이딩 웹 대시보드 (Streamlit)
 ├── config/      # 설정 로딩 (pydantic-settings)
 ├── tests/       # 테스트
 ├── .env.example # 환경변수 예시 (.env는 커밋 금지)
 ├── .github/     # CI (ruff · mypy · pytest)
 └── pyproject.toml
 ```
+
+## 대시보드
+
+캔들+오더블록(강세/약세·활성/무효화)+진입·청산 시그널 차트와 백테스트 성과
+(수익곡선·MDD·승률·손익비·샤프·거래 목록)를 한 화면에서 확인하는 로컬 실행형
+Streamlit 앱이다. 외부 노출/인증은 범위 밖이며 로컬에서만 실행한다.
+
+```bash
+uv run streamlit run dashboard/app.py
+```
+
+사이드바에서 심볼·타임프레임·기간을 바꾸면 해당 구간 OHLCV로 오더블록 탐지와
+백테스트를 다시 실행해 화면을 갱신한다. 데이터는 `ALPHABLOCK_DB_PATH`(기본
+`data/ohlcv.db`, WAN-6 수집 결과)에서 읽으며, 저장된 데이터가 없으면 먼저
+데이터 수집을 실행하라는 안내를 보여준다.
 
 ## 품질 검사
 
