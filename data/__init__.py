@@ -7,6 +7,7 @@ from data.backfill import backfill_all, backfill_symbol
 from data.collector import run_collector
 from data.exchange import create_exchange
 from data.models import Candle, candle_from_ccxt, timeframe_to_ms
+from data.resample import resample_ohlcv
 from data.storage import OhlcvStore
 from data.stream import parse_kline_message, stream_klines
 
@@ -18,6 +19,7 @@ __all__ = [
     "candle_from_ccxt",
     "create_exchange",
     "parse_kline_message",
+    "resample_ohlcv",
     "run_collector",
     "stream_klines",
     "timeframe_to_ms",
