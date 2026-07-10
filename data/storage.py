@@ -14,7 +14,8 @@ from types import TracebackType
 
 import pandas as pd
 
-from data.models import Candle
+from data.models import Candle, timeframe_to_ms
+from data.resample import resample_ohlcv
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS ohlcv (
@@ -43,6 +44,10 @@ ON CONFLICT(symbol, timeframe, open_time) DO UPDATE SET
     volume = excluded.volume,
     closed = excluded.closed
 """
+
+# 거래소에서 직접 수집하지 않고 하위 TF에서 리샘플로 파생하는 타임프레임 → 원본 TF.
+# 2h는 미수집(WAN-6은 1h까지만)이라 1h 두 봉을 합쳐 무손실로 만든다 (WAN-24).
+_DERIVED_TIMEFRAMES: dict[str, str] = {"2h": "1h"}
 
 # `load`가 반환하는 컬럼 순서.
 _COLUMNS = [
@@ -150,7 +155,46 @@ class OhlcvStore:
 
         `open_datetime` 컬럼(UTC)을 파생해 함께 제공한다. 결과가 없으면 동일한
         컬럼 스키마의 빈 DataFrame을 반환한다.
+
+        `2h`처럼 파생 타임프레임(`_DERIVED_TIMEFRAMES`)은 저장소에 없으므로 원본
+        TF(1h)를 조회해 리샘플한 결과를 다른 TF와 동일한 인터페이스로 반환한다.
         """
+        if timeframe in _DERIVED_TIMEFRAMES:
+            return self._load_derived(symbol, timeframe, start_ms=start_ms, end_ms=end_ms)
+        return self._load_native(symbol, timeframe, start_ms=start_ms, end_ms=end_ms)
+
+    def _load_derived(
+        self,
+        symbol: str,
+        timeframe: str,
+        *,
+        start_ms: int | None,
+        end_ms: int | None,
+    ) -> pd.DataFrame:
+        """파생 TF를 원본 TF 리샘플로 조회한다(경계 버킷이 온전하도록 창을 넓힘)."""
+        source_tf = _DERIVED_TIMEFRAMES[timeframe]
+        tgt_ms = timeframe_to_ms(timeframe)
+        # 경계 상위 봉을 구성하려면 요청 창 밖의 원본 봉도 필요하다: 시작은 버킷
+        # 경계로 내림, 끝은 한 버킷만큼 넓혀 로드한 뒤 결과를 [start, end)로 자른다.
+        src_start = None if start_ms is None else (start_ms // tgt_ms) * tgt_ms
+        src_end = None if end_ms is None else end_ms + tgt_ms
+        base = self._load_native(symbol, source_tf, start_ms=src_start, end_ms=src_end)
+        out = resample_ohlcv(base, source_tf, timeframe)
+        if start_ms is not None:
+            out = out[out["open_time"] >= start_ms]
+        if end_ms is not None:
+            out = out[out["open_time"] < end_ms]
+        return out.reset_index(drop=True)
+
+    def _load_native(
+        self,
+        symbol: str,
+        timeframe: str,
+        *,
+        start_ms: int | None,
+        end_ms: int | None,
+    ) -> pd.DataFrame:
+        """저장소에 직접 저장된 TF를 조회한다."""
         query = "SELECT " + ", ".join(_COLUMNS) + " FROM ohlcv WHERE symbol = ? AND timeframe = ?"
         params: list[object] = [symbol, timeframe]
         if start_ms is not None:
