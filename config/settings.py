@@ -67,9 +67,9 @@ class Settings(BaseSettings):
     funding_refresh_interval_seconds: int = Field(default=300)  # 현재 펀딩비 갱신 간격(초)
     funding_backfill_lookback_days: int = Field(default=30)  # 저장분 없을 때 백필 룩백(일)
 
-    # 오더블록 + 지표 컨플루언스 진입·청산 규칙(WAN-18). 기본값은 트레이딩뷰 설정과 일치.
-    # 개별 필드는 ALPHABLOCK_CONFLUENCE__<필드명> 환경변수로 덮어쓴다.
-    # 예: ALPHABLOCK_CONFLUENCE__USE_RSI_GATE=false
+    # 전략 규칙(WAN-23): 진입=오더블록+RSI, 익절=EMA/VWMA 선 도달, 손절=오더블록 무효화.
+    # 기본값은 트레이딩뷰 설정과 일치. 개별 필드는 ALPHABLOCK_CONFLUENCE__<필드명>로 덮어쓴다.
+    # 예: ALPHABLOCK_CONFLUENCE__RSI_OVERSOLD=25
     confluence: ConfluenceParams = Field(default_factory=ConfluenceParams)
 
     # 안전장치: 실제 주문 실행 여부. 기본은 반드시 False. (본 이슈에서는 미사용)

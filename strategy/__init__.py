@@ -4,7 +4,6 @@ from strategy.confluence import (
     ConfluenceResult,
     ConfluenceSignal,
     ConfluenceStrategy,
-    ExitTrigger,
     IndicatorSnapshot,
     SignalKind,
     generate_confluence_signals,
@@ -24,6 +23,8 @@ from strategy.models import (
     OrderBlockParams,
     OrderBlockResult,
     OrderBlockSignal,
+    PlannedExit,
+    SignalExitReason,
 )
 from strategy.order_blocks import OrderBlockDetector, detect_order_blocks
 
@@ -34,7 +35,6 @@ __all__ = [
     "ConfluenceResult",
     "ConfluenceSignal",
     "ConfluenceStrategy",
-    "ExitTrigger",
     "IndicatorSnapshot",
     "OrderBlock",
     "OrderBlockDetector",
@@ -42,6 +42,8 @@ __all__ = [
     "OrderBlockParams",
     "OrderBlockResult",
     "OrderBlockSignal",
+    "PlannedExit",
+    "SignalExitReason",
     "SignalKind",
     "detect_order_blocks",
     "ema",
