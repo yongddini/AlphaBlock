@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -60,6 +61,20 @@ class BacktestConfig(BaseModel):
     """부분 익절 시 청산할 최초 수량 비율."""
     allow_long: bool = True
     allow_short: bool = True
+    funding_enabled: bool = False
+    """펀딩비(funding rate)를 손익에 반영할지 여부. 기본 False(기존 동작 보존).
+
+    True이면 `run()`에 전달된 펀딩비 데이터로 보유 구간의 각 정산 시점마다
+    `명목가치 × 요율 × 방향`을 손익에 가감한다.
+    """
+    funding_include_predicted: bool = False
+    """예측(미정산) 펀딩비까지 반영할지 여부. 기본 False(확정값만 반영)."""
+    funding_missing_policy: Literal["zero", "error"] = "zero"
+    """`funding_enabled`인데 펀딩비 데이터가 전혀 없을 때의 정책.
+
+    - ``"zero"``(기본): 펀딩비용을 0으로 두고 백테스트를 진행한다.
+    - ``"error"``: 데이터 결측을 오류로 보고 `ValueError`를 발생시킨다.
+    """
     annualization_factor: float | None = Field(default=None, gt=0)
     """샤프 지수 연율화 계수(연간 봉 수). None이면 봉 단위 샤프를 그대로 사용."""
     seed: int = 0
@@ -105,8 +120,10 @@ class Trade(BaseModel):
     """진입 수량(부분 청산 전 전체)."""
     entry_fee: float
     exits: list[TradeFill]
+    funding_cost: float = 0.0
+    """보유 구간 누적 펀딩비용(양수=지불, 음수=수취). `realized_pnl`에 이미 반영됨."""
     realized_pnl: float
-    """모든 수수료(진입·청산)를 차감한 순손익."""
+    """모든 수수료(진입·청산)와 펀딩비용을 차감·가감한 순손익."""
     return_pct: float
     """`realized_pnl`을 진입 노셔널로 나눈 수익률."""
 
@@ -150,6 +167,8 @@ class BacktestMetrics(BaseModel):
     gross_loss: float
     avg_win: float
     avg_loss: float
+    total_funding_cost: float = 0.0
+    """모든 거래에 걸친 누적 펀딩비용(양수=순지불, 음수=순수취)."""
 
 
 class BacktestResult(BaseModel):

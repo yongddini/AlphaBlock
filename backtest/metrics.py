@@ -76,6 +76,7 @@ def build_metrics(
     win_rate = len(wins) / num_trades if num_trades else 0.0
     avg_win = gross_profit / len(wins) if wins else 0.0
     avg_loss = -gross_loss / len(losses) if losses else 0.0
+    total_funding_cost = sum(t.funding_cost for t in trades)
 
     return BacktestMetrics(
         initial_capital=initial_capital,
@@ -92,4 +93,5 @@ def build_metrics(
         gross_loss=gross_loss,
         avg_win=avg_win,
         avg_loss=avg_loss,
+        total_funding_cost=total_funding_cost,
     )

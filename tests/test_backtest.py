@@ -28,10 +28,21 @@ from backtest import (
     write_trades_csv,
 )
 from backtest.metrics import bar_returns
+from data.models import FundingRate
 from strategy.models import OrderBlock, OrderBlockDirection, OrderBlockSignal
 
 # 봉 간격(ms)
 _STEP = 60_000
+
+
+def _funding(funding_time: int, rate: float, *, is_predicted: bool = False) -> FundingRate:
+    """테스트용 펀딩비 관측(심볼은 엔진이 무시하므로 형식만)."""
+    return FundingRate(
+        symbol="BTC/USDT:USDT",
+        funding_time=funding_time,
+        rate=rate,
+        is_predicted=is_predicted,
+    )
 
 
 def _make_df(bars: Sequence[tuple[float, float, float, float, float]]) -> pd.DataFrame:
@@ -315,6 +326,132 @@ def test_closed_column_filters_unconfirmed_bars() -> None:
     # 익절 봉이 제외되어 데이터 끝(중간봉 종가 104)에서 강제 청산
     assert len(result.equity_curve) == 2
     assert result.trades[0].exits[-1].reason is ExitReason.END_OF_DATA
+
+
+# --- 펀딩비 (WAN-20) ---
+
+# 롱 익절 시나리오: 진입 bar0(open_time 0), 익절 bar2(open_time 120_000).
+# 보유 구간 [0, 120_000), 진입가 100, 수량 100 → 명목가 10_000.
+_LONG_TP_DF = [_ENTRY_BAR, _MID_BAR, (104.0, 112.0, 103.0, 110.0, 10.0)]
+
+
+def _long_tp_cfg(**kw: object) -> BacktestConfig:
+    base: dict[str, object] = dict(
+        initial_capital=10_000.0,
+        fee_rate=0.0,
+        slippage=0.0,
+        position_fraction=1.0,
+        stop_loss_pct=0.05,
+        take_profit_pct=0.10,
+    )
+    base.update(kw)
+    return BacktestConfig(**base)
+
+
+def test_funding_long_pays_when_rate_positive() -> None:
+    df = _make_df(_LONG_TP_DF)
+    signals = [_signal(OrderBlockDirection.BULLISH, 0, 100.0)]
+    rates = [_funding(30_000, 0.001), _funding(90_000, 0.001)]  # 구간 내 2회 정산
+    result = run_backtest(df, signals, _long_tp_cfg(funding_enabled=True), rates)
+
+    trade = result.trades[0]
+    # 명목가 10_000 × 0.001 × 2회 = 20 (롱은 rate>0에서 지불)
+    assert trade.funding_cost == pytest.approx(20.0)
+    assert trade.realized_pnl == pytest.approx(980.0)  # 1000 - 20
+    assert result.metrics.total_funding_cost == pytest.approx(20.0)
+    assert result.metrics.final_equity == pytest.approx(10_980.0)
+
+
+def test_funding_disabled_ignores_rates() -> None:
+    df = _make_df(_LONG_TP_DF)
+    signals = [_signal(OrderBlockDirection.BULLISH, 0, 100.0)]
+    rates = [_funding(30_000, 0.001), _funding(90_000, 0.001)]
+    result = run_backtest(df, signals, _long_tp_cfg(funding_enabled=False), rates)
+
+    trade = result.trades[0]
+    assert trade.funding_cost == pytest.approx(0.0)
+    assert trade.realized_pnl == pytest.approx(1_000.0)
+    assert result.metrics.total_funding_cost == pytest.approx(0.0)
+
+
+def test_funding_short_receives_when_rate_positive() -> None:
+    df = _make_df([_ENTRY_BAR, (100.0, 101.0, 88.0, 92.0, 10.0)])  # 숏 익절 bar1
+    signals = [_signal(OrderBlockDirection.BEARISH, 0, 100.0)]
+    rates = [_funding(30_000, 0.001)]  # 보유 [0, 60_000)
+    result = run_backtest(df, signals, _long_tp_cfg(funding_enabled=True), rates)
+
+    trade = result.trades[0]
+    assert trade.side is PositionSide.SHORT
+    # 숏은 부호 반대 → 10_000 × 0.001 × (-1) = -10 (수취)
+    assert trade.funding_cost == pytest.approx(-10.0)
+    assert trade.realized_pnl == pytest.approx(1_010.0)  # 1000 - (-10)
+
+
+def test_funding_partial_exit_scales_notional() -> None:
+    df = _make_df(
+        [
+            _ENTRY_BAR,
+            (100.0, 106.0, 101.0, 104.0, 10.0),  # 부분 익절(105) bar1
+            (104.0, 112.0, 103.0, 110.0, 10.0),  # 전체 익절(110) bar2
+        ]
+    )
+    signals = [_signal(OrderBlockDirection.BULLISH, 0, 100.0)]
+    cfg = _long_tp_cfg(
+        funding_enabled=True,
+        stop_loss_pct=0.20,
+        partial_take_profit_pct=0.05,
+        partial_exit_fraction=0.5,
+    )
+    rates = [_funding(30_000, 0.001), _funding(90_000, 0.001)]
+    result = run_backtest(df, signals, cfg, rates)
+
+    trade = result.trades[0]
+    # [0,60_000) 수량 100 → 10_000×0.001=10, [60_000,120_000) 수량 50 → 5_000×0.001=5
+    assert trade.funding_cost == pytest.approx(15.0)
+    assert trade.realized_pnl == pytest.approx(735.0)  # 750 - 15
+
+
+def test_funding_entry_inclusive_exit_exclusive() -> None:
+    df = _make_df(_LONG_TP_DF)
+    signals = [_signal(OrderBlockDirection.BULLISH, 0, 100.0)]
+    # 진입시각(0)의 펀딩은 포함, 청산시각(120_000)의 펀딩은 제외.
+    rates = [_funding(0, 0.001), _funding(120_000, 0.005)]
+    result = run_backtest(df, signals, _long_tp_cfg(funding_enabled=True), rates)
+
+    trade = result.trades[0]
+    assert trade.funding_cost == pytest.approx(10.0)  # 0시각 1회만 반영
+
+
+def test_funding_missing_policy_error_raises() -> None:
+    df = _make_df(_LONG_TP_DF)
+    signals = [_signal(OrderBlockDirection.BULLISH, 0, 100.0)]
+    cfg = _long_tp_cfg(funding_enabled=True, funding_missing_policy="error")
+    with pytest.raises(ValueError, match="펀딩비 데이터가 없습니다"):
+        run_backtest(df, signals, cfg)  # funding_rates 미전달
+
+
+def test_funding_missing_policy_zero_proceeds() -> None:
+    df = _make_df(_LONG_TP_DF)
+    signals = [_signal(OrderBlockDirection.BULLISH, 0, 100.0)]
+    cfg = _long_tp_cfg(funding_enabled=True, funding_missing_policy="zero")
+    result = run_backtest(df, signals, cfg)  # 데이터 없음 → 0으로 진행
+
+    assert result.trades[0].funding_cost == pytest.approx(0.0)
+    assert result.trades[0].realized_pnl == pytest.approx(1_000.0)
+
+
+def test_funding_predicted_excluded_by_default_included_when_enabled() -> None:
+    df = _make_df(_LONG_TP_DF)
+    signals = [_signal(OrderBlockDirection.BULLISH, 0, 100.0)]
+    rates = [_funding(30_000, 0.001, is_predicted=True)]
+
+    excluded = run_backtest(df, signals, _long_tp_cfg(funding_enabled=True), rates)
+    assert excluded.trades[0].funding_cost == pytest.approx(0.0)
+
+    included = run_backtest(
+        df, signals, _long_tp_cfg(funding_enabled=True, funding_include_predicted=True), rates
+    )
+    assert included.trades[0].funding_cost == pytest.approx(10.0)
 
 
 # --- 지표 순수 함수 ---
