@@ -28,6 +28,7 @@ def trades_to_dataframe(result: BacktestResult) -> pd.DataFrame:
                 "last_exit_reason": tr.exits[-1].reason.value,
                 "entry_fee": tr.entry_fee,
                 "exit_fees": sum(f.fee for f in tr.exits),
+                "funding_cost": tr.funding_cost,
                 "realized_pnl": tr.realized_pnl,
                 "return_pct": tr.return_pct,
             }
@@ -42,6 +43,7 @@ def trades_to_dataframe(result: BacktestResult) -> pd.DataFrame:
         "last_exit_reason",
         "entry_fee",
         "exit_fees",
+        "funding_cost",
         "realized_pnl",
         "return_pct",
     ]
@@ -77,7 +79,9 @@ def summary_dict(result: BacktestResult) -> dict[str, object]:
         "gross_loss": m.gross_loss,
         "avg_win": m.avg_win,
         "avg_loss": m.avg_loss,
+        "total_funding_cost": m.total_funding_cost,
         "fee_rate": c.fee_rate,
+        "funding_enabled": c.funding_enabled,
         "slippage": c.slippage,
         "position_fraction": c.position_fraction,
         "stop_loss_pct": c.stop_loss_pct,
@@ -108,11 +112,15 @@ def format_summary(result: BacktestResult) -> str:
         f"{'Trades':<20}{m.num_trades:>16}",
         f"{'Wins / Losses':<20}{f'{m.num_wins} / {m.num_losses}':>16}",
         f"{'Avg Win / Loss':<20}{f'{m.avg_win:,.2f} / {m.avg_loss:,.2f}':>16}",
+        f"{'Funding Cost':<20}{_fmt(m.total_funding_cost):>16}",
         "--- Params ---",
         f"fee_rate={c.fee_rate} slippage={c.slippage} "
         f"position_fraction={c.position_fraction} seed={c.seed}",
         f"stop_loss_pct={c.stop_loss_pct} take_profit_pct={c.take_profit_pct} "
         f"partial_take_profit_pct={c.partial_take_profit_pct}",
+        f"funding_enabled={c.funding_enabled} "
+        f"funding_include_predicted={c.funding_include_predicted} "
+        f"funding_missing_policy={c.funding_missing_policy}",
     ]
     return "\n".join(lines)
 
