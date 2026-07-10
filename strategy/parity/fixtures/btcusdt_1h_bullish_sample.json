@@ -1,0 +1,38 @@
+{
+  "symbol": "BTCUSDT",
+  "timeframe": "1h",
+  "source": "PLACEHOLDER: strategy/reference/README.md 명세를 기준으로 손으로 계산한 값 (tests/test_order_blocks.py::test_bullish_order_block_parity 와 동일 시나리오). 실제 TradingView 스크린샷 캡처로 교체되지 않았다 — strategy/parity/README.md의 '정답 확보 절차'에 따라 실 데이터로 교체할 것.",
+  "params": {
+    "swing_length": 3,
+    "atr_length": 3,
+    "max_atr_mult": 100.0,
+    "combine_obs": false,
+    "zone_count": "high"
+  },
+  "candles": [
+    {"open_time": 0, "open": 100, "high": 102, "low": 90, "close": 95, "volume": 10},
+    {"open_time": 3600000, "open": 95, "high": 100, "low": 93, "close": 98, "volume": 10},
+    {"open_time": 7200000, "open": 98, "high": 101, "low": 94, "close": 99, "volume": 10},
+    {"open_time": 10800000, "open": 99, "high": 103, "low": 95, "close": 101, "volume": 10},
+    {"open_time": 14400000, "open": 101, "high": 110, "low": 100, "close": 108, "volume": 10},
+    {"open_time": 18000000, "open": 108, "high": 109, "low": 104, "close": 106, "volume": 15},
+    {"open_time": 21600000, "open": 106, "high": 107, "low": 103, "close": 105, "volume": 20},
+    {"open_time": 25200000, "open": 105, "high": 106, "low": 102, "close": 104, "volume": 25},
+    {"open_time": 28800000, "open": 104, "high": 105, "low": 100, "close": 102, "volume": 10},
+    {"open_time": 32400000, "open": 102, "high": 104, "low": 99, "close": 101, "volume": 10},
+    {"open_time": 36000000, "open": 101, "high": 103, "low": 98, "close": 100, "volume": 10},
+    {"open_time": 39600000, "open": 100, "high": 115, "low": 99, "close": 112, "volume": 30},
+    {"open_time": 43200000, "open": 112, "high": 113, "low": 95, "close": 97, "volume": 10}
+  ],
+  "tv_order_blocks": [
+    {
+      "direction": "bull",
+      "top": 103.0,
+      "bottom": 98.0,
+      "start_time": 36000000,
+      "invalidated": true,
+      "break_time": 43200000,
+      "note": "swing_length=3, atr_length=3, max_atr_mult=100, combine_obs=false, zone_count=high 기준 손으로 추적한 강세 OB"
+    }
+  ]
+}
