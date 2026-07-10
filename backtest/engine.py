@@ -15,6 +15,13 @@
   적용된다. 모든 손익은 진입·청산 수수료를 차감한 순값이다.
 - 진입 봉에서는 청산을 판정하지 않는다(청산 판정은 진입 후 다음 봉부터).
 
+## 계획 청산(planned exit, WAN-23)
+
+시그널에 `planned_exit`(전략이 진입가 기준으로 미리 계산한 익절 선 도달·손절
+오더블록 무효화)이 실려 있으면, 그 포지션은 계획된 봉·참조가·사유대로 전량
+청산된다. 계획 청산이 있는 포지션은 고정 %TP/SL·부분익절 규칙을 타지 않으므로
+두 경로가 충돌하지 않는다(계획 청산이 없는 포지션만 고정 %규칙을 따른다).
+
 ## 펀딩비(funding rate)
 
 `config.funding_enabled=True`이고 `run()`에 심볼의 펀딩비(`FundingRate`)가 전달되면,
@@ -47,10 +54,16 @@ from backtest.models import (
 )
 from data.funding import Direction, cumulative_funding_cost
 from data.models import FundingRate
-from strategy.models import OrderBlockDirection, OrderBlockSignal
+from strategy.models import OrderBlockDirection, OrderBlockSignal, PlannedExit, SignalExitReason
 
 _REQUIRED_COLUMNS = ("open_time", "open", "high", "low", "close")
 _QTY_EPS = 1e-12
+
+#: 전략(WAN-23)이 계획한 청산 사유 → 백테스트 청산 사유 매핑.
+_PLANNED_EXIT_REASON: dict[SignalExitReason, ExitReason] = {
+    SignalExitReason.TAKE_PROFIT: ExitReason.TAKE_PROFIT,
+    SignalExitReason.STOP_LOSS: ExitReason.STOP_LOSS,
+}
 
 
 @dataclass(eq=False)
@@ -66,6 +79,7 @@ class _OpenPosition:
     stop_price: float | None
     take_profit_price: float | None
     partial_take_profit_price: float | None
+    planned_exit: PlannedExit | None = None
     partial_taken: bool = False
     exits: list[TradeFill] = field(default_factory=list)
 
@@ -210,6 +224,7 @@ class BacktestEngine:
             stop_price=stop_price,
             take_profit_price=take_profit_price,
             partial_take_profit_price=partial_price,
+            planned_exit=sig.planned_exit,
         )
         return position, cash
 
@@ -238,6 +253,23 @@ class BacktestEngine:
 
         완전 청산되면 (cash, Trade)를, 아니면 (cash, None)을 반환한다.
         """
+        # 전략(WAN-23)이 계획한 청산이 있으면 그 봉에서 계획대로 전량 청산한다
+        # (익절=선 도달, 손절=오더블록 무효화). 고정 %TP/SL 경로와 배타적으로 동작해
+        # 충돌하지 않는다 — 계획 청산이 없는 포지션만 아래 고정 %규칙을 탄다.
+        planned = pos.planned_exit
+        if planned is not None:
+            if t >= planned.time:
+                cash = self._close_qty(
+                    pos,
+                    pos.remaining_quantity,
+                    planned.price,
+                    cash,
+                    t,
+                    _PLANNED_EXIT_REASON[planned.reason],
+                )
+                return self._finalize_and_settle(pos, cash)
+            return cash, None
+
         is_long = pos.side is PositionSide.LONG
 
         # 보수적 가정: 손절과 익절이 같은 봉에 걸리면 손절을 우선한다.
