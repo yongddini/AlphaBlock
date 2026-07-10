@@ -8,9 +8,11 @@ dependencies = [
     "ccxt>=4.0.0",
     "matplotlib>=3.8.0",
     "pandas>=2.0.0",
+    "plotly>=6.9.0",
     "pydantic>=2.0.0",
     "pydantic-settings>=2.0.0",
     "python-dotenv>=1.0.0",
+    "streamlit>=1.59.1",
     "websockets>=12.0",
 ]
 
@@ -27,7 +29,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["config", "data", "strategy", "execution", "backtest"]
+packages = ["config", "data", "strategy", "execution", "backtest", "dashboard"]
 
 [tool.ruff]
 line-length = 100
@@ -40,11 +42,21 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 python_version = "3.11"
 strict = true
 plugins = ["pydantic.mypy"]
-files = ["main.py", "config", "data", "strategy", "execution", "backtest", "tests", "scripts"]
+files = [
+    "main.py",
+    "config",
+    "data",
+    "strategy",
+    "execution",
+    "backtest",
+    "dashboard",
+    "tests",
+    "scripts",
+]
 
-# ccxt/pandas/matplotlib은 타입 스텁을 제공하지 않으므로 미싱 임포트를 허용한다.
+# ccxt/pandas/matplotlib/streamlit은 타입 스텁을 제공하지 않으므로 미싱 임포트를 허용한다.
 [[tool.mypy.overrides]]
-module = ["ccxt.*", "pandas.*", "matplotlib.*"]
+module = ["ccxt.*", "pandas.*", "matplotlib.*", "streamlit.*", "plotly.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

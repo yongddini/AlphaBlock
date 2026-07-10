@@ -119,6 +119,13 @@ class OhlcvStore:
         (value,) = cur.fetchone()
         return int(value)
 
+    def list_series(self) -> list[tuple[str, str]]:
+        """저장된 (symbol, timeframe) 조합 목록을 정렬해 반환한다."""
+        cur = self._conn.execute(
+            "SELECT DISTINCT symbol, timeframe FROM ohlcv ORDER BY symbol, timeframe"
+        )
+        return [(row[0], row[1]) for row in cur.fetchall()]
+
     def load(
         self,
         symbol: str,
