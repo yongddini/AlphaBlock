@@ -1,17 +1,30 @@
 """컨플루언스 전략 성과 평가 & 파라미터 스윕 (WAN-19).
 
-WAN-18 컨플루언스 시그널(`strategy.confluence`)을 WAN-8 백테스트 엔진
+WAN-23 재설계 컨플루언스 전략(`strategy.confluence`)을 WAN-8 백테스트 엔진
 (`backtest.engine`)에 태워 **엔드투엔드 성과 리포트**를 만들고, 핵심 파라미터를
 소규모 그리드로 스윕해 비교표를 생성한다. 결과는 재현을 위해 심볼·타임프레임·기간·
 시드·파라미터를 함께 기록한다.
+
+## 평가 대상 전략 (WAN-23, TF별 자기완결)
+
+- **진입** = 활성(비-breaker) 오더블록 첫 탭 + RSI 게이트(롱=과매도, 숏=과매수).
+- **익절** = 진입가 너머 가장 가까운 EMA/VWMA 선 도달(동적, 전량 청산).
+- **손절** = 진입 근거 오더블록의 무효화(breaker, distal 경계 이탈).
+- **동시봉 손절 우선**, **TF당 동시 1포지션**(피라미딩·역전 없음)은 전략·엔진이
+  이미 보장한다(`ConfluenceStrategy`가 진입가 기준으로 청산을 미리 계산해
+  `planned_exit`로 실어 보내고, `BacktestEngine`이 한 번에 한 포지션만 보유).
+
+익절·손절이 모두 전략의 동적 규칙(`planned_exit`)으로 결정되므로, 백테스트 설정의
+고정 %손절·익절 배수는 이 전략의 성과에 관여하지 않는다(계획 청산이 있는 포지션은
+고정 %경로를 타지 않는다). 따라서 손절·익절 배수는 스윕 축이 아니다.
 
 ## 구성
 
 - `evaluate()` — 하나의 (파라미터 조합, OHLCV)로 컨플루언스 → 백테스트를 실행해
   `BacktestResult`를 반환한다.
-- `ParamGrid` / `SweepPoint` — 스윕 축(그리드) 정의. 이슈가 지정한 3개 축만 다룬다:
-  RSI 게이트 임계값, EMA 추세 편향 on/off, 손절·익절 배수. 과적합 방지를 위해
-  조합 수를 제한한다(기본 3×2×2 = 12).
+- `ParamGrid` / `SweepPoint` — 스윕 축(그리드) 정의. WAN-23은 지표·청산 규칙이
+  고정이라 자유도가 낮으므로, **진입 RSI 임계값 한 축만** 소규모로 스윕한다
+  (기본 3점). 과매도는 과매수에 대칭(`100 - overbought`)으로 유도한다.
 - `run_sweep()` — 그리드의 모든 조합을 실행해 정렬된 `SweepReport`를 반환한다.
 - `SweepReport` — 조합별 성과 행(`SweepRunRow`)을 담고, DataFrame·CSV·비교표
   문자열·추천 기본값(best)을 제공한다.
@@ -93,8 +106,10 @@ def evaluate(
 ) -> BacktestResult:
     """컨플루언스 시그널을 생성하고 백테스트 엔진으로 시뮬레이션해 결과를 반환한다.
 
-    WAN-18 `ConfluenceStrategy`가 만든 확정 진입(`order_block_signals`)을 WAN-8
-    `BacktestEngine`에 그대로 전달한다. 손절·익절은 `backtest_config`가 담당한다.
+    WAN-23 `ConfluenceStrategy`가 만든 확정 진입(`order_block_signals`)을 WAN-8
+    `BacktestEngine`에 그대로 전달한다. 진입 각각에는 전략이 미리 계산한 청산
+    (`planned_exit`: EMA/VWMA 선 도달 익절 또는 오더블록 무효화 손절)이 실려 있어,
+    엔진은 고정 %TP/SL이 아니라 그 계획대로 청산한다.
 
     `order_block_result`를 주면 오더블록 탐지를 재실행하지 않고 재사용한다(스윕에서
     동일 오더블록에 대해 여러 파라미터를 평가할 때 탐지 중복을 피한다). 오더블록
@@ -114,16 +129,15 @@ def evaluate(
 class SweepPoint(BaseModel):
     """스윕 그리드의 한 셀(파라미터 조합).
 
-    RSI 과매수 임계값, EMA 추세 편향 on/off, 손절·익절 배수 3개 축을 담는다.
-    과매도 임계값은 대칭(``100 - overbought``)으로 유도한다.
+    WAN-23은 지표(RSI14·EMA·VWMA)와 청산 규칙(선 도달 익절·오더블록 무효화 손절)이
+    고정이라 튜닝 자유도가 낮다. 유일하게 남는 저-자유도 진입 노브인 **RSI 게이트
+    임계값** 한 축만 담는다. 과매도 임계값은 과매수에 대칭(``100 - overbought``)으로
+    유도한다.
     """
 
     model_config = ConfigDict(frozen=True)
 
     rsi_overbought: float
-    use_ema_trend: bool
-    stop_loss_pct: float
-    take_profit_pct: float
 
     @property
     def rsi_oversold(self) -> float:
@@ -133,56 +147,39 @@ class SweepPoint(BaseModel):
 
 @dataclass(frozen=True)
 class ParamGrid:
-    """스윕 축 정의. 과적합 방지를 위해 축과 조합 수를 제한한다.
+    """스윕 축 정의. WAN-23 확정 설계상 지표·청산이 고정이므로 축을 최소화한다.
 
-    기본 그리드는 3(RSI) × 2(EMA on/off) × 2(손절·익절) = 12 조합이다.
+    기본 그리드는 진입 RSI 임계값 한 축(3점)뿐이다. 과매도는 대칭 유도이므로
+    실질 스윕 대상은 `rsi_overbought` 하나다.
     """
 
     rsi_overbought: Sequence[float] = (70.0, 75.0, 80.0)
     """RSI 게이트 과매수 임계값 후보. 과매도는 ``100 - overbought``로 대칭 유도."""
-    use_ema_trend: Sequence[bool] = (True, False)
-    """EMA 추세 편향 게이트 on/off 후보."""
-    stop_take_pct: Sequence[tuple[float, float]] = ((0.02, 0.04), (0.03, 0.06))
-    """(손절 배수, 익절 배수) 후보 쌍. 진입가 대비 분수."""
 
     def points(self) -> Iterator[SweepPoint]:
         """그리드의 모든 조합을 `SweepPoint`로 열거한다(결정적 순서)."""
         for overbought in self.rsi_overbought:
-            for use_ema in self.use_ema_trend:
-                for stop_loss, take_profit in self.stop_take_pct:
-                    yield SweepPoint(
-                        rsi_overbought=overbought,
-                        use_ema_trend=use_ema,
-                        stop_loss_pct=stop_loss,
-                        take_profit_pct=take_profit,
-                    )
+            yield SweepPoint(rsi_overbought=overbought)
 
     @property
     def size(self) -> int:
         """총 조합 수."""
-        return len(self.rsi_overbought) * len(self.use_ema_trend) * len(self.stop_take_pct)
+        return len(self.rsi_overbought)
 
 
-def apply_sweep_point(
-    base_confluence: ConfluenceParams,
-    base_backtest: BacktestConfig,
-    point: SweepPoint,
-) -> tuple[ConfluenceParams, BacktestConfig]:
-    """기준 파라미터에 스윕 셀 값을 덮어써 (컨플루언스, 백테스트) 설정을 만든다."""
-    confluence = base_confluence.model_copy(
+def apply_sweep_point(base_confluence: ConfluenceParams, point: SweepPoint) -> ConfluenceParams:
+    """기준 컨플루언스 파라미터에 스윕 셀의 RSI 임계값을 덮어써 반환한다.
+
+    지표·청산 규칙은 WAN-23 확정 설계대로 고정이므로 RSI 게이트 임계값만 바꾼다.
+    백테스트 설정은 손대지 않는다(고정 %손절·익절은 이 전략의 계획 청산에
+    관여하지 않으므로 스윕 대상이 아니다).
+    """
+    return base_confluence.model_copy(
         update={
-            "use_ema_trend": point.use_ema_trend,
             "rsi_overbought": point.rsi_overbought,
             "rsi_oversold": point.rsi_oversold,
         }
     )
-    backtest = base_backtest.model_copy(
-        update={
-            "stop_loss_pct": point.stop_loss_pct,
-            "take_profit_pct": point.take_profit_pct,
-        }
-    )
-    return confluence, backtest
 
 
 # --------------------------------------------------------------------------- #
@@ -201,10 +198,8 @@ class SweepRunRow(BaseModel):
     end_time: int | None
     num_bars: int
     # --- 스윕 파라미터 ---
+    rsi_oversold: float
     rsi_overbought: float
-    use_ema_trend: bool
-    stop_loss_pct: float
-    take_profit_pct: float
     # --- 성과 지표 ---
     total_return: float
     max_drawdown: float
@@ -222,10 +217,8 @@ _ROW_COLUMNS = [
     "start_time",
     "end_time",
     "num_bars",
+    "rsi_oversold",
     "rsi_overbought",
-    "use_ema_trend",
-    "stop_loss_pct",
-    "take_profit_pct",
     "total_return",
     "max_drawdown",
     "win_rate",
@@ -266,7 +259,7 @@ class SweepReport(BaseModel):
     def to_table(self) -> str:
         """정렬된 비교표 문자열(콘솔용)."""
         header = (
-            f"{'rsi_ob':>6} {'ema':>5} {'sl%':>5} {'tp%':>5} "
+            f"{'rsi_os':>6} {'rsi_ob':>6} "
             f"{'return%':>9} {'mdd%':>7} {'win%':>6} {'pf':>6} {'sharpe':>8} {'trades':>7}"
         )
         lines = [f"=== Parameter Sweep (sorted by {self.sort_by}) ===", header, "-" * len(header)]
@@ -274,8 +267,7 @@ class SweepReport(BaseModel):
             pf = "N/A" if row.profit_factor is None else f"{row.profit_factor:.2f}"
             sharpe = "N/A" if row.sharpe is None else f"{row.sharpe:.2f}"
             lines.append(
-                f"{row.rsi_overbought:>6.0f} {str(row.use_ema_trend):>5} "
-                f"{row.stop_loss_pct * 100:>5.1f} {row.take_profit_pct * 100:>5.1f} "
+                f"{row.rsi_oversold:>6.0f} {row.rsi_overbought:>6.0f} "
                 f"{row.total_return * 100:>9.2f} {row.max_drawdown * 100:>7.2f} "
                 f"{row.win_rate * 100:>6.1f} {pf:>6} {sharpe:>8} {row.num_trades:>7}"
             )
@@ -299,10 +291,8 @@ def _build_row(
         start_time=start_time,
         end_time=end_time,
         num_bars=num_bars,
+        rsi_oversold=point.rsi_oversold,
         rsi_overbought=point.rsi_overbought,
-        use_ema_trend=point.use_ema_trend,
-        stop_loss_pct=point.stop_loss_pct,
-        take_profit_pct=point.take_profit_pct,
         total_return=m.total_return,
         max_drawdown=m.max_drawdown,
         win_rate=m.win_rate,
@@ -345,12 +335,12 @@ def run_sweep(
 
     rows: list[SweepRunRow] = []
     for point in grid.points():
-        confluence, backtest = apply_sweep_point(base_conf, base_bt, point)
+        confluence = apply_sweep_point(base_conf, point)
         result = evaluate(
             df,
             confluence_params=confluence,
             order_block_params=order_block_params,
-            backtest_config=backtest,
+            backtest_config=base_bt,
             order_block_result=ob_result,
         )
         rows.append(

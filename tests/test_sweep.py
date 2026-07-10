@@ -13,7 +13,6 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from backtest.models import BacktestConfig
 from backtest.sweep import (
     ParamGrid,
     apply_sweep_point,
@@ -93,30 +92,27 @@ def test_synthetic_rejects_nonpositive_bars() -> None:
 def test_param_grid_size_and_points_distinct() -> None:
     grid = ParamGrid()
     points = list(grid.points())
-    assert grid.size == 12
-    assert len(points) == 12
-    # 각 조합은 유일
-    keys = {(p.rsi_overbought, p.use_ema_trend, p.stop_loss_pct, p.take_profit_pct) for p in points}
-    assert len(keys) == 12
+    assert grid.size == 3
+    assert len(points) == 3
+    # 각 조합(RSI 임계값)은 유일
+    keys = {p.rsi_overbought for p in points}
+    assert len(keys) == 3
     # 과매도는 과매수에 대칭
     for p in points:
         assert p.rsi_oversold == pytest.approx(100.0 - p.rsi_overbought)
 
 
-def test_apply_sweep_point_overrides_only_targeted_fields() -> None:
+def test_apply_sweep_point_overrides_only_rsi_threshold() -> None:
     base_conf = ConfluenceParams()
-    base_bt = BacktestConfig(fee_rate=0.001, seed=99)
-    point = next(ParamGrid(rsi_overbought=(80.0,), use_ema_trend=(False,)).points())
-    conf, bt = apply_sweep_point(base_conf, base_bt, point)
+    point = next(ParamGrid(rsi_overbought=(80.0,)).points())
+    conf = apply_sweep_point(base_conf, point)
 
-    assert conf.use_ema_trend is False
     assert conf.rsi_overbought == pytest.approx(80.0)
     assert conf.rsi_oversold == pytest.approx(20.0)
-    # 손대지 않은 필드는 보존
-    assert conf.vwma_length == base_conf.vwma_length
-    assert bt.stop_loss_pct == pytest.approx(point.stop_loss_pct)
-    assert bt.fee_rate == pytest.approx(0.001)
-    assert bt.seed == 99
+    # 지표·청산 규칙은 고정(손대지 않음)
+    assert conf.tp_ema_lengths == base_conf.tp_ema_lengths
+    assert conf.tp_vwma_length == base_conf.tp_vwma_length
+    assert conf.rsi_length == base_conf.rsi_length
 
 
 # --------------------------------------------------------------------------- 스윕 (엔드투엔드)
@@ -210,11 +206,17 @@ def _arch_df(volume: float = 10.0) -> pd.DataFrame:
 
 
 def test_evaluate_executes_trade_with_injected_order_block() -> None:
-    """오더블록 결과를 주입해 컨플루언스 → 백테스트 엔드투엔드로 거래가 체결됨을 확인."""
+    """오더블록 결과를 주입해 컨플루언스 → 백테스트 엔드투엔드로 거래가 체결됨을 확인.
+
+    WAN-23 규칙에서 진입은 오더블록 탭 + RSI 게이트가 필수다. 상승 구간(pos=50)의
+    약세 오더블록 탭은 RSI가 과매수 상태라 **숏 진입이 확정**된다. 근거 오더블록에
+    무효화(break_time)가 없고 진입가 아래 선 도달 익절도 발생하지 않으므로, 포지션은
+    데이터 끝에서 강제 청산되어 최소 1건의 거래로 기록된다.
+    """
     df = _arch_df()
     ob = OrderBlock(
-        direction=OrderBlockDirection.BULLISH,
-        top=126.0,
+        direction=OrderBlockDirection.BEARISH,
+        top=127.0,
         bottom=124.0,
         start_time=0,
         confirmed_time=0,
@@ -222,21 +224,20 @@ def test_evaluate_executes_trade_with_injected_order_block() -> None:
         ob_low_volume=0.5,
         ob_high_volume=0.5,
     )
-    # 상승 구간(pos=50) 롱 탭. 짧은 EMA로 추세를 빠르게 정배열시켜 확정 유도.
+    # 상승 구간(pos=50) 약세 오더블록 탭 → RSI 과매수 → 숏 확정.
     signal = OrderBlockSignal(
-        direction=OrderBlockDirection.BULLISH,
+        direction=OrderBlockDirection.BEARISH,
         trigger_time=50 * 60_000,
         price=float(df["close"][50]),
         order_block=ob,
         status="active",
     )
     ob_result = OrderBlockResult(order_blocks=[ob], signals=[signal])
-    params = ConfluenceParams(ema_lengths=(3, 5, 8), use_rsi_gate=False, use_vwma_trend=False)
+    params = ConfluenceParams(rsi_overbought=50.0, rsi_oversold=30.0)
 
     result = evaluate(
         df,
         confluence_params=params,
-        backtest_config=BacktestConfig(stop_loss_pct=0.03, take_profit_pct=0.06),
         order_block_result=ob_result,
     )
     assert result.metrics.num_trades >= 1

@@ -1,9 +1,10 @@
 """컨플루언스 전략 백테스트 성과 리포트 & 파라미터 스윕 CLI (WAN-19).
 
-WAN-18 컨플루언스 시그널을 WAN-8 백테스트 엔진에 태워 심볼·타임프레임별
-성과 리포트를 만들고, 핵심 파라미터를 소규모 그리드로 스윕해 비교표를 낸다.
-결과(요약 텍스트·거래/자본곡선/스윕 CSV)는 재현을 위해 파라미터·시드·기간과 함께
-`--out-dir`에 저장한다.
+WAN-23 재설계 컨플루언스 전략(오더블록+RSI 진입 / EMA·VWMA 선 익절 / 오더블록
+무효화 손절)을 WAN-8 백테스트 엔진에 태워 심볼·타임프레임별 성과 리포트를 만들고,
+진입 RSI 임계값을 소규모로 스윕해 비교표를 낸다. 각 타임프레임은 독립 단위로
+개별 평가하며(지표 파라미터는 전 TF 공통 고정), 결과(요약 텍스트·거래/자본곡선·
+스윕 CSV)는 재현을 위해 파라미터·시드·기간과 함께 `--out-dir`에 저장한다.
 
 데이터는 `ALPHABLOCK_DB_PATH`(기본 `data/ohlcv.db`, WAN-6 수집분)에서 읽는다.
 저장된 데이터가 없거나 `--synthetic`이면 시드로 고정된 합성 OHLCV로 대체해
@@ -11,8 +12,8 @@ WAN-18 컨플루언스 시그널을 WAN-8 백테스트 엔진에 태워 심볼·
 
 사용법::
 
-    # 저장된 데이터로 BTC 1h 리포트 + 스윕
-    uv run python scripts/backtest_report.py --symbols BTC/USDT:USDT --timeframes 1h
+    # 저장된 데이터로 BTC 전 타임프레임(15m·1h·2h·4h·1d) 리포트 + 스윕
+    uv run python scripts/backtest_report.py --symbols BTC/USDT:USDT
 
     # 데이터 없이 합성 데이터로 재현 가능한 데모
     uv run python scripts/backtest_report.py --synthetic --timeframes 1h,4h
@@ -53,7 +54,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="쉼표로 구분한 심볼 목록 (예: BTC/USDT:USDT,ETH/USDT:USDT)",
     )
     parser.add_argument(
-        "--timeframes", default="1h", help="쉼표로 구분한 타임프레임 목록 (예: 15m,1h,4h)"
+        "--timeframes",
+        default="15m,1h,2h,4h,1d",
+        help="쉼표로 구분한 타임프레임 목록 (기본: 15m,1h,2h,4h,1d — WAN-23 대상 TF)",
     )
     parser.add_argument("--db-path", default=None, help="OHLCV SQLite 경로 (기본: 설정값)")
     parser.add_argument("--start", default=None, help="시작일 (ISO, 예: 2024-01-01). 없으면 전체")
@@ -142,17 +145,12 @@ def _report_combo(
 
     best = report.best()
     if best is not None:
-        confluence, backtest = apply_sweep_point(
-            base_confluence, base_backtest, _point_from_row(best)
-        )
-        result = evaluate(df, confluence_params=confluence, backtest_config=backtest)
+        confluence = apply_sweep_point(base_confluence, _point_from_row(best))
+        result = evaluate(df, confluence_params=confluence, backtest_config=base_backtest)
         trades_path = write_trades_csv(result, combo_dir / "best_trades.csv")
         equity_path = write_equity_csv(result, combo_dir / "best_equity.csv")
         print(f"\n--- 추천(best) 조합 상세: {sort_by} 최상위 ---")
-        print(
-            f"rsi_overbought={best.rsi_overbought:.0f} use_ema_trend={best.use_ema_trend} "
-            f"stop_loss_pct={best.stop_loss_pct} take_profit_pct={best.take_profit_pct}"
-        )
+        print(f"rsi_oversold={best.rsi_oversold:.0f} rsi_overbought={best.rsi_overbought:.0f}")
         print(format_summary(result))
         print(f"거래 CSV: {trades_path}")
         print(f"자본곡선 CSV: {equity_path}")
@@ -162,12 +160,7 @@ def _report_combo(
 
 def _point_from_row(row: SweepRunRow) -> SweepPoint:
     """`SweepRunRow`의 파라미터로 `SweepPoint`를 재구성한다."""
-    return SweepPoint(
-        rsi_overbought=row.rsi_overbought,
-        use_ema_trend=row.use_ema_trend,
-        stop_loss_pct=row.stop_loss_pct,
-        take_profit_pct=row.take_profit_pct,
-    )
+    return SweepPoint(rsi_overbought=row.rsi_overbought)
 
 
 def main(argv: list[str] | None = None) -> None:

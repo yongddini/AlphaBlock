@@ -58,17 +58,26 @@ uv run streamlit run dashboard/app.py
 
 ## 백테스트 성과 리포트 & 파라미터 스윕 (WAN-19)
 
-WAN-18 컨플루언스 시그널(오더블록 + RSI·EMA·VWMA 게이트)을 WAN-8 백테스트
-엔진에 태워 **재현 가능한 성과 리포트**를 만들고, 핵심 파라미터를 소규모 그리드로
-스윕해 비교표를 낸다.
+WAN-23 재설계 컨플루언스 전략을 WAN-8 백테스트 엔진에 태워 **재현 가능한 성과
+리포트**를 만들고, 진입 RSI 임계값을 소규모로 스윕해 비교표를 낸다. 평가 대상
+전략(TF별 자기완결):
+
+- **진입** = 활성(비-breaker) 오더블록의 **첫 탭** + RSI 게이트(롱=과매도, 숏=과매수).
+- **익절** = 진입가 너머 **가장 가까운 EMA/VWMA 선 도달**(동적, 전량 청산).
+- **손절** = 진입 근거 오더블록의 **무효화(breaker, distal 경계 이탈)**.
+- **동시봉 손절 우선**, **TF당 동시 1포지션**(피라미딩·역전 없음)은 전략·엔진이 보장.
+
+각 타임프레임은 **독립 단위**로 개별 평가하며, 지표 파라미터(RSI 14, EMA 20/60/120/
+240/365, VWMA 100)는 **전 TF 공통 고정**이다. 익절·손절이 모두 전략의 동적 규칙으로
+결정되므로 백테스트의 고정 %손절·익절 배수는 이 전략 성과에 관여하지 않는다.
 
 ```bash
-# 저장된 데이터(data/ohlcv.db, WAN-6 수집분)로 BTC 1h 리포트 + 스윕
-uv run python scripts/backtest_report.py --symbols BTC/USDT:USDT --timeframes 1h
+# 저장된 데이터(data/ohlcv.db, WAN-6 수집분)로 BTC 전 타임프레임 리포트 + 스윕
+uv run python scripts/backtest_report.py --symbols BTC/USDT:USDT
 
-# 여러 심볼·타임프레임을 한 번에
+# 여러 심볼·타임프레임을 한 번에 (기본 TF = 15m,1h,2h,4h,1d)
 uv run python scripts/backtest_report.py \
-    --symbols BTC/USDT:USDT,ETH/USDT:USDT,SOL/USDT:USDT --timeframes 15m,1h,4h
+    --symbols BTC/USDT:USDT,ETH/USDT:USDT,SOL/USDT:USDT
 
 # 저장 데이터가 없어도 시드로 고정된 합성 OHLCV로 재현 가능하게 실행(데모/CI)
 uv run python scripts/backtest_report.py --synthetic --timeframes 1h,4h
@@ -81,33 +90,35 @@ uv run python scripts/backtest_report.py --synthetic --timeframes 1h,4h
 
 - `<심볼>_<타임프레임>/sweep.csv` — 파라미터 조합별 성과 비교표(정렬됨).
 - `<심볼>_<타임프레임>/best_trades.csv`, `best_equity.csv` — 추천(best) 조합의 거래·자본곡선.
-- `sweep_combined.csv` — 모든 조합을 한 파일로.
+- `sweep_combined.csv` — 모든 (심볼·TF) 조합을 한 파일로.
 
 각 행에는 재현을 위해 **심볼·타임프레임·기간(`start_time`/`end_time`/`num_bars`)·시드·
-스윕 파라미터**가 함께 기록된다. 성과 지표는 총수익률·MDD·승률·손익비(profit factor)·
-샤프(타임프레임에서 유도한 연율화 계수 적용)·거래 수다.
+스윕 파라미터(`rsi_oversold`/`rsi_overbought`)**가 함께 기록된다. 성과 지표는
+총수익률·MDD·승률·손익비(profit factor)·샤프(타임프레임에서 유도한 연율화 계수
+적용)·거래 수다.
 
-### 스윕 축 (과적합 방지: 3축 × 소수 값 = 12 조합)
+### 스윕 축 (과적합 억제: 노브 최소화)
 
-`backtest.sweep.ParamGrid`가 정의하는 3개 축만 다룬다:
+WAN-23 확정 설계에서는 지표(RSI14·EMA·VWMA)와 청산 규칙(선 도달 익절·오더블록
+무효화 손절)이 **고정**이라 튜닝 자유도가 낮다. 따라서 `backtest.sweep.ParamGrid`는
+유일하게 남는 저-자유도 진입 노브인 **진입 RSI 임계값** 한 축만 소규모로 다룬다:
 
-1. **RSI 게이트 임계값** — `rsi_overbought ∈ {70, 75, 80}` (과매도는 `100 - overbought`로 대칭).
-2. **EMA 추세 편향 on/off** — `use_ema_trend ∈ {True, False}`.
-3. **손절·익절 배수** — `(stop_loss_pct, take_profit_pct) ∈ {(2%,4%), (3%,6%)}`.
+- **RSI 게이트 임계값** — `rsi_overbought ∈ {70, 75, 80}` (과매도는 `100 - overbought`로 대칭).
 
 `--sort-by`(기본 `sharpe`)로 정렬 기준을 바꾼다(`total_return`·`win_rate`·
 `profit_factor`·`num_trades`도 가능). 최상위 조합이 "추천(best)"으로 상세 리포트된다.
 
 ### 해석과 기본 파라미터 제안
 
-저장된 BTC/USDT:USDT 1h 구간에서의 예시 스윕에서는 **EMA 추세 게이트를 끄고
-(`use_ema_trend=False`) 손절 2%·익절 4%**로 둔 조합이 샤프 기준 최상위였다(총수익률
-약 +5.7%, MDD 약 3.1%). RSI 임계값 축은 이 구간에서 결과에 유의미한 차이를 만들지
-않았다(거래 수가 적어 RSI 게이트가 결정 요인이 아니었음). 다만 이는 **소규모 표본의
-단일 구간 예시**이므로, `config.ConfluenceParams`/`BacktestConfig` 기본값을 바꾸기
-전에 더 넓은 기간·심볼에서 재확인할 것을 권한다(워크포워드·교차검증은 WAN-19 범위 밖,
-후속 이슈). 현재 코드 기본값(전 게이트 활성, 완전 컨플루언스)은 **보수적(선별적)**
-설정으로 유지한다.
+RSI 임계값 한 축만 스윕하므로 비교표는 각 TF에서 진입 게이트의 민감도를 보여준다.
+임계값을 넓히면(예: `rsi_overbought=70`) 진입이 늘고, 좁히면(`80`) 더 선별적이 된다.
+어떤 임계값이 TF별로 우위인지는 표에서 샤프·총수익률·MDD로 비교한다.
+
+지표·청산 규칙이 고정이므로 이 스윕의 인샘플 결과만으로 `config.ConfluenceParams`
+기본값을 바꾸는 것은 권하지 않는다. **소규모 표본·단일 구간**의 인샘플 성과이므로,
+기본값 반영 전 **WAN-22 워크포워드/OOS**로 견고성을 확인한다(워크포워드·교차검증은
+WAN-19 범위 밖, 후속 이슈). 현재 코드 기본값(RSI 14, 과매수 70/과매도 30, EMA/VWMA
+전 목표선, 오더블록 무효화 손절)은 재설계 확정 규칙 그대로 유지한다.
 
 ## 품질 검사
 
