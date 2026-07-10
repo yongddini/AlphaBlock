@@ -16,7 +16,7 @@
 claude mcp add --transport http linear-server https://mcp.linear.app/mcp
 ```
 
-세션에서 `/mcp`로 인증. 팀은 **Alphabot** (key: `WAN`).
+세션에서 `/mcp`로 인증. 팀은 **Alphablock** (key: `WAN`).
 
 ## GitHub 연동
 
@@ -24,7 +24,7 @@ claude mcp add --transport http linear-server https://mcp.linear.app/mcp
 
 ## 개발 워크플로우
 
-1. **Approved 이슈만 개발한다.** Linear에서 team=Alphabot, state=`Approved` 이슈를 우선순위 순으로 가져온다. Backlog/Todo/Rejected 는 절대 개발하지 않는다.
+1. **Approved 이슈만 개발한다.** Linear에서 team=Alphablock, state=`Approved` 이슈를 우선순위 순으로 가져온다. Backlog/Todo/Rejected 는 절대 개발하지 않는다.
 2. **착수 = 브랜치 생성.** 이슈의 Linear 제안 브랜치명(이슈 식별자 포함, 예 `yu04038/wan-7-...`)으로 `main`에서 브랜치를 만든다. 브랜치·첫 커밋이 올라가면 Linear GitHub 연동이 이슈를 자동으로 **In Progress**로 옮긴다(안 되면 수동 전환).
 3. 이슈의 완료 기준(Acceptance Criteria)을 충족하도록 이 저장소에서 개발한다.
 4. 커밋 메시지 앞에 이슈 식별자를 붙인다. 예: `WAN-7: 오더블록 탐지 로직 추가`.
