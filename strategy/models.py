@@ -65,6 +65,32 @@ class OrderBlock(BaseModel):
     """`combine_obs`로 다른 존과 병합되어 생성된 존인지 여부."""
 
 
+class SignalExitReason(StrEnum):
+    """전략이 계획한 청산의 사유 (WAN-23)."""
+
+    TAKE_PROFIT = "take_profit"
+    """진입가 너머 가장 가까운 EMA/VWMA 선에 도달(전량 익절)."""
+    STOP_LOSS = "stop_loss"
+    """진입 근거 오더블록이 breaker로 무효화(손절)."""
+
+
+class PlannedExit(BaseModel):
+    """전략이 진입 시점에 계획한 명시적 청산 이벤트 (WAN-23).
+
+    익절(선 도달)·손절(오더블록 무효화)이 모두 봉마다 달라지는 **동적** 규칙이라,
+    전략이 진입가를 기준으로 청산 봉·참조가·사유를 미리 산출해 시그널에 실어
+    보내면 백테스트(`backtest.run_backtest`)가 이를 그대로 소비한다.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    time: int
+    """청산이 발생하는 봉의 `open_time`(ms)."""
+    price: float
+    """청산 참조가. 익절=도달한 선 가격, 손절=무효화 봉 종가."""
+    reason: SignalExitReason
+
+
 class OrderBlockSignal(BaseModel):
     """오더블록 기반 진입 후보 시그널 (AlphaBlock 확장, 원본에는 없음)."""
 
@@ -76,6 +102,8 @@ class OrderBlockSignal(BaseModel):
     price: float
     order_block: OrderBlock
     status: Literal["active", "cancelled"] = "active"
+    planned_exit: PlannedExit | None = None
+    """컨플루언스 전략이 계획한 청산(WAN-23). 없으면 백테스트의 고정 %TP/SL 경로를 따른다."""
 
 
 class OrderBlockResult(BaseModel):
@@ -88,103 +116,87 @@ class OrderBlockResult(BaseModel):
 
 
 class ConfluenceParams(BaseModel):
-    """오더블록 + 지표 컨플루언스(진입·청산) 규칙 파라미터 (WAN-18).
+    """오더블록 + RSI 진입 / EMA·VWMA 선 익절 / 오더블록 무효화 손절 규칙 (WAN-23).
 
-    오더블록 탭(tap) 시그널을 기준 신호로 두고, 세 개의 지표 게이트로 확정한다.
-    각 게이트는 개별 on/off 가능하고, 임계값·EMA 배열 길이·필요 컨플루언스 점수를
-    조정할 수 있다. 기본값은 사용자 트레이딩뷰 설정과 일치한다
+    사용자의 실제 매매 방식에 맞춘 규칙이다. **EMA·VWMA는 진입 판정에 쓰지 않고**
+    오직 익절 목표선으로만 쓴다. 기본값은 사용자 트레이딩뷰 설정과 일치한다
     (`indicators.py` 기본값 참고). 필드는 `config.Settings`에서
     `ALPHABLOCK_CONFLUENCE__*` 환경변수로 덮어쓸 수 있다.
 
-    ## 게이트 (진입)
+    ## 진입 (오더블록 탭 + RSI, 필수 조건)
 
-    * **EMA 추세 배열**(`use_ema_trend`): `ema_lengths`를 짧은→긴 순으로 볼 때
-      값이 내림차순(짧은 EMA가 위)이면 정배열=상승 추세, 오름차순이면 역배열=하락
-      추세로 본다. 시그널 방향이 추세와 같으면 +1, 반대면 −1, 중립이면 0표를 준다.
-    * **RSI 게이트**(`use_rsi_gate`): 롱은 RSI가 `rsi_overbought` 이상이면(과매수)
-      −1, 아니면 +1. 숏은 RSI가 `rsi_oversold` 이하이면(과매도) −1, 아니면 +1.
-      과열 구간 진입을 걸러내는 게이트다.
-    * **VWMA 추세**(`use_vwma_trend`): 롱은 종가가 VWMA 이상이면 +1 아니면 −1,
-      숏은 종가가 VWMA 이하이면 +1 아니면 −1.
+    기준 신호는 활성(비-breaker) 오더블록 탭(tap). 탭 봉의 RSI가
 
-    활성 게이트 표의 합이 `min_confluence_score`(미지정 시 활성 게이트 수 = 전원
-    확정) 이상이면 진입을 **확정**한다. 지표가 아직 워밍업 중(NaN)인 게이트는 0표.
+    * **롱**(강세 오더블록): RSI ≤ `rsi_oversold`(과매도)면 진입.
+    * **숏**(약세 오더블록): RSI ≥ `rsi_overbought`(과매수)면 진입.
 
-    ## 청산 (지표 이탈)
+    RSI가 워밍업 중(NaN)이면 진입하지 않는다. EMA·VWMA는 진입에 영향이 없다.
 
-    진입 후 첫 지표 이탈 봉에서 청산 신호를 낸다. `exit_on_trend_flip`이면 EMA
-    추세가 반대로 뒤집힐 때, `exit_on_vwma_cross`이면 종가가 VWMA를 반대로 돌파할
-    때. (손절·익절은 백테스트/실행 계층의 `BacktestConfig`가 담당한다.)
+    ## 익절 (EMA/VWMA 중 진입가 너머 가장 가까운 선 도달)
+
+    대상 선은 `tp_ema_lengths` EMA들과 `tp_vwma_length` VWMA. 진입 이후 매 봉,
+    진입가 **너머**(롱은 위·숏은 아래)에 있는 대상 선들 중 **가장 가까운 선**에
+    고가(롱)/저가(숏)가 도달하면 그 선 가격에서 **전량 익절**한다. 선은 봉마다
+    움직이므로 매 봉 재평가한다. 진입가 너머에 대상 선이 하나도 없으면 익절 목표가
+    없어 손절/청산에만 의존한다.
+
+    ## 손절 (오더블록 무효화)
+
+    진입 근거였던 오더블록이 breaker로 무효화되면(존 반대편 돌파 — 무효화 기준
+    Wick/Close는 `OrderBlockParams.zone_invalidation`을 재사용) 그 봉에서 손절한다.
+
+    ## 우선순위
+
+    같은 봉에서 손절·익절이 동시에 충족되면 `stop_before_take_profit`(기본 True)이면
+    **손절을 우선**한다(보수적). 한 오더블록당 진입은 첫 탭 1회로 제한된다.
     """
 
     model_config = ConfigDict(frozen=True)
 
-    # --- 게이트 on/off ---
-    use_ema_trend: bool = True
-    use_rsi_gate: bool = True
-    use_vwma_trend: bool = True
-
-    # --- EMA 추세 배열 ---
-    ema_lengths: tuple[int, ...] = DEFAULT_CONFLUENCE_EMA_LENGTHS
-    ema_min_aligned_pairs: int | None = Field(default=None, ge=1)
-    """정/역배열로 인정할 최소 인접쌍 수. None이면 완전 배열(len(ema_lengths)-1)."""
-
-    # --- RSI 게이트 ---
+    # --- 진입: RSI (필수 조건) ---
     rsi_length: int = Field(default=14, ge=1)
     rsi_overbought: float = Field(default=70.0, gt=0, lt=100)
     rsi_oversold: float = Field(default=30.0, gt=0, lt=100)
 
-    # --- VWMA 추세 ---
-    vwma_length: int = Field(default=100, ge=1)
+    # --- 익절: EMA/VWMA 목표선 ---
+    use_line_take_profit: bool = True
+    """익절(선 도달) 규칙 on/off. False면 손절/강제청산에만 의존."""
+    tp_ema_lengths: tuple[int, ...] = DEFAULT_CONFLUENCE_EMA_LENGTHS
+    """익절 목표로 쓸 EMA 길이들. 비우면 EMA 목표선 없음."""
+    tp_vwma_length: int | None = Field(default=100, ge=1)
+    """익절 목표로 쓸 VWMA 길이. None이면 VWMA 목표선 없음."""
 
-    # --- 컨플루언스 판정 ---
+    # --- 손절: 오더블록 무효화 ---
+    use_order_block_stop: bool = True
+    """손절(오더블록 무효화) 규칙 on/off."""
+
+    # --- 우선순위 ---
+    stop_before_take_profit: bool = True
+    """동일 봉에서 손절·익절 동시 충족 시 손절 우선(보수적)."""
+
     source: str = "close"
-    min_confluence_score: int | None = Field(default=None, ge=1)
-    """진입 확정에 필요한 최소 게이트 표 합. None이면 활성 게이트 전원 확정."""
-
-    # --- 청산(지표 이탈) ---
-    exit_on_trend_flip: bool = True
-    exit_on_vwma_cross: bool = True
 
     @model_validator(mode="after")
     def _validate(self) -> ConfluenceParams:
-        if len(self.ema_lengths) < 2:
-            raise ValueError("ema_lengths에는 최소 2개의 길이가 필요합니다.")
-        if any(length < 1 for length in self.ema_lengths):
-            raise ValueError("ema_lengths의 모든 길이는 1 이상이어야 합니다.")
-        max_pairs = len(self.ema_lengths) - 1
-        if self.ema_min_aligned_pairs is not None and self.ema_min_aligned_pairs > max_pairs:
-            raise ValueError(f"ema_min_aligned_pairs는 {max_pairs} 이하여야 합니다(인접쌍 수).")
         if self.rsi_oversold >= self.rsi_overbought:
             raise ValueError("rsi_oversold는 rsi_overbought보다 작아야 합니다.")
-        enabled = self.enabled_gate_count
-        if (
-            self.min_confluence_score is not None
-            and enabled
-            and self.min_confluence_score > enabled
-        ):
-            raise ValueError(f"min_confluence_score는 활성 게이트 수({enabled}) 이하여야 합니다.")
+        if any(length < 1 for length in self.tp_ema_lengths):
+            raise ValueError("tp_ema_lengths의 모든 길이는 1 이상이어야 합니다.")
+        if len(set(self.tp_ema_lengths)) != len(self.tp_ema_lengths):
+            raise ValueError("tp_ema_lengths에 중복된 길이가 있습니다.")
+        if self.use_line_take_profit and not self.tp_ema_lengths and self.tp_vwma_length is None:
+            raise ValueError(
+                "use_line_take_profit=True면 tp_ema_lengths 또는 tp_vwma_length 중 "
+                "최소 하나의 익절 목표선이 필요합니다."
+            )
         return self
 
     @property
-    def enabled_gate_count(self) -> int:
-        """활성화된 진입 게이트 수."""
-        return int(self.use_ema_trend) + int(self.use_rsi_gate) + int(self.use_vwma_trend)
+    def tp_vwma_key(self) -> str | None:
+        """익절 VWMA 선의 스냅샷 키(`vwma_<길이>`). 미사용이면 None."""
+        return None if self.tp_vwma_length is None else f"vwma_{self.tp_vwma_length}"
 
     @property
-    def required_aligned_pairs(self) -> int:
-        """정/역배열로 인정할 인접쌍 수(미지정 시 완전 배열)."""
-        return (
-            self.ema_min_aligned_pairs
-            if self.ema_min_aligned_pairs is not None
-            else len(self.ema_lengths) - 1
-        )
-
-    @property
-    def entry_threshold(self) -> int:
-        """진입 확정 임계 점수. 미지정 시 활성 게이트 전원 확정."""
-        return (
-            self.min_confluence_score
-            if self.min_confluence_score is not None
-            else self.enabled_gate_count
-        )
+    def sorted_tp_ema_lengths(self) -> list[int]:
+        """익절 EMA 길이들을 오름차순 정렬한 리스트."""
+        return sorted(self.tp_ema_lengths)

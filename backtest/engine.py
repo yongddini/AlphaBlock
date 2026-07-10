@@ -14,12 +14,30 @@
 - 손익은 방향 부호 × (청산가 − 진입가) × 수량으로 계산하며, 롱/숏에 동일하게
   적용된다. 모든 손익은 진입·청산 수수료를 차감한 순값이다.
 - 진입 봉에서는 청산을 판정하지 않는다(청산 판정은 진입 후 다음 봉부터).
+
+## 계획 청산(planned exit, WAN-23)
+
+시그널에 `planned_exit`(전략이 진입가 기준으로 미리 계산한 익절 선 도달·손절
+오더블록 무효화)이 실려 있으면, 그 포지션은 계획된 봉·참조가·사유대로 전량
+청산된다. 계획 청산이 있는 포지션은 고정 %TP/SL·부분익절 규칙을 타지 않으므로
+두 경로가 충돌하지 않는다(계획 청산이 없는 포지션만 고정 %규칙을 따른다).
+
+## 펀딩비(funding rate)
+
+`config.funding_enabled=True`이고 `run()`에 심볼의 펀딩비(`FundingRate`)가 전달되면,
+포지션 보유 구간 `[진입시각, 청산시각)`에 정산된 각 펀딩마다
+`명목가치 × 요율 × 방향`을 손익에 가감한다(WAN-16이 수집한 데이터, WAN-20). 명목가는
+진입 체결가 × 잔여 수량을 사용하므로 부분 익절로 수량이 줄면 이후 정산의 명목가도
+비례해 줄어든다. 펀딩비용은 청산 시점에 현금·손익에 반영되며, 각 정산은 개별적으로
+계산해 합산한다. 펀딩비 데이터는 `data.FundingRateStore.get_rates(symbol, start_ms, end_ms)`로
+조회해 전달한다.
 """
 
 from __future__ import annotations
 
 import random
 from collections import defaultdict
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 import pandas as pd
@@ -34,10 +52,18 @@ from backtest.models import (
     Trade,
     TradeFill,
 )
-from strategy.models import OrderBlockDirection, OrderBlockSignal
+from data.funding import Direction, cumulative_funding_cost
+from data.models import FundingRate
+from strategy.models import OrderBlockDirection, OrderBlockSignal, PlannedExit, SignalExitReason
 
 _REQUIRED_COLUMNS = ("open_time", "open", "high", "low", "close")
 _QTY_EPS = 1e-12
+
+#: 전략(WAN-23)이 계획한 청산 사유 → 백테스트 청산 사유 매핑.
+_PLANNED_EXIT_REASON: dict[SignalExitReason, ExitReason] = {
+    SignalExitReason.TAKE_PROFIT: ExitReason.TAKE_PROFIT,
+    SignalExitReason.STOP_LOSS: ExitReason.STOP_LOSS,
+}
 
 
 @dataclass(eq=False)
@@ -53,6 +79,7 @@ class _OpenPosition:
     stop_price: float | None
     take_profit_price: float | None
     partial_take_profit_price: float | None
+    planned_exit: PlannedExit | None = None
     partial_taken: bool = False
     exits: list[TradeFill] = field(default_factory=list)
 
@@ -74,10 +101,23 @@ class BacktestEngine:
         # 현재 엔진은 결정적이지만, 시드를 기록·고정해 향후 확률적 슬리피지 등
         # 확장 시에도 재현이 유지되도록 한다.
         random.seed(self.config.seed)
+        self._funding_rates: list[FundingRate] = []
 
-    def run(self, df: pd.DataFrame, signals: list[OrderBlockSignal]) -> BacktestResult:
+    def run(
+        self,
+        df: pd.DataFrame,
+        signals: list[OrderBlockSignal],
+        funding_rates: Sequence[FundingRate] | None = None,
+    ) -> BacktestResult:
         frame = self._prepare(df)
         cfg = self.config
+        self._funding_rates = list(funding_rates) if funding_rates else []
+        missing_funding = cfg.funding_enabled and not self._funding_rates
+        if missing_funding and cfg.funding_missing_policy == "error":
+            raise ValueError(
+                "funding_enabled=True인데 펀딩비 데이터가 없습니다. "
+                "funding_missing_policy='zero'로 두거나 펀딩비를 전달하세요."
+            )
 
         times = frame["open_time"].astype("int64").tolist()
         highs = frame["high"].astype(float).tolist()
@@ -184,6 +224,7 @@ class BacktestEngine:
             stop_price=stop_price,
             take_profit_price=take_profit_price,
             partial_take_profit_price=partial_price,
+            planned_exit=sig.planned_exit,
         )
         return position, cash
 
@@ -212,6 +253,23 @@ class BacktestEngine:
 
         완전 청산되면 (cash, Trade)를, 아니면 (cash, None)을 반환한다.
         """
+        # 전략(WAN-23)이 계획한 청산이 있으면 그 봉에서 계획대로 전량 청산한다
+        # (익절=선 도달, 손절=오더블록 무효화). 고정 %TP/SL 경로와 배타적으로 동작해
+        # 충돌하지 않는다 — 계획 청산이 없는 포지션만 아래 고정 %규칙을 탄다.
+        planned = pos.planned_exit
+        if planned is not None:
+            if t >= planned.time:
+                cash = self._close_qty(
+                    pos,
+                    pos.remaining_quantity,
+                    planned.price,
+                    cash,
+                    t,
+                    _PLANNED_EXIT_REASON[planned.reason],
+                )
+                return self._finalize_and_settle(pos, cash)
+            return cash, None
+
         is_long = pos.side is PositionSide.LONG
 
         # 보수적 가정: 손절과 익절이 같은 봉에 걸리면 손절을 우선한다.
@@ -221,7 +279,7 @@ class BacktestEngine:
                 cash = self._close_qty(
                     pos, pos.remaining_quantity, pos.stop_price, cash, t, ExitReason.STOP_LOSS
                 )
-                return cash, self._finalize(pos)
+                return self._finalize_and_settle(pos, cash)
 
         # 부분 익절 (전체 익절보다 앞선 목표)
         pp = pos.partial_take_profit_price
@@ -233,7 +291,7 @@ class BacktestEngine:
                 cash = self._close_qty(pos, qty, pp, cash, t, ExitReason.PARTIAL_TAKE_PROFIT)
                 pos.partial_taken = True
                 if pos.remaining_quantity <= _QTY_EPS:
-                    return cash, self._finalize(pos)
+                    return self._finalize_and_settle(pos, cash)
 
         # 전체 익절
         tp = pos.take_profit_price
@@ -243,7 +301,7 @@ class BacktestEngine:
                 cash = self._close_qty(
                     pos, pos.remaining_quantity, tp, cash, t, ExitReason.TAKE_PROFIT
                 )
-                return cash, self._finalize(pos)
+                return self._finalize_and_settle(pos, cash)
 
         return cash, None
 
@@ -253,13 +311,46 @@ class BacktestEngine:
         cash = self._close_qty(
             pos, pos.remaining_quantity, close_price, cash, t, ExitReason.END_OF_DATA
         )
-        return cash, self._finalize(pos)
+        return self._finalize_and_settle(pos, cash)
+
+    def _funding_cost(self, pos: _OpenPosition) -> float:
+        """보유 구간 `[진입시각, 최종청산시각)`의 누적 펀딩비용을 계산한다.
+
+        수량이 바뀌는 (부분)청산 시점으로 구간을 분할해, 각 구간의 잔여 명목가
+        (진입가 × 잔여수량)에 그 구간에 정산된 펀딩을 적용한다. 양수=지불, 음수=수취.
+        """
+        if not self.config.funding_enabled or not self._funding_rates:
+            return 0.0
+        direction: Direction = "long" if pos.side is PositionSide.LONG else "short"
+        include_predicted = self.config.funding_include_predicted
+        total = 0.0
+        seg_start = pos.entry_time
+        remaining = pos.initial_quantity
+        for fill in sorted(pos.exits, key=lambda f: f.time):
+            if fill.time > seg_start and remaining > _QTY_EPS:
+                total += cumulative_funding_cost(
+                    self._funding_rates,
+                    position_notional=pos.entry_price * remaining,
+                    direction=direction,
+                    start_ms=seg_start,
+                    end_ms=fill.time,
+                    include_predicted=include_predicted,
+                )
+            remaining -= fill.quantity
+            seg_start = fill.time
+        return total
+
+    def _finalize_and_settle(self, pos: _OpenPosition, cash: float) -> tuple[float, Trade]:
+        """포지션을 마감하며 펀딩비용을 정산하고 (현금, Trade)를 반환한다."""
+        funding_cost = self._funding_cost(pos)
+        cash -= funding_cost
+        return cash, self._finalize(pos, funding_cost)
 
     @staticmethod
-    def _finalize(pos: _OpenPosition) -> Trade:
+    def _finalize(pos: _OpenPosition, funding_cost: float) -> Trade:
         exit_fees = sum(f.fee for f in pos.exits)
         gross = sum(pos.side.sign * (f.price - pos.entry_price) * f.quantity for f in pos.exits)
-        realized_pnl = gross - exit_fees - pos.entry_fee
+        realized_pnl = gross - exit_fees - pos.entry_fee - funding_cost
         entry_notional = pos.entry_price * pos.initial_quantity
         return_pct = realized_pnl / entry_notional if entry_notional else 0.0
         return Trade(
@@ -269,6 +360,7 @@ class BacktestEngine:
             quantity=pos.initial_quantity,
             entry_fee=pos.entry_fee,
             exits=list(pos.exits),
+            funding_cost=funding_cost,
             realized_pnl=realized_pnl,
             return_pct=return_pct,
         )
@@ -288,6 +380,7 @@ def run_backtest(
     df: pd.DataFrame,
     signals: list[OrderBlockSignal],
     config: BacktestConfig | None = None,
+    funding_rates: Sequence[FundingRate] | None = None,
 ) -> BacktestResult:
-    """`BacktestEngine(config).run(df, signals)`의 편의 함수."""
-    return BacktestEngine(config).run(df, signals)
+    """`BacktestEngine(config).run(df, signals, funding_rates)`의 편의 함수."""
+    return BacktestEngine(config).run(df, signals, funding_rates)
