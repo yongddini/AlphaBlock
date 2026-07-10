@@ -56,8 +56,13 @@ class Settings(BaseSettings):
     # 타임프레임별 백필 룩백(일). 저장된 데이터가 없을 때 이만큼 과거부터 수집한다.
     backfill_lookback_days: dict[str, int] = Field(default_factory=_default_backfill_lookback_days)
 
-    # 수집 데이터 SQLite 경로
+    # 수집 데이터 SQLite 경로 (OHLCV·펀딩비 공용)
     db_path: str = Field(default="data/ohlcv.db")
+
+    # 펀딩비(funding rate) 수집 설정
+    funding_enabled: bool = Field(default=True)  # 펀딩 수집 on/off
+    funding_refresh_interval_seconds: int = Field(default=300)  # 현재 펀딩비 갱신 간격(초)
+    funding_backfill_lookback_days: int = Field(default=30)  # 저장분 없을 때 백필 룩백(일)
 
     # 안전장치: 실제 주문 실행 여부. 기본은 반드시 False. (본 이슈에서는 미사용)
     live_trading: bool = Field(default=False)
