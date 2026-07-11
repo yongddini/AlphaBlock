@@ -12,6 +12,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from execution.sizing import PositionSizingParams
+
 
 class PositionSide(StrEnum):
     """포지션 방향. 오더블록 방향(bull/bear)과 1:1로 대응."""
@@ -50,7 +52,13 @@ class BacktestConfig(BaseModel):
     slippage: float = Field(default=0.0005, ge=0)
     """체결가에 불리하게 적용되는 슬리피지 분수. 예: 0.0005 = 0.05%."""
     position_fraction: float = Field(default=1.0, gt=0, le=1)
-    """진입 시 노셔널로 사용할 자본(equity) 비율."""
+    """진입 시 노셔널로 사용할 자본(equity) 비율. `risk_sizing`이 None일 때만 쓰인다."""
+    risk_sizing: PositionSizingParams | None = Field(default=None)
+    """리스크 기반 포지션 사이징(WAN-26). None이면 `position_fraction` 고정 사이징을 쓴다.
+
+    설정 시, 진입 수량을 손절 거리(오더블록 distal 경계 기준)에 반비례해 산출하고
+    한도·최소단위로 clamp한다. 손절 거리가 최소치 미만이면 그 진입은 스킵된다.
+    """
     stop_loss_pct: float | None = Field(default=None, gt=0)
     """진입가 대비 손절 폭. None이면 손절 없음."""
     take_profit_pct: float | None = Field(default=None, gt=0)

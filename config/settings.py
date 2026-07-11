@@ -12,6 +12,7 @@ from typing import Literal
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from execution.sizing import PositionSizingParams
 from strategy.models import ConfluenceParams
 
 
@@ -97,6 +98,13 @@ class Settings(BaseSettings):
     # 이미 보낸 신호를 기록해 재시작 시 중복 발송을 막는 상태 파일 경로.
     live_signal_state_path: str = Field(default="data/live_signals_state.json")
 
+    # 리스크 기반 포지션 사이징(WAN-26). 손절 거리에 반비례해 수량을 역산한다.
+    # 백테스트·실행이 공용으로 쓰며, 기본은 켬(risk_sizing_enabled=True).
+    # 개별 필드는 ALPHABLOCK_RISK_SIZING__<필드명>로 덮어쓴다.
+    # 예: ALPHABLOCK_RISK_SIZING__RISK_PER_TRADE=0.02
+    risk_sizing_enabled: bool = Field(default=True)
+    risk_sizing: PositionSizingParams = Field(default_factory=PositionSizingParams)
+
     # 안전장치: 실제 주문 실행 여부. 기본은 반드시 False. (본 이슈에서는 미사용)
     live_trading: bool = Field(default=False)
 
@@ -109,6 +117,15 @@ class Settings(BaseSettings):
     def telegram_configured(self) -> bool:
         """텔레그램 봇 토큰과 chat_id가 모두 설정됐는지 여부."""
         return bool(self.telegram_bot_token) and bool(self.telegram_chat_id)
+
+    @property
+    def effective_risk_sizing(self) -> PositionSizingParams | None:
+        """활성화됐을 때만 사이징 파라미터를, 아니면 None을 반환한다.
+
+        `BacktestConfig(risk_sizing=...)`에 그대로 넘길 수 있다. None이면 백테스트는
+        `position_fraction` 고정 사이징으로 되돌아간다.
+        """
+        return self.risk_sizing if self.risk_sizing_enabled else None
 
     def lookback_days_for(self, timeframe: str, *, default: int = 30) -> int:
         """타임프레임의 백필 룩백(일)을 반환한다. 없으면 `default`."""

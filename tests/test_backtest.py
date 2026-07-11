@@ -454,6 +454,94 @@ def test_funding_predicted_excluded_by_default_included_when_enabled() -> None:
     assert included.trades[0].funding_cost == pytest.approx(10.0)
 
 
+# --- 리스크 기반 포지션 사이징 (WAN-26) ---
+
+
+def _signal_ob(
+    direction: OrderBlockDirection,
+    trigger_index: int,
+    price: float,
+    *,
+    top: float,
+    bottom: float,
+) -> OrderBlockSignal:
+    """손절 참조가(오더블록 distal 경계)를 명시적으로 지정하는 시그널."""
+    ob = OrderBlock(
+        direction=direction,
+        top=top,
+        bottom=bottom,
+        start_time=0,
+        confirmed_time=trigger_index * _STEP,
+        ob_volume=1.0,
+        ob_low_volume=0.5,
+        ob_high_volume=0.5,
+    )
+    return OrderBlockSignal(
+        direction=direction,
+        trigger_time=trigger_index * _STEP,
+        price=price,
+        order_block=ob,
+    )
+
+
+def test_risk_sizing_scales_quantity_by_stop_distance() -> None:
+    from execution import PositionSizingParams
+
+    df = _make_df([_ENTRY_BAR, _MID_BAR, (104.0, 112.0, 103.0, 110.0, 10.0)])
+    # 롱: 진입가 100, 오더블록 distal(bottom)=90 → 손절 거리 10.
+    signals = [_signal_ob(OrderBlockDirection.BULLISH, 0, 100.0, top=101.0, bottom=90.0)]
+    cfg = BacktestConfig(
+        initial_capital=10_000.0,
+        fee_rate=0.0,
+        slippage=0.0,
+        take_profit_pct=0.10,
+        risk_sizing=PositionSizingParams(risk_per_trade=0.01, leverage=100.0),
+    )
+    result = run_backtest(df, signals, cfg)
+    trade = result.trades[0]
+    # 리스크 = 10_000 × 0.01 = 100, 손절 거리 10 → 수량 10.
+    assert trade.quantity == pytest.approx(10.0)
+    # 익절 110 도달 → (110-100)×10 = 100.
+    assert trade.realized_pnl == pytest.approx(100.0)
+    assert trade.return_pct == pytest.approx(0.10)
+
+
+def test_risk_sizing_differs_from_fixed_fraction() -> None:
+    from execution import PositionSizingParams
+
+    df = _make_df([_ENTRY_BAR, _MID_BAR, (104.0, 112.0, 103.0, 110.0, 10.0)])
+    signals = [_signal_ob(OrderBlockDirection.BULLISH, 0, 100.0, top=101.0, bottom=90.0)]
+    base = dict(initial_capital=10_000.0, fee_rate=0.0, slippage=0.0, take_profit_pct=0.10)
+
+    fixed = run_backtest(df, signals, BacktestConfig(position_fraction=1.0, **base))
+    risk = run_backtest(
+        df,
+        signals,
+        BacktestConfig(
+            risk_sizing=PositionSizingParams(risk_per_trade=0.01, leverage=100.0), **base
+        ),
+    )
+    # 고정 사이징: 수량 100(전 자본). 리스크 사이징: 수량 10. 성과는 비교 가능하게 산출된다.
+    assert fixed.trades[0].quantity == pytest.approx(100.0)
+    assert risk.trades[0].quantity == pytest.approx(10.0)
+    assert risk.trades[0].realized_pnl == pytest.approx(fixed.trades[0].realized_pnl / 10.0)
+
+
+def test_risk_sizing_skips_entry_when_stop_too_close() -> None:
+    from execution import PositionSizingParams
+
+    df = _make_df([_ENTRY_BAR, _MID_BAR, (104.0, 112.0, 103.0, 110.0, 10.0)])
+    # 손절 거리 0.1(bottom=99.9) < 최소 2% → 진입 스킵.
+    signals = [_signal_ob(OrderBlockDirection.BULLISH, 0, 100.0, top=101.0, bottom=99.9)]
+    cfg = BacktestConfig(
+        take_profit_pct=0.10,
+        risk_sizing=PositionSizingParams(min_stop_distance_fraction=0.02),
+    )
+    result = run_backtest(df, signals, cfg)
+    assert result.trades == []
+    assert result.metrics.num_trades == 0
+
+
 # --- 지표 순수 함수 ---
 
 

@@ -54,6 +54,7 @@ from backtest.models import (
 )
 from data.funding import Direction, cumulative_funding_cost
 from data.models import FundingRate
+from execution.sizing import position_size
 from strategy.models import OrderBlockDirection, OrderBlockSignal, PlannedExit, SignalExitReason
 
 _REQUIRED_COLUMNS = ("open_time", "open", "high", "low", "close")
@@ -152,7 +153,10 @@ class BacktestEngine:
                     if side is None:
                         continue
                     position, cash = self._open(sig, side, cash, t)
-                    break
+                    # 리스크 사이징이 수량 0(손절 거리 과소·한도)으로 진입을 스킵하면
+                    # 이 봉의 다음 후보 시그널을 계속 살펴본다.
+                    if position is not None:
+                        break
 
             # 3) 봉 종가 기준 평가금 기록
             equity = cash + (position.unrealized(closes[i]) if position is not None else 0.0)
@@ -186,14 +190,35 @@ class BacktestEngine:
         slip = self.config.slippage
         return price * (1.0 - slip) if side is PositionSide.LONG else price * (1.0 + slip)
 
+    @staticmethod
+    def _sizing_stop_price(sig: OrderBlockSignal, side: PositionSide) -> float:
+        """리스크 사이징의 손절 참조가(오더블록 distal 경계, WAN-23 규칙).
+
+        롱(강세 오더블록)은 존 하단(bottom)이, 숏(약세 오더블록)은 존 상단(top)이
+        무효화 경계다.
+        """
+        ob = sig.order_block
+        return ob.bottom if side is PositionSide.LONG else ob.top
+
     def _open(
         self, sig: OrderBlockSignal, side: PositionSide, cash: float, t: int
-    ) -> tuple[_OpenPosition, float]:
+    ) -> tuple[_OpenPosition | None, float]:
         cfg = self.config
         equity = cash  # 플랫 상태이므로 미실현손익 없음
         entry_price = self._entry_fill(sig.price, side)
-        notional = equity * cfg.position_fraction
-        quantity = notional / entry_price
+        if cfg.risk_sizing is not None:
+            quantity = position_size(
+                equity=equity,
+                entry_price=entry_price,
+                stop_price=self._sizing_stop_price(sig, side),
+                params=cfg.risk_sizing,
+            )
+            if quantity <= 0.0:
+                return None, cash  # 손절 거리 과소·한도 → 진입 스킵
+            notional = entry_price * quantity
+        else:
+            notional = equity * cfg.position_fraction
+            quantity = notional / entry_price
         entry_fee = notional * cfg.fee_rate
         cash -= entry_fee
 
