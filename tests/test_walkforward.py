@@ -252,3 +252,56 @@ def test_run_walk_forward_warmup_uses_only_past_data() -> None:
     assert report_no_warmup.rows[0].oos_end_time == report_with_warmup.rows[0].oos_end_time
     assert report_no_warmup.rows[0].is_start_time == report_with_warmup.rows[0].is_start_time
     assert report_no_warmup.rows[0].is_end_time == report_with_warmup.rows[0].is_end_time
+
+
+# --------------------------------------------------------------------- 펀딩비 스레딩 (WAN-29)
+
+
+def test_run_walk_forward_forwards_funding_to_is_sweep_and_oos(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """run_walk_forward가 funding_rates를 IS 스윕과 OOS 평가에 동일하게 전달한다.
+
+    워크포워드는 오더블록을 내부에서 재탐지하므로 합성 데이터로 OOS 거래를 강제하기
+    어렵다. 대신 원래 갭(펀딩비를 스윕·OOS 손익에 흘려버림)을 직접 막도록, IS 스윕
+    (`run_sweep`)과 OOS 백테스트(`BacktestEngine.run`)가 넘겨준 그대로의 funding_rates를
+    받는지 스파이로 검증한다. 펀딩비가 손익에 반영되는 경로는 test_sweep의
+    evaluate 테스트가 확인한다.
+    """
+    import backtest.walkforward as wf_mod
+    from backtest.engine import BacktestEngine
+    from backtest.sweep import run_sweep as real_run_sweep
+    from data.models import FundingRate
+
+    rates = [FundingRate(symbol="X", funding_time=t, rate=0.001) for t in (0, 1, 2)]
+
+    sweep_seen: list[object] = []
+
+    def spy_run_sweep(df: pd.DataFrame, **kwargs: object) -> object:
+        sweep_seen.append(kwargs.get("funding_rates"))
+        return real_run_sweep(df, **kwargs)  # type: ignore[arg-type]
+
+    engine_seen: list[object] = []
+    real_run = BacktestEngine.run
+
+    def spy_run(self: object, df: pd.DataFrame, signals: object, funding: object = None) -> object:
+        engine_seen.append(funding)
+        return real_run(self, df, signals, funding)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(wf_mod, "run_sweep", spy_run_sweep)
+    monkeypatch.setattr(BacktestEngine, "run", spy_run)
+
+    df = make_synthetic_ohlcv(bars=400, timeframe="1h", seed=7)
+    report = run_walk_forward(
+        df,
+        symbol="X",
+        timeframe="1h",
+        is_bars=150,
+        oos_bars=80,
+        funding_rates=rates,
+    )
+
+    # 윈도우가 생성되어 IS 스윕과 OOS 평가가 실제로 호출됐다.
+    assert report.rows
+    assert sweep_seen and all(fr is rates for fr in sweep_seen)
+    assert engine_seen and all(fr is rates for fr in engine_seen)

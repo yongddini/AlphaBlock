@@ -13,6 +13,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from backtest.models import BacktestConfig
 from backtest.sweep import (
     ParamGrid,
     apply_sweep_point,
@@ -23,6 +24,7 @@ from backtest.sweep import (
     write_sweep_csv,
 )
 from backtest.synthetic import make_synthetic_ohlcv
+from data.models import FundingRate
 from strategy.models import (
     ConfluenceParams,
     OrderBlock,
@@ -241,3 +243,130 @@ def test_evaluate_executes_trade_with_injected_order_block() -> None:
         order_block_result=ob_result,
     )
     assert result.metrics.num_trades >= 1
+
+
+# --------------------------------------------------------------------------- 펀딩비 반영 (WAN-29)
+
+
+def _forced_short_setup() -> tuple[pd.DataFrame, OrderBlockResult, ConfluenceParams]:
+    """상승 구간 약세 오더블록 탭으로 숏 1건이 확정·보유되는 결정적 설정.
+
+    포지션은 bar 50에서 진입해 데이터 끝(bar 199)에서 강제 청산되므로, 그 사이에
+    정산되는 펀딩은 모두 보유 구간에 포함된다.
+    """
+    df = _arch_df()
+    ob = OrderBlock(
+        direction=OrderBlockDirection.BEARISH,
+        top=127.0,
+        bottom=124.0,
+        start_time=0,
+        confirmed_time=0,
+        ob_volume=1.0,
+        ob_low_volume=0.5,
+        ob_high_volume=0.5,
+    )
+    signal = OrderBlockSignal(
+        direction=OrderBlockDirection.BEARISH,
+        trigger_time=50 * 60_000,
+        price=float(df["close"][50]),
+        order_block=ob,
+        status="active",
+    )
+    ob_result = OrderBlockResult(order_blocks=[ob], signals=[signal])
+    params = ConfluenceParams(rsi_overbought=50.0, rsi_oversold=30.0)
+    return df, ob_result, params
+
+
+def _funding_rates_over_hold() -> list[FundingRate]:
+    """보유 구간 `[bar 50, bar 199)` 안에서 정산되는 확정 펀딩비들."""
+    return [
+        FundingRate(symbol="X", funding_time=bar * 60_000, rate=0.001) for bar in (60, 120, 180)
+    ]
+
+
+def test_evaluate_reflects_funding_when_enabled() -> None:
+    """`funding_enabled=True` + funding_rates면 evaluate 손익에 펀딩비가 실제 반영된다."""
+    df, ob_result, params = _forced_short_setup()
+    rates = _funding_rates_over_hold()
+
+    off = evaluate(
+        df,
+        confluence_params=params,
+        order_block_result=ob_result,
+        backtest_config=BacktestConfig(funding_enabled=False),
+        funding_rates=rates,
+    )
+    on = evaluate(
+        df,
+        confluence_params=params,
+        order_block_result=ob_result,
+        backtest_config=BacktestConfig(funding_enabled=True),
+        funding_rates=rates,
+    )
+
+    assert off.metrics.num_trades >= 1
+    assert on.metrics.num_trades == off.metrics.num_trades
+    # 펀딩 미반영 시 비용 0, 반영 시 0이 아니어야 한다(요율 3회 × 명목가).
+    assert off.metrics.total_funding_cost == 0.0
+    assert on.metrics.total_funding_cost != 0.0
+    # 손익(총수익률)이 펀딩 반영으로 달라져야 한다.
+    assert on.metrics.total_return != off.metrics.total_return
+
+
+def test_evaluate_ignores_funding_rates_when_disabled() -> None:
+    """funding_rates를 넘겨도 `funding_enabled=False`면 손익이 바뀌지 않는다(기존 동작 보존)."""
+    df, ob_result, params = _forced_short_setup()
+
+    no_rates = evaluate(
+        df,
+        confluence_params=params,
+        order_block_result=ob_result,
+        backtest_config=BacktestConfig(funding_enabled=False),
+    )
+    with_rates = evaluate(
+        df,
+        confluence_params=params,
+        order_block_result=ob_result,
+        backtest_config=BacktestConfig(funding_enabled=False),
+        funding_rates=_funding_rates_over_hold(),
+    )
+
+    assert with_rates.metrics.total_return == no_rates.metrics.total_return
+    assert with_rates.metrics.total_funding_cost == 0.0
+
+
+def test_run_sweep_forwards_funding_to_every_evaluation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """run_sweep이 funding_rates를 그리드의 모든 조합 평가(evaluate)에 전달한다.
+
+    스윕은 오더블록을 내부에서 재탐지하므로 합성 데이터로 거래를 강제하기 어렵다.
+    대신 원래 버그(evaluate 호출에서 funding_rates 인자를 흘려버림)를 직접 막도록,
+    각 조합 평가가 동일한 funding_rates를 받는지 스파이로 검증한다. 펀딩비가 실제
+    손익에 반영되는 경로는 `test_evaluate_reflects_funding_when_enabled`가 확인한다.
+    """
+    import backtest.sweep as sweep_mod
+
+    rates = _funding_rates_over_hold()
+    seen: list[object] = []
+    real_evaluate = sweep_mod.evaluate
+
+    def spy_evaluate(df: pd.DataFrame, **kwargs: object) -> object:
+        seen.append(kwargs.get("funding_rates"))
+        return real_evaluate(df, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(sweep_mod, "evaluate", spy_evaluate)
+
+    grid = ParamGrid(rsi_overbought=(70.0, 75.0, 80.0))
+    df = _arch_df()
+    run_sweep(
+        df,
+        symbol="X",
+        timeframe="1m",
+        grid=grid,
+        base_backtest=BacktestConfig(funding_enabled=True),
+        funding_rates=rates,
+    )
+
+    assert len(seen) == grid.size
+    assert all(fr is rates for fr in seen)

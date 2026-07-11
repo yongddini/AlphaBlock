@@ -47,6 +47,7 @@ from pydantic import BaseModel, ConfigDict
 
 from backtest.engine import BacktestEngine
 from backtest.models import BacktestConfig, BacktestResult
+from data.models import FundingRate
 from strategy.confluence import ConfluenceStrategy
 from strategy.models import ConfluenceParams, OrderBlockParams, OrderBlockResult
 from strategy.order_blocks import OrderBlockDetector
@@ -103,6 +104,7 @@ def evaluate(
     order_block_params: OrderBlockParams | None = None,
     backtest_config: BacktestConfig | None = None,
     order_block_result: OrderBlockResult | None = None,
+    funding_rates: Sequence[FundingRate] | None = None,
 ) -> BacktestResult:
     """컨플루언스 시그널을 생성하고 백테스트 엔진으로 시뮬레이션해 결과를 반환한다.
 
@@ -114,11 +116,15 @@ def evaluate(
     `order_block_result`를 주면 오더블록 탐지를 재실행하지 않고 재사용한다(스윕에서
     동일 오더블록에 대해 여러 파라미터를 평가할 때 탐지 중복을 피한다). 오더블록
     탐지는 `confluence_params`와 무관하므로 이 재사용은 결과를 바꾸지 않는다.
+
+    `funding_rates`(WAN-20)를 주고 `backtest_config.funding_enabled=True`이면 엔진이
+    보유 구간의 펀딩비를 손익에 반영한다. 그래야 스윕/워크포워드의 파라미터 선택과
+    성과 평가가 실거래(WAN-9) 손익 모델(수수료·슬리피지·펀딩비)과 일관된다.
     """
     strategy = ConfluenceStrategy(confluence_params, order_block_params)
     confluence = strategy.run(df, order_block_result)
     engine = BacktestEngine(backtest_config)
-    return engine.run(df, confluence.order_block_signals)
+    return engine.run(df, confluence.order_block_signals, funding_rates)
 
 
 # --------------------------------------------------------------------------- #
@@ -312,12 +318,17 @@ def run_sweep(
     base_confluence: ConfluenceParams | None = None,
     base_backtest: BacktestConfig | None = None,
     order_block_params: OrderBlockParams | None = None,
+    funding_rates: Sequence[FundingRate] | None = None,
     sort_by: str = "sharpe",
 ) -> SweepReport:
     """그리드의 모든 파라미터 조합을 백테스트해 정렬된 `SweepReport`를 반환한다.
 
     `base_backtest`가 없으면 타임프레임에서 유도한 연율화 계수로 샤프를 연율화한다.
     `sort_by`는 높을수록 좋은 지표여야 한다(`_SORTABLE_METRICS`).
+
+    `funding_rates`(WAN-20)는 모든 조합 평가에 그대로 전달된다. `base_backtest.
+    funding_enabled=True`이면 각 조합의 손익에 펀딩비가 반영되어, 펀딩비를 뺀 손익이
+    아니라 실거래 조건과 일관된 손익으로 파라미터가 선택·비교된다.
     """
     if sort_by not in _SORTABLE_METRICS:
         raise ValueError(f"sort_by는 {_SORTABLE_METRICS} 중 하나여야 합니다: {sort_by!r}")
@@ -342,6 +353,7 @@ def run_sweep(
             order_block_params=order_block_params,
             backtest_config=base_bt,
             order_block_result=ob_result,
+            funding_rates=funding_rates,
         )
         rows.append(
             _build_row(
