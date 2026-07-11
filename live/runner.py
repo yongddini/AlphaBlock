@@ -30,6 +30,8 @@ from pathlib import Path
 from config.settings import Settings, get_settings
 from data.funding import FundingRateStore
 from data.storage import OhlcvStore
+from execution.engine import build_execution_engine
+from live.executor import PaperExecutor
 from live.notifier import Notifier, SignalEvent, collect_events
 from live.runtime_state import RuntimeStateStore
 from live.telegram import TelegramClient
@@ -148,7 +150,7 @@ class SignalRunner:
         if not new_events:
             return []
         for event in new_events:
-            self._notifier.handle(event)
+            self._notifier.handle(event, now_ms=self._now_ms())
         highest = max(e.time for e in new_events)
         self._state.set(symbol, timeframe, max(watermark, highest))
         _logger.info("%s %s: 새 신호 %d건 처리", symbol, timeframe, len(new_events))
@@ -166,7 +168,7 @@ class SignalRunner:
             # 하트비트·현재 포지션·새 신호를 남겨 Health 대시보드(WAN-30)가 읽게 한다.
             self._runtime_state.record(
                 now_ms=self._now_ms(),
-                open_positions=self._notifier.book.open_positions,
+                open_positions=self._notifier.open_positions,
                 new_events=emitted,
             )
         return emitted
@@ -229,8 +231,11 @@ def run_signal_runner(
 
     store = OhlcvStore(settings.db_path)
     series = build_series(settings)
-    # 페이퍼 성과 추적(WAN-33): 청산 거래를 paper_trades 테이블에 누적한다. 펀딩비는
-    # 수집분(WAN-16)이 있을 때만 반영한다. 러너 견고성을 위해 기록 실패는 싱크가 삼킨다.
+    # 페이퍼 집행 배선(WAN-34): 시그널 → 사이징/리스크 → 페이퍼 주문 → 포지션 추적.
+    # 열린 포지션은 재시작 복구용으로 저장하고(open_positions), 청산 라운드트립은
+    # WAN-33 성과 스키마(paper_trades, 같은 DB)에 recorder로 위임 기록해 성과·패리티
+    # 리포트가 즉시 집계한다. live_trading이 꺼져 있으면 build_execution_engine이
+    # PaperBroker를 써 실주문 API를 부르지 않는다. 기록 실패는 recorder가 삼킨다.
     paper_store = PaperTradeStore(settings.db_path)
     funding_store = FundingRateStore(settings.db_path) if settings.funding_enabled else None
     recorder = PaperTradeRecorder(
@@ -238,11 +243,17 @@ def run_signal_runner(
         fee_rate=settings.paper_fee_rate,
         funding_store=funding_store,
     )
+    executor = PaperExecutor(
+        engine=build_execution_engine(settings),
+        store=paper_store,
+        recorder=recorder,
+        sizing=settings.risk_sizing,
+    )
     try:
         runner = SignalRunner(
             store=store,
             strategy=ConfluenceStrategy(settings.confluence),
-            notifier=Notifier(telegram, trade_sink=recorder),
+            notifier=Notifier(telegram, executor=executor),
             state=WatermarkStore(settings.live_signal_state_path),
             series=series,
             lookback_bars=settings.live_signal_lookback_bars,
