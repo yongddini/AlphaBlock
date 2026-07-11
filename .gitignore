@@ -17,6 +17,13 @@ data/*.db
 data/*.parquet
 data/*.json
 
+# Report / analysis outputs (backtest·parity·walkforward)
+out/
+
+# Local-only Claude Code settings (shared: .claude/settings.json)
+.claude/settings.local.json
+.claude/worktrees/
+
 # Tool caches
 .mypy_cache/
 .ruff_cache/
