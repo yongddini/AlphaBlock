@@ -174,6 +174,12 @@ class Notifier:
         """이벤트를 처리한다. 전송 성공(또는 드라이런에서 처리)하면 True."""
         sig = event.signal
         if event.is_entry:
+            stop_price = (
+                _stop_loss_price(sig.direction, sig.order_block)
+                if sig.order_block is not None
+                else None
+            )
+            tp = _nearest_take_profit_line(sig.direction, sig.price, sig.indicators.lines)
             self.book.open(
                 PaperPosition(
                     symbol=event.symbol,
@@ -181,6 +187,8 @@ class Notifier:
                     direction=sig.direction,
                     entry_time=sig.time,
                     entry_price=sig.price,
+                    stop_price=stop_price,
+                    take_profit_price=tp[1] if tp is not None else None,
                 )
             )
             message = format_entry(event)

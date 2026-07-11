@@ -97,6 +97,11 @@ class Settings(BaseSettings):
     live_signal_lookback_bars: int = Field(default=1500, ge=1)
     # 이미 보낸 신호를 기록해 재시작 시 중복 발송을 막는 상태 파일 경로.
     live_signal_state_path: str = Field(default="data/live_signals_state.json")
+    # 러너 운영 상태(하트비트·페이퍼 포지션·최근 신호)를 남겨 Health 대시보드(WAN-30)가
+    # 읽는 파일 경로. 러너가 매 폴링마다 갱신한다.
+    live_runtime_state_path: str = Field(default="data/live_runtime_state.json")
+    # 데이터 신선도(수집 멈춤)를 stale로 볼 지연 배수. TF 주기 대비 이 배수를 넘으면 경고.
+    health_stale_multiplier: float = Field(default=2.5, gt=0)
 
     # 리스크 기반 포지션 사이징(WAN-26). 손절 거리에 반비례해 수량을 역산한다.
     # 백테스트·실행이 공용으로 쓰며, 기본은 켬(risk_sizing_enabled=True).

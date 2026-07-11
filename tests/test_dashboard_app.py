@@ -48,7 +48,19 @@ def test_app_renders_price_chart_and_metrics_when_data_available(seeded_db_path:
 
     assert not at.exception
     assert at.title[0].value == "AlphaBlock — 통합 트레이딩 대시보드"
+    # 분석 탭의 성과 지표 6종(러너 미실행이라 Health 탭 지표는 없음).
     assert len(at.metric) == 6
+
+
+def test_app_health_tab_renders_without_error(seeded_db_path: str) -> None:
+    at = AppTest.from_file("dashboard/app.py")
+    at.run(timeout=30)
+
+    assert not at.exception
+    # Health 탭이 실제로 그려졌는지 소제목으로 확인한다.
+    subheaders = [s.value for s in at.subheader]
+    assert "데이터 신선도" in subheaders
+    assert "실시간 러너" in subheaders
 
 
 def test_app_shows_warning_when_no_data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
