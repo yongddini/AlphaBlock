@@ -22,6 +22,8 @@ claude mcp add --transport http linear-server https://mcp.linear.app/mcp
 
 원격: `github.com/yongddini/AlphaBlock` (기본 브랜치 `main`). Linear ↔ GitHub 기본 연동을 사용해 **GitHub 동작이 Linear 상태를 자동 동기화**한다: 브랜치/커밋 → In Progress, PR 열림 → In Review, PR 머지 → Done. 따라서 개발자는 상태를 손으로 바꾸기보다 브랜치·PR·머지 행위로 상태가 흐르게 한다. 이슈 연결은 브랜치명 또는 PR 제목/본문의 이슈 식별자(`WAN-x`)로 이뤄진다.
 
+`main`은 브랜치 보호로 **CI(WAN-10) green + PR** 없이는 머지되지 않는다(설정 스크립트: `scripts/setup-branch-protection.sh`, 적용은 저장소 소유자 1회 실행). 머지 버튼은 사람이 누른다 — 자세한 규칙은 README "브랜치 보호 · 머지 정책" 참고.
+
 ## 개발 워크플로우
 
 1. **Approved 이슈만 개발한다.** Linear에서 team=Alphablock, state=`Approved` 이슈를 우선순위 순으로 가져온다. Backlog/Todo/Rejected 는 절대 개발하지 않는다.

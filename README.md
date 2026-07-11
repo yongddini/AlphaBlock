@@ -220,6 +220,23 @@ uv run pre-commit install
 
 `main` 브랜치로의 push와 모든 PR에서 [GitHub Actions](.github/workflows/ci.yml)가 로컬과 동일한 품질 게이트(`ruff check`, `ruff format --check`, `mypy`, `pytest`)를 순서대로 실행한다. 하나라도 실패하면 워크플로우가 실패로 표시된다.
 
+## 브랜치 보호 · 머지 정책
+
+`main`은 다음 규칙으로 보호된다(설정 스크립트: [`scripts/setup-branch-protection.sh`](scripts/setup-branch-protection.sh)):
+
+- 모든 변경은 PR을 거친다 — `main` 직접 push 금지.
+- CI 워크플로우의 **`quality`** 잡(위 품질 게이트)이 **green**이어야만 머지 가능하다. **CI가 실패한 PR은 `main`에 머지되지 않는다.**
+- 머지 전 브랜치를 최신 base로 최신화(strict)하고, 리뷰 코멘트를 해결해야 한다.
+- **머지는 사람이 누른다.** CI green + PM 검증 후 저장소 소유자가 직접 머지한다. Claude Code(개발 러너)는 PR을 자동 머지하지 않는다.
+
+보호 규칙 변경에는 저장소 관리자 권한이 필요하므로, 소유자가 아래를 1회 실행해 적용한다:
+
+```bash
+./scripts/setup-branch-protection.sh
+# 선택: CI green 시 자동 머지 예약을 허용하려면 (수동 머지와 병행 가능)
+gh api --method PATCH /repos/yongddini/AlphaBlock -f allow_auto_merge=true
+```
+
 ## 설정
 
 설정은 환경변수 또는 `.env`(접두사 `ALPHABLOCK_`)로 주입한다. `config.settings.Settings` 참고.
