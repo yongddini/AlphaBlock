@@ -29,7 +29,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["config", "data", "strategy", "execution", "backtest", "dashboard"]
+packages = ["config", "data", "strategy", "execution", "backtest", "dashboard", "live"]
 
 [tool.ruff]
 line-length = 100
@@ -50,6 +50,7 @@ files = [
     "execution",
     "backtest",
     "dashboard",
+    "live",
     "tests",
     "scripts",
 ]

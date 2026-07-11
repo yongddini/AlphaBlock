@@ -15,6 +15,7 @@ wheels/
 # Data artifacts
 data/*.db
 data/*.parquet
+data/*.json
 
 # Tool caches
 .mypy_cache/
