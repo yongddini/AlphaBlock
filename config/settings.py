@@ -141,6 +141,12 @@ class Settings(BaseSettings):
     # 실행 엔진(페이퍼) 시작 자본. 리스크·사이징·손익 정산의 기준.
     paper_equity: float = Field(default=10_000.0, gt=0)
 
+    # 페이퍼 성과 추적(WAN-33). 러너가 청산한 가상 거래를 paper_trades 테이블에 누적하고,
+    # 손익률 계산 시 왕복 수수료를 반영한다. 백테스트 대비 패리티도 이 수수료율을 공유해
+    # 둘의 손익 비용 모델을 일치시킨다. 펀딩비는 funding_enabled 수집분(WAN-16/20)을 쓴다.
+    # BacktestConfig 기본값과 동일한 0.04%가 기본.
+    paper_fee_rate: float = Field(default=0.0004, ge=0)
+
     # 안전장치: 실제 주문 실행 여부. 기본은 반드시 False. live_trading=True여도
     # 실행 엔진은 실거래 브로커를 자동 생성하지 않고 명시적 주입을 요구한다(WAN-27).
     live_trading: bool = Field(default=False)

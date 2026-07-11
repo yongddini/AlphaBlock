@@ -28,10 +28,12 @@ from collections.abc import Callable
 from pathlib import Path
 
 from config.settings import Settings, get_settings
+from data.funding import FundingRateStore
 from data.storage import OhlcvStore
 from live.notifier import Notifier, SignalEvent, collect_events
 from live.runtime_state import RuntimeStateStore
 from live.telegram import TelegramClient
+from paper.store import PaperTradeRecorder, PaperTradeStore
 from strategy.confluence import ConfluenceStrategy
 
 _logger = logging.getLogger(__name__)
@@ -227,11 +229,20 @@ def run_signal_runner(
 
     store = OhlcvStore(settings.db_path)
     series = build_series(settings)
+    # 페이퍼 성과 추적(WAN-33): 청산 거래를 paper_trades 테이블에 누적한다. 펀딩비는
+    # 수집분(WAN-16)이 있을 때만 반영한다. 러너 견고성을 위해 기록 실패는 싱크가 삼킨다.
+    paper_store = PaperTradeStore(settings.db_path)
+    funding_store = FundingRateStore(settings.db_path) if settings.funding_enabled else None
+    recorder = PaperTradeRecorder(
+        paper_store,
+        fee_rate=settings.paper_fee_rate,
+        funding_store=funding_store,
+    )
     try:
         runner = SignalRunner(
             store=store,
             strategy=ConfluenceStrategy(settings.confluence),
-            notifier=Notifier(telegram),
+            notifier=Notifier(telegram, trade_sink=recorder),
             state=WatermarkStore(settings.live_signal_state_path),
             series=series,
             lookback_bars=settings.live_signal_lookback_bars,
@@ -247,6 +258,9 @@ def run_signal_runner(
         runner.run(max_polls=1 if once else None)
     finally:
         store.close()
+        paper_store.close()
+        if funding_store is not None:
+            funding_store.close()
 
 
 def main() -> None:
