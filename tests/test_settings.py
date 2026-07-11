@@ -54,3 +54,22 @@ def test_invalid_market_type_rejected() -> None:
 
 def test_get_settings_is_cached() -> None:
     assert get_settings() is get_settings()
+
+
+def test_risk_sizing_enabled_by_default() -> None:
+    """리스크 기반 사이징(WAN-26)은 기본 켬이며 파라미터를 반환한다."""
+    s = Settings.model_validate({})
+    assert s.risk_sizing_enabled is True
+    assert s.risk_sizing.risk_per_trade == pytest.approx(0.01)
+    assert s.effective_risk_sizing is s.risk_sizing
+
+
+def test_risk_sizing_disabled_returns_none() -> None:
+    s = Settings.model_validate({"risk_sizing_enabled": False})
+    assert s.effective_risk_sizing is None
+
+
+def test_risk_sizing_nested_override() -> None:
+    s = Settings.model_validate({"risk_sizing": {"risk_per_trade": 0.02, "leverage": 5.0}})
+    assert s.risk_sizing.risk_per_trade == pytest.approx(0.02)
+    assert s.risk_sizing.leverage == pytest.approx(5.0)
