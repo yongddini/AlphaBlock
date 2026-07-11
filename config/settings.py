@@ -117,6 +117,15 @@ class Settings(BaseSettings):
     collector_heartbeat_interval_seconds: int = Field(default=60, ge=1)
     collector_heartbeat_min_interval_seconds: int = Field(default=5, ge=0)
 
+    # 운영 상태(Health) 워치(WAN-32). WAN-30 판정을 주기적으로 점검해 이상 시 텔레그램
+    # 경고를 보낸다. stale 판정 배수는 위 health_stale_multiplier를 공유한다.
+    # 점검 주기(초): 이 간격마다 상태를 점검한다.
+    health_watch_interval_seconds: int = Field(default=600, ge=1)
+    # 쿨다운(초): 동일 이상은 이 시간 내 1회만 경고(플래핑 방지).
+    health_watch_cooldown_seconds: int = Field(default=3600, ge=0)
+    # 발효 중인 경고 상태를 남겨 재시작 시 중복/누락을 막는 상태 파일 경로.
+    health_watch_state_path: str = Field(default="data/health_watch_state.json")
+
     # 리스크 기반 포지션 사이징(WAN-26). 손절 거리에 반비례해 수량을 역산한다.
     # 백테스트·실행이 공용으로 쓰며, 기본은 켬(risk_sizing_enabled=True).
     # 개별 필드는 ALPHABLOCK_RISK_SIZING__<필드명>로 덮어쓴다.

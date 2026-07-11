@@ -243,6 +243,7 @@ uv run alphablock collect --once   # 백필만 1회 수행하고 종료
 uv run alphablock live             # 실시간 시그널 러너(페이퍼) 상주
 uv run alphablock live --once      # 러너 1회 폴링 후 종료(점검)
 uv run alphablock status           # 운영 상태(Health) 요약을 콘솔에 출력
+uv run alphablock watch            # 운영 상태 워치(이상 시 텔레그램 경고) 상주 — WAN-32
 ```
 
 `alphablock status`는 대시보드 Health 탭과 같은 판정을 텍스트로 보여준다 —
@@ -283,6 +284,46 @@ uv run alphablock status                          # 상태 요약
 
 로그 파일이 무한정 커지지 않게 하려면 macOS `newsyslog`(예: `/etc/newsyslog.d/`에
 `alphablock.conf` 추가)로 로테이션을 설정한다.
+
+## 운영 상태 자동 경고 (WAN-32)
+
+Health 대시보드(WAN-30)·`alphablock status`는 화면을 **열어야** 상태를 볼 수 있다.
+`alphablock watch`는 같은 판정 로직을 **주기적으로(기본 10분) 자동 점검**해, 수집·러너가
+조용히 멈추면 **텔레그램으로 폰에 경고**를 보낸다(WAN-25의 전송 경로 재사용). 화면을 보고
+있지 않아도 "수집이 하루 넘게 멈췄는데 아무도 몰랐다"는 상황을 막는다.
+
+```bash
+uv run alphablock watch                 # 상주(기본 10분마다 점검)
+uv run alphablock watch --once          # 1회 점검 후 종료(점검용)
+uv run alphablock watch --dry-run       # 텔레그램 전송 없이 경고를 로그로만 출력
+uv run alphablock watch --test-message  # 텔레그램 연결 확인용 메시지 1건 전송
+```
+
+**경고 대상** — 각 항목이 WAN-30 기준으로 stale(빨강)이면 경고한다:
+
+- **데이터 수집 지연**: 시리즈(심볼·TF)의 최신 봉이 TF 주기 대비 stale(지연시간 명시).
+- **펀딩비 갱신 지연**: 심볼의 펀딩 갱신이 정산 주기 대비 stale.
+- **러너/수집기 하트비트 끊김**: 돌던 프로세스의 하트비트가 끊김. 한 번도 실행되지 않은
+  (미실행) 프로세스는 "복구할 대상"이 없으므로 경고하지 않는다.
+
+**플래핑 방지**: 동일 이상은 쿨다운(기본 60분) 내 1회만 보내고, 계속되면 쿨다운마다 1회씩
+리마인더를 보낸다. 이상이 사라지면 **"✅ 정상 복구"** 알림을 1회 보낸다. 발효 중인 경고
+상태는 `data/health_watch_state.json`에 남겨, 워치를 재시작해도 중복 경고를 보내거나 복구
+알림을 놓치지 않는다.
+
+**설정**(`.env`):
+
+```bash
+ALPHABLOCK_HEALTH_WATCH_INTERVAL_SECONDS=600      # 점검 주기(초)
+ALPHABLOCK_HEALTH_WATCH_COOLDOWN_SECONDS=3600     # 동일 이상 쿨다운(초)
+ALPHABLOCK_HEALTH_STALE_MULTIPLIER=2.5            # stale 판정 배수(WAN-30과 공유)
+ALPHABLOCK_HEALTH_WATCH_STATE_PATH=data/health_watch_state.json
+```
+
+텔레그램 토큰·chat_id는 WAN-25와 동일하게 `ALPHABLOCK_TELEGRAM_*`로 주입한다(미설정 시
+경고를 로그로만 남기는 드라이런으로 동작). 상주는 위 launchd 방식으로 상시 구동할 수 있다.
+
+> 안전: 워치는 **읽기·경고만** 한다. 실주문·`live_trading`은 건드리지 않는다.
 
 ## 품질 검사
 

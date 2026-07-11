@@ -130,6 +130,19 @@ def cmd_status(args: argparse.Namespace, settings: Settings) -> int:
     return 0
 
 
+def cmd_watch(args: argparse.Namespace, settings: Settings) -> int:
+    """`alphablock watch` — 운영 상태 워치(이상 시 텔레그램 경고, WAN-32)."""
+    from live.health_watch import run_health_watch
+
+    run_health_watch(
+        settings,
+        once=args.once,
+        dry_run=args.dry_run,
+        test_message=args.test_message,
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="alphablock",
@@ -157,6 +170,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_status = sub.add_parser("status", help="운영 상태(Health) 요약 출력")
     p_status.set_defaults(func=cmd_status)
+
+    p_watch = sub.add_parser("watch", help="운영 상태 워치(이상 시 텔레그램 경고)")
+    p_watch.add_argument("--once", action="store_true", help="한 번만 점검하고 종료")
+    p_watch.add_argument("--dry-run", action="store_true", help="텔레그램 전송 없이 로그로만 출력")
+    p_watch.add_argument(
+        "--test-message",
+        action="store_true",
+        help="테스트 메시지를 한 번 보내고 종료(텔레그램 연결 확인)",
+    )
+    p_watch.set_defaults(func=cmd_watch)
 
     return parser
 
