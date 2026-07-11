@@ -34,6 +34,10 @@ from dashboard.health import (
 from dashboard.health_data import HealthView, OpenPositionView, build_health_view
 from dashboard.pipeline import run_pipeline
 from live.runtime_state import EventRecord
+from paper.parity import build_parity_report
+from paper.performance import build_performance
+from paper.report import performance_to_dataframe, records_to_dataframe
+from paper.store import PaperTradeStore
 from strategy.confluence import SignalKind
 from strategy.models import OrderBlockDirection, OrderBlockParams, SignalExitReason
 
@@ -302,14 +306,86 @@ def _render_health(settings: Settings) -> None:
         st.caption("기록된 신호가 없습니다(러너 미실행이거나 신호 미발생).")
 
 
+# --- 페이퍼 성과 탭 (WAN-33) -------------------------------------------------
+
+
+def _render_paper(settings: Settings) -> None:
+    db_path = settings.db_path
+    with PaperTradeStore(db_path) as store:
+        series = store.list_series()
+        records = [r for s, tf in series for r in store.list_records(s, tf)]
+
+    if not records:
+        st.info(
+            "누적된 페이퍼 거래가 없습니다. 러너(`python -m live.runner`)가 청산을 내면 "
+            "여기에 성과가 집계됩니다."
+        )
+        return
+
+    performance = build_performance(records)
+    overall = performance.overall
+
+    st.subheader("전체 성과")
+    cols = st.columns(6)
+    cols[0].metric("총수익률(복리)", f"{overall.total_return_pct:+.2f}%")
+    cols[1].metric("총 R", f"{overall.total_r:+.2f}")
+    cols[2].metric("승률", f"{overall.win_rate * 100:.1f}%")
+    payoff = overall.payoff_ratio
+    cols[3].metric("손익비", f"{payoff:.2f}" if payoff is not None else "N/A")
+    cols[4].metric("MDD", f"{overall.max_drawdown_pct:.2f}%")
+    cols[5].metric("거래 수", str(overall.num_trades))
+
+    st.subheader("시리즈별 성과")
+    st.dataframe(performance_to_dataframe(performance), use_container_width=True, hide_index=True)
+    st.download_button(
+        "성과 요약 CSV",
+        performance_to_dataframe(performance).to_csv(index=False),
+        file_name="paper_performance.csv",
+        mime="text/csv",
+    )
+
+    st.subheader("거래 원장")
+    trades_df = records_to_dataframe(records)
+    st.dataframe(trades_df, use_container_width=True, hide_index=True)
+    st.download_button(
+        "거래 원장 CSV",
+        trades_df.to_csv(index=False),
+        file_name="paper_trades.csv",
+        mime="text/csv",
+    )
+
+    st.subheader("백테스트 대비 패리티")
+    st.caption("같은 기간·시리즈를 백테스트로 재실행해 거래 수·승률·평균 R을 비교합니다.")
+    try:
+        report = build_parity_report(db_path, settings=settings, series=series)
+    except Exception as exc:  # noqa: BLE001 — 대시보드는 실패해도 다른 섹션을 살린다.
+        st.warning(f"패리티 리포트를 만들지 못했습니다: {exc}")
+        return
+    parity_df = report.to_dataframe()
+    st.dataframe(parity_df, use_container_width=True, hide_index=True)
+    st.download_button(
+        "패리티 CSV",
+        parity_df.to_csv(index=False),
+        file_name="paper_parity.csv",
+        mime="text/csv",
+    )
+    if report.flagged_rows:
+        flagged = ", ".join(f"{r.symbol} {r.timeframe}" for r in report.flagged_rows)
+        st.warning(f"⚠ 페이퍼와 백테스트 차이가 큰 시리즈: {flagged}")
+    else:
+        st.success("모든 시리즈가 백테스트와 임계값 내로 일치합니다.")
+
+
 def main() -> None:
     st.set_page_config(page_title="AlphaBlock Dashboard", layout="wide")
     st.title("AlphaBlock — 통합 트레이딩 대시보드")
 
     settings = get_settings()
-    analysis_tab, health_tab = st.tabs(["분석", "운영 상태(Health)"])
+    analysis_tab, paper_tab, health_tab = st.tabs(["분석", "페이퍼 성과", "운영 상태(Health)"])
     with analysis_tab:
         _render_analysis(settings)
+    with paper_tab:
+        _render_paper(settings)
     with health_tab:
         _render_health(settings)
 

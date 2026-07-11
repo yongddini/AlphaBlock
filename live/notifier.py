@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
+from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict
 
@@ -159,16 +160,37 @@ def format_exit(event: SignalEvent, trade: ClosedTrade | None) -> str:
     return "\n".join(lines)
 
 
+class TradeSink(Protocol):
+    """청산된 페이퍼 거래를 받아 어딘가에 영속화하는 싱크(WAN-33).
+
+    구현은 `paper.store.PaperTradeRecorder`가 담당한다. 결합을 피하기 위해 여기서는
+    최소 시그니처만 선언한다.
+    """
+
+    def record(self, trade: ClosedTrade) -> object: ...
+
+
 class Notifier:
     """신호 이벤트를 페이퍼 장부에 반영하고 텔레그램으로 전송한다.
 
     `telegram`이 None이면 실제 전송 없이 메시지를 로그로만 남긴다(드라이런).
     이 경우에도 페이퍼 장부는 정상 갱신되어 포지션 추적을 검증할 수 있다.
+
+    `trade_sink`가 주어지면 청산이 발생할 때마다 그 거래를 싱크에 전달해 성과 추적용
+    저장소(`paper_trades`, WAN-33)에 누적한다. 싱크 자체가 실패를 삼키므로 전송 흐름을
+    막지 않는다.
     """
 
-    def __init__(self, telegram: TelegramClient | None, book: PaperBook | None = None) -> None:
+    def __init__(
+        self,
+        telegram: TelegramClient | None,
+        book: PaperBook | None = None,
+        *,
+        trade_sink: TradeSink | None = None,
+    ) -> None:
         self._telegram = telegram
         self.book = book if book is not None else PaperBook()
+        self._trade_sink = trade_sink
 
     def handle(self, event: SignalEvent) -> bool:
         """이벤트를 처리한다. 전송 성공(또는 드라이런에서 처리)하면 True."""
@@ -202,6 +224,8 @@ class Notifier:
                     exit_price=sig.price,
                     reason=sig.exit_reason,
                 )
+                if trade is not None and self._trade_sink is not None:
+                    self._trade_sink.record(trade)
             message = format_exit(event, trade)
         return self._send(message)
 

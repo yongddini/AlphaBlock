@@ -34,6 +34,7 @@ AlphaBlock/
 ├── execution/   # 주문 실행·포지션 관리
 ├── live/        # 실시간 시그널 러너 + 텔레그램 알림 (페이퍼) · 하트비트
 ├── backtest/    # 백테스팅 엔진
+├── paper/       # 페이퍼 거래 영속·성과 집계·백테스트 대비 패리티 (WAN-33)
 ├── dashboard/   # 통합 트레이딩 웹 대시보드 (Streamlit)
 ├── cli/         # 실행 CLI (alphablock collect/live/status)
 ├── config/      # 설정 로딩 (pydantic-settings)
@@ -46,8 +47,8 @@ AlphaBlock/
 
 ## 대시보드
 
-두 개의 탭으로 구성된 로컬 실행형 Streamlit 앱이다. 외부 노출/인증은 범위 밖이며
-로컬에서만 실행한다.
+세 개의 탭(분석 · 페이퍼 성과 · 운영 상태)으로 구성된 로컬 실행형 Streamlit 앱이다.
+외부 노출/인증은 범위 밖이며 로컬에서만 실행한다.
 
 ```bash
 uv run streamlit run dashboard/app.py
@@ -77,6 +78,51 @@ uv run streamlit run dashboard/app.py
 러너 상태·포지션·신호 이력은 시그널 러너(WAN-25)가 매 폴링마다 남기는 운영 상태
 파일 `ALPHABLOCK_LIVE_RUNTIME_STATE_PATH`(기본 `data/live_runtime_state.json`,
 커밋 금지)에서 읽는다. 실주문/`live_trading`은 건드리지 않고 페이퍼 상태만 표시한다.
+
+## 페이퍼 트레이딩 성과 & 백테스트 대비 패리티 (WAN-33)
+
+WAN-25 페이퍼 러너가 **실제로 무슨 거래를 냈고 그게 돈이 됐는지**, 그리고 **백테스트가
+약속한 성과와 비슷한지**를 집계한다. 실계좌(WAN-9/WAN-27) 전환 판단의 근거다.
+
+### 거래 영속 (`paper_trades` 테이블)
+
+러너가 익절/손절로 포지션을 닫을 때마다 그 거래를 `ALPHABLOCK_DB_PATH`(기본
+`data/ohlcv.db`)의 `paper_trades` 테이블에 **거래 단위로 누적**한다. 심볼·TF·방향·
+진입/청산 시각·가격·사유와 함께 손익을 저장한다:
+
+- `gross_pct` — 방향을 반영한 가격 손익률(%).
+- `fee_pct` — 왕복 수수료 비용률(`2 × ALPHABLOCK_PAPER_FEE_RATE × 100`).
+- `funding_pct` — 보유 구간 펀딩비용률(WAN-16 수집분 + WAN-20 모델 재사용).
+- `net_pct` — 모든 비용을 반영한 순손익률 = `gross − fee − funding`.
+- `risk_pct` / `r_multiple` — 손절 거리(오더블록 무효화) 기준 리스크와 **R 배수**.
+
+`(symbol, timeframe, entry_time, exit_time)`을 기본키로 UPSERT하므로 러너 재시작·
+재평가로 같은 거래가 다시 들어와도 중복되지 않는다. 기록 실패는 러너 폴링·알림을
+막지 않는다(견고성). 실주문/`live_trading`은 건드리지 않는 **페이퍼 한정**이다.
+
+### 리포트 CLI
+
+```bash
+# 누적된 페이퍼 거래로 성과(전체·심볼/TF별) + 백테스트 대비 패리티 리포트
+uv run python scripts/paper_report.py
+
+# 특정 기간·심볼만, 패리티 없이 성과만
+uv run python scripts/paper_report.py --symbols BTC/USDT:USDT --start 2024-01-01 --no-parity
+```
+
+- **성과 집계** — 총 PnL(복리 %·R 배수 합)·승률·손익비(payoff)·손익 팩터(profit
+  factor)·MDD·거래 수를 전체 및 심볼·TF별로 낸다.
+- **패리티** — 같은 기간·시리즈를 WAN-8 백테스트로 재실행해 **거래 수·승률·평균 R**을
+  비교한다. 손익 비용(수수료·펀딩비)은 양쪽에 동일하게 적용해, 남는 차이가 거래
+  선택·체결 타이밍(실시간 데이터 지연·프라이밍 등)에서 비롯되도록 한다. 차이가
+  임계값을 넘는 시리즈는 `⚠`로 표시한다.
+- 결과 표는 `--out-dir`(기본 `out/paper/`)에 CSV(거래 원장·성과 요약·패리티)로 저장한다.
+
+### 대시보드 "페이퍼 성과" 탭
+
+같은 성과·패리티를 대시보드에서 표로 보고 **CSV로 내보낼** 수 있다(전체 성과 지표,
+시리즈별 표, 거래 원장, 패리티 비교표 + 다운로드 버튼). 누적된 페이퍼 거래가 없으면
+러너를 먼저 돌리라고 안내한다.
 
 ## 백테스트 성과 리포트 & 파라미터 스윕 (WAN-19)
 
