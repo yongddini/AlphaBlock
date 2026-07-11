@@ -6,6 +6,7 @@ from dashboard.health import (
     FUNDING_INTERVAL_MS,
     HealthLevel,
     classify_lag,
+    compute_collector_status,
     compute_freshness,
     compute_funding_status,
     compute_overall,
@@ -103,6 +104,79 @@ def test_compute_runner_status_ran_stale_and_never() -> None:
     )
     assert never.ran is False
     assert never.level is HealthLevel.UNKNOWN
+
+
+def test_compute_collector_status_alive_stale_and_never_ran() -> None:
+    now = 100 * _HOUR
+    interval_s = 60
+
+    alive = compute_collector_status(
+        last_beat_ms=now - 30_000,
+        now_ms=now,
+        heartbeat_interval_seconds=interval_s,
+        stale_multiplier=2.5,
+    )
+    assert alive.ran is True
+    assert alive.level is HealthLevel.OK
+
+    # 마지막 하트비트가 간격의 2.5배(=150s)를 훨씬 넘김 → 멈춤
+    dead = compute_collector_status(
+        last_beat_ms=now - 10 * 60_000,
+        now_ms=now,
+        heartbeat_interval_seconds=interval_s,
+        stale_multiplier=2.5,
+    )
+    assert dead.level is HealthLevel.STALE
+
+    never = compute_collector_status(
+        last_beat_ms=None,
+        now_ms=now,
+        heartbeat_interval_seconds=interval_s,
+        stale_multiplier=2.5,
+    )
+    assert never.ran is False
+    assert never.level is HealthLevel.UNKNOWN
+
+
+def _collector(level: HealthLevel):  # type: ignore[no-untyped-def]
+    from dashboard.health import CollectorStatus
+
+    return CollectorStatus(
+        ran=level is not HealthLevel.UNKNOWN,
+        last_beat_ms=None if level is HealthLevel.UNKNOWN else 0,
+        lag_ms=None if level is HealthLevel.UNKNOWN else 0,
+        level=level,
+    )
+
+
+def test_compute_overall_collector_down_is_stopped() -> None:
+    badge = compute_overall(
+        [_fresh(HealthLevel.OK)],
+        [],
+        _runner(HealthLevel.OK),
+        _collector(HealthLevel.STALE),
+    )
+    assert badge.label == "멈춤"
+
+
+def test_compute_overall_collector_never_ran_is_partial() -> None:
+    badge = compute_overall(
+        [_fresh(HealthLevel.OK)],
+        [],
+        _runner(HealthLevel.OK),
+        _collector(HealthLevel.UNKNOWN),
+    )
+    assert badge.label == "일부 지연"
+
+
+def test_compute_overall_healthy_with_collector() -> None:
+    badge = compute_overall(
+        [_fresh(HealthLevel.OK)],
+        [],
+        _runner(HealthLevel.OK),
+        _collector(HealthLevel.OK),
+    )
+    assert badge.level is HealthLevel.OK
 
 
 def _fresh(level: HealthLevel):  # type: ignore[no-untyped-def]

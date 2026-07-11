@@ -196,29 +196,23 @@ def build_telegram_client(settings: Settings) -> TelegramClient | None:
     return TelegramClient(settings.telegram_bot_token, settings.telegram_chat_id)
 
 
-def main() -> None:
-    """CLI 엔트리포인트: `python -m live.runner`."""
-    parser = argparse.ArgumentParser(description="WAN-25 실시간 시그널 러너 (페이퍼)")
-    parser.add_argument("--once", action="store_true", help="한 번만 폴링하고 종료")
-    parser.add_argument(
-        "--test-message",
-        action="store_true",
-        help="테스트 메시지를 한 번 보내고 종료(텔레그램 연결 확인)",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="텔레그램 전송 없이 메시지를 로그로만 출력",
-    )
-    args = parser.parse_args()
+def run_signal_runner(
+    settings: Settings | None = None,
+    *,
+    once: bool = False,
+    dry_run: bool = False,
+    test_message: bool = False,
+) -> None:
+    """시그널 러너를 실행한다(`live` CLI/`python -m live.runner` 공용 진입).
 
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
-    )
-    settings = get_settings()
+    - `test_message=True`: 텔레그램 연결 확인용 메시지 1건만 보내고 종료.
+    - `dry_run=True`: 텔레그램 전송 없이 로그로만 출력.
+    - `once=True`: 한 번만 폴링하고 종료(그 외에는 무한 폴링 루프).
+    """
+    settings = settings or get_settings()
 
-    telegram = None if args.dry_run else build_telegram_client(settings)
-    if args.test_message:
+    telegram = None if dry_run else build_telegram_client(settings)
+    if test_message:
         if telegram is None:
             _logger.error("텔레그램이 설정되지 않았습니다(ALPHABLOCK_TELEGRAM_*).")
             return
@@ -226,7 +220,7 @@ def main() -> None:
         _logger.info("테스트 메시지 전송 %s", "성공" if ok else "실패")
         return
 
-    if telegram is None and not args.dry_run:
+    if telegram is None and not dry_run:
         _logger.warning(
             "텔레그램 미설정 — 드라이런으로 실행합니다. ALPHABLOCK_TELEGRAM_* 를 설정하세요."
         )
@@ -250,9 +244,35 @@ def main() -> None:
             settings.live_poll_interval_seconds,
             settings.live_trading,
         )
-        runner.run(max_polls=1 if args.once else None)
+        runner.run(max_polls=1 if once else None)
     finally:
         store.close()
+
+
+def main() -> None:
+    """CLI 엔트리포인트: `python -m live.runner`."""
+    parser = argparse.ArgumentParser(description="WAN-25 실시간 시그널 러너 (페이퍼)")
+    parser.add_argument("--once", action="store_true", help="한 번만 폴링하고 종료")
+    parser.add_argument(
+        "--test-message",
+        action="store_true",
+        help="테스트 메시지를 한 번 보내고 종료(텔레그램 연결 확인)",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="텔레그램 전송 없이 메시지를 로그로만 출력",
+    )
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
+    run_signal_runner(
+        once=args.once,
+        dry_run=args.dry_run,
+        test_message=args.test_message,
+    )
 
 
 if __name__ == "__main__":

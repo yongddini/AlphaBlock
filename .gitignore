@@ -20,6 +20,9 @@ data/*.json
 # Report / analysis outputs (backtest·parity·walkforward)
 out/
 
+# 상시 구동 데몬 로그 (WAN-31)
+logs/
+
 # Local-only Claude Code settings (shared: .claude/settings.json)
 .claude/settings.local.json
 .claude/worktrees/

@@ -126,3 +126,19 @@ def test_consume_messages_stores_only_closed(store: OhlcvStore) -> None:
     assert len(seen) == 2
     assert store.count(symbol="BTC/USDT:USDT", timeframe="1m") == 1
     assert store.count(symbol="ETH/USDT:USDT", timeframe="5m") == 1
+
+
+def test_consume_messages_heartbeats_every_message(store: OhlcvStore) -> None:
+    """하트비트는 저장 여부와 무관하게 수신 메시지마다 호출된다(WAN-31)."""
+    messages = [
+        json.dumps(_kline_msg("BTCUSDT", "1m", 1000, 1.1, closed=False)),  # 미확정
+        json.dumps(_kline_msg("BTCUSDT", "1m", 1000, 1.2, closed=True)),  # 확정
+        json.dumps({"data": {"e": "aggTrade"}}),  # kline 아님
+    ]
+    beats = {"n": 0}
+
+    def beat() -> None:
+        beats["n"] += 1
+
+    asyncio.run(consume_messages(_aiter(messages), store, SYMBOL_MAP, heartbeat=beat))
+    assert beats["n"] == 3  # 3개 메시지 모두 하트비트
