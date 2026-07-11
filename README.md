@@ -32,6 +32,7 @@ AlphaBlock/
 ├── data/        # 시세 수집·저장 (OHLCV, 웹소켓)
 ├── strategy/    # 오더블록 탐지·시그널 생성
 ├── execution/   # 주문 실행·포지션 관리
+├── live/        # 실시간 시그널 러너 + 텔레그램 알림 (페이퍼)
 ├── backtest/    # 백테스팅 엔진
 ├── dashboard/   # 통합 트레이딩 웹 대시보드 (Streamlit)
 ├── config/      # 설정 로딩 (pydantic-settings)
@@ -145,6 +146,60 @@ uv run python scripts/walkforward_report.py --synthetic --timeframes 1h
   IS/OOS 성과 지표를 함께 기록한다.
 - 룩어헤드 방지는 `tests/test_walkforward.py`에서 한 윈도우의 `oos_end` 이후 데이터를
   바꿔도 그 윈도우의 결과가 완전히 동일함을 테스트로 검증한다.
+
+## 실시간 시그널 러너 + 텔레그램 알림 (WAN-25, 페이퍼)
+
+WAN-23 컨플루언스 전략을 저장소(WAN-6 수집분)에 **주기적으로 재평가**해, 새 진입/
+청산 신호가 뜨면 **텔레그램**으로 폰에 알림을 보내는 **페이퍼(무주문) 러너**다.
+실제 주문은 하지 않고(`ALPHABLOCK_LIVE_TRADING`은 계속 `false`) 가상 포지션만
+추적한다. 실주문 연결은 WAN-9의 몫이다.
+
+- **폴링**: `ALPHABLOCK_LIVE_POLL_INTERVAL_SECONDS`(기본 60초)마다 각 시리즈(심볼·TF)를
+  재평가한다. 심볼·TF는 `ALPHABLOCK_LIVE_SIGNAL_SYMBOLS`·`..._TIMEFRAMES`(기본 BTC 1h).
+- **페이퍼 포지션**: 확정 진입에서 열고 계획 청산(익절=선 도달 / 손절=오더블록 무효화)
+  에서 닫으며, 청산 시 실현 손익률(%)을 알림에 포함한다(TF당 동시 1포지션).
+- **중복 방지**: 시리즈별 **워터마크**(마지막 처리 신호 시각)를
+  `ALPHABLOCK_LIVE_SIGNAL_STATE_PATH`(기본 `data/live_signals_state.json`, 커밋 금지)에
+  저장한다. 처음 보는 시리즈는 과거 신호를 조용히 프라이밍하고, 이후 새 확정봉의
+  신호만 보낸다. 러너를 재시작해도 같은 신호를 다시 보내지 않는다.
+- **재시도**: 네트워크 오류·HTTP 429는 지수 백오프로 재시도하고, 429의 `retry_after`를
+  존중한다. 전송이 최종 실패해도 러너 루프는 멈추지 않는다.
+
+### 텔레그램 봇 준비
+
+1. 텔레그램에서 **@BotFather** 와 대화 → `/newbot` → 이름·유저네임을 정하면
+   **봇 토큰**(`123456:ABC-...`)을 발급한다.
+2. 방금 만든 봇과 대화를 **먼저 시작**(아무 메시지나 전송)한다. 봇은 자신에게
+   말을 건 적 없는 사용자에게 메시지를 보낼 수 없다.
+3. **chat_id 확인**: 브라우저에서
+   `https://api.telegram.org/bot<토큰>/getUpdates` 를 열면 `message.chat.id` 에
+   숫자 chat_id가 보인다(내게 보내려면 개인 chat_id, 그룹이면 그룹 id).
+4. `.env`에 주입(커밋 금지):
+
+   ```bash
+   ALPHABLOCK_TELEGRAM_BOT_TOKEN=123456:ABC-...   # 비밀
+   ALPHABLOCK_TELEGRAM_CHAT_ID=123456789
+   ```
+
+### 실행
+
+```bash
+# 텔레그램 연결 확인용 테스트 메시지 1건 전송
+uv run python -m live.runner --test-message
+
+# 상시 폴링 루프(백그라운드 상주). Ctrl+C로 종료.
+uv run python -m live.runner
+
+# 한 번만 폴링하고 종료(점검용)
+uv run python -m live.runner --once
+
+# 텔레그램 없이 메시지를 로그로만 출력(드라이런)
+uv run python -m live.runner --dry-run --once
+```
+
+토큰·chat_id가 없으면 자동으로 **드라이런**(메시지를 로그로만 출력)으로 동작하므로,
+설정 전에도 어떤 알림이 나갈지 로컬에서 확인할 수 있다. 저장소에 데이터가 없으면
+먼저 데이터 수집(`python -m data.collector`)을 돌려 봉을 채운다.
 
 ## 품질 검사
 

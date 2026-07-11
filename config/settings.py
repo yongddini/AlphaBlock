@@ -30,6 +30,16 @@ def _default_backfill_lookback_days() -> dict[str, int]:
     return {"1m": 3, "5m": 10, "15m": 30, "1h": 120, "4h": 365, "1d": 1825}
 
 
+def _default_live_signal_symbols() -> list[str]:
+    """실시간 시그널 러너(WAN-25)가 감시할 기본 심볼."""
+    return ["BTC/USDT:USDT"]
+
+
+def _default_live_signal_timeframes() -> list[str]:
+    """실시간 시그널 러너(WAN-25)가 감시할 기본 타임프레임."""
+    return ["1h"]
+
+
 class Settings(BaseSettings):
     """환경변수/.env 기반 설정 값."""
 
@@ -72,6 +82,21 @@ class Settings(BaseSettings):
     # 예: ALPHABLOCK_CONFLUENCE__RSI_OVERSOLD=25
     confluence: ConfluenceParams = Field(default_factory=ConfluenceParams)
 
+    # 실시간 시그널 러너 + 텔레그램 알림 (WAN-25, 페이퍼 모드).
+    # 텔레그램 봇 토큰/대화 ID는 비밀이므로 코드에 두지 않고 env로만 주입한다.
+    # 예: ALPHABLOCK_TELEGRAM_BOT_TOKEN=123:abc, ALPHABLOCK_TELEGRAM_CHAT_ID=123456
+    telegram_bot_token: str = Field(default="")
+    telegram_chat_id: str = Field(default="")
+    # 러너가 감시할 심볼·타임프레임(수집 대상의 부분집합). 기본은 BTC 1h 하나.
+    live_signal_symbols: list[str] = Field(default_factory=_default_live_signal_symbols)
+    live_signal_timeframes: list[str] = Field(default_factory=_default_live_signal_timeframes)
+    # 폴링 간격(초). 새 확정봉이 저장됐는지 이 주기로 확인한다.
+    live_poll_interval_seconds: int = Field(default=60, ge=1)
+    # 전략 재평가 시 각 시리즈에서 사용할 최근 봉 수(최장 EMA 365봉 워밍업 여유 포함).
+    live_signal_lookback_bars: int = Field(default=1500, ge=1)
+    # 이미 보낸 신호를 기록해 재시작 시 중복 발송을 막는 상태 파일 경로.
+    live_signal_state_path: str = Field(default="data/live_signals_state.json")
+
     # 안전장치: 실제 주문 실행 여부. 기본은 반드시 False. (본 이슈에서는 미사용)
     live_trading: bool = Field(default=False)
 
@@ -79,6 +104,11 @@ class Settings(BaseSettings):
     def has_credentials(self) -> bool:
         """API 키와 시크릿이 모두 설정됐는지 여부."""
         return bool(self.binance_api_key) and bool(self.binance_api_secret)
+
+    @property
+    def telegram_configured(self) -> bool:
+        """텔레그램 봇 토큰과 chat_id가 모두 설정됐는지 여부."""
+        return bool(self.telegram_bot_token) and bool(self.telegram_chat_id)
 
     def lookback_days_for(self, timeframe: str, *, default: int = 30) -> int:
         """타임프레임의 백필 룩백(일)을 반환한다. 없으면 `default`."""
