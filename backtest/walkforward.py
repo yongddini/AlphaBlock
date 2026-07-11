@@ -30,6 +30,7 @@ IS 꼬리에서 빌려옴) → `OOS`(성과 측정). 파라미터는 **IS 구간
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -39,6 +40,7 @@ from pydantic import BaseModel, ConfigDict
 from backtest.engine import BacktestEngine
 from backtest.models import BacktestConfig
 from backtest.sweep import ParamGrid, SweepPoint, apply_sweep_point, bars_per_year, run_sweep
+from data.models import FundingRate
 from strategy.confluence import ConfluenceStrategy
 from strategy.models import ConfluenceParams, OrderBlockParams
 
@@ -274,6 +276,7 @@ def run_walk_forward(
     base_confluence: ConfluenceParams | None = None,
     base_backtest: BacktestConfig | None = None,
     order_block_params: OrderBlockParams | None = None,
+    funding_rates: Sequence[FundingRate] | None = None,
     sort_by: str = "sharpe",
 ) -> WalkForwardReport:
     """롤링 워크포워드를 실행한다: 윈도우마다 IS 스윕으로 파라미터를 고르고
@@ -282,6 +285,11 @@ def run_walk_forward(
     OOS 신호 생성에는 `warmup_bars`만큼의 과거(IS 꼬리) 컨텍스트를 포함해 지표
     워밍업을 확보하지만, 백테스트 엔진에는 OOS 구간의 봉만 전달되므로 워밍업 구간의
     시각에 걸린 신호는 체결되지 않는다(데이터 누수 방지 방식은 모듈 docstring 참고).
+
+    `funding_rates`(WAN-20)는 IS 스윕과 OOS 평가에 **동일하게** 전달되어, `base_
+    backtest.funding_enabled=True`이면 파라미터 선택(IS)과 검증(OOS)이 같은 손익
+    모델(수수료·슬리피지·펀딩비)로 이뤄진다. 엔진은 각 거래의 보유 구간에 정산된
+    펀딩만 반영하므로, 전체 요율 목록을 넘겨도 IS/OOS 각 구간의 거래에만 적용된다.
 
     데이터가 `is_bars + oos_bars`보다 짧아 윈도우가 하나도 만들어지지 않으면 빈
     리포트(`rows=[]`)를 반환한다.
@@ -315,6 +323,7 @@ def run_walk_forward(
             base_confluence=base_conf,
             base_backtest=base_bt,
             order_block_params=order_block_params,
+            funding_rates=funding_rates,
             sort_by=sort_by,
         )
         best = sweep_report.best()
@@ -330,7 +339,9 @@ def run_walk_forward(
 
         strategy = ConfluenceStrategy(selected_confluence, order_block_params)
         confluence = strategy.run(warmup_and_oos_df)
-        oos_result = BacktestEngine(base_bt).run(oos_only_df, confluence.order_block_signals)
+        oos_result = BacktestEngine(base_bt).run(
+            oos_only_df, confluence.order_block_signals, funding_rates
+        )
         m = oos_result.metrics
 
         assert open_times is not None
