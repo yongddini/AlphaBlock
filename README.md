@@ -116,9 +116,35 @@ RSI 임계값 한 축만 스윕하므로 비교표는 각 TF에서 진입 게이
 
 지표·청산 규칙이 고정이므로 이 스윕의 인샘플 결과만으로 `config.ConfluenceParams`
 기본값을 바꾸는 것은 권하지 않는다. **소규모 표본·단일 구간**의 인샘플 성과이므로,
-기본값 반영 전 **WAN-22 워크포워드/OOS**로 견고성을 확인한다(워크포워드·교차검증은
-WAN-19 범위 밖, 후속 이슈). 현재 코드 기본값(RSI 14, 과매수 70/과매도 30, EMA/VWMA
-전 목표선, 오더블록 무효화 손절)은 재설계 확정 규칙 그대로 유지한다.
+기본값 반영 전 **WAN-22 워크포워드/OOS**로 견고성을 확인한다. 현재 코드 기본값
+(RSI 14, 과매수 70/과매도 30, EMA/VWMA 전 목표선, 오더블록 무효화 손절)은 재설계
+확정 규칙 그대로 유지한다.
+
+## 워크포워드/아웃오브샘플(OOS) 검증 (WAN-22)
+
+WAN-19 스윕은 인샘플(IS) 성과를 최대화하는 RSI 임계값을 고르므로 특정 구간에
+과적합될 위험이 있다. `backtest.walkforward`는 데이터를 **겹치지 않는 롤링
+(IS, OOS) 윈도우**로 나눠, 각 윈도우에서 IS 구간으로 파라미터를 고르고(`run_sweep`
+재사용) 그 값을 고정해 **보지 않은** OOS 구간에 적용한 성과를 측정한다. IS·OOS
+성과 격차(`return_gap`/`sharpe_gap`, IS − OOS)가 크면 과적합 신호다.
+
+```bash
+# 저장된 데이터로 BTC 1h 워크포워드 (IS 720봉≈30일, OOS 168봉≈7일)
+uv run python scripts/walkforward_report.py --symbols BTC/USDT:USDT \
+    --timeframes 1h --is-bars 720 --oos-bars 168
+
+# 저장 데이터가 없어도 시드로 고정된 합성 OHLCV로 재현 가능하게 실행(데모/CI)
+uv run python scripts/walkforward_report.py --synthetic --timeframes 1h
+```
+
+- `--warmup-bars`(기본 400)는 OOS 신호 생성 시 지표(최장 EMA 365봉) 워밍업을 위해
+  IS 꼬리에서 빌려오는 과거 컨텍스트일 뿐, 백테스트 엔진에는 OOS 구간의 봉만
+  전달되므로 그 이전 시각의 신호는 체결되지 않는다(미래 데이터 누수 없음).
+- 결과(`<out-dir>/<심볼>_<타임프레임>/walkforward.csv`)는 재현을 위해 윈도우별
+  심볼·타임프레임·IS/OOS 구간·시드·선택 파라미터(`rsi_oversold`/`rsi_overbought`)와
+  IS/OOS 성과 지표를 함께 기록한다.
+- 룩어헤드 방지는 `tests/test_walkforward.py`에서 한 윈도우의 `oos_end` 이후 데이터를
+  바꿔도 그 윈도우의 결과가 완전히 동일함을 테스트로 검증한다.
 
 ## 품질 검사
 

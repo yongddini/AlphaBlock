@@ -45,6 +45,14 @@ from backtest.sweep import (
     write_sweep_csv,
 )
 from backtest.synthetic import make_synthetic_ohlcv
+from backtest.walkforward import (
+    WalkForwardReport,
+    WalkForwardRow,
+    WalkForwardWindow,
+    generate_windows,
+    run_walk_forward,
+    write_walk_forward_csv,
+)
 
 __all__ = [
     "BacktestConfig",
@@ -61,16 +69,21 @@ __all__ = [
     "SweepRunRow",
     "Trade",
     "TradeFill",
+    "WalkForwardReport",
+    "WalkForwardRow",
+    "WalkForwardWindow",
     "apply_sweep_point",
     "bars_per_year",
     "build_metrics",
     "equity_to_dataframe",
     "evaluate",
     "format_summary",
+    "generate_windows",
     "make_synthetic_ohlcv",
     "max_drawdown",
     "run_backtest",
     "run_sweep",
+    "run_walk_forward",
     "sharpe_ratio",
     "summary_dict",
     "timeframe_to_ms",
@@ -78,4 +91,5 @@ __all__ = [
     "write_equity_csv",
     "write_sweep_csv",
     "write_trades_csv",
+    "write_walk_forward_csv",
 ]
