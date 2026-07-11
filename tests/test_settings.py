@@ -47,6 +47,39 @@ def test_has_credentials_false_when_partial() -> None:
     assert s.has_credentials is False
 
 
+def test_testnet_disabled_by_default() -> None:
+    """테스트넷(WAN-27)은 기본 off, 키도 비어 있어야 한다."""
+    s = Settings.model_validate({})
+    assert s.use_testnet is False
+    assert s.has_testnet_credentials is False
+
+
+def test_has_testnet_credentials_true_when_both_set() -> None:
+    s = Settings.model_validate({"testnet_api_key": "tk", "testnet_api_secret": "ts"})
+    assert s.has_testnet_credentials is True
+
+
+def test_has_testnet_credentials_false_when_partial() -> None:
+    s = Settings.model_validate({"testnet_api_key": "tk"})
+    assert s.has_testnet_credentials is False
+
+
+def test_testnet_and_mainnet_keys_are_independent() -> None:
+    """테스트넷 키와 실계좌 키는 별도 필드로 서로 섞이지 않는다."""
+    s = Settings.model_validate(
+        {
+            "binance_api_key": "mk",
+            "binance_api_secret": "ms",
+            "testnet_api_key": "tk",
+            "testnet_api_secret": "ts",
+        }
+    )
+    assert s.binance_api_key == "mk"
+    assert s.testnet_api_key == "tk"
+    assert s.has_credentials is True
+    assert s.has_testnet_credentials is True
+
+
 def test_invalid_market_type_rejected() -> None:
     with pytest.raises(ValidationError):
         Settings.model_validate({"market_type": "invalid"})

@@ -22,6 +22,8 @@ from execution.models import Fill, Order, OrderStatus, OrderType
 if TYPE_CHECKING:  # pragma: no cover - 타입 체크 전용(런타임 임포트 회피)
     from ccxt import Exchange
 
+    from config.settings import Settings
+
 _logger = logging.getLogger(__name__)
 
 
@@ -89,6 +91,11 @@ class CcxtLiveBroker:
             )
         self._exchange = exchange
 
+    @property
+    def exchange(self) -> Exchange:
+        """포지션·잔고 조회, 주문 취소 등 검증에 쓰는 하부 ccxt 인스턴스."""
+        return self._exchange
+
     def place_order(self, order: Order, *, mark_price: float | None = None) -> Fill:
         params = {"reduceOnly": True} if order.reduce_only else {}
         raw = self._exchange.create_order(
@@ -100,6 +107,31 @@ class CcxtLiveBroker:
             params=params,
         )
         return _fill_from_ccxt(order, raw)
+
+
+def build_live_broker(
+    settings: Settings,
+    *,
+    exchange: Exchange | None = None,
+) -> CcxtLiveBroker:
+    """설정에서 실거래/테스트넷 브로커를 만든다(WAN-27).
+
+    안전 가드: `live_trading=True`가 아니면 만들지 않는다. `exchange`를 주지 않으면
+    `create_exchange(settings)`로 인스턴스를 만드는데, `use_testnet=True`면 그 경로가
+    자동으로 sandbox(테스트넷) 모드 + 테스트넷 키를 쓴다. 이 팩토리는 데이터 수집용
+    거래소 생성 로직을 그대로 재사용해 실주문 브로커에 배선한다(주문 로직 중복 없음).
+    """
+    if not settings.live_trading:
+        raise RuntimeError(
+            "live_trading=True일 때만 실거래/테스트넷 브로커를 만듭니다(WAN-27). "
+            "기본값은 페이퍼(드라이런)이며, 실주문 경로는 명시적 승인이 필요합니다."
+        )
+    if exchange is None:
+        # 런타임 순환 임포트 회피를 위해 지연 임포트.
+        from data.exchange import create_exchange
+
+        exchange = create_exchange(settings)
+    return CcxtLiveBroker(exchange, live_trading=settings.live_trading)
 
 
 def _fill_from_ccxt(order: Order, raw: dict[str, object]) -> Fill:

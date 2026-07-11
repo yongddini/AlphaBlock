@@ -57,6 +57,13 @@ class Settings(BaseSettings):
     binance_api_key: str = Field(default="")
     binance_api_secret: str = Field(default="")
 
+    # 바이낸스 선물 테스트넷(WAN-27). 실계좌 실거래 전 안전 검증용.
+    # use_testnet=True면 create_exchange가 set_sandbox_mode로 테스트넷 엔드포인트를 쓰고
+    # 아래 testnet 키만 주입한다. **실계좌 키는 테스트넷 경로로 절대 새지 않는다**(별도 필드).
+    use_testnet: bool = Field(default=False)
+    testnet_api_key: str = Field(default="")
+    testnet_api_secret: str = Field(default="")
+
     # 거래 시장: 현물(spot) 또는 선물(future). 본 프로젝트는 USDⓈ-M 무기한 선물이 기본.
     market_type: Literal["spot", "future"] = Field(default="future")
 
@@ -127,6 +134,11 @@ class Settings(BaseSettings):
     def has_credentials(self) -> bool:
         """API 키와 시크릿이 모두 설정됐는지 여부."""
         return bool(self.binance_api_key) and bool(self.binance_api_secret)
+
+    @property
+    def has_testnet_credentials(self) -> bool:
+        """테스트넷 API 키와 시크릿이 모두 설정됐는지 여부(WAN-27)."""
+        return bool(self.testnet_api_key) and bool(self.testnet_api_secret)
 
     @property
     def telegram_configured(self) -> bool:

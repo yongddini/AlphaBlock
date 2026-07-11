@@ -259,10 +259,48 @@ uv run pre-commit install
 gh api --method PATCH /repos/yongddini/AlphaBlock -f allow_auto_merge=true
 ```
 
+## 바이낸스 선물 테스트넷 드라이런 (WAN-27)
+
+실계좌에 붙이기 전에, 바이낸스 USDⓈ-M **선물 테스트넷**에서 실제 주문으로 실행 경로
+(진입→포지션 조회→손절/익절 부착→취소→청산→정합)를 자금 위험 없이 검증한다.
+WAN-9 실행 브로커(`CcxtLiveBroker`)를 **테스트넷 엔드포인트로** 배선해 그대로 쓴다.
+
+**키 격리(안전).** 테스트넷 키(`ALPHABLOCK_TESTNET_API_KEY/SECRET`)는 실계좌 키와
+완전히 별도 필드다. `use_testnet=true`면 `create_exchange`가 `set_sandbox_mode(True)`로
+테스트넷 엔드포인트를 쓰고 **테스트넷 키만** 주입한다 — 실계좌 키는 테스트넷 경로로
+절대 새지 않으며, 그 역도 성립한다(테스트로 보장: `tests/test_exchange.py`).
+
+### 준비
+
+1. https://testnet.binancefuture.com 에서 테스트넷 API 키를 발급한다(가짜 자금).
+2. `.env`에 아래를 채운다(실계좌 키는 비워두거나 그대로 두면 된다):
+
+```bash
+ALPHABLOCK_USE_TESTNET=true
+ALPHABLOCK_LIVE_TRADING=true          # 테스트넷에 "실주문"을 넣기 위해 필요
+ALPHABLOCK_TESTNET_API_KEY=...
+ALPHABLOCK_TESTNET_API_SECRET=...
+```
+
+### 실행 (수동)
+
+```bash
+uv run python -m scripts.testnet_dryrun --symbol BTC/USDT:USDT --qty 0.001
+```
+
+스크립트는 세 전제(`use_testnet`·`live_trading`·테스트넷 키)를 모두 확인한 뒤에만
+동작하며, 하나라도 빠지면 즉시 거부한다(실계좌 경로에는 접근하지 않는다). 진입/청산은
+브로커 `place_order`를 재사용하고, 손절/익절·포지션·잔고 조회·취소는 거래소 특화 API라
+하부 ccxt 인스턴스(`broker.exchange`)를 직접 호출한다. 각 단계는 로그로 남는다.
+
+> 실제 테스트넷 호출은 네트워크·키가 필요해 자동화 테스트에서 돌리지 않는다. 자동
+> 테스트는 sandbox 배선/키 격리만 모킹으로 검증한다(`pytest`).
+
 ## 설정
 
 설정은 환경변수 또는 `.env`(접두사 `ALPHABLOCK_`)로 주입한다. `config.settings.Settings` 참고.
 실거래(`ALPHABLOCK_LIVE_TRADING`)는 기본 `false`이며, 검증 전까지 활성화하지 않는다.
+바이낸스 선물 테스트넷 검증은 위 "바이낸스 선물 테스트넷 드라이런(WAN-27)" 참고.
 
 ## 기술 스택
 
