@@ -78,6 +78,18 @@ class RunnerStatus(BaseModel):
     level: HealthLevel
 
 
+class CollectorStatus(BaseModel):
+    """상시 구동 수집기(WAN-31) 생존 상태."""
+
+    model_config = ConfigDict(frozen=True)
+
+    ran: bool
+    """한 번이라도 하트비트를 남긴 적이 있는지."""
+    last_beat_ms: int | None
+    lag_ms: int | None
+    level: HealthLevel
+
+
 class OverallBadge(BaseModel):
     """상단 종합 상태 배지."""
 
@@ -188,24 +200,53 @@ def compute_runner_status(
     )
 
 
+def compute_collector_status(
+    *,
+    last_beat_ms: int | None,
+    now_ms: int,
+    heartbeat_interval_seconds: float,
+    stale_multiplier: float,
+) -> CollectorStatus:
+    """수집기 하트비트로 생존 상태를 판정한다.
+
+    하트비트가 없으면 미실행(UNKNOWN). 있으면 기대 하트비트 간격의
+    `stale_multiplier`배를 넘겨 갱신이 없을 때 멈춤(STALE).
+    """
+    interval_ms = int(heartbeat_interval_seconds * 1000)
+    lag, level = classify_lag(last_beat_ms, now_ms, interval_ms, stale_multiplier)
+    return CollectorStatus(
+        ran=last_beat_ms is not None,
+        last_beat_ms=last_beat_ms,
+        lag_ms=lag,
+        level=level,
+    )
+
+
 def compute_overall(
     freshness: list[SeriesFreshness],
     funding: list[FundingFreshness],
     runner: RunnerStatus,
+    collector: CollectorStatus | None = None,
 ) -> OverallBadge:
     """종합 배지: 전부 정상 / 일부 지연 / 멈춤.
 
-    - 러너가 멈췄거나(데이터가 있고) 전부 stale이면 **멈춤**.
-    - 일부만 stale하거나 러너가 미실행이면 **일부 지연**.
-    - 그 외(데이터 정상 + 러너 정상)면 **정상**.
+    - 수집기·러너가 멈췄거나(데이터가 있고) 전부 stale이면 **멈춤**.
+    - 일부만 stale하거나 수집기·러너가 미실행이면 **일부 지연**.
+    - 그 외(데이터 정상 + 프로세스 정상)면 **정상**.
     """
     data_levels = [f.level for f in freshness] + [f.level for f in funding]
     known = [lvl for lvl in data_levels if lvl is not HealthLevel.UNKNOWN]
     any_stale = any(lvl is HealthLevel.STALE for lvl in known)
     all_stale = bool(known) and all(lvl is HealthLevel.STALE for lvl in known)
 
-    if runner.level is HealthLevel.STALE or all_stale:
+    proc_levels = [runner.level]
+    if collector is not None:
+        proc_levels.append(collector.level)
+    proc_stale = any(lvl is HealthLevel.STALE for lvl in proc_levels)
+    proc_unknown = any(lvl is HealthLevel.UNKNOWN for lvl in proc_levels)
+
+    if proc_stale or all_stale:
         return OverallBadge(level=HealthLevel.STALE, label="멈춤")
-    if any_stale or runner.level is HealthLevel.UNKNOWN:
+    if any_stale or proc_unknown:
         return OverallBadge(level=HealthLevel.STALE, label="일부 지연")
     return OverallBadge(level=HealthLevel.OK, label="정상")

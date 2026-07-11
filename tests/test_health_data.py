@@ -9,6 +9,7 @@ from dashboard.health_data import build_health_view
 from data.funding import FundingRateStore
 from data.models import Candle, FundingRate
 from data.storage import OhlcvStore
+from live.heartbeat import HeartbeatStore
 from live.paper import PaperPosition
 from live.runtime_state import RuntimeStateStore
 from strategy.models import OrderBlockDirection
@@ -61,17 +62,24 @@ def test_build_health_view_fresh_data_and_running_runner(tmp_path: Path) -> None
         new_events=[],
     )
 
+    hb_path = tmp_path / "collector_heartbeat.json"
+    HeartbeatStore(hb_path, label="collector", now_ms=lambda: _NOW - 30_000).beat()
+
     view = build_health_view(
         db_path,
         runtime_state_path=str(state_path),
         poll_interval_seconds=60,
         stale_multiplier=2.5,
+        collector_heartbeat_path=str(hb_path),
+        collector_heartbeat_interval_seconds=60,
         now_ms=_NOW,
     )
 
     assert view.overall.level is HealthLevel.OK
     assert view.freshness[0].level is HealthLevel.OK
     assert view.funding[0].level is HealthLevel.OK
+    assert view.collector.ran is True
+    assert view.collector.level is HealthLevel.OK
     assert view.runner.ran is True
     assert view.runner.level is HealthLevel.OK
     # 현재가(최신 종가 100) 대비 진입가 90 롱 → +11.11% 근처
@@ -113,5 +121,7 @@ def test_build_health_view_no_data_and_no_runner(tmp_path: Path) -> None:
     )
     assert view.freshness == []
     assert view.positions == []
+    assert view.collector.ran is False
+    assert view.collector.level is HealthLevel.UNKNOWN
     assert view.runner.ran is False
     assert view.runner.level is HealthLevel.UNKNOWN

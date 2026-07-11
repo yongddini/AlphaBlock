@@ -32,10 +32,12 @@ AlphaBlock/
 ├── data/        # 시세 수집·저장 (OHLCV, 웹소켓)
 ├── strategy/    # 오더블록 탐지·시그널 생성
 ├── execution/   # 주문 실행·포지션 관리
-├── live/        # 실시간 시그널 러너 + 텔레그램 알림 (페이퍼)
+├── live/        # 실시간 시그널 러너 + 텔레그램 알림 (페이퍼) · 하트비트
 ├── backtest/    # 백테스팅 엔진
 ├── dashboard/   # 통합 트레이딩 웹 대시보드 (Streamlit)
+├── cli/         # 실행 CLI (alphablock collect/live/status)
 ├── config/      # 설정 로딩 (pydantic-settings)
+├── scripts/     # 운영 스크립트 (launchd 데몬 설치·해제 등)
 ├── tests/       # 테스트
 ├── .env.example # 환경변수 예시 (.env는 커밋 금지)
 ├── .github/     # CI (ruff · mypy · pytest)
@@ -222,6 +224,65 @@ uv run python -m live.runner --dry-run --once
 토큰·chat_id가 없으면 자동으로 **드라이런**(메시지를 로그로만 출력)으로 동작하므로,
 설정 전에도 어떤 알림이 나갈지 로컬에서 확인할 수 있다. 저장소에 데이터가 없으면
 먼저 데이터 수집(`python -m data.collector`)을 돌려 봉을 채운다.
+
+## 상시 구동: 실행 CLI + 데몬화 (WAN-31)
+
+수집기와 시그널 러너를 **한 줄 명령**으로 실행하고, macOS `launchd`로 **로그인 시
+자동 시작·크래시 시 자동 재시작**되게 상주시킨다. 상시로 돌아야 최신 봉 지연이 TF
+주기 수준으로 유지되고, 실시간 시그널·알림(WAN-25)도 의미가 있다.
+
+> 안전: 데몬은 **수집·시그널·알림까지만** 한다. 실주문은 없다(`live_trading=false` 유지).
+
+### 실행 CLI (`alphablock`)
+
+`pyproject`의 `[project.scripts]`로 노출된다. 기존 `python -m ...` 진입점을 감싼다.
+
+```bash
+uv run alphablock collect          # 데이터 수집기(백필 + 실시간 스트림 상주)
+uv run alphablock collect --once   # 백필만 1회 수행하고 종료
+uv run alphablock live             # 실시간 시그널 러너(페이퍼) 상주
+uv run alphablock live --once      # 러너 1회 폴링 후 종료(점검)
+uv run alphablock status           # 운영 상태(Health) 요약을 콘솔에 출력
+```
+
+`alphablock status`는 대시보드 Health 탭과 같은 판정을 텍스트로 보여준다 —
+수집기·러너 생존, 데이터 신선도, 오픈 페이퍼 포지션을 한눈에 확인한다.
+
+### 하트비트
+
+수집기는 스트림 수신 메시지마다, 러너는 매 폴링마다 **하트비트(마지막 동작 시각)**를
+상태 파일(`data/collector_heartbeat.json`, `data/live_runtime_state.json`)에 남긴다.
+Health 대시보드/`alphablock status`가 이 값으로 "프로세스가 살아있는지"를 판정한다
+(기대 간격의 `ALPHABLOCK_HEALTH_STALE_MULTIPLIER`배를 넘겨 갱신이 없으면 **멈춤**).
+
+### 데몬 설치·해제 (macOS launchd)
+
+`scripts/`의 설치 스크립트가 plist 템플릿(`scripts/launchd/*.template`)의 경로
+자리표시자를 실제 값(저장소 경로·`uv` 경로·로그 경로)으로 치환해
+`~/Library/LaunchAgents/`에 설치하고 로드한다. `RunAtLoad`(로그인 시 시작)와
+`KeepAlive`(크래시 시 재시작), 절전 방지를 위한 `caffeinate` 래핑을 적용한다.
+
+```bash
+./scripts/install-daemons.sh            # 수집기 + 러너 둘 다 설치·시작
+./scripts/install-daemons.sh collector  # 수집기만
+./scripts/install-daemons.sh live       # 러너만
+
+./scripts/uninstall-daemons.sh          # 둘 다 해제(로그는 남김)
+```
+
+- **재부팅·크래시 자동 복구**: 로그인하면 `RunAtLoad`로 다시 뜨고, 프로세스가 죽으면
+  `KeepAlive`가 `ThrottleInterval`(10초) 간격으로 되살린다.
+- **로그**: 기본 `logs/collector.log`, `logs/live.log`(리포지토리 밖 위치는
+  `ALPHABLOCK_LOG_DIR`로 지정). `logs/`는 `.gitignore`에 포함된다.
+
+```bash
+launchctl list | grep alphablock                 # 등록·구동 상태
+tail -f logs/collector.log logs/live.log         # 실시간 로그
+uv run alphablock status                          # 상태 요약
+```
+
+로그 파일이 무한정 커지지 않게 하려면 macOS `newsyslog`(예: `/etc/newsyslog.d/`에
+`alphablock.conf` 추가)로 로테이션을 설정한다.
 
 ## 품질 검사
 

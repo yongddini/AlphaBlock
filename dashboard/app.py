@@ -24,7 +24,13 @@ from config import get_settings
 from config.settings import Settings
 from dashboard.charts import build_equity_chart, build_price_chart
 from dashboard.data_access import list_series, load_ohlcv
-from dashboard.health import FundingFreshness, HealthLevel, RunnerStatus, SeriesFreshness
+from dashboard.health import (
+    CollectorStatus,
+    FundingFreshness,
+    HealthLevel,
+    RunnerStatus,
+    SeriesFreshness,
+)
 from dashboard.health_data import HealthView, OpenPositionView, build_health_view
 from dashboard.pipeline import run_pipeline
 from live.runtime_state import EventRecord
@@ -228,6 +234,18 @@ def _render_overall_badge(view: HealthView) -> None:
         st.error(label)
 
 
+def _render_collector(collector: CollectorStatus) -> None:
+    st.subheader("데이터 수집기")
+    if not collector.ran:
+        st.info("수집기가 실행된 흔적이 없습니다(미실행). `alphablock collect` 로 시작하세요.")
+        return
+    cols = st.columns(2)
+    cols[0].metric("상태", _LEVEL_BADGE[collector.level])
+    cols[1].metric("마지막 하트비트", _fmt_lag(collector.lag_ms) + " 전")
+    if collector.level is HealthLevel.STALE:
+        st.error("수집기 하트비트가 끊겼습니다 — 수집 프로세스가 멈췄을 수 있습니다.")
+
+
 def _render_runner(runner: RunnerStatus) -> None:
     st.subheader("실시간 러너")
     if not runner.ran:
@@ -250,6 +268,8 @@ def _render_health(settings: Settings) -> None:
         runtime_state_path=settings.live_runtime_state_path,
         poll_interval_seconds=settings.live_poll_interval_seconds,
         stale_multiplier=settings.health_stale_multiplier,
+        collector_heartbeat_path=settings.collector_heartbeat_path,
+        collector_heartbeat_interval_seconds=settings.collector_heartbeat_interval_seconds,
     )
 
     _render_overall_badge(view)
@@ -266,6 +286,7 @@ def _render_health(settings: Settings) -> None:
     else:
         st.caption("표시할 펀딩비 심볼이 없습니다.")
 
+    _render_collector(view.collector)
     _render_runner(view.runner)
 
     st.subheader("현재 페이퍼 포지션")

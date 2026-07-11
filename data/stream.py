@@ -98,10 +98,18 @@ async def consume_messages(
     *,
     only_closed: bool = True,
     on_candle: Callable[[Candle], None] | None = None,
+    heartbeat: Callable[[], None] | None = None,
 ) -> int:
-    """메시지 스트림을 소비해 확정봉을 저장한다. 저장한 봉 수를 반환한다."""
+    """메시지 스트림을 소비해 확정봉을 저장한다. 저장한 봉 수를 반환한다.
+
+    `heartbeat`가 주어지면 봉 확정 여부와 무관하게 **수신한 모든 메시지마다** 호출해
+    프로세스가 살아있음을 기록한다(미확정 봉 갱신도 수초 간격으로 오므로, 저조한 TF만
+    수집해도 하트비트가 신선하게 유지된다).
+    """
     stored = 0
     async for raw in messages:
+        if heartbeat is not None:
+            heartbeat()
         candle = parse_kline_message(raw, symbol_map, only_closed=only_closed)
         if candle is None:
             continue
@@ -129,11 +137,13 @@ async def stream_klines(
     ws_base: str = FUTURES_WS_BASE,
     only_closed: bool = True,
     on_candle: Callable[[Candle], None] | None = None,
+    heartbeat: Callable[[], None] | None = None,
 ) -> None:
     """선물 kline 결합 스트림에 접속해 확정봉을 계속 저장한다.
 
     네트워크 예외가 나면 로깅 후 예외를 다시 던진다(상위 오케스트레이터가
     재접속 정책을 결정). 무한 스트림이므로 정상 반환은 하지 않는다.
+    `heartbeat`는 수신 메시지마다 호출돼 프로세스 생존을 기록한다(WAN-31).
     """
     url = ws_base + build_stream_path(symbols, timeframes)
     symbol_map = build_symbol_map(symbols)
@@ -146,4 +156,5 @@ async def stream_klines(
             symbol_map,
             only_closed=only_closed,
             on_candle=on_candle,
+            heartbeat=heartbeat,
         )

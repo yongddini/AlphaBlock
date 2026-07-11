@@ -103,6 +103,12 @@ class Settings(BaseSettings):
     # 데이터 신선도(수집 멈춤)를 stale로 볼 지연 배수. TF 주기 대비 이 배수를 넘으면 경고.
     health_stale_multiplier: float = Field(default=2.5, gt=0)
 
+    # 상시 구동 수집기 하트비트(WAN-31). 수집기가 살아있음을 남기는 파일과, Health가
+    # 생존 판정에 쓰는 기대 하트비트 간격(초). min_interval은 파일 쓰기 스로틀.
+    collector_heartbeat_path: str = Field(default="data/collector_heartbeat.json")
+    collector_heartbeat_interval_seconds: int = Field(default=60, ge=1)
+    collector_heartbeat_min_interval_seconds: int = Field(default=5, ge=0)
+
     # 리스크 기반 포지션 사이징(WAN-26). 손절 거리에 반비례해 수량을 역산한다.
     # 백테스트·실행이 공용으로 쓰며, 기본은 켬(risk_sizing_enabled=True).
     # 개별 필드는 ALPHABLOCK_RISK_SIZING__<필드명>로 덮어쓴다.

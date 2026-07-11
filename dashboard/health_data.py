@@ -11,10 +11,12 @@ import time
 from pydantic import BaseModel, ConfigDict
 
 from dashboard.health import (
+    CollectorStatus,
     FundingFreshness,
     OverallBadge,
     RunnerStatus,
     SeriesFreshness,
+    compute_collector_status,
     compute_freshness,
     compute_funding_status,
     compute_overall,
@@ -22,6 +24,7 @@ from dashboard.health import (
 )
 from data.funding import FundingRateStore
 from data.storage import OhlcvStore
+from live.heartbeat import HeartbeatStore
 from live.runtime_state import EventRecord, PositionSnapshot, RunnerRuntimeState, RuntimeStateStore
 from strategy.models import OrderBlockDirection
 
@@ -49,6 +52,7 @@ class HealthView(BaseModel):
     overall: OverallBadge
     freshness: list[SeriesFreshness]
     funding: list[FundingFreshness]
+    collector: CollectorStatus
     runner: RunnerStatus
     positions: list[OpenPositionView]
     recent_events: list[EventRecord]
@@ -123,6 +127,8 @@ def build_health_view(
     runtime_state_path: str,
     poll_interval_seconds: float,
     stale_multiplier: float,
+    collector_heartbeat_path: str | None = None,
+    collector_heartbeat_interval_seconds: float = 60.0,
     funding_symbols: list[str] | None = None,
     now_ms: int | None = None,
 ) -> HealthView:
@@ -141,8 +147,20 @@ def build_health_view(
         runtime: RunnerRuntimeState = RuntimeStateStore(runtime_state_path).load()
         positions = build_position_views(ohlcv, runtime.open_positions)
 
+    last_beat_ms = (
+        HeartbeatStore(collector_heartbeat_path).load().updated_at
+        if collector_heartbeat_path is not None
+        else None
+    )
+
     freshness = compute_freshness(fresh_rows, now_ms=now, stale_multiplier=stale_multiplier)
     funding = compute_funding_status(fund_rows, now_ms=now, stale_multiplier=stale_multiplier)
+    collector = compute_collector_status(
+        last_beat_ms=last_beat_ms,
+        now_ms=now,
+        heartbeat_interval_seconds=collector_heartbeat_interval_seconds,
+        stale_multiplier=stale_multiplier,
+    )
     runner = compute_runner_status(
         last_poll_ms=runtime.updated_at,
         last_notification_ms=runtime.last_notification_at,
@@ -150,13 +168,14 @@ def build_health_view(
         poll_interval_seconds=poll_interval_seconds,
         stale_multiplier=stale_multiplier,
     )
-    overall = compute_overall(freshness, funding, runner)
+    overall = compute_overall(freshness, funding, runner, collector)
 
     return HealthView(
         now_ms=now,
         overall=overall,
         freshness=freshness,
         funding=funding,
+        collector=collector,
         runner=runner,
         positions=positions,
         recent_events=list(reversed(runtime.recent_events)),
