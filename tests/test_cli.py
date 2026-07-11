@@ -118,15 +118,19 @@ def test_cmd_collect_invokes_run_collector(tmp_path: Path, monkeypatch: pytest.M
     settings = _settings(tmp_path)
     calls: dict[str, Any] = {}
 
-    async def fake_run_collector(s: Settings, *, run_stream: bool) -> None:
+    async def fake_run_collector(
+        s: Settings, *, run_stream: bool, repair_on_start: bool | None
+    ) -> None:
         calls["settings"] = s
         calls["run_stream"] = run_stream
+        calls["repair_on_start"] = repair_on_start
 
     monkeypatch.setattr("data.collector.run_collector", fake_run_collector)
-    rc = cmd_collect(argparse.Namespace(once=True), settings)
+    rc = cmd_collect(argparse.Namespace(once=True, repair_on_start=None), settings)
     assert rc == 0
     assert calls["run_stream"] is False  # --once → 스트림 없음
     assert calls["settings"] is settings
+    assert calls["repair_on_start"] is None  # 미지정 → 설정값 위임
 
 
 def test_cmd_live_invokes_runner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
