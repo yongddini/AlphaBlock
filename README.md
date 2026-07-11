@@ -124,6 +124,37 @@ uv run python scripts/paper_report.py --symbols BTC/USDT:USDT --start 2024-01-01
 시리즈별 표, 거래 원장, 패리티 비교표 + 다운로드 버튼). 누적된 페이퍼 거래가 없으면
 러너를 먼저 돌리라고 안내한다.
 
+### 성과 다이제스트 텔레그램 발송 (WAN-36)
+
+대시보드/CLI를 직접 열지 않아도 **성과 요약이 폰으로 오도록**, 같은 성과·패리티 집계를
+짧은 마크다운 다이제스트로 만들어 WAN-32와 같은 텔레그램 경로로 보낸다.
+
+```bash
+# 최근 7일 다이제스트 미리보기(발송 없음 — 설정과 무관)
+uv run python scripts/paper_digest.py --dry-run
+
+# 특정 기간, 패리티 비교 없이
+uv run python scripts/paper_digest.py --since 2024-01-01 --until 2024-01-08 --no-parity
+```
+
+- 담기는 것: 기간 내 **거래 수·승률·순손익률(%)·합계 R·MDD**, 시리즈(심볼·TF)별
+  **상위/하위**, 백테스트 **패리티 불일치(`⚠️`) 시리즈** 요약.
+- 기간은 `--since/--until`로 지정하거나, 없으면 `--days`(기본 `ALPHABLOCK_PAPER_DIGEST_DAYS=7`)
+  창을 지금 기준으로 잡는다.
+- 거래가 0건인 기간이면 "거래 없음 + 러너 상태 한 줄"로 짧게 보낸다(무음 실패 방지).
+- **발송 안전장치**: 실제 발송은 `ALPHABLOCK_PAPER_DIGEST_ENABLED=true`이고 텔레그램
+  (`ALPHABLOCK_TELEGRAM_*`)이 설정된 경우에만 한다. 기본은 꺼짐이며, `--dry-run`은 설정과
+  무관하게 stdout 미리보기만 한다. 페이퍼 한정 — 실주문·`live_trading`은 건드리지 않는다.
+
+주 1회 자동 발송은 cron/launchd로 스크립트를 스케줄링하면 된다(예: 매주 월요일 09:00 UTC).
+`ALPHABLOCK_PAPER_DIGEST_WEEKDAY`(0=월)·`ALPHABLOCK_PAPER_DIGEST_HOUR_UTC`는 스케줄러가
+참고하는 값으로, 스크립트 자체는 스케줄링하지 않는다.
+
+```bash
+# crontab 예: 매주 월요일 09:00 UTC 에 최근 7일 다이제스트 발송
+0 9 * * 1  cd /path/to/AlphaBlock && uv run python scripts/paper_digest.py
+```
+
 ## 백테스트 성과 리포트 & 파라미터 스윕 (WAN-19)
 
 WAN-23 재설계 컨플루언스 전략을 WAN-8 백테스트 엔진에 태워 **재현 가능한 성과
