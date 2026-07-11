@@ -23,6 +23,7 @@ from dashboard.health import (
     compute_runner_status,
 )
 from data.funding import FundingRateStore
+from data.repair import RepairStateStore, RepairSummary
 from data.storage import OhlcvStore
 from live.heartbeat import HeartbeatStore
 from live.runtime_state import EventRecord, PositionSnapshot, RunnerRuntimeState, RuntimeStateStore
@@ -56,6 +57,8 @@ class HealthView(BaseModel):
     runner: RunnerStatus
     positions: list[OpenPositionView]
     recent_events: list[EventRecord]
+    last_repair: RepairSummary | None = None
+    """마지막 갭 복구 요약(WAN-35). 복구를 한 번도 안 돌렸으면 None."""
 
 
 def series_freshness_rows(store: OhlcvStore) -> list[tuple[str, str, int | None, int]]:
@@ -130,6 +133,7 @@ def build_health_view(
     collector_heartbeat_path: str | None = None,
     collector_heartbeat_interval_seconds: float = 60.0,
     funding_symbols: list[str] | None = None,
+    repair_state_path: str | None = None,
     now_ms: int | None = None,
 ) -> HealthView:
     """DB·상태파일을 읽어 완성된 `HealthView`를 조립한다."""
@@ -170,6 +174,10 @@ def build_health_view(
     )
     overall = compute_overall(freshness, funding, runner, collector)
 
+    last_repair: RepairSummary | None = (
+        RepairStateStore(repair_state_path).load() if repair_state_path is not None else None
+    )
+
     return HealthView(
         now_ms=now,
         overall=overall,
@@ -179,4 +187,5 @@ def build_health_view(
         runner=runner,
         positions=positions,
         recent_events=list(reversed(runtime.recent_events)),
+        last_repair=last_repair,
     )

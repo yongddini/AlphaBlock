@@ -286,6 +286,8 @@ uv run python -m live.runner --dry-run --once
 ```bash
 uv run alphablock collect          # 데이터 수집기(백필 + 실시간 스트림 상주)
 uv run alphablock collect --once   # 백필만 1회 수행하고 종료
+uv run alphablock collect --no-repair-on-start  # 시작 시 갭 자동 복구 끄기(WAN-35)
+uv run alphablock backfill --repair  # 저장된 시리즈의 내부 갭을 1회 탐지·복구 — WAN-35
 uv run alphablock live             # 실시간 시그널 러너(페이퍼) 상주
 uv run alphablock live --once      # 러너 1회 폴링 후 종료(점검)
 uv run alphablock status           # 운영 상태(Health) 요약을 콘솔에 출력
@@ -370,6 +372,50 @@ ALPHABLOCK_HEALTH_WATCH_STATE_PATH=data/health_watch_state.json
 경고를 로그로만 남기는 드라이런으로 동작). 상주는 위 launchd 방식으로 상시 구동할 수 있다.
 
 > 안전: 워치는 **읽기·경고만** 한다. 실주문·`live_trading`은 건드리지 않는다.
+
+## OHLCV 데이터 갭 자동 탐지·복구 백필 (WAN-35)
+
+WAN-30/32는 수집이 **멈췄다는 사실**은 알리지만, 멈춘 동안 생긴 **구멍(누락 봉)**은
+그대로 남는다. 구멍이 있는 캔들 위에서 돌린 백테스트·페이퍼 성과(WAN-33)는 조용히
+왜곡된다. WAN-35는 저장된 시리즈(심볼·TF)의 **내부 누락 봉만** 찾아 그 구간만
+재수집(UPSERT)해 자동으로 메운다.
+
+```bash
+uv run alphablock backfill --repair   # 저장된 모든 시리즈의 내부 갭을 1회 탐지·복구
+uv run alphablock backfill --repair --dry-run  # 복구 실패해도 텔레그램 경고 없이 로그만
+```
+
+수집 데몬(`alphablock collect`)은 **시작 시 1회 자동으로** 갭을 점검·복구한다
+(`--repair-on-start`, 기본 켬). 끄려면 `--no-repair-on-start` 또는
+`ALPHABLOCK_REPAIR_ON_START=false`.
+
+**탐지 규칙**(`data/gaps.py`, 순수 함수 `find_gaps`) — 연속한 두 저장 봉 사이 간격이
+TF 주기를 초과하면 그 사이를 갭으로 본다. 경계 처리:
+
+- **신규 상장 이전 구간**: 저장된 첫 봉 이전은 보지 않는다(상장 전엔 봉이 없으므로 갭 아님).
+- **현재 진행 중인 봉**: 저장된 마지막 봉 이후(형성 중/미수집 최신 구간)는 갭으로 잡지
+  않는다 — 그 구간은 재시작 백필(`backfill_all`)의 몫이고, 복구는 오직 저장된 데이터
+  **사이의 구멍**만 메운다.
+- **갭이 없으면 거래소 API를 호출하지 않는다.**
+
+**복구**(`data/repair.py`) — 탐지된 구간만 WAN-6 수집기 로직(`backfill_symbol`,
+레이트리밋·지수 백오프 재시도 재사용)으로 다시 받아 UPSERT한다. 저장소 기본키가
+`(symbol, timeframe, open_time)`이라 덮어쓰기는 무해하다. 거래소에도 없는 구간(상장
+공백·거래 정지 등)은 복구 후에도 잔여로 **보고만** 하고 무한 재시도하지 않는다.
+시리즈 단위로 예외를 격리해 한 시리즈 실패가 나머지 복구·수집 데몬을 죽이지 않는다.
+
+**가시성** — 시리즈별 "채운 봉 수/잔여 봉 수/오류"를 로그와 마지막 복구 요약
+파일(`data/repair_state.json`)에 남기고, Health 대시보드 "데이터 갭 복구" 섹션과
+`alphablock status`에 노출한다. 복구 실패가 있으면 WAN-32 텔레그램 경고 경로로 알린다.
+
+**설정**(`.env`):
+
+```bash
+ALPHABLOCK_REPAIR_ON_START=true                  # 수집 데몬 시작 시 갭 자동 복구
+ALPHABLOCK_REPAIR_STATE_PATH=data/repair_state.json
+```
+
+> 안전: 복구는 **데이터 계층 한정**이다. 실주문·`live_trading`은 건드리지 않는다.
 
 ## 품질 검사
 

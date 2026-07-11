@@ -117,6 +117,12 @@ class Settings(BaseSettings):
     collector_heartbeat_interval_seconds: int = Field(default=60, ge=1)
     collector_heartbeat_min_interval_seconds: int = Field(default=5, ge=0)
 
+    # OHLCV 갭 자동 탐지·복구 백필(WAN-35). 저장된 시리즈의 내부 누락 봉을 찾아 그
+    # 구간만 재수집한다. 수집 데몬(`alphablock collect`) 시작 시 1회 자동 점검을 켜는
+    # 기본값(repair_on_start=True)과, 마지막 복구 요약을 남겨 Health 뷰가 읽는 파일 경로.
+    repair_on_start: bool = Field(default=True)
+    repair_state_path: str = Field(default="data/repair_state.json")
+
     # 운영 상태(Health) 워치(WAN-32). WAN-30 판정을 주기적으로 점검해 이상 시 텔레그램
     # 경고를 보낸다. stale 판정 배수는 위 health_stale_multiplier를 공유한다.
     # 점검 주기(초): 이 간격마다 상태를 점검한다.
