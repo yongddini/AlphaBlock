@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import pytest
 
-from execution.broker import CcxtLiveBroker, PaperBroker
+from config.settings import Settings
+from execution.broker import CcxtLiveBroker, PaperBroker, build_live_broker
 from execution.engine import (
     EntryIntent,
     ExecutionEngine,
@@ -384,6 +385,51 @@ def test_ccxt_live_broker_requires_live_flag() -> None:
     # live_trading=False로는 실거래 브로커를 만들 수 없다(실주문 API 접근 불가).
     with pytest.raises(RuntimeError, match="live_trading"):
         CcxtLiveBroker(exchange=object(), live_trading=False)
+
+
+# -- 테스트넷 브로커 팩토리 (WAN-27) ------------------------------------------
+
+
+class _StubExchange:
+    """create_order를 기록하는 최소 ccxt 대역."""
+
+    def __init__(self) -> None:
+        self.orders: list[dict[str, object]] = []
+
+    def create_order(
+        self,
+        *,
+        symbol: str,
+        type: str,  # noqa: A002 - ccxt 시그니처와 일치시킨다.
+        side: str,
+        amount: float,
+        price: float | None,
+        params: dict[str, object],
+    ) -> dict[str, object]:
+        self.orders.append({"symbol": symbol, "side": side, "amount": amount})
+        return {"filled": amount, "average": 100.0, "price": 100.0}
+
+
+def test_build_live_broker_refuses_without_live_trading() -> None:
+    # 기본(live_trading=False)에서는 테스트넷이라도 실주문 브로커를 만들지 않는다.
+    settings = Settings.model_validate({"use_testnet": True, "live_trading": False})
+    with pytest.raises(RuntimeError, match="live_trading"):
+        build_live_broker(settings, exchange=_StubExchange())
+
+
+def test_build_live_broker_wires_injected_exchange() -> None:
+    # live_trading=True면 주입한 (테스트넷) 거래소를 그대로 브로커에 배선한다.
+    settings = Settings.model_validate({"use_testnet": True, "live_trading": True})
+    stub = _StubExchange()
+    broker = build_live_broker(settings, exchange=stub)
+    assert isinstance(broker, CcxtLiveBroker)
+    assert broker.exchange is stub
+    # 브로커의 place_order가 주입한 거래소로 실제 주문을 낸다(WAN-9 로직 재사용).
+    fill = broker.place_order(
+        Order(symbol="BTC/USDT:USDT", side=OrderSide.BUY, type=OrderType.MARKET, quantity=1.0)
+    )
+    assert fill.status is OrderStatus.FILLED
+    assert stub.orders[0]["symbol"] == "BTC/USDT:USDT"
 
 
 def test_position_realized_pnl_helper() -> None:
