@@ -12,6 +12,7 @@ from typing import Literal
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from execution.risk import RiskParams
 from execution.sizing import PositionSizingParams
 from strategy.models import ConfluenceParams
 
@@ -116,7 +117,16 @@ class Settings(BaseSettings):
     risk_sizing_enabled: bool = Field(default=True)
     risk_sizing: PositionSizingParams = Field(default_factory=PositionSizingParams)
 
-    # 안전장치: 실제 주문 실행 여부. 기본은 반드시 False. (본 이슈에서는 미사용)
+    # 실행 리스크 한도(WAN-9). 사이징(WAN-26)과 별개로 신규 진입을 차단하는 상한:
+    # 최대 명목/레버리지, 동시 포지션 수, 일일 손실 서킷브레이커.
+    # 개별 필드는 ALPHABLOCK_RISK_LIMITS__<필드명>로 덮어쓴다.
+    # 예: ALPHABLOCK_RISK_LIMITS__DAILY_LOSS_LIMIT_FRACTION=0.03
+    risk_limits: RiskParams = Field(default_factory=RiskParams)
+    # 실행 엔진(페이퍼) 시작 자본. 리스크·사이징·손익 정산의 기준.
+    paper_equity: float = Field(default=10_000.0, gt=0)
+
+    # 안전장치: 실제 주문 실행 여부. 기본은 반드시 False. live_trading=True여도
+    # 실행 엔진은 실거래 브로커를 자동 생성하지 않고 명시적 주입을 요구한다(WAN-27).
     live_trading: bool = Field(default=False)
 
     @property
