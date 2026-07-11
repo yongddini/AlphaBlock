@@ -30,6 +30,7 @@ from pathlib import Path
 from config.settings import Settings, get_settings
 from data.storage import OhlcvStore
 from live.notifier import Notifier, SignalEvent, collect_events
+from live.runtime_state import RuntimeStateStore
 from live.telegram import TelegramClient
 from strategy.confluence import ConfluenceStrategy
 
@@ -97,6 +98,8 @@ class SignalRunner:
         lookback_bars: int,
         poll_interval_seconds: float,
         sleep: Callable[[float], None] = time.sleep,
+        runtime_state: RuntimeStateStore | None = None,
+        now_ms: Callable[[], int] = lambda: int(time.time() * 1000),
     ) -> None:
         self._store = store
         self._strategy = strategy
@@ -106,6 +109,8 @@ class SignalRunner:
         self._lookback_bars = lookback_bars
         self._poll_interval = poll_interval_seconds
         self._sleep = sleep
+        self._runtime_state = runtime_state
+        self._now_ms = now_ms
 
     def poll_series(self, symbol: str, timeframe: str) -> list[SignalEvent]:
         """한 시리즈를 한 번 평가하고 새로 발생한 신호를 처리·반환한다.
@@ -155,6 +160,13 @@ class SignalRunner:
                 emitted += self.poll_series(symbol, timeframe)
             except Exception:  # noqa: BLE001 — 한 시리즈 오류가 루프 전체를 멈추지 않도록.
                 _logger.exception("시리즈 폴링 실패: %s %s", symbol, timeframe)
+        if self._runtime_state is not None:
+            # 하트비트·현재 포지션·새 신호를 남겨 Health 대시보드(WAN-30)가 읽게 한다.
+            self._runtime_state.record(
+                now_ms=self._now_ms(),
+                open_positions=self._notifier.book.open_positions,
+                new_events=emitted,
+            )
         return emitted
 
     def run(self, *, max_polls: int | None = None) -> None:
@@ -230,6 +242,7 @@ def main() -> None:
             series=series,
             lookback_bars=settings.live_signal_lookback_bars,
             poll_interval_seconds=settings.live_poll_interval_seconds,
+            runtime_state=RuntimeStateStore(settings.live_runtime_state_path),
         )
         _logger.info(
             "시그널 러너 시작: %d 시리즈, 폴링 %ds (live_trading=%s, 페이퍼 모드)",

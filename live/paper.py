@@ -29,6 +29,10 @@ class PaperPosition(BaseModel):
     direction: OrderBlockDirection
     entry_time: int
     entry_price: float
+    stop_price: float | None = None
+    """진입 시점 손절 참조가(오더블록 무효화). 없으면 None."""
+    take_profit_price: float | None = None
+    """진입 시점 가장 가까운 익절 목표선 가격. 없으면 None."""
 
     @property
     def is_long(self) -> bool:
