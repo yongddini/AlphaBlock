@@ -28,6 +28,7 @@ from paper.report import (
     records_to_dataframe,
 )
 from paper.store import (
+    OpenPosition,
     PaperTradeRecord,
     PaperTradeRecorder,
     PaperTradeStore,
@@ -35,6 +36,7 @@ from paper.store import (
 )
 
 __all__ = [
+    "OpenPosition",
     "PaperPerformance",
     "PaperTradeRecord",
     "PaperTradeRecorder",

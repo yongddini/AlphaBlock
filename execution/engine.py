@@ -122,6 +122,15 @@ class ExecutionEngine:
     def position(self, symbol: str, timeframe: str) -> Position | None:
         return self._book.get((symbol, timeframe))
 
+    def restore_position(self, position: Position) -> None:
+        """영속 저장소에서 읽은 열린 포지션을 장부에 복구한다(재시작 안전).
+
+        주문을 내지 않고 추적 장부에만 넣는다. 러너 재시작 시 DB의 열린 포지션을
+        엔진에 다시 실어 청산 평가가 이어지게 한다. 같은 시리즈가 이미 있으면
+        덮어쓴다(단일 작성자 전제).
+        """
+        self._book[(position.symbol, position.timeframe)] = position
+
     # -- 진입 ---------------------------------------------------------------
 
     def on_entry(self, intent: EntryIntent, *, now_ms: int) -> ExecutionOutcome:
