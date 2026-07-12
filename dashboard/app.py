@@ -22,7 +22,15 @@ from backtest.models import BacktestConfig
 from backtest.report import trades_to_dataframe
 from config import get_settings
 from config.settings import Settings
-from dashboard.charts import build_equity_chart, build_price_chart
+from dashboard.charts import (
+    DEFAULT_ZONE_CATEGORIES,
+    ZONE_CATEGORY_LABELS,
+    ZoneCategory,
+    build_equity_chart,
+    build_price_chart,
+    entered_zone_keys,
+    filter_zones,
+)
 from dashboard.data_access import list_series, load_ohlcv
 from dashboard.health import (
     CollectorStatus,
@@ -39,7 +47,13 @@ from paper.performance import build_performance
 from paper.report import performance_to_dataframe, records_to_dataframe
 from paper.store import PaperTradeStore
 from strategy.confluence import SignalKind
-from strategy.models import OrderBlockDirection, OrderBlockParams, SignalExitReason
+from strategy.models import (
+    OrderBlock,
+    OrderBlockDirection,
+    OrderBlockParams,
+    SignalExitReason,
+    select_active,
+)
 
 
 def _ms_to_datetime(ms: int) -> datetime:
@@ -145,6 +159,38 @@ def _cached_pipeline(
 # --- 분석 탭 ----------------------------------------------------------------
 
 
+def _select_chart_zones(
+    result: PipelineResult,
+    df: pd.DataFrame,
+    ob_params: OrderBlockParams,
+    *,
+    replay_ms: int | None,
+    categories: frozenset[ZoneCategory],
+    show_all_archive: bool,
+) -> tuple[pd.DataFrame, list[OrderBlock]]:
+    """표시 옵션에 따라 차트에 넘길 (캔들 df, 존 목록)을 고른다 (WAN-52).
+
+    - **시점 재생**(``replay_ms``): 그 시각 T에 트레이딩뷰가 그렸을 존(방향별
+      ``zone_limit``개, 병합)만 `select_active`로 파생하고, 캔들도 T까지 잘라 그
+      시점 화면을 정확히 재현한다(≤6개).
+    - **전체 아카이브**: 생성된 모든 존(무거움).
+    - 그 외: 선택된 범주(진입/활성/지지/깨짐/소멸)로 필터.
+    """
+    if replay_ms is not None:
+        chart_df = df[df["open_time"] <= replay_ms]
+        zones = select_active(
+            result.order_blocks,
+            replay_ms,
+            limit=ob_params.zone_limit,
+            combine=ob_params.combine_obs,
+        )
+        return chart_df, zones
+    if show_all_archive:
+        return df, list(result.order_blocks)
+    entered = entered_zone_keys(result.signals)
+    return df, filter_zones(result.order_blocks, categories, entered)
+
+
 def _render_analysis(settings: Settings) -> None:
     db_path = settings.db_path
 
@@ -199,20 +245,73 @@ def _render_analysis(settings: Settings) -> None:
     )
     backtest = result.backtest
 
+    label_to_category = {label: cat for cat, label in ZONE_CATEGORY_LABELS.items()}
     with st.sidebar:
-        zone_view = st.radio(
-            "오더블록 표시",
-            ("현재 활성 존", "전 구간(생애주기)"),
+        st.subheader("오더블록 표시")
+        replay_on = st.checkbox(
+            "시점 재생",
+            value=False,
             help=(
-                "현재 활성 존: 트레이딩뷰와 동일하게 마지막 봉 시점에 살아있는 존만 표시. "
-                "전 구간: 깨지고 소멸한 존까지 전체 생애주기를 표시(WAN-47)."
+                "특정 시각 T에 트레이딩뷰가 그렸을 존(방향별 최대 3개)과 그때까지의 "
+                "캔들만 재현합니다. '그때 내 화면이 뭘 보여줬나'를 정확히 되짚습니다."
             ),
         )
-    zones = result.order_blocks if zone_view.startswith("전 구간") else result.rendered_order_blocks
+        replay_ms: int | None = None
+        categories = DEFAULT_ZONE_CATEGORIES
+        show_all_archive = False
+        if replay_on:
+            chart_min = _ms_to_datetime(int(df["open_time"].min()))
+            chart_max = _ms_to_datetime(int(df["open_time"].max()))
+            if chart_min < chart_max:
+                replay_dt = st.slider(
+                    "재생 시각(T)",
+                    min_value=chart_min,
+                    max_value=chart_max,
+                    value=chart_max,
+                    format="YYYY-MM-DD HH:mm",
+                )
+            else:
+                replay_dt = chart_max
+            replay_ms = _datetime_to_ms(replay_dt)
+        else:
+            default_labels = [
+                ZONE_CATEGORY_LABELS[c] for c in ZoneCategory if c in DEFAULT_ZONE_CATEGORIES
+            ]
+            selected_labels = st.multiselect(
+                "표시 필터",
+                options=list(ZONE_CATEGORY_LABELS.values()),
+                default=default_labels,
+                help=(
+                    "진입·활성·지지(탭)·깨짐(무효화)·소멸 중 골라 봅니다. "
+                    "기본은 진입한 존 + 활성 존(전체 아님)."
+                ),
+            )
+            categories = frozenset(label_to_category[label] for label in selected_labels)
+            show_all_archive = st.checkbox(
+                "전체 아카이브 표시(무거움)",
+                value=False,
+                help=(
+                    "깨지고 소멸한 존까지 생성된 모든 존을 그립니다. "
+                    "3년 15m에서는 느릴 수 있습니다."
+                ),
+            )
+            if show_all_archive:
+                st.warning("전체 아카이브는 존이 매우 많아 렌더가 느릴 수 있습니다.")
+
+    chart_df, zones = _select_chart_zones(
+        result,
+        df,
+        ob_params,
+        replay_ms=replay_ms,
+        categories=categories,
+        show_all_archive=show_all_archive,
+    )
+    # 시점 재생은 그 시점 화면 재현이 목적이라 미래 거래 마커를 겹치지 않는다.
+    chart_backtest = None if replay_ms is not None else backtest
 
     st.subheader(f"{symbol} · {timeframe}")
     st.plotly_chart(
-        build_price_chart(df, zones, backtest, title=f"{symbol} {timeframe}"),
+        build_price_chart(chart_df, zones, chart_backtest, title=f"{symbol} {timeframe}"),
         use_container_width=True,
     )
 
