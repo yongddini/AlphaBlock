@@ -13,6 +13,7 @@ Fluxchart "Volumized Order Blocks" (TradingView, MPL-2.0)의 탐지 로직을
 
 from __future__ import annotations
 
+import bisect
 from dataclasses import dataclass, field
 
 import pandas as pd
@@ -148,17 +149,17 @@ def _generate_signals(
     """
     signals: list[OrderBlockSignal] = []
     n = len(times)
+    # WAN-49: times는 정렬된 배열이므로 존별 구간 경계를 이진 탐색으로 O(log n)에 구한다.
+    # (이전에는 매 존마다 0부터 선형 스캔 → O(존수 × 봉수)로 3년치에서 수천만 회.)
+    # bisect_right(confirmed_time): 확정 시각을 **초과**하는 첫 봉(구버전 `<= ` 루프와 동일).
+    # bisect_left(break_time): 무효화 시각 **이상**인 첫 봉(구버전 `< ` 루프와 동일).
+    # break_time > confirmed_time 이 항상 성립하므로 break_pos >= start_pos 가 보장된다.
     for ob in order_blocks:
-        start_pos = 0
-        while start_pos < n and times[start_pos] <= ob.confirmed_time:
-            start_pos += 1
+        start_pos = bisect.bisect_right(times, ob.confirmed_time)
         # 무효화 봉의 위치. 이 봉까지(포함) 탭을 살핀다.
         break_pos: int | None = None
         if ob.break_time is not None:
-            pos = start_pos
-            while pos < n and times[pos] < ob.break_time:
-                pos += 1
-            break_pos = pos
+            break_pos = bisect.bisect_left(times, ob.break_time)
         end_pos = n if break_pos is None else min(n, break_pos + 1)
 
         for i in range(start_pos, end_pos):
@@ -218,8 +219,15 @@ class OrderBlockDetector:
         top: _SwingPoint | None = None
         bottom: _SwingPoint | None = None
 
+        # WAN-49: 아카이브(전체 생애 보존)와 활성 리스트(아직 소멸 안 한 존)를 분리한다.
+        # `bullish_obs`/`bearish_obs`는 WAN-47 그대로 생성된 모든 존을 담는 아카이브이고,
+        # `active_bull`/`active_bear`는 `_invalidate()`의 **순회 대상**이다. 존이 소멸(swept)
+        # 하면 활성 리스트에서만 빠지고 아카이브에는 남는다. 아카이브의 내용·순서는
+        # WAN-47과 100% 동일하다(순회 집합만 좁혔을 뿐, 존별 상태 전이는 불변).
         bullish_obs: list[_RawOrderBlock] = []
         bearish_obs: list[_RawOrderBlock] = []
+        active_bull: list[_RawOrderBlock] = []
+        active_bear: list[_RawOrderBlock] = []
 
         # WAN-47: 탐지는 **전체 히스토리**를 스캔한다. 원본의 max_distance_to_last_bar는
         # "마지막 봉에서 N봉 이내만 탐지"하는 스캔 상한이었지만, 그러면 백테스트 기간의
@@ -241,8 +249,8 @@ class OrderBlockDetector:
                     bottom = _SwingPoint(index=lag, price=lows[lag])
                 swing_type = new_swing_type
 
-            self._invalidate(
-                bullish_obs,
+            active_bull = self._invalidate(
+                active_bull,
                 is_bullish=True,
                 use_wick=use_wick,
                 t=t,
@@ -253,11 +261,11 @@ class OrderBlockDetector:
                 times=times,
             )
             top = self._create_bullish(
-                top, bullish_obs, params, t, highs, lows, closes, volumes, times, atr
+                top, bullish_obs, active_bull, params, t, highs, lows, closes, volumes, times, atr
             )
 
-            self._invalidate(
-                bearish_obs,
+            active_bear = self._invalidate(
+                active_bear,
                 is_bullish=False,
                 use_wick=use_wick,
                 t=t,
@@ -268,7 +276,17 @@ class OrderBlockDetector:
                 times=times,
             )
             bottom = self._create_bearish(
-                bottom, bearish_obs, params, t, highs, lows, closes, volumes, times, atr
+                bottom,
+                bearish_obs,
+                active_bear,
+                params,
+                t,
+                highs,
+                lows,
+                closes,
+                volumes,
+                times,
+                atr,
             )
 
         # WAN-47: 탐지(archive)와 렌더링(view)을 분리한다. 아카이브는 생성된 모든
@@ -303,11 +321,17 @@ class OrderBlockDetector:
         lows: list[float],
         closes: list[float],
         times: list[int],
-    ) -> None:
+    ) -> list[_RawOrderBlock]:
+        """활성 존만 순회해 무효화·소멸·탭을 갱신하고, **아직 소멸 안 한 존**을 반환한다.
+
+        WAN-49: `obs`는 활성 리스트(비-swept 존만)다. 이번 봉에 소멸(`swept`)한 존은
+        반환 리스트에서 빠지고(다음 봉부터 순회 제외), 아카이브에는 그대로 남는다.
+        구버전은 전체 아카이브를 순회하며 `if ob.swept: continue`로 건너뛰었는데,
+        소멸 존이 누적되면서 매 봉 순회 길이가 최대 존수까지 커져 O(봉수 × 존수)로
+        퇴화했다. 순회 집합만 좁혔을 뿐 존별 상태 전이 로직은 완전히 동일하다.
+        """
+        still_active: list[_RawOrderBlock] = []
         for ob in obs:
-            if ob.swept:
-                # 이미 소멸한 존은 더 이상 상태가 바뀌지 않는다(생애 종료, 기록 보존).
-                continue
             if not ob.breaker:
                 if is_bullish:
                     cmp_value = lows[t] if use_wick else min(opens[t], closes[t])
@@ -337,11 +361,14 @@ class OrderBlockDetector:
                 if inside and not ob._inside and times[t] > ob.confirmed_time:
                     ob.tapped_times.append(times[t])
                 ob._inside = inside
+                still_active.append(ob)
+        return still_active
 
     @staticmethod
     def _create_bullish(
         top: _SwingPoint | None,
         bullish_obs: list[_RawOrderBlock],
+        active_bull: list[_RawOrderBlock],
         params: OrderBlockParams,
         t: int,
         highs: list[float],
@@ -378,12 +405,15 @@ class OrderBlockDetector:
             # WAN-47: 아카이브는 개수 캡으로 오래된 존을 버리지 않는다(전체 생애 보존).
             # 표시 개수 제한은 렌더링 뷰(`select_active`)에서만 적용한다.
             bullish_obs.insert(0, new_ob)
+            # WAN-49: 새 존은 다음 봉부터 무효화 순회 대상이 된다(활성 리스트에 추가).
+            active_bull.append(new_ob)
         return top
 
     @staticmethod
     def _create_bearish(
         bottom: _SwingPoint | None,
         bearish_obs: list[_RawOrderBlock],
+        active_bear: list[_RawOrderBlock],
         params: OrderBlockParams,
         t: int,
         highs: list[float],
@@ -418,6 +448,7 @@ class OrderBlockDetector:
                 ob_high_volume=ob_high_volume,
             )
             bearish_obs.insert(0, new_ob)
+            active_bear.append(new_ob)
         return bottom
 
     @staticmethod
