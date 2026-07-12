@@ -97,10 +97,14 @@ def backfill_symbol(
     backoff_base: float = 1.0,
     sleeper: Callable[[float], None] = time.sleep,
     now_ms: Callable[[], int] = lambda: int(time.time() * 1000),
+    progress: Callable[[int, int, int], None] | None = None,
 ) -> int:
     """`since_ms`부터 `until_ms`(기본 현재)까지 페이징 백필한다.
 
     저장한 봉 수를 반환한다. 진행이 없으면(빈 응답/커서 정체) 루프를 종료한다.
+
+    `progress`가 주어지면 매 페이지 저장 후 `(total, last_open_ms, end)`로 호출된다.
+    장시간(수십만 봉) 실행의 진행률 로깅에 쓴다(테스트에서 주입 가능).
     """
     tf_ms = timeframe_to_ms(timeframe)
     end = until_ms if until_ms is not None else now_ms()
@@ -127,6 +131,8 @@ def backfill_symbol(
         total += store.upsert_candles(candles)
 
         last_open = int(batch[-1][0])
+        if progress is not None:
+            progress(total, last_open, end)
         next_since = last_open + tf_ms
         # 커서가 전진하지 않으면(거래소가 같은 봉 반환) 무한루프 방지.
         if next_since <= since:

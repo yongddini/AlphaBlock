@@ -134,6 +134,20 @@ class OhlcvStore:
             (value,) = cur.fetchone()
         return int(value)
 
+    def open_times(self, symbol: str, timeframe: str) -> list[int]:
+        """해당 심볼·타임프레임의 모든 `open_time`을 오름차순으로 반환한다.
+
+        전체 시리즈를 `load()`로 DataFrame에 올리지 않고 시각열만 가볍게 가져와
+        갭·중복·연속성 검증(WAN-44)에 쓴다.
+        """
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT open_time FROM ohlcv WHERE symbol = ? AND timeframe = ? "
+                "ORDER BY open_time ASC",
+                (symbol, timeframe),
+            )
+            return [int(row[0]) for row in cur.fetchall()]
+
     def list_series(self) -> list[tuple[str, str]]:
         """저장된 (symbol, timeframe) 조합 목록을 정렬해 반환한다."""
         with self._lock:
