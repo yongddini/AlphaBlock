@@ -48,8 +48,21 @@ def test_app_renders_price_chart_and_metrics_when_data_available(seeded_db_path:
 
     assert not at.exception
     assert at.title[0].value == "AlphaBlock — 통합 트레이딩 대시보드"
-    # 분석 탭의 성과 지표 6종(러너 미실행이라 Health 탭 지표는 없음).
-    assert len(at.metric) == 6
+    # 분석 탭의 백테스트 성과 지표 6종이 실제로 그려졌는지 라벨로 확인한다.
+    # 개수(len)로 단언하지 않는다: streamlit 1.59+는 모든 탭을 한 번에 렌더하므로
+    # Health/페이퍼 탭의 지표(러너 상태 등)까지 at.metric 에 섞여 개수가 환경에 따라 달라진다.
+    metric_labels = {m.label for m in at.metric}
+    assert {
+        "Total Return",
+        "Max Drawdown",
+        "Win Rate",
+        "Profit Factor",
+        "Sharpe",
+        "Trades",
+    } <= metric_labels
+    # 시드 데이터로는 시그널이 없어 거래 0건 — 값도 의미 있게 검증한다.
+    metrics_by_label = {m.label: m.value for m in at.metric}
+    assert metrics_by_label["Trades"] == "0"
 
 
 def test_app_health_tab_renders_without_error(seeded_db_path: str) -> None:
