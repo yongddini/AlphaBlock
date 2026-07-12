@@ -153,6 +153,17 @@ class Settings(BaseSettings):
     # BacktestConfig 기본값과 동일한 0.04%가 기본.
     paper_fee_rate: float = Field(default=0.0004, ge=0)
 
+    # 페이퍼 성과 다이제스트(WAN-36). paper_trades(WAN-33)에서 한 기간의 성과 요약을
+    # 만들어 텔레그램(WAN-32 경로)으로 주기적으로 보낸다(`scripts/paper_digest.py`).
+    # 실제 발송은 이 값이 True이고 텔레그램이 설정된 경우에만 한다(기본 끔).
+    paper_digest_enabled: bool = Field(default=False)
+    # --since 미지정 시 기본 집계 창(일). 주 1회 실행이면 7이 자연스럽다.
+    paper_digest_days: int = Field(default=7, ge=1)
+    # 발송 요일(0=월 … 6=일)·시각(UTC 시). 스케줄러(cron/launchd)가 참고하는 값으로,
+    # 스크립트 자체는 스케줄링하지 않는다. README "페이퍼 다이제스트" 절 참고.
+    paper_digest_weekday: int = Field(default=0, ge=0, le=6)
+    paper_digest_hour_utc: int = Field(default=0, ge=0, le=23)
+
     # 안전장치: 실제 주문 실행 여부. 기본은 반드시 False. live_trading=True여도
     # 실행 엔진은 실거래 브로커를 자동 생성하지 않고 명시적 주입을 요구한다(WAN-27).
     live_trading: bool = Field(default=False)
