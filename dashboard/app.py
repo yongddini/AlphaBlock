@@ -32,7 +32,7 @@ from dashboard.health import (
     SeriesFreshness,
 )
 from dashboard.health_data import HealthView, OpenPositionView, build_health_view
-from dashboard.pipeline import run_pipeline
+from dashboard.pipeline import PipelineResult, run_pipeline
 from live.runtime_state import EventRecord
 from paper.parity import build_parity_report
 from paper.performance import build_performance
@@ -95,13 +95,60 @@ def _kind_label(kind: SignalKind, exit_reason: SignalExitReason | None) -> str:
     return "청산"
 
 
+# --- 캐시 계층 (WAN-49) ------------------------------------------------------
+#
+# Streamlit은 위젯 조작(슬라이더 이동 등)마다 스크립트를 처음부터 재실행하므로,
+# 캐시가 없으면 심볼/기간을 조금만 바꿔도 OHLCV 로드·오더블록 탐지·백테스트가
+# 통째로 재계산된다(3년치에서 수십 초). 아래 래퍼는 각 단계를 `st.cache_data`로
+# 감싸 캐시 키(심볼·타임프레임·기간·파라미터)가 같으면 즉시(캐시 히트) 응답한다.
+#
+# TTL: 시리즈 목록처럼 자주 바뀌는 가벼운 읽기는 짧게(WAN-48 자동 새로고침 주기와
+# 정합), 무거운 계산(OHLCV·파이프라인)은 길게 둔다. 파라미터는 해시 불가능한
+# pydantic 객체라 `_` 접두(해시 제외) 인자로 넘기고, 대신 직렬화한 `params_key`를
+# 캐시 키에 포함시킨다 — 키에서 빠지면 잘못된 결과를 캐시하게 되므로 주의.
+
+_SERIES_TTL_SECONDS = 60
+_HEAVY_TTL_SECONDS = 3600
+
+
+@st.cache_data(ttl=_SERIES_TTL_SECONDS, show_spinner=False)
+def _cached_series(db_path: str) -> list[tuple[str, str]]:
+    return list_series(db_path)
+
+
+@st.cache_data(ttl=_HEAVY_TTL_SECONDS, show_spinner=False)
+def _cached_ohlcv(
+    db_path: str,
+    symbol: str,
+    timeframe: str,
+    start_ms: int | None = None,
+    end_ms: int | None = None,
+) -> pd.DataFrame:
+    return load_ohlcv(db_path, symbol, timeframe, start_ms=start_ms, end_ms=end_ms)
+
+
+@st.cache_data(ttl=_HEAVY_TTL_SECONDS, show_spinner="오더블록 탐지·백테스트 계산 중…")
+def _cached_pipeline(
+    db_path: str,
+    symbol: str,
+    timeframe: str,
+    start_ms: int,
+    end_ms: int,
+    params_key: str,
+    _ob_params: OrderBlockParams,
+    _bt_config: BacktestConfig,
+) -> PipelineResult:
+    df = _cached_ohlcv(db_path, symbol, timeframe, start_ms, end_ms)
+    return run_pipeline(df, _ob_params, _bt_config)
+
+
 # --- 분석 탭 ----------------------------------------------------------------
 
 
 def _render_analysis(settings: Settings) -> None:
     db_path = settings.db_path
 
-    series = list_series(db_path)
+    series = _cached_series(db_path)
     if not series:
         st.warning(
             f"저장된 OHLCV 데이터가 없습니다 ({db_path}). 먼저 데이터 수집(WAN-6)을 실행하세요."
@@ -115,7 +162,7 @@ def _render_analysis(settings: Settings) -> None:
         timeframes = sorted({tf for s, tf in series if s == symbol})
         timeframe = st.selectbox("타임프레임", timeframes)
 
-    full_df = load_ohlcv(db_path, symbol, timeframe)
+    full_df = _cached_ohlcv(db_path, symbol, timeframe)
     if full_df.empty:
         st.warning("선택한 심볼/타임프레임에 데이터가 없습니다.")
         return
@@ -142,7 +189,14 @@ def _render_analysis(settings: Settings) -> None:
         st.warning("선택한 기간에 데이터가 없습니다.")
         return
 
-    result = run_pipeline(df, OrderBlockParams(), BacktestConfig())
+    ob_params = OrderBlockParams()
+    bt_config = BacktestConfig()
+    # 캐시 키에 심볼·타임프레임·기간·파라미터를 모두 포함시킨다(누락 시 잘못된
+    # 결과를 캐시하게 됨). 파라미터는 직렬화해 params_key로 키에 싣는다.
+    params_key = f"{ob_params.model_dump_json()}|{bt_config.model_dump_json()}"
+    result = _cached_pipeline(
+        db_path, symbol, timeframe, start_ms, end_ms, params_key, ob_params, bt_config
+    )
     backtest = result.backtest
 
     with st.sidebar:
