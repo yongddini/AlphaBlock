@@ -15,17 +15,24 @@
    줌·팬 비용이 급감한다.
 3. **표시 필터·시점 재생** — 어떤 존 집합을 넘길지는 호출자(`dashboard.app`)가 정한다.
    이 모듈은 넘어온 존을 위 두 방식으로 그리기만 한다.
+4. **RSI 서브패널** — 캔들 아래 `make_subplots`로 RSI(14) 패널을 붙인다. 30/50/70
+   기준선도 `add_hline`(layout shape) 대신 2점짜리 `Scatter` 트레이스로 그려 위
+   트레이스 통합 정책과 일관되게 유지한다. RSI 라인도 캔들과 동일한 시간 버킷으로
+   다운샘플링해 대량 봉에서 병목이 되돌아오지 않게 한다.
 """
 
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable, Sequence
 from enum import StrEnum
 
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 from backtest.models import BacktestResult, PositionSide
+from strategy.indicators import rsi as compute_rsi
 from strategy.models import OrderBlock, OrderBlockDirection, OrderBlockSignal
 
 _BULL_COLOR = "#26a69a"
@@ -42,6 +49,16 @@ _BEAR_ZONE_FILL_FADED = "rgba(239, 83, 80, 0.09)"
 #: 안팎으로 줄인다(WAN-52). 3년 15m(105,121봉)에서도 브라우저가 감당할 봉 수만
 #: 넘겨 초기 렌더가 빨라진다. 오더블록·거래 마커는 원본 시각 그대로 유지된다.
 _MAX_CANDLES = 4_000
+
+#: RSI 서브패널 설정(WAN-52 추가 범위). 지표 자체는 strategy.indicators.rsi() 재사용.
+_RSI_LENGTH = 14
+_RSI_OVERBOUGHT = 70.0
+_RSI_MIDLINE = 50.0
+_RSI_OVERSOLD = 30.0
+_RSI_LINE_COLOR = "#7e57c2"
+_RSI_GUIDE_COLOR = "rgba(120, 120, 120, 0.5)"
+#: 캔들:RSI 높이 비율 ≈ 3:1.
+_ROW_HEIGHTS = [0.75, 0.25]
 
 
 class ZoneCategory(StrEnum):
@@ -132,17 +149,26 @@ def _to_datetime(ms_series: pd.Series) -> pd.Series:
     return pd.to_datetime(ms_series, unit="ms", utc=True)
 
 
-def _downsample_ohlc(frame: pd.DataFrame, max_bars: int) -> pd.DataFrame:
-    """봉이 `max_bars`를 넘으면 균등 시간 버킷으로 OHLC를 집계해 봉 수를 줄인다.
+def _bucket_size(n: int, max_bars: int) -> int:
+    """`n`개를 `max_bars` 이하로 줄이는 데 필요한 시간 버킷 크기.
+
+    1이면 다운샘플링이 필요 없다는 뜻이다. 캔들·RSI 라인이 같은 `bucket_size`를
+    써야 두 트레이스의 x좌표(버킷별 대표 시각)가 정렬된다(WAN-52).
+    """
+    if n <= max_bars:
+        return 1
+    return (n + max_bars - 1) // max_bars
+
+
+def _downsample_ohlc(frame: pd.DataFrame, bucket_size: int) -> pd.DataFrame:
+    """`bucket_size`만큼 균등 시간 버킷으로 OHLC를 집계해 봉 수를 줄인다.
 
     각 버킷은 첫 시가·최고 고가·최저 저가·마지막 종가·거래량 합으로 하나의 봉이
     된다(표준 OHLC 리샘플링). 개수만 줄일 뿐 가격 범위·추세는 보존돼, 전체 구간
-    개요에서 캔들 렌더 부담을 크게 낮춘다(WAN-52). `max_bars` 이하면 원본 그대로.
+    개요에서 캔들 렌더 부담을 크게 낮춘다(WAN-52). `bucket_size` 1이면 원본 그대로.
     """
-    n = len(frame)
-    if n <= max_bars:
+    if bucket_size <= 1:
         return frame
-    bucket_size = (n + max_bars - 1) // max_bars
     buckets = frame.index // bucket_size
     grouped = frame.groupby(buckets)
     return pd.DataFrame(
@@ -155,6 +181,26 @@ def _downsample_ohlc(frame: pd.DataFrame, max_bars: int) -> pd.DataFrame:
             "volume": grouped["volume"].sum().to_numpy(),
         }
     )
+
+
+def _downsample_last(series: pd.Series, bucket_size: int) -> pd.Series:
+    """RSI 라인을 캔들과 동일한 시간 버킷으로 묶어 버킷별 마지막 값만 남긴다.
+
+    캔들 다운샘플링이 버킷의 마지막 종가를 대표값으로 쓰는 것과 동일한 방식이라,
+    같은 `bucket_size`를 쓰면 캔들 x좌표와 정확히 정렬된다(WAN-52).
+    """
+    if bucket_size <= 1:
+        return series.reset_index(drop=True)
+    buckets = pd.RangeIndex(len(series)) // bucket_size
+    return series.groupby(buckets).last().reset_index(drop=True)
+
+
+def _rsi_at(rsi_by_time: dict[int, float], time_ms: int) -> float | None:
+    """진입 시각의 RSI 값을 조회한다. 없거나 NaN이면 `None`(호버에 "—"로 표시)."""
+    value = rsi_by_time.get(time_ms)
+    if value is None or math.isnan(value):
+        return None
+    return value
 
 
 def _zone_span_end(ob: OrderBlock, last_bar_ms: int) -> int:
@@ -171,7 +217,14 @@ def _zone_span_end(ob: OrderBlock, last_bar_ms: int) -> int:
     return last_bar_ms
 
 
-def _add_zone_traces(fig: go.Figure, order_blocks: Sequence[OrderBlock], last_bar_ms: int) -> None:
+def _add_zone_traces(
+    fig: go.Figure,
+    order_blocks: Sequence[OrderBlock],
+    last_bar_ms: int,
+    *,
+    row: int,
+    col: int,
+) -> None:
     """모든 존 박스를 방향·상태별 소수의 채워진 Scatter 트레이스로 합쳐 그린다.
 
     각 박스는 5개 모서리 점 + `None` 구분자로 폴리곤을 이어붙여, 방향(강세/약세)과
@@ -218,8 +271,38 @@ def _add_zone_traces(fig: go.Figure, order_blocks: Sequence[OrderBlock], last_ba
                     name=f"{side} 존({state})",
                     legendgroup=f"zone-{direction}-{breaker}",
                     hoverinfo="skip",
-                )
+                ),
+                row=row,
+                col=col,
             )
+
+
+def _add_rsi_reference_lines(
+    fig: go.Figure, endpoints: tuple[pd.Timestamp, pd.Timestamp], *, row: int, col: int
+) -> None:
+    """RSI 30/50/70 기준선을 2점짜리 `Scatter` 트레이스로 그린다.
+
+    `add_hline`은 layout shape를 만들어 WAN-52의 "shape → data 트레이스" 정책과
+    어긋나므로 쓰지 않는다(존 3,000개 문제와 같은 부류의 재계산 비용은 아니지만,
+    이 모듈에서는 일관되게 트레이스로 그린다).
+    """
+    for level, dash in (
+        (_RSI_OVERBOUGHT, "dot"),
+        (_RSI_MIDLINE, "dash"),
+        (_RSI_OVERSOLD, "dot"),
+    ):
+        fig.add_trace(
+            go.Scatter(
+                x=list(endpoints),
+                y=[level, level],
+                mode="lines",
+                line={"color": _RSI_GUIDE_COLOR, "width": 1, "dash": dash},
+                showlegend=False,
+                hoverinfo="skip",
+            ),
+            row=row,
+            col=col,
+        )
 
 
 def build_price_chart(
@@ -229,53 +312,105 @@ def build_price_chart(
     *,
     title: str = "",
 ) -> go.Figure:
-    """캔들 차트 위에 오더블록 존과 (있다면) 진입/청산 마커를 오버레이한다.
+    """캔들 차트 + RSI(14) 서브패널 위에 오더블록 존과 진입/청산 마커를 오버레이한다.
 
     존은 수명 구간에만, 방향·상태별 통합 트레이스로 그린다(WAN-52). 캔들이
     `_MAX_CANDLES`를 넘으면 OHLC 다운샘플링해 초기 렌더 부담을 낮춘다. 오더블록
     존과 거래 마커는 원본 시각 그대로 유지되므로 위치는 정확하다.
+
+    아래 RSI(14) 서브패널은 캔들과 x축을 공유하고(``make_subplots``), 진입 마커를
+    같은 x좌표로 함께 찍어 "왜 여기서 들어갔는지"를 RSI 위치로 바로 읽게 한다.
+    RSI 라인도 캔들과 같은 시간 버킷으로 다운샘플링해 대량 봉에서 병목이
+    되돌아오지 않게 한다.
     """
     frame = df.sort_values("open_time").reset_index(drop=True)
     last_bar_ms = int(frame["open_time"].iloc[-1]) if len(frame) else 0
-    candles = _downsample_ohlc(frame, _MAX_CANDLES)
-    x = _to_datetime(candles["open_time"])
+    bucket_size = _bucket_size(len(frame), _MAX_CANDLES)
+    candles = _downsample_ohlc(frame, bucket_size)
+    x = _to_datetime(candles["open_time"]).tolist()
 
-    fig = go.Figure(
-        data=[
-            go.Candlestick(
-                x=x,
-                open=candles["open"],
-                high=candles["high"],
-                low=candles["low"],
-                close=candles["close"],
-                name="price",
-                increasing_line_color=_BULL_COLOR,
-                decreasing_line_color=_BEAR_COLOR,
-            )
-        ]
+    rsi_by_time: dict[int, float] = {}
+    rsi_y: list[float] = []
+    if len(frame):
+        rsi_full = compute_rsi(frame, length=_RSI_LENGTH)
+        rsi_by_time = dict(zip(frame["open_time"].tolist(), rsi_full.tolist(), strict=True))
+        rsi_y = _downsample_last(rsi_full, bucket_size).tolist()
+
+    fig = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        row_heights=_ROW_HEIGHTS,
+        vertical_spacing=0.03,
+    )
+
+    fig.add_trace(
+        go.Candlestick(
+            x=x,
+            open=candles["open"],
+            high=candles["high"],
+            low=candles["low"],
+            close=candles["close"],
+            name="price",
+            increasing_line_color=_BULL_COLOR,
+            decreasing_line_color=_BEAR_COLOR,
+        ),
+        row=1,
+        col=1,
     )
 
     if len(frame) and len(order_blocks):
-        _add_zone_traces(fig, order_blocks, last_bar_ms)
+        _add_zone_traces(fig, order_blocks, last_bar_ms, row=1, col=1)
+
+    if x:
+        _add_rsi_reference_lines(fig, (x[0], x[-1]), row=2, col=1)
+        fig.add_trace(
+            go.Scatter(
+                x=x,
+                y=rsi_y,
+                mode="lines",
+                name=f"RSI({_RSI_LENGTH})",
+                line={"color": _RSI_LINE_COLOR, "width": 1.3},
+                hovertemplate="RSI %{y:.1f}<br>%{x}<extra></extra>",
+            ),
+            row=2,
+            col=1,
+        )
 
     if backtest is not None:
-        _add_trade_markers(fig, backtest)
+        _add_trade_markers(fig, backtest, rsi_by_time, price_row=1, rsi_row=2, col=1)
 
+    fig.update_yaxes(title_text="RSI", range=[0, 100], row=2, col=1)
     fig.update_layout(
         title=title,
         xaxis_rangeslider_visible=False,
         template="plotly_white",
-        height=600,
+        height=700,
         legend={"orientation": "h", "y": 1.02, "yanchor": "bottom"},
     )
     return fig
 
 
-def _add_trade_markers(fig: go.Figure, backtest: BacktestResult) -> None:
+def _add_trade_markers(
+    fig: go.Figure,
+    backtest: BacktestResult,
+    rsi_by_time: dict[int, float],
+    *,
+    price_row: int,
+    rsi_row: int,
+    col: int,
+) -> None:
+    """진입/청산 마커를 캔들 패널에, 진입 마커를 같은 x좌표로 RSI 패널에도 찍는다.
+
+    캔들 패널 진입 마커의 호버에 그 시점 RSI를 덧붙이고, RSI 패널에도 동일한
+    방향 심볼의 마커를 그려 "왜 여기서 들어갔는지"가 두 패널에서 정렬돼 보이게
+    한다(WAN-52 추가 범위).
+    """
     entry_x: list[pd.Timestamp] = []
     entry_y: list[float] = []
     entry_symbol: list[str] = []
     entry_text: list[str] = []
+    entry_rsi: list[float | None] = []
     exit_x: list[pd.Timestamp] = []
     exit_y: list[float] = []
 
@@ -285,11 +420,13 @@ def _add_trade_markers(fig: go.Figure, backtest: BacktestResult) -> None:
         is_long = trade.side is PositionSide.LONG
         entry_symbol.append("triangle-up" if is_long else "triangle-down")
         entry_text.append("롱" if is_long else "숏")
+        entry_rsi.append(_rsi_at(rsi_by_time, trade.entry_time))
         for fill in trade.exits:
             exit_x.append(pd.Timestamp(fill.time, unit="ms", tz="UTC"))
             exit_y.append(fill.price)
 
     if entry_x:
+        rsi_hover = [f"{v:.1f}" if v is not None else "—" for v in entry_rsi]
         fig.add_trace(
             go.Scatter(
                 x=entry_x,
@@ -303,8 +440,33 @@ def _add_trade_markers(fig: go.Figure, backtest: BacktestResult) -> None:
                 },
                 name="entry",
                 text=entry_text,
-                hovertemplate="진입 %{text}<br>%{x}<br>가격 %{y}<extra></extra>",
-            )
+                customdata=rsi_hover,
+                hovertemplate=(
+                    "진입 %{text}<br>%{x}<br>가격 %{y}<br>RSI %{customdata}<extra></extra>"
+                ),
+            ),
+            row=price_row,
+            col=col,
+        )
+        rsi_marker_y = [v if v is not None else float("nan") for v in entry_rsi]
+        fig.add_trace(
+            go.Scatter(
+                x=entry_x,
+                y=rsi_marker_y,
+                mode="markers",
+                marker={
+                    "symbol": entry_symbol,
+                    "size": 9,
+                    "color": "#1e88e5",
+                    "line": {"width": 1, "color": "white"},
+                },
+                name="entry (RSI)",
+                showlegend=False,
+                text=entry_text,
+                hovertemplate="진입 %{text}<br>%{x}<br>RSI %{y:.1f}<extra></extra>",
+            ),
+            row=rsi_row,
+            col=col,
         )
     if exit_x:
         fig.add_trace(
@@ -315,7 +477,9 @@ def _add_trade_markers(fig: go.Figure, backtest: BacktestResult) -> None:
                 marker={"symbol": "x", "size": 9, "color": "#6d4c41"},
                 name="exit",
                 hovertemplate="청산<br>%{x}<br>가격 %{y}<extra></extra>",
-            )
+            ),
+            row=price_row,
+            col=col,
         )
 
 

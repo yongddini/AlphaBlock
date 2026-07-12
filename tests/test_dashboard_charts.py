@@ -190,6 +190,50 @@ def test_filter_zones_empty_selection_returns_nothing() -> None:
     assert filter_zones([_order_block()], set()) == []
 
 
+def test_build_price_chart_adds_rsi_subpanel_without_shapes() -> None:
+    df = _df(30)
+
+    fig = build_price_chart(df, [], title="test")
+
+    rsi_traces = [t for t in fig.data if t.name and t.name.startswith("RSI(")]
+    assert len(rsi_traces) == 1
+    # 기준선(30/50/70)도 add_hline이 아니라 데이터 트레이스로 그려 shape가 늘지 않는다.
+    assert len(fig.layout.shapes) == 0
+    assert isinstance(fig.data[0], go.Candlestick)
+
+
+def test_build_price_chart_downsamples_rsi_line_with_candles() -> None:
+    from dashboard.charts import _MAX_CANDLES
+
+    df = _df(_MAX_CANDLES * 3)
+    fig = build_price_chart(df, [])
+
+    candle = fig.data[0]
+    rsi_trace = next(t for t in fig.data if t.name and t.name.startswith("RSI("))
+    # RSI 라인도 캔들과 같은 버킷 수로 줄어 x좌표 개수가 일치한다(정렬 보장).
+    assert len(rsi_trace.x) == len(candle.x)
+
+
+def test_build_price_chart_entry_marker_hover_includes_rsi() -> None:
+    df = _df(30)
+    signal = OrderBlockSignal(
+        direction=OrderBlockDirection.BULLISH,
+        trigger_time=20 * _STEP,
+        price=100.0,
+        order_block=_order_block(),
+        status="active",
+    )
+    backtest = run_backtest(df, [signal], BacktestConfig(take_profit_pct=0.5))
+
+    fig = build_price_chart(df, [], backtest)
+
+    entry_trace = next(t for t in fig.data if t.name == "entry")
+    assert "RSI" in entry_trace.hovertemplate
+    rsi_entry_traces = [t for t in fig.data if t.name == "entry (RSI)"]
+    assert len(rsi_entry_traces) == 1
+    assert rsi_entry_traces[0].x == entry_trace.x
+
+
 def test_build_equity_chart_has_one_point_per_equity_curve_entry() -> None:
     df = _df(5)
     backtest = run_backtest(df, [])
