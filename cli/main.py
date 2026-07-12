@@ -89,6 +89,19 @@ def format_status(view: HealthView) -> str:
     else:
         lines.append("오픈 페이퍼 포지션: 없음")
 
+    if view.last_repair is not None:
+        rep = view.last_repair
+        detail = (
+            f"{len(rep.repaired_series)} 시리즈에서 {rep.total_filled}봉 채움"
+            if rep.repaired_series
+            else "갭 없음"
+        )
+        if rep.total_remaining:
+            detail += f", {rep.total_remaining}봉 잔여"
+        if rep.has_error:
+            detail += " ⚠️ 복구 오류"
+        lines.append(f"마지막 갭 복구: {_fmt_time(rep.ran_at_ms)} — {detail}")
+
     return "\n".join(lines)
 
 
@@ -100,6 +113,7 @@ def _build_health_view(settings: Settings) -> HealthView:
         stale_multiplier=settings.health_stale_multiplier,
         collector_heartbeat_path=settings.collector_heartbeat_path,
         collector_heartbeat_interval_seconds=settings.collector_heartbeat_interval_seconds,
+        repair_state_path=settings.repair_state_path,
     )
 
 
@@ -107,7 +121,31 @@ def cmd_collect(args: argparse.Namespace, settings: Settings) -> int:
     """`alphablock collect` — 백필 후 실시간 스트림(또는 `--once`로 백필만)."""
     from data.collector import run_collector
 
-    asyncio.run(run_collector(settings, run_stream=not args.once))
+    asyncio.run(
+        run_collector(
+            settings,
+            run_stream=not args.once,
+            repair_on_start=args.repair_on_start,
+        )
+    )
+    return 0
+
+
+def cmd_backfill(args: argparse.Namespace, settings: Settings) -> int:
+    """`alphablock backfill --repair` — 저장된 시리즈의 내부 갭을 1회 복구(WAN-35)."""
+    from data.repair import run_repair
+
+    summary = run_repair(settings, dry_run=args.dry_run)
+    print(
+        f"갭 복구: {len(summary.repaired_series)} 시리즈에서 {summary.total_filled}봉 채움"
+        + (f", {summary.total_remaining}봉 잔여" if summary.total_remaining else "")
+    )
+    for s in summary.repaired_series:
+        suffix = f" (오류: {s.error})" if s.error else ""
+        print(
+            f"  {s.symbol} {s.timeframe}: 갭 {s.gaps_found}개 → {s.bars_filled}봉 채움,"
+            f" {s.bars_remaining}봉 잔여{suffix}"
+        )
     return 0
 
 
@@ -156,7 +194,26 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="백필만 1회 수행하고 종료(실시간 스트림 없음)",
     )
+    p_collect.add_argument(
+        "--repair-on-start",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="시작 시 갭 자동 복구 1회 수행(기본: 설정값, 켬). --no-repair-on-start로 끔",
+    )
     p_collect.set_defaults(func=cmd_collect)
+
+    p_backfill = sub.add_parser("backfill", help="저장된 시리즈의 내부 갭을 1회 복구(WAN-35)")
+    p_backfill.add_argument(
+        "--repair",
+        action="store_true",
+        help="갭을 탐지해 그 구간만 재수집(현재 backfill의 유일한 동작)",
+    )
+    p_backfill.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="복구 실패 시 텔레그램 경고를 보내지 않고 로그로만 남김",
+    )
+    p_backfill.set_defaults(func=cmd_backfill)
 
     p_live = sub.add_parser("live", help="실시간 시그널 러너(페이퍼)")
     p_live.add_argument("--once", action="store_true", help="한 번만 폴링하고 종료")

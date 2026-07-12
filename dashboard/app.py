@@ -263,6 +263,37 @@ def _render_runner(runner: RunnerStatus) -> None:
         st.error("러너 하트비트가 끊겼습니다 — 프로세스가 멈췄을 수 있습니다.")
 
 
+def _render_repair(view: HealthView) -> None:
+    st.subheader("데이터 갭 복구 (WAN-35)")
+    rep = view.last_repair
+    if rep is None:
+        st.caption(
+            "갭 복구가 실행된 흔적이 없습니다. `alphablock backfill --repair` 로 점검하세요."
+        )
+        return
+    cols = st.columns(3)
+    cols[0].metric("마지막 복구", _fmt_time(rep.ran_at_ms))
+    cols[1].metric("채운 봉", str(rep.total_filled))
+    cols[2].metric("잔여 봉", str(rep.total_remaining))
+    if rep.repaired_series:
+        frame = pd.DataFrame(
+            {
+                "심볼": s.symbol,
+                "TF": s.timeframe,
+                "갭": s.gaps_found,
+                "채움": s.bars_filled,
+                "잔여": s.bars_remaining,
+                "오류": s.error or "",
+            }
+            for s in rep.repaired_series
+        )
+        st.dataframe(frame, use_container_width=True, hide_index=True)
+    else:
+        st.caption("마지막 점검에서 갭이 없었습니다.")
+    if rep.has_error:
+        st.error("일부 시리즈 갭 복구에 실패했습니다 — 로그/텔레그램 경고를 확인하세요.")
+
+
 def _render_health(settings: Settings) -> None:
     if st.button("🔄 새로고침"):
         st.rerun()
@@ -274,6 +305,7 @@ def _render_health(settings: Settings) -> None:
         stale_multiplier=settings.health_stale_multiplier,
         collector_heartbeat_path=settings.collector_heartbeat_path,
         collector_heartbeat_interval_seconds=settings.collector_heartbeat_interval_seconds,
+        repair_state_path=settings.repair_state_path,
     )
 
     _render_overall_badge(view)
@@ -292,6 +324,7 @@ def _render_health(settings: Settings) -> None:
 
     _render_collector(view.collector)
     _render_runner(view.runner)
+    _render_repair(view)
 
     st.subheader("현재 페이퍼 포지션")
     if view.positions:
