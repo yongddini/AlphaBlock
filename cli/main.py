@@ -167,9 +167,11 @@ def cmd_history(args: argparse.Namespace, settings: Settings) -> int:
     )
     print(f"과거 백필 완료: {len(results)} 시리즈 ({args.days}일 창)")
     for r in results:
+        # 완료 확인: 창 시작 도달 여부(WAN-51 재발 방지).
+        reached = "OK" if r.reached_requested_start() else "미완(창 시작 미도달)"
         print(
             f"  {r.symbol} {r.timeframe}: 처리 {r.bars_written}봉,"
-            f" 저장 총 {r.stored_after}봉, {r.elapsed_s:.1f}s"
+            f" 저장 총 {r.stored_after}봉, {r.elapsed_s:.1f}s [{reached}]"
         )
     return 0
 

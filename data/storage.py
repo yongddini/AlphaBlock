@@ -118,6 +118,16 @@ class OhlcvStore:
             (value,) = cur.fetchone()
         return int(value) if value is not None else None
 
+    def first_open_time(self, symbol: str, timeframe: str) -> int | None:
+        """해당 심볼·타임프레임의 가장 오래된 `open_time`. 없으면 None."""
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT MIN(open_time) FROM ohlcv WHERE symbol = ? AND timeframe = ?",
+                (symbol, timeframe),
+            )
+            (value,) = cur.fetchone()
+        return int(value) if value is not None else None
+
     def count(self, symbol: str | None = None, timeframe: str | None = None) -> int:
         """저장된 봉 개수. 심볼·타임프레임으로 선택 필터링."""
         clauses: list[str] = []
