@@ -9,13 +9,13 @@ from __future__ import annotations
 import asyncio
 import logging
 
+from common.heartbeat import HeartbeatStore
 from config.settings import Settings, get_settings
 from data.backfill import backfill_all
 from data.exchange import create_exchange
 from data.repair import RepairStateStore, alert_on_failure, repair_all
 from data.storage import OhlcvStore
 from data.stream import stream_klines
-from live.heartbeat import HeartbeatStore
 
 logger = logging.getLogger(__name__)
 

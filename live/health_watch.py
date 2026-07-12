@@ -2,7 +2,7 @@
 
 WAN-30의 Health 판정 로직(`dashboard.health` / `dashboard.health_data.build_health_view`)을
 그대로 재사용해 주기적으로 상태를 점검하고, 이상이 감지되면 WAN-25의 텔레그램 전송
-경로(`live.telegram.TelegramClient`)로 폰에 경고를 보낸다. 화면(대시보드)을 열지 않아도
+경로(`common.telegram.TelegramClient`)로 폰에 경고를 보낸다. 화면(대시보드)을 열지 않아도
 수집·러너가 조용히 멈춘 사실을 알 수 있게 하는 것이 목적이다.
 
 경고 대상
@@ -35,10 +35,10 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from common.telegram import build_telegram_client
 from config.settings import Settings, get_settings
 from dashboard.health import HealthLevel
 from dashboard.health_data import HealthView, build_health_view
-from live.runner import build_telegram_client
 
 _logger = logging.getLogger(__name__)
 

@@ -10,6 +10,7 @@ import time
 
 from pydantic import BaseModel, ConfigDict
 
+from common.heartbeat import HeartbeatStore
 from dashboard.health import (
     CollectorStatus,
     FundingFreshness,
@@ -25,7 +26,6 @@ from dashboard.health import (
 from data.funding import FundingRateStore
 from data.repair import RepairStateStore, RepairSummary
 from data.storage import OhlcvStore
-from live.heartbeat import HeartbeatStore
 from live.runtime_state import EventRecord, PositionSnapshot, RunnerRuntimeState, RuntimeStateStore
 from strategy.models import OrderBlockDirection
 

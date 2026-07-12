@@ -1,10 +1,10 @@
-"""live.telegram 테스트 — 전송은 목 트랜스포트로 대체(네트워크 없음)."""
+"""common.telegram 테스트 — 전송은 목 트랜스포트로 대체(네트워크 없음)."""
 
 from __future__ import annotations
 
 import pytest
 
-from live.telegram import TelegramClient, TelegramResponse, TransportError, urllib_transport
+from common.telegram import TelegramClient, TelegramResponse, TransportError, urllib_transport
 
 
 class _FakeTransport:

@@ -20,6 +20,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from config.settings import Settings
+
 _logger = logging.getLogger(__name__)
 
 _API_BASE = "https://api.telegram.org"
@@ -171,3 +173,15 @@ class TelegramClient:
         _logger.info("텔레그램 전송 재시도 대기 %.1fs (%s)", seconds, reason)
         if seconds > 0:
             self._sleep(seconds)
+
+
+def build_telegram_client(settings: Settings) -> TelegramClient | None:
+    """설정이 갖춰졌으면 텔레그램 클라이언트를, 아니면 None(드라이런)을 반환한다.
+
+    토큰·chat_id 는 `config.Settings`(=`ALPHABLOCK_TELEGRAM_*`)로만 주입한다.
+    `data`·`live`·`scripts`·`dashboard` 등 여러 레이어에서 공용으로 쓰므로
+    `common` 에 둔다(레이어 독립).
+    """
+    if not settings.telegram_configured:
+        return None
+    return TelegramClient(settings.telegram_bot_token, settings.telegram_chat_id)

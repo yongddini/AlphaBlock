@@ -8,11 +8,11 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from common.telegram import TelegramClient, TelegramResponse
 from data.models import Candle
 from data.storage import OhlcvStore
 from live.notifier import Notifier
 from live.runner import SignalRunner, WatermarkStore, build_series
-from live.telegram import TelegramClient, TelegramResponse
 from strategy.confluence import ConfluenceResult, ConfluenceSignal, IndicatorSnapshot, SignalKind
 from strategy.models import ConfluenceParams, OrderBlock, OrderBlockDirection, SignalExitReason
 

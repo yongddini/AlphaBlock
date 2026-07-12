@@ -1,10 +1,10 @@
-"""live.heartbeat 하트비트 스토어 테스트 (WAN-31)."""
+"""common.heartbeat 하트비트 스토어 테스트 (WAN-31)."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from live.heartbeat import Heartbeat, HeartbeatStore
+from common.heartbeat import Heartbeat, HeartbeatStore
 
 
 def test_load_missing_file_returns_empty(tmp_path: Path) -> None:

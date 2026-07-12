@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from common.heartbeat import HeartbeatStore
 from dashboard.health import HealthLevel
 from dashboard.health_data import build_health_view
 from data.funding import FundingRateStore
 from data.models import Candle, FundingRate
 from data.storage import OhlcvStore
-from live.heartbeat import HeartbeatStore
 from live.paper import PaperPosition
 from live.runtime_state import RuntimeStateStore
 from strategy.models import OrderBlockDirection

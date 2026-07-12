@@ -19,11 +19,11 @@ from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict
 
+from common.telegram import TelegramClient
 from execution.engine import EntryIntent
 from execution.models import Position
 from live.executor import PaperExecutor, TradeReport
 from live.paper import ClosedTrade, PaperBook, PaperPosition
-from live.telegram import TelegramClient
 from strategy.confluence import ConfluenceResult, ConfluenceSignal, SignalKind
 from strategy.models import OrderBlock, OrderBlockDirection, SignalExitReason
 
