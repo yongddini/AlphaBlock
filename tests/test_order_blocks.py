@@ -15,11 +15,14 @@ from collections.abc import Sequence
 import pandas as pd
 import pytest
 
-from strategy.models import OrderBlockDirection, OrderBlockParams
+from strategy.models import (
+    OrderBlock,
+    OrderBlockDirection,
+    OrderBlockParams,
+    combine_order_blocks,
+)
 from strategy.order_blocks import (
     OrderBlockDetector,
-    _combine_same_direction,
-    _RawOrderBlock,
     _true_range,
     _wilder_rma,
     detect_order_blocks,
@@ -112,12 +115,27 @@ def test_bullish_signal_cancelled_on_breaker_tap() -> None:
     assert signal.status == "cancelled"
 
 
-def test_bullish_order_block_removed_after_breaker_high_exceeds_top() -> None:
-    """breaker 이후 고가가 top을 넘으면 리스트에서 제거된다."""
+def test_bullish_order_block_swept_kept_in_archive_but_not_rendered() -> None:
+    """breaker 이후 고가가 top을 넘으면 소멸(sweep)한다.
+
+    WAN-47: 원본은 여기서 박스를 삭제하지만, 아카이브는 존을 **보존**하고
+    `swept_time`만 기록한다. 렌더링 뷰(트레이딩뷰 패리티)에서만 사라진다.
+    """
     bars = [*_BULL_BARS, (97, 105, 96, 100, 10)]  # high=105 > top(103)
     df = _make_df(bars)
     result = detect_order_blocks(df, _bull_params())
-    assert result.order_blocks == []
+
+    # 아카이브: 존이 보존되고 무효화·소멸 시각이 모두 기록된다.
+    assert len(result.order_blocks) == 1
+    ob = result.order_blocks[0]
+    assert ob.breaker is True
+    assert ob.break_time == 12 * 60_000
+    assert ob.swept_time == 13 * 60_000
+    assert ob.alive_at(12 * 60_000) is True  # breaker지만 아직 소멸 전 → 생존
+    assert ob.alive_at(13 * 60_000) is False  # 소멸 봉 이후 → 렌더 제외
+
+    # 렌더링 뷰: 소멸한 존은 그려지지 않는다(트레이딩뷰와 동일).
+    assert result.rendered_order_blocks == []
 
 
 def test_bearish_order_block_parity_via_price_mirror() -> None:
@@ -193,11 +211,18 @@ def test_empty_dataframe_returns_empty_result() -> None:
     assert result.signals == []
 
 
-def test_max_distance_to_last_bar_skips_older_history() -> None:
-    """탐지 윈도우를 좁히면(최근 N봉만) 오래된 스윙/OB는 탐지되지 않는다."""
+def test_max_distance_to_last_bar_filters_render_not_archive() -> None:
+    """`max_distance_to_last_bar`는 렌더 최근성 필터다 (WAN-47).
+
+    구버전은 탐지 스캔을 좁혀 오래된 존을 아예 만들지 않았지만, 이제 아카이브는
+    전체 히스토리를 스캔해 존을 보존하고, 오래된 존은 "현재 그림"(렌더 뷰)에서만
+    빠진다. max_distance=1이면 마지막 봉에서 1봉 이내에 확정된 존만 렌더한다 —
+    존 확정은 t11, 마지막 봉은 t13이라 렌더에는 안 잡히지만 아카이브엔 남는다.
+    """
     df = _make_df(_BULL_BARS)
     result = detect_order_blocks(df, _bull_params(max_distance_to_last_bar=1))
-    assert result.order_blocks == []
+    assert len(result.order_blocks) == 1  # 아카이브는 존을 보존.
+    assert result.rendered_order_blocks == []  # 렌더 최근성 필터에서 제외.
 
 
 def test_zone_count_limits_selected_order_blocks() -> None:
@@ -206,29 +231,36 @@ def test_zone_count_limits_selected_order_blocks() -> None:
     assert params.zone_limit == 1
 
 
-class TestCombineSameDirection:
+def _ob(**overrides: object) -> OrderBlock:
+    base: dict[str, object] = {
+        "direction": OrderBlockDirection.BULLISH,
+        "top": 100.0,
+        "bottom": 90.0,
+        "start_time": 0,
+        "confirmed_time": 1,
+        "ob_volume": 10.0,
+        "ob_low_volume": 3.0,
+        "ob_high_volume": 7.0,
+    }
+    base.update(overrides)
+    return OrderBlock.model_validate(base)
+
+
+class TestCombineOrderBlocks:
     def test_merges_overlapping_zones(self) -> None:
-        a = _RawOrderBlock(
-            top=100,
-            bottom=90,
-            ob_volume=10,
-            direction=OrderBlockDirection.BULLISH,
-            start_time=0,
-            confirmed_time=5,
-            ob_low_volume=3,
-            ob_high_volume=7,
+        a = _ob(
+            top=100, bottom=90, ob_volume=10, confirmed_time=5, ob_low_volume=3, ob_high_volume=7
         )
-        b = _RawOrderBlock(
+        b = _ob(
             top=95,
             bottom=85,
             ob_volume=20,
-            direction=OrderBlockDirection.BULLISH,
             start_time=2,
             confirmed_time=8,
             ob_low_volume=8,
             ob_high_volume=12,
         )
-        merged = _combine_same_direction([a, b], now=100)
+        merged = combine_order_blocks([a, b], now=100)
 
         assert len(merged) == 1
         ob = merged[0]
@@ -240,27 +272,9 @@ class TestCombineSameDirection:
         assert ob.combined is True
 
     def test_does_not_merge_non_overlapping_zones(self) -> None:
-        a = _RawOrderBlock(
-            top=50,
-            bottom=40,
-            ob_volume=5,
-            direction=OrderBlockDirection.BULLISH,
-            start_time=0,
-            confirmed_time=1,
-            ob_low_volume=1,
-            ob_high_volume=4,
-        )
-        b = _RawOrderBlock(
-            top=200,
-            bottom=190,
-            ob_volume=5,
-            direction=OrderBlockDirection.BULLISH,
-            start_time=0,
-            confirmed_time=1,
-            ob_low_volume=1,
-            ob_high_volume=4,
-        )
-        merged = _combine_same_direction([a, b], now=100)
+        a = _ob(top=50, bottom=40, ob_volume=5, ob_low_volume=1, ob_high_volume=4)
+        b = _ob(top=200, bottom=190, ob_volume=5, ob_low_volume=1, ob_high_volume=4)
+        merged = combine_order_blocks([a, b], now=100)
         assert len(merged) == 2
         assert all(not ob.combined for ob in merged)
 

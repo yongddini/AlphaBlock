@@ -25,6 +25,8 @@ from strategy.models import (
     OrderBlockSignal,
     PlannedExit,
     SignalExitReason,
+    combine_order_blocks,
+    select_active,
 )
 from strategy.order_blocks import OrderBlockDetector, detect_order_blocks
 
@@ -45,10 +47,12 @@ __all__ = [
     "PlannedExit",
     "SignalExitReason",
     "SignalKind",
+    "combine_order_blocks",
     "detect_order_blocks",
     "ema",
     "emas",
     "generate_confluence_signals",
     "rsi",
+    "select_active",
     "vwma",
 ]

@@ -23,6 +23,9 @@ class PipelineResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     order_blocks: list[OrderBlock]
+    """생성된 모든 존의 전체 생애주기 아카이브(WAN-47). "전 구간" 뷰용."""
+    rendered_order_blocks: list[OrderBlock]
+    """마지막 봉 시점의 렌더링 뷰(트레이딩뷰 패리티). "현재 활성 존" 뷰용."""
     signals: list[OrderBlockSignal]
     backtest: BacktestResult
 
@@ -37,6 +40,7 @@ def run_pipeline(
     backtest = BacktestEngine(backtest_config).run(df, detection.signals)
     return PipelineResult(
         order_blocks=detection.order_blocks,
+        rendered_order_blocks=detection.rendered_order_blocks,
         signals=detection.signals,
         backtest=backtest,
     )

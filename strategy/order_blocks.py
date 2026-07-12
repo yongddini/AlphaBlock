@@ -13,7 +13,7 @@ Fluxchart "Volumized Order Blocks" (TradingView, MPL-2.0)의 탐지 로직을
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import pandas as pd
 
@@ -23,6 +23,7 @@ from strategy.models import (
     OrderBlockParams,
     OrderBlockResult,
     OrderBlockSignal,
+    select_active,
 )
 
 _REQUIRED_COLUMNS = ("open_time", "open", "high", "low", "close", "volume")
@@ -39,7 +40,12 @@ class _SwingPoint:
 
 @dataclass(eq=False)
 class _RawOrderBlock:
-    """탐지 진행 중 상태를 갖는 오더블록. 원본 `orderBlockInfo`에 대응."""
+    """탐지 진행 중 상태를 갖는 오더블록. 원본 `orderBlockInfo`에 대응.
+
+    WAN-47: 존은 삭제되지 않고 전체 생애주기를 기록한다. `swept`로 소멸 여부를,
+    `swept_time`으로 소멸 시각을, `tapped_times`로 재진입 시각들을 보존한다.
+    `_inside`는 tap 전이(바깥→안) 판정을 위한 내부 상태다.
+    """
 
     top: float
     bottom: float
@@ -51,6 +57,10 @@ class _RawOrderBlock:
     ob_high_volume: float
     breaker: bool = False
     break_time: int | None = None
+    swept: bool = False
+    swept_time: int | None = None
+    tapped_times: list[int] = field(default_factory=list)
+    _inside: bool = False
 
     def to_model(self, *, combined: bool = False) -> OrderBlock:
         return OrderBlock(
@@ -64,6 +74,8 @@ class _RawOrderBlock:
             ob_high_volume=self.ob_high_volume,
             breaker=self.breaker,
             break_time=self.break_time,
+            swept_time=self.swept_time,
+            tapped_times=tuple(self.tapped_times),
             combined=combined,
         )
 
@@ -114,66 +126,6 @@ def _rolling_min(values: list[float], length: int) -> list[float]:
     return [float(v) for v in result]
 
 
-def _combine_same_direction(obs: list[_RawOrderBlock], now: int) -> list[OrderBlock]:
-    """겹치는(IoU 교집합>0) 동일 방향 존을 병합. 원본 `combineOBsFunc`에 대응."""
-
-    def area(ob: _RawOrderBlock) -> float:
-        end = ob.break_time if ob.break_time is not None else now
-        return (end - ob.start_time) * (ob.top - ob.bottom)
-
-    def touch(a: _RawOrderBlock, b: _RawOrderBlock) -> bool:
-        a_end = a.break_time if a.break_time is not None else now
-        b_end = b.break_time if b.break_time is not None else now
-        intersection_time = max(0, min(a_end, b_end) - max(a.start_time, b.start_time))
-        intersection_price = max(0.0, min(a.top, b.top) - max(a.bottom, b.bottom))
-        intersection = intersection_time * intersection_price
-        union = area(a) + area(b) - intersection
-        if union <= 0:
-            return False
-        return (intersection / union) * 100.0 > 0
-
-    items = list(obs)
-    combined_flags = [False] * len(items)
-    merged = True
-    while merged:
-        merged = False
-        for i in range(len(items)):
-            for j in range(len(items)):
-                if i == j:
-                    continue
-                a, b = items[i], items[j]
-                if touch(a, b):
-                    new_ob = _RawOrderBlock(
-                        top=max(a.top, b.top),
-                        bottom=min(a.bottom, b.bottom),
-                        ob_volume=a.ob_volume + b.ob_volume,
-                        direction=a.direction,
-                        start_time=min(a.start_time, b.start_time),
-                        confirmed_time=min(a.confirmed_time, b.confirmed_time),
-                        ob_low_volume=a.ob_low_volume + b.ob_low_volume,
-                        ob_high_volume=a.ob_high_volume + b.ob_high_volume,
-                        breaker=a.breaker or b.breaker,
-                        break_time=(
-                            max(a.break_time, b.break_time)
-                            if a.break_time is not None and b.break_time is not None
-                            else (a.break_time if a.break_time is not None else b.break_time)
-                        ),
-                    )
-                    remove_indices = {i, j}
-                    items = [x for k, x in enumerate(items) if k not in remove_indices]
-                    combined_flags = [
-                        f for k, f in enumerate(combined_flags) if k not in remove_indices
-                    ]
-                    items.append(new_ob)
-                    combined_flags.append(True)
-                    merged = True
-                    break
-            if merged:
-                break
-
-    return [ob.to_model(combined=flag) for ob, flag in zip(items, combined_flags, strict=True)]
-
-
 def _generate_signals(
     order_blocks: list[OrderBlock],
     times: list[int],
@@ -186,6 +138,13 @@ def _generate_signals(
     원본에는 없는 AlphaBlock 확장(기본 골격). 존이 확정된 이후 첫 재진입만
     시그널로 기록하고, breaker로 전환된 존은 `status="cancelled"`로 표시한다.
     세부 규칙(리테스트 확인, 손절 등)은 WAN-8/9에서 확정한다.
+
+    WAN-47: `order_blocks`는 **전체 아카이브**(살아남은 존뿐 아니라 깨지고 소멸한
+    존까지)를 받는다. 이로써 생존자 편향 없이 모든 존의 탭·손절이 백테스트에
+    반영된다. **look-ahead 금지** — 각 존의 신호는 그 존이 확정(`confirmed_time`)된
+    이후, 무효화(`break_time`) 이전(무효화 봉 포함)의 자기 시간축에서만 나온다.
+    시각 `t`의 신호는 `t` 시점에 이미 확정·미소멸한 존만 근거로 하므로, 데이터를
+    미래에서 잘라도 과거 신호는 바뀌지 않는다.
     """
     signals: list[OrderBlockSignal] = []
     n = len(times)
@@ -193,22 +152,29 @@ def _generate_signals(
         start_pos = 0
         while start_pos < n and times[start_pos] <= ob.confirmed_time:
             start_pos += 1
-        end_pos = n
+        # 무효화 봉의 위치. 이 봉까지(포함) 탭을 살핀다.
+        break_pos: int | None = None
         if ob.break_time is not None:
             pos = start_pos
             while pos < n and times[pos] < ob.break_time:
                 pos += 1
-            end_pos = min(end_pos, pos + 1)
+            break_pos = pos
+        end_pos = n if break_pos is None else min(n, break_pos + 1)
 
         for i in range(start_pos, end_pos):
             if lows[i] <= ob.top and highs[i] >= ob.bottom:
+                # WAN-47: 상태는 존의 **최종** breaker 여부가 아니라 **이 탭이 무효화
+                # 전인지**로 정한다. 무효화 봉 자체에서의 탭만 cancelled고, 그 전의
+                # 탭은 유효한 진입(나중에 무효화되면 손절)이다. 최종 상태로 판정하면
+                # 결국 깨질 존의 정상 진입까지 모두 배제돼 생존자 편향이 재발한다.
+                is_break_bar = break_pos is not None and i >= break_pos
                 signals.append(
                     OrderBlockSignal(
                         direction=ob.direction,
                         trigger_time=times[i],
                         price=closes[i],
                         order_block=ob,
-                        status="cancelled" if ob.breaker else "active",
+                        status="cancelled" if is_break_bar else "active",
                     )
                 )
                 break
@@ -255,10 +221,12 @@ class OrderBlockDetector:
         bullish_obs: list[_RawOrderBlock] = []
         bearish_obs: list[_RawOrderBlock] = []
 
-        last_index = n - 1
-        start_active = max(0, last_index - params.max_distance_to_last_bar + 1)
-
-        for t in range(start_active, n):
+        # WAN-47: 탐지는 **전체 히스토리**를 스캔한다. 원본의 max_distance_to_last_bar는
+        # "마지막 봉에서 N봉 이내만 탐지"하는 스캔 상한이었지만, 그러면 백테스트 기간의
+        # 앞부분에서 당시 유효했던 존이 아카이브에서 통째로 빠진다(생존자 편향의 또 다른
+        # 얼굴). 탐지/렌더 분리에 따라 이 상한은 **렌더 최근성 필터**로 옮겨(아래
+        # rendered 계산), 아카이브는 생성된 모든 존을 담는다.
+        for t in range(n):
             if t >= swing_length:
                 lag = t - swing_length
                 if highs[lag] > upper[t]:
@@ -303,22 +271,25 @@ class OrderBlockDetector:
                 bottom, bearish_obs, params, t, highs, lows, closes, volumes, times, atr
             )
 
-        zone_limit = params.zone_limit
-        selected_bull = bullish_obs[:zone_limit]
-        selected_bear = bearish_obs[:zone_limit]
-        now_sentinel = times[-1] + 1
+        # WAN-47: 탐지(archive)와 렌더링(view)을 분리한다. 아카이브는 생성된 모든
+        # 존의 전체 생애주기를 담고(트리밍·삭제 없음), 신호는 아카이브 전체에서
+        # 생성한다(생존자 편향 제거). "지금 차트에 그릴 박스"는 렌더링 뷰가 파생한다.
+        archive = [ob.to_model() for ob in bullish_obs] + [ob.to_model() for ob in bearish_obs]
+        signals = _generate_signals(archive, times, highs, lows, closes)
 
-        if params.combine_obs:
-            final_bull = _combine_same_direction(selected_bull, now_sentinel)
-            final_bear = _combine_same_direction(selected_bear, now_sentinel)
-        else:
-            final_bull = [ob.to_model() for ob in selected_bull]
-            final_bear = [ob.to_model() for ob in selected_bear]
+        # 렌더 뷰(트레이딩뷰 "현재 그림"): 마지막 봉에서 max_distance_to_last_bar봉 이내에
+        # 확정된 존만 대상으로, 방향별 zone_limit개를 병합해 낸다. 데이터가 스캔 상한보다
+        # 짧으면(대부분의 테스트·픽스처) 필터는 무효라 기존 동작과 동일하다.
+        cutoff_index = max(0, (n - 1) - params.max_distance_to_last_bar + 1)
+        cutoff_time = times[cutoff_index]
+        recent = [ob for ob in archive if ob.confirmed_time >= cutoff_time]
+        rendered = select_active(
+            recent, times[-1], limit=params.zone_limit, combine=params.combine_obs
+        )
 
-        order_blocks = final_bull + final_bear
-        signals = _generate_signals(order_blocks, times, highs, lows, closes)
-
-        return OrderBlockResult(order_blocks=order_blocks, signals=signals)
+        return OrderBlockResult(
+            order_blocks=archive, signals=signals, rendered_order_blocks=rendered
+        )
 
     @staticmethod
     def _invalidate(
@@ -333,7 +304,10 @@ class OrderBlockDetector:
         closes: list[float],
         times: list[int],
     ) -> None:
-        for ob in list(obs):
+        for ob in obs:
+            if ob.swept:
+                # 이미 소멸한 존은 더 이상 상태가 바뀌지 않는다(생애 종료, 기록 보존).
+                continue
             if not ob.breaker:
                 if is_bullish:
                     cmp_value = lows[t] if use_wick else min(opens[t], closes[t])
@@ -346,12 +320,23 @@ class OrderBlockDetector:
                         ob.breaker = True
                         ob.break_time = times[t]
             else:
+                # WAN-47: 되쓸린 존을 리스트에서 지우지 않고 소멸 시각만 기록한다.
+                # (원본은 여기서 box.delete() — 렌더링에는 옳지만 백테스트 기록을 지운다.)
                 if is_bullish:
                     if highs[t] > ob.top:
-                        obs.remove(ob)
+                        ob.swept = True
+                        ob.swept_time = times[t]
                 else:
                     if lows[t] < ob.bottom:
-                        obs.remove(ob)
+                        ob.swept = True
+                        ob.swept_time = times[t]
+
+            # tap(재진입) 전이 기록: 확정 이후, 존 범위에 바깥→안으로 진입한 시각.
+            if not ob.swept:
+                inside = lows[t] <= ob.top and highs[t] >= ob.bottom
+                if inside and not ob._inside and times[t] > ob.confirmed_time:
+                    ob.tapped_times.append(times[t])
+                ob._inside = inside
 
     @staticmethod
     def _create_bullish(
@@ -390,9 +375,9 @@ class OrderBlockDetector:
                 ob_low_volume=ob_low_volume,
                 ob_high_volume=ob_high_volume,
             )
+            # WAN-47: 아카이브는 개수 캡으로 오래된 존을 버리지 않는다(전체 생애 보존).
+            # 표시 개수 제한은 렌더링 뷰(`select_active`)에서만 적용한다.
             bullish_obs.insert(0, new_ob)
-            if len(bullish_obs) > params.max_order_blocks:
-                bullish_obs.pop()
         return top
 
     @staticmethod
@@ -433,8 +418,6 @@ class OrderBlockDetector:
                 ob_high_volume=ob_high_volume,
             )
             bearish_obs.insert(0, new_ob)
-            if len(bearish_obs) > params.max_order_blocks:
-                bearish_obs.pop()
         return bottom
 
     @staticmethod
