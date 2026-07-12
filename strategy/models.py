@@ -174,6 +174,34 @@ class ConfluenceParams(BaseModel):
     stop_before_take_profit: bool = True
     """동일 봉에서 손절·익절 동시 충족 시 손절 우선(보수적)."""
 
+    # --- 진입 방식 전환 (WAN-41) ---
+    entry_mode: Literal["close", "zone_limit"] = "close"
+    """진입 방식. **기본 `close`(A안, 현행 보존)**: 탭 봉 종가에 시장가 진입.
+
+    `zone_limit`(B안): 활성 오더블록 존 근단(proximal)에 지정가를 걸어 두고 가격이
+    닿는 순간 체결한다(`backtest.substep`가 1분봉 서브스텝으로 시뮬레이션). 실제
+    트레이딩뷰 매매(존에 닿는 순간 진입)를 재현한다.
+    """
+    rsi_mode: Literal["closed_bar", "realtime"] = "closed_bar"
+    """RSI 판정 기준. **기본 `closed_bar`(A안, 현행 보존)**: 확정봉 RSI로 판정.
+
+    `realtime`(B안): 체결 순간의 실시간(봉내) RSI로 판정한다(`strategy.realtime_rsi`).
+    라이브·백테스트가 동일 상태 머신을 공유한다.
+    """
+    zone_limit_ref: Literal["proximal", "mid", "distal"] = "proximal"
+    """`entry_mode=zone_limit`일 때 지정가를 걸 존 내 기준선.
+
+    `proximal`(기본): 존 근단(롱=존 상단, 숏=존 하단) — 가장 먼저 닿는 경계.
+    `mid`: 존 중앙. `distal`: 존 원단(무효화 경계에 가장 가까움 — 더 깊은 진입).
+    """
+    limit_valid_bars: int = Field(default=24, ge=1)
+    """미체결 지정가 주문이 유효한 상위TF 봉 수. 경과하면 취소한다(`zone_limit`)."""
+    cancel_limit_on_condition_fail: bool = False
+    """지정가에 닿았지만 실시간 RSI 조건 미충족 시 주문을 취소할지 여부.
+
+    기본 False면 조건이 충족될 때까지(또는 만료·무효화까지) 주문을 유지한다.
+    """
+
     source: str = "close"
 
     @model_validator(mode="after")
@@ -190,6 +218,19 @@ class ConfluenceParams(BaseModel):
                 "최소 하나의 익절 목표선이 필요합니다."
             )
         return self
+
+    def zone_limit_price(self, order_block: OrderBlock) -> float:
+        """`zone_limit_ref`에 따른 지정가(존 내 기준선)를 반환한다 (WAN-41).
+
+        롱(강세 오더블록)은 존 상단이 근단(proximal, 먼저 닿음)·하단이 원단(distal,
+        무효화 경계), 숏(약세 오더블록)은 그 반대다. `mid`는 존 중앙.
+        """
+        top, bottom = order_block.top, order_block.bottom
+        if self.zone_limit_ref == "mid":
+            return (top + bottom) / 2.0
+        is_long = order_block.direction is OrderBlockDirection.BULLISH
+        proximal, distal = (top, bottom) if is_long else (bottom, top)
+        return proximal if self.zone_limit_ref == "proximal" else distal
 
     @property
     def tp_vwma_key(self) -> str | None:
