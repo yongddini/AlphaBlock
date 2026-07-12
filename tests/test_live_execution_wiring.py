@@ -14,6 +14,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from common.telegram import TelegramClient, TelegramResponse
 from data.models import Candle
 from data.storage import OhlcvStore
 from execution.broker import PaperBroker
@@ -23,7 +24,6 @@ from execution.sizing import PositionSizingParams
 from live.executor import PaperExecutor
 from live.notifier import Notifier
 from live.runner import SignalRunner, WatermarkStore
-from live.telegram import TelegramClient, TelegramResponse
 from paper.performance import build_performance
 from paper.store import PaperTradeRecorder, PaperTradeStore
 from strategy.confluence import ConfluenceResult, ConfluenceSignal, IndicatorSnapshot, SignalKind

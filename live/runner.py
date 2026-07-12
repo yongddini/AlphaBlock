@@ -27,6 +27,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
+from common.telegram import build_telegram_client
 from config.settings import Settings, get_settings
 from data.funding import FundingRateStore
 from data.storage import OhlcvStore
@@ -34,7 +35,6 @@ from execution.engine import build_execution_engine
 from live.executor import PaperExecutor
 from live.notifier import Notifier, SignalEvent, collect_events
 from live.runtime_state import RuntimeStateStore
-from live.telegram import TelegramClient
 from paper.store import PaperTradeRecorder, PaperTradeStore
 from strategy.confluence import ConfluenceStrategy
 
@@ -191,13 +191,6 @@ def build_series(settings: Settings) -> list[Series]:
         for symbol in settings.live_signal_symbols
         for timeframe in settings.live_signal_timeframes
     ]
-
-
-def build_telegram_client(settings: Settings) -> TelegramClient | None:
-    """설정이 갖춰졌으면 텔레그램 클라이언트를, 아니면 None(드라이런)을 반환한다."""
-    if not settings.telegram_configured:
-        return None
-    return TelegramClient(settings.telegram_bot_token, settings.telegram_chat_id)
 
 
 def run_signal_runner(

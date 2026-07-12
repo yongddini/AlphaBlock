@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from common.telegram import TelegramClient, TelegramResponse
 from live.notifier import (
     Notifier,
     SignalEvent,
@@ -10,7 +11,6 @@ from live.notifier import (
     format_exit,
 )
 from live.paper import ClosedTrade, PaperBook, PaperPosition
-from live.telegram import TelegramClient, TelegramResponse
 from strategy.confluence import ConfluenceResult, ConfluenceSignal, IndicatorSnapshot, SignalKind
 from strategy.models import (
     ConfluenceParams,

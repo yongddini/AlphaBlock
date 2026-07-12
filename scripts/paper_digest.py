@@ -2,7 +2,7 @@
 
 WAN-33이 `paper_trades`에 누적한 가상 거래를 읽어 한 기간의 성과 요약(거래 수·승률·
 순손익률·합계 R·MDD, 시리즈별 상위/하위, 백테스트 패리티 불일치)을 만들고, WAN-32와
-같은 텔레그램 경로(`live.telegram.TelegramClient`)로 폰에 보낸다. 화면을 열지 않아도
+같은 텔레그램 경로(`common.telegram.TelegramClient`)로 폰에 보낸다. 화면을 열지 않아도
 "얼마 벌었나"가 주기적으로 오게 하는 것이 목적이다.
 
 기간은 `--since/--until`로 지정하거나, 없으면 `--days`(기본 7일) 창을 지금 기준으로
@@ -28,8 +28,8 @@ import sqlite3
 
 import pandas as pd
 
+from common.telegram import build_telegram_client
 from config.settings import Settings, get_settings
-from live.runner import build_telegram_client
 from paper.digest import build_digest, format_period_label
 from paper.performance import build_performance
 from paper.store import PaperTradeRecord, PaperTradeStore

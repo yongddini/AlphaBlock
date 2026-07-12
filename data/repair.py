@@ -26,6 +26,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from common.telegram import build_telegram_client
 from config.settings import Settings, get_settings
 from data.backfill import DEFAULT_LIMIT, FetchOHLCV
 from data.backfill import backfill_symbol as _backfill_symbol
@@ -251,8 +252,6 @@ def alert_on_failure(summary: RepairSummary, settings: Settings) -> bool:
     for s in failed:
         lines.append(f"`{s.symbol}` `{s.timeframe}` — {s.error}")
     text = "\n".join(lines)
-
-    from live.runner import build_telegram_client
 
     telegram = build_telegram_client(settings)
     if telegram is None:

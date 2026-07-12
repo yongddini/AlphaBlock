@@ -15,11 +15,11 @@ from cli.main import (
     cmd_status,
     format_status,
 )
+from common.heartbeat import HeartbeatStore
 from config.settings import Settings
 from dashboard.health_data import build_health_view
 from data.models import Candle
 from data.storage import OhlcvStore
-from live.heartbeat import HeartbeatStore
 
 _HOUR = 3_600_000
 _NOW = 1_000 * _HOUR
