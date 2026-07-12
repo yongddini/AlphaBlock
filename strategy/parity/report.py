@@ -110,8 +110,14 @@ def compare_to_fixture(
     price_tolerance_pct: float = DEFAULT_PRICE_TOLERANCE_PCT,
     time_tolerance_ms: int = DEFAULT_TIME_TOLERANCE_MS,
 ) -> ParityReport:
-    """탐지 결과를 TV fixture와 비교해 `ParityReport`를 만든다."""
-    remaining = list(result.order_blocks)
+    """탐지 결과를 TV fixture와 비교해 `ParityReport`를 만든다.
+
+    WAN-47: 비교 대상은 마지막 봉 시점의 **렌더링 뷰**(`rendered_order_blocks`,
+    트레이딩뷰가 실제로 그리는 박스 집합)다. `result.order_blocks`는 이제 삭제되지
+    않은 전체 생애주기 아카이브이므로, 그것과 직접 비교하면 TV가 지운 존까지 잡혀
+    과탐지가 된다. 패리티는 어디까지나 "지금 그릴 박스"에 대한 것이다.
+    """
+    remaining = list(result.rendered_order_blocks)
     matches: list[ParityMatch] = []
 
     for tv_ob in fixture.tv_order_blocks:

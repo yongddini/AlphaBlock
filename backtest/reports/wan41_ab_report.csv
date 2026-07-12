@@ -1,5 +1,5 @@
 symbol,timeframe,variant,num_trades,num_wins,num_losses,win_rate,profit_factor,avg_win,avg_loss,avg_trade_return,total_return,max_drawdown,sharpe
-BTC/USDT:USDT,1h,A_close_closedbar,1,1,0,1.0,,0.558022,0.0,5.6e-05,5.6e-05,0.0,
-BTC/USDT:USDT,1h,B_zonelimit_realtime,1,1,0,1.0,,84.365854,0.0,0.008437,0.008437,0.0,
-ALL,ALL,A_close_closedbar,1,1,0,1.0,,0.558022,,5.6e-05,,,
-ALL,ALL,B_zonelimit_realtime,1,1,0,1.0,,84.365854,,0.008437,,,
+BTC/USDT:USDT,1h,A_close_closedbar,0,0,0,0.0,,0.0,0.0,,0.0,0.0,
+BTC/USDT:USDT,1h,B_zonelimit_realtime,2,1,1,0.5,0.126232,11.280077,-89.359861,-0.003899,-0.007808,0.008926,-51.330986
+ALL,ALL,A_close_closedbar,0,0,0,,,,,,,,
+ALL,ALL,B_zonelimit_realtime,2,1,1,0.5,0.126232,11.280077,-89.359861,-0.003899,,,

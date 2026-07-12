@@ -145,9 +145,20 @@ def _render_analysis(settings: Settings) -> None:
     result = run_pipeline(df, OrderBlockParams(), BacktestConfig())
     backtest = result.backtest
 
+    with st.sidebar:
+        zone_view = st.radio(
+            "오더블록 표시",
+            ("현재 활성 존", "전 구간(생애주기)"),
+            help=(
+                "현재 활성 존: 트레이딩뷰와 동일하게 마지막 봉 시점에 살아있는 존만 표시. "
+                "전 구간: 깨지고 소멸한 존까지 전체 생애주기를 표시(WAN-47)."
+            ),
+        )
+    zones = result.order_blocks if zone_view.startswith("전 구간") else result.rendered_order_blocks
+
     st.subheader(f"{symbol} · {timeframe}")
     st.plotly_chart(
-        build_price_chart(df, result.order_blocks, backtest, title=f"{symbol} {timeframe}"),
+        build_price_chart(df, zones, backtest, title=f"{symbol} {timeframe}"),
         use_container_width=True,
     )
 
