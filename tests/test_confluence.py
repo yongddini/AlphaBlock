@@ -468,3 +468,27 @@ def test_planned_exit_model_roundtrip() -> None:
     exit_ = PlannedExit(time=123, price=99.5, reason=SignalExitReason.STOP_LOSS)
     assert exit_.reason is SignalExitReason.STOP_LOSS
     assert exit_.model_dump()["reason"] == "stop_loss"
+
+
+# --------------------------------------------------- WAN-41 진입 방식 전환 설정
+
+
+def test_entry_mode_defaults_preserve_variant_a() -> None:
+    """새 설정의 기본값은 현행(A안)을 보존한다: 종가 진입 + 확정봉 RSI."""
+    params = ConfluenceParams()
+    assert params.entry_mode == "close"
+    assert params.rsi_mode == "closed_bar"
+    assert params.zone_limit_ref == "proximal"
+    assert params.limit_valid_bars == 24
+    assert params.cancel_limit_on_condition_fail is False
+
+
+def test_zone_limit_price_by_reference() -> None:
+    long_ob = _order_block(_BULL, top=100.0, bottom=90.0)
+    short_ob = _order_block(_BEAR, top=100.0, bottom=90.0)
+    # 롱: proximal=상단, distal=하단. 숏: proximal=하단, distal=상단. mid=중앙.
+    assert ConfluenceParams(zone_limit_ref="proximal").zone_limit_price(long_ob) == 100.0
+    assert ConfluenceParams(zone_limit_ref="distal").zone_limit_price(long_ob) == 90.0
+    assert ConfluenceParams(zone_limit_ref="mid").zone_limit_price(long_ob) == 95.0
+    assert ConfluenceParams(zone_limit_ref="proximal").zone_limit_price(short_ob) == 90.0
+    assert ConfluenceParams(zone_limit_ref="distal").zone_limit_price(short_ob) == 100.0

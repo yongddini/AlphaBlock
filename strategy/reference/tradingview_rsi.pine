@@ -1,0 +1,37 @@
+// 참조: TradingView 기본 제공 RSI (Relative Strength Index)
+// AlphaBlock RSI 이식/실시간 계산의 기준. 사용자 설정: length=14, source=close.
+//
+// 핵심은 아래 3줄. 나머지(RSI 기반 MA, 볼린저, 다이버전스)는 AlphaBlock 범위 밖.
+//   up   = ta.rma(math.max(ta.change(close), 0), 14)   ← Wilder RMA
+//   down = ta.rma(-math.min(ta.change(close), 0), 14)
+//   rsi  = 100 - (100 / (1 + up / down))
+//
+// ★ "실시간 RSI"는 수식이 아니라 실행 방식에서 나온다.
+//   Pine 런타임은 매 틱마다 "진행 중인 봉"을 다시 계산하며, 그때 close = 현재가다.
+//   RMA 상태는 직전 확정봉 값에서 고정하고 현재 봉만 매번 새로 얹는다(rollback).
+//   → AlphaBlock 증분 구현(O(1)):
+//       change = current_price - last_closed_close
+//       gain, loss = max(change,0), max(-change,0)
+//       avg_gain = (avg_gain_prev*(n-1) + gain) / n
+//       avg_loss = (avg_loss_prev*(n-1) + loss) / n
+//       rsi_live = 100 - 100/(1 + avg_gain/avg_loss)
+//     봉이 마감되면 avg_gain/avg_loss를 확정 상태로 커밋한다.
+
+//@version=5
+indicator(title="Relative Strength Index", shorttitle="RSI", format=format.price, precision=2, timeframe="", timeframe_gaps=true)
+
+rsiLengthInput = input.int(14, minval=1, title="RSI Length", group="RSI Settings")
+rsiSourceInput = input.source(close, "Source", group="RSI Settings")
+
+up = ta.rma(math.max(ta.change(rsiSourceInput), 0), rsiLengthInput)
+down = ta.rma(-math.min(ta.change(rsiSourceInput), 0), rsiLengthInput)
+rsi = down == 0 ? 100 : up == 0 ? 0 : 100 - (100 / (1 + up / down))
+
+plot(rsi, "RSI", color=#7E57C2)
+hline(70, "RSI Upper Band", color=#787B86)
+hline(50, "RSI Middle Band", color=color.new(#787B86, 50))
+hline(30, "RSI Lower Band", color=#787B86)
+
+// 엣지 케이스(원본 그대로 유지):
+//   down == 0  → RSI = 100
+//   up   == 0  → RSI = 0
