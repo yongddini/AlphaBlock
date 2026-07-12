@@ -527,6 +527,17 @@ uv run python -m scripts.testnet_dryrun --symbol BTC/USDT:USDT --qty 0.001
 실거래(`ALPHABLOCK_LIVE_TRADING`)는 기본 `false`이며, 검증 전까지 활성화하지 않는다.
 바이낸스 선물 테스트넷 검증은 위 "바이낸스 선물 테스트넷 드라이런(WAN-27)" 참고.
 
+### `.env.example` 편집 규칙 (WAN-40)
+
+새 설정을 추가할 때는 파일 **끝에 무작정 붙이지 말고 관련 기능 섹션 말미**에 넣는다(예:
+리스크 관련 키는 리스크 섹션 아래). 그래야 문서 구조가 유지되고 리뷰가 쉽다. `.env.example`
+은 `.gitattributes` 의 `merge=union` 으로 지정돼 있어, 두 브랜치가 서로 다른 블록을 파일에
+추가해도 병합 충돌 없이 양쪽 추가분이 모두 보존된다. 다만 **union 은 같은 키를 양쪽에서
+다르게 *수정*한 경우까지 해소하지 못하고 두 줄을 모두 남긴다** — 이렇게 생긴 중복 키는
+`tests/test_env_example.py` 가 CI에서 잡으므로, 충돌 없이 병합됐더라도 결과를 검토하고
+중복을 정리한다. 같은 테스트가 `.env.example` 키와 `Settings` 필드의 1:1 대응도 검증하니,
+새 필드를 추가하면 `.env.example` 문서화도 함께 갱신한다.
+
 ## 기술 스택
 
 Python 3.11+ · uv · ccxt · pandas · asyncio · pydantic-settings
