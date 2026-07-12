@@ -11,11 +11,15 @@ import argparse
 import asyncio
 import logging
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from config import get_settings
 from config.settings import Settings
 from dashboard.health import HealthLevel
 from dashboard.health_data import HealthView, build_health_view
+
+if TYPE_CHECKING:
+    from data.verify import VerifyReport
 
 _LEVEL_TEXT = {
     HealthLevel.OK: "[OK]",
@@ -149,6 +153,88 @@ def cmd_backfill(args: argparse.Namespace, settings: Settings) -> int:
     return 0
 
 
+def cmd_history(args: argparse.Namespace, settings: Settings) -> int:
+    """`alphablock history --days N` — 지정 구간을 심볼×TF별로 대량 백필(WAN-44)."""
+    from data.history import run_history_backfill_with_settings
+
+    symbols = args.symbols or settings.symbols
+    timeframes = args.timeframes or ["1m"]
+    results = run_history_backfill_with_settings(
+        symbols,
+        timeframes,
+        days=args.days,
+        settings=settings,
+    )
+    print(f"과거 백필 완료: {len(results)} 시리즈 ({args.days}일 창)")
+    for r in results:
+        print(
+            f"  {r.symbol} {r.timeframe}: 처리 {r.bars_written}봉,"
+            f" 저장 총 {r.stored_after}봉, {r.elapsed_s:.1f}s"
+        )
+    return 0
+
+
+def format_verify_report(report: VerifyReport) -> str:
+    """검증 리포트를 사람이 읽는 여러 줄 텍스트로 요약한다(순수 함수, 테스트용)."""
+    lines: list[str] = ["OHLCV 무결성 검증", ""]
+    lines.append("시리즈 (봉수 · 갭 · 중복):")
+    for s in report.series:
+        span = f"{_fmt_time(s.first_ms)} ~ {_fmt_time(s.last_ms)}"
+        flags = []
+        if s.has_gaps:
+            flags.append(f"갭 {len(s.gaps)}개({s.missing}봉)")
+        if s.duplicates:
+            flags.append(f"중복 {s.duplicates}")
+        if not s.monotonic:
+            flags.append("역순!")
+        status = ", ".join(flags) if flags else "OK"
+        lines.append(f"  {s.symbol} {s.timeframe}: {s.bar_count}봉  [{span}]  {status}")
+
+    lines.append("")
+    lines.append("1m→상위TF 리샘플 정합성:")
+    if report.parity:
+        for p in report.parity:
+            status = "OK" if p.ok else f"불일치 {len(p.mismatches)}건"
+            lines.append(
+                f"  {p.symbol} {p.source_timeframe}→{p.target_timeframe}:"
+                f" {p.compared}버킷 비교  {status}"
+            )
+            for m in p.mismatches[:3]:
+                lines.append(
+                    f"      {_fmt_time(m.open_time)} {m.field}:"
+                    f" 리샘플 {m.resampled} ≠ 저장 {m.stored}"
+                )
+    else:
+        lines.append("  비교 대상 없음(1m 또는 상위TF 미보유)")
+
+    lines.append("")
+    verdict = "통과" if report.ok else "실패"
+    lines.append(f"판정: {verdict} (하드 실패 없음={report.ok}, 갭 총 {report.total_gaps}개)")
+    return "\n".join(lines)
+
+
+def cmd_verify(args: argparse.Namespace, settings: Settings) -> int:
+    """`alphablock verify` — 저장된 OHLCV의 갭·중복·상위TF 정합성 검증(WAN-44)."""
+    from data.storage import OhlcvStore
+    from data.verify import verify_all
+
+    symbols = args.symbols or settings.symbols
+    timeframes = args.timeframes or ["1m", "15m", "1h", "4h", "1d"]
+    store = OhlcvStore(settings.db_path)
+    try:
+        report = verify_all(
+            store,
+            symbols,
+            timeframes,
+            sample_buckets=args.sample_buckets,
+        )
+    finally:
+        store.close()
+    print(format_verify_report(report))
+    ok = report.strict_ok if args.strict else report.ok
+    return 0 if ok else 1
+
+
 def cmd_live(args: argparse.Namespace, settings: Settings) -> int:
     """`alphablock live` — 실시간 시그널 러너(페이퍼)."""
     from live.runner import run_signal_runner
@@ -214,6 +300,59 @@ def build_parser() -> argparse.ArgumentParser:
         help="복구 실패 시 텔레그램 경고를 보내지 않고 로그로만 남김",
     )
     p_backfill.set_defaults(func=cmd_backfill)
+
+    p_history = sub.add_parser(
+        "history",
+        help="지정 구간 대량 백필(예: 1분봉 6개월/3년) — WAN-44",
+    )
+    p_history.add_argument(
+        "--days",
+        type=int,
+        required=True,
+        help="현재로부터 몇 일 전까지 백필할지(예: 6개월=180, 3년=1095)",
+    )
+    p_history.add_argument(
+        "--symbols",
+        nargs="+",
+        default=None,
+        help="대상 심볼(기본: 설정 symbols). 예: BTC/USDT:USDT ETH/USDT:USDT",
+    )
+    p_history.add_argument(
+        "--timeframes",
+        nargs="+",
+        default=None,
+        help="대상 타임프레임(기본: 1m). 예: 1m",
+    )
+    p_history.set_defaults(func=cmd_history)
+
+    p_verify = sub.add_parser(
+        "verify",
+        help="저장된 OHLCV의 갭·중복·상위TF 정합성 검증 — WAN-44",
+    )
+    p_verify.add_argument(
+        "--symbols",
+        nargs="+",
+        default=None,
+        help="대상 심볼(기본: 설정 symbols)",
+    )
+    p_verify.add_argument(
+        "--timeframes",
+        nargs="+",
+        default=None,
+        help="검증할 타임프레임(기본: 1m 15m 1h 4h 1d)",
+    )
+    p_verify.add_argument(
+        "--sample-buckets",
+        type=int,
+        default=500,
+        help="정합성 비교에 쓸 상위TF 최근 봉 표본 수(기본 500)",
+    )
+    p_verify.add_argument(
+        "--strict",
+        action="store_true",
+        help="갭이 하나라도 있으면 실패로 처리(기본: 갭은 경고만, 중복·역순·불일치만 실패)",
+    )
+    p_verify.set_defaults(func=cmd_verify)
 
     p_live = sub.add_parser("live", help="실시간 시그널 러너(페이퍼)")
     p_live.add_argument("--once", action="store_true", help="한 번만 폴링하고 종료")
