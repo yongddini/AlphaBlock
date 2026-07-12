@@ -132,6 +132,13 @@ class Settings(BaseSettings):
     # 발효 중인 경고 상태를 남겨 재시작 시 중복/누락을 막는 상태 파일 경로.
     health_watch_state_path: str = Field(default="data/health_watch_state.json")
 
+    # 대시보드 상시 구동·자동 새로고침(WAN-48). launchd 데몬으로 상주시켜 터미널
+    # 없이 북마크(http://localhost:<port>)로 확인한다. port는 설치 스크립트가
+    # 읽어 plist에 싣고, refresh_seconds는 대시보드가 읽어 운영 상태 탭을 주기적으로
+    # 자동 갱신한다(0이면 자동 갱신 끔). 로컬(127.0.0.1) 바인딩만 하며 외부 노출은 안 한다.
+    dashboard_port: int = Field(default=8501, ge=1, le=65535)
+    dashboard_refresh_seconds: int = Field(default=60, ge=0)
+
     # 리스크 기반 포지션 사이징(WAN-26). 손절 거리에 반비례해 수량을 역산한다.
     # 백테스트·실행이 공용으로 쓰며, 기본은 켬(risk_sizing_enabled=True).
     # 개별 필드는 ALPHABLOCK_RISK_SIZING__<필드명>로 덮어쓴다.

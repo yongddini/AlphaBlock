@@ -359,9 +359,14 @@ def _render_repair(view: HealthView) -> None:
         st.error("일부 시리즈 갭 복구에 실패했습니다 — 로그/텔레그램 경고를 확인하세요.")
 
 
-def _render_health(settings: Settings) -> None:
-    if st.button("🔄 새로고침"):
-        st.rerun()
+def _render_health_body(settings: Settings) -> None:
+    # 마지막 갱신 시각(UTC). 자동 새로고침이 켜져 있으면 fragment가 주기적으로
+    # 재실행되며 이 값이 갱신돼, 화면이 실제로 최신인지 한눈에 확인할 수 있다.
+    now_local = datetime.now(tz=UTC)
+    st.caption(f"마지막 갱신: {now_local.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    if st.button("🔄 지금 새로고침"):
+        # fragment 범위만 다시 그린다(분석·백테스트 등 무거운 탭은 건드리지 않음).
+        st.rerun(scope="fragment")
 
     view = build_health_view(
         settings.db_path,
@@ -402,6 +407,21 @@ def _render_health(settings: Settings) -> None:
         st.dataframe(_events_frame(view.recent_events), use_container_width=True, hide_index=True)
     else:
         st.caption("기록된 신호가 없습니다(러너 미실행이거나 신호 미발생).")
+
+
+def _render_health(settings: Settings, *, run_every: int | None) -> None:
+    """운영 상태 탭을 자동 새로고침 fragment로 감싸 렌더한다(WAN-48).
+
+    ``run_every``(초)가 주어지면 Streamlit이 이 fragment만 그 주기로 재실행해,
+    분석·백테스트 등 무거운 탭을 다시 계산하지 않고 운영 상태(가벼운 파일·DB
+    읽기)만 최신으로 유지한다. ``None``이면 자동 새로고침을 끈다.
+    """
+
+    @st.fragment(run_every=run_every)
+    def _auto_refresh_fragment() -> None:
+        _render_health_body(settings)
+
+    _auto_refresh_fragment()
 
 
 # --- 페이퍼 성과 탭 (WAN-33) -------------------------------------------------
@@ -479,13 +499,29 @@ def main() -> None:
     st.title("AlphaBlock — 통합 트레이딩 대시보드")
 
     settings = get_settings()
+
+    # 자동 새로고침 컨트롤(WAN-48). 운영 상태 탭만 주기적으로 스스로 갱신되게 한다.
+    # 기본 주기는 ALPHABLOCK_DASHBOARD_REFRESH_SECONDS(0이면 기본 꺼짐). 토글로 끌 수 있다.
+    refresh_seconds = settings.dashboard_refresh_seconds
+    with st.sidebar:
+        st.header("자동 새로고침")
+        auto_refresh = st.toggle(
+            "운영 상태 자동 갱신",
+            value=refresh_seconds > 0,
+            help=(
+                f"켜면 운영 상태(Health) 탭이 {refresh_seconds or 60}초마다 스스로 갱신됩니다. "
+                "주기는 ALPHABLOCK_DASHBOARD_REFRESH_SECONDS로 설정합니다(0이면 기본 꺼짐)."
+            ),
+        )
+    run_every = refresh_seconds if (auto_refresh and refresh_seconds > 0) else None
+
     analysis_tab, paper_tab, health_tab = st.tabs(["분석", "페이퍼 성과", "운영 상태(Health)"])
     with analysis_tab:
         _render_analysis(settings)
     with paper_tab:
         _render_paper(settings)
     with health_tab:
-        _render_health(settings)
+        _render_health(settings, run_every=run_every)
 
 
 main()

@@ -106,3 +106,27 @@ def test_risk_sizing_nested_override() -> None:
     s = Settings.model_validate({"risk_sizing": {"risk_per_trade": 0.02, "leverage": 5.0}})
     assert s.risk_sizing.risk_per_trade == pytest.approx(0.02)
     assert s.risk_sizing.leverage == pytest.approx(5.0)
+
+
+def test_dashboard_defaults() -> None:
+    """대시보드 상시 구동·자동 새로고침(WAN-48) 기본값."""
+    s = Settings.model_validate({})
+    assert s.dashboard_port == 8501
+    assert s.dashboard_refresh_seconds == 60
+
+
+def test_dashboard_refresh_can_be_disabled() -> None:
+    """새로고침 주기 0은 자동 갱신 끔을 뜻하며 허용된다."""
+    s = Settings.model_validate({"dashboard_refresh_seconds": 0})
+    assert s.dashboard_refresh_seconds == 0
+
+
+def test_dashboard_refresh_rejects_negative() -> None:
+    with pytest.raises(ValidationError):
+        Settings.model_validate({"dashboard_refresh_seconds": -1})
+
+
+@pytest.mark.parametrize("port", [0, 70000])
+def test_dashboard_port_out_of_range_rejected(port: int) -> None:
+    with pytest.raises(ValidationError):
+        Settings.model_validate({"dashboard_port": port})

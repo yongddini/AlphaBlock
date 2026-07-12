@@ -6,9 +6,10 @@
 # 로그 파일은 남긴다(진단용). 로그까지 지우려면 logs/ 를 직접 삭제한다.
 #
 # 사용:
-#   ./scripts/uninstall-daemons.sh               # 수집기 + 러너 둘 다
+#   ./scripts/uninstall-daemons.sh               # 셋 다(수집기 + 러너 + 대시보드)
 #   ./scripts/uninstall-daemons.sh collector     # 수집기만
 #   ./scripts/uninstall-daemons.sh live          # 러너만
+#   ./scripts/uninstall-daemons.sh dashboard     # 대시보드만
 set -euo pipefail
 
 AGENTS_DIR="$HOME/Library/LaunchAgents"
@@ -30,6 +31,7 @@ case "${1:-all}" in
     all)
         uninstall_one "com.alphablock.collector"
         uninstall_one "com.alphablock.live"
+        uninstall_one "com.alphablock.dashboard"
         ;;
     collector)
         uninstall_one "com.alphablock.collector"
@@ -37,8 +39,11 @@ case "${1:-all}" in
     live)
         uninstall_one "com.alphablock.live"
         ;;
+    dashboard)
+        uninstall_one "com.alphablock.dashboard"
+        ;;
     *)
-        echo "사용법: $0 [all|collector|live]" >&2
+        echo "사용법: $0 [all|collector|live|dashboard]" >&2
         exit 2
         ;;
 esac
