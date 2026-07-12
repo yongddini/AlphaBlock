@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  AlphaBlock 대시보드 launchd 에이전트 (WAN-48).
+  scripts/install-daemons.sh 가 __PLACEHOLDER__ 를 실제 값으로 치환해 설치한다.
+  RunAtLoad=true 로 로그인 시 자동 시작, KeepAlive=true 로 크래시 시 자동 재시작.
+  --server.headless true 로 첫 실행 이메일 프롬프트를 없애고, 127.0.0.1 로만
+  바인딩해 로컬 전용(외부 노출·인증 없음, 읽기 전용)으로 상주한다.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.alphablock.dashboard</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__CAFFEINATE__</string>
+        <string>-i</string>
+        <string>__UV_BIN__</string>
+        <string>run</string>
+        <string>--</string>
+        <string>streamlit</string>
+        <string>run</string>
+        <string>dashboard/app.py</string>
+        <string>--server.port</string>
+        <string>__DASHBOARD_PORT__</string>
+        <string>--server.address</string>
+        <string>127.0.0.1</string>
+        <string>--server.headless</string>
+        <string>true</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__WORKDIR__</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>__PATH__</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- 크래시 재시작 폭주 방지: 최소 재시작 간격(초). -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>__LOG_DIR__/dashboard.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>__LOG_DIR__/dashboard.log</string>
+</dict>
+</plist>

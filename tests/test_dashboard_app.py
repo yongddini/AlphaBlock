@@ -76,6 +76,19 @@ def test_app_health_tab_renders_without_error(seeded_db_path: str) -> None:
     assert "실시간 러너" in subheaders
 
 
+def test_app_auto_refresh_toggle_and_last_updated(seeded_db_path: str) -> None:
+    """자동 새로고침(WAN-48): 사이드바 토글과 마지막 갱신 시각 캡션이 그려진다."""
+    at = AppTest.from_file("dashboard/app.py")
+    at.run(timeout=30)
+
+    assert not at.exception
+    toggle_labels = {t.label for t in at.toggle}
+    assert "운영 상태 자동 갱신" in toggle_labels
+    # Health 탭 상단에 마지막 갱신 시각(UTC)이 표시된다.
+    captions = [c.value for c in at.caption]
+    assert any(c.startswith("마지막 갱신:") for c in captions)
+
+
 def test_app_shows_warning_when_no_data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ALPHABLOCK_DB_PATH", str(tmp_path / "empty.db"))
     get_settings.cache_clear()

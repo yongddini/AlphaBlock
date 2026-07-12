@@ -79,6 +79,30 @@ uv run streamlit run dashboard/app.py
 파일 `ALPHABLOCK_LIVE_RUNTIME_STATE_PATH`(기본 `data/live_runtime_state.json`,
 커밋 금지)에서 읽는다. 실주문/`live_trading`은 건드리지 않고 페이퍼 상태만 표시한다.
 
+### 상시 구동 + 북마크 (WAN-48)
+
+매번 터미널에서 `streamlit run`을 치지 않아도 되게, 대시보드도 수집기·러너와 같은
+macOS `launchd` 데몬으로 상주시킨다. **설치는 1회**, 이후엔 브라우저 북마크만으로
+항상 최신 상태를 본다.
+
+```bash
+./scripts/install-daemons.sh dashboard   # 대시보드만 상주 등록·시작
+./scripts/install-daemons.sh             # 수집기 + 러너 + 대시보드 셋 다
+```
+
+- **북마크**: 설치 후 `http://localhost:8501` 을 북마크한다. `RunAtLoad`로 로그인 시
+  자동으로 뜨고 `KeepAlive`로 죽으면 되살아나므로, **재부팅해도** 북마크만 누르면 열린다.
+- **포트**: `ALPHABLOCK_DASHBOARD_PORT`(기본 8501). 예:
+  `ALPHABLOCK_DASHBOARD_PORT=9000 ./scripts/install-daemons.sh dashboard`.
+- **이메일 프롬프트 없음**: `--server.headless true`로 실행해 Streamlit 첫 실행 이메일
+  입력 프롬프트가 뜨지 않는다. `127.0.0.1` 로만 바인딩한다(외부 노출·인증 없음, 읽기 전용).
+- **자동 새로고침**: 운영 상태(Health) 탭이 `ALPHABLOCK_DASHBOARD_REFRESH_SECONDS`
+  (기본 60초, 0이면 끔) 주기로 **스스로 갱신**된다 — 사이드바 토글로 끄고 켤 수 있고,
+  탭 상단에 **마지막 갱신 시각**이 표시된다. 무거운 분석·백테스트 탭은 자동 갱신 대상이
+  아니며(캐시 유지), 가벼운 파일·DB 읽기인 운영 상태만 자주 갱신된다.
+- **로그·해제**: 로그는 `logs/dashboard.log`. 해제는
+  `./scripts/uninstall-daemons.sh dashboard`(로그는 남김).
+
 ## 페이퍼 트레이딩 성과 & 백테스트 대비 패리티 (WAN-33)
 
 WAN-25 페이퍼 러너가 **실제로 무슨 거래를 냈고 그게 돈이 됐는지**, 그리고 **백테스트가
@@ -376,22 +400,23 @@ Health 대시보드/`alphablock status`가 이 값으로 "프로세스가 살아
 `KeepAlive`(크래시 시 재시작), 절전 방지를 위한 `caffeinate` 래핑을 적용한다.
 
 ```bash
-./scripts/install-daemons.sh            # 수집기 + 러너 둘 다 설치·시작
+./scripts/install-daemons.sh            # 수집기 + 러너 + 대시보드 셋 다 설치·시작
 ./scripts/install-daemons.sh collector  # 수집기만
 ./scripts/install-daemons.sh live       # 러너만
+./scripts/install-daemons.sh dashboard  # 대시보드만(WAN-48, http://localhost:8501)
 
-./scripts/uninstall-daemons.sh          # 둘 다 해제(로그는 남김)
+./scripts/uninstall-daemons.sh          # 셋 다 해제(로그는 남김)
 ```
 
 - **재부팅·크래시 자동 복구**: 로그인하면 `RunAtLoad`로 다시 뜨고, 프로세스가 죽으면
   `KeepAlive`가 `ThrottleInterval`(10초) 간격으로 되살린다.
-- **로그**: 기본 `logs/collector.log`, `logs/live.log`(리포지토리 밖 위치는
-  `ALPHABLOCK_LOG_DIR`로 지정). `logs/`는 `.gitignore`에 포함된다.
+- **로그**: 기본 `logs/collector.log`, `logs/live.log`, `logs/dashboard.log`(리포지토리
+  밖 위치는 `ALPHABLOCK_LOG_DIR`로 지정). `logs/`는 `.gitignore`에 포함된다.
 
 ```bash
-launchctl list | grep alphablock                 # 등록·구동 상태
-tail -f logs/collector.log logs/live.log         # 실시간 로그
-uv run alphablock status                          # 상태 요약
+launchctl list | grep alphablock                            # 등록·구동 상태
+tail -f logs/collector.log logs/live.log logs/dashboard.log # 실시간 로그
+uv run alphablock status                                     # 상태 요약
 ```
 
 로그 파일이 무한정 커지지 않게 하려면 macOS `newsyslog`(예: `/etc/newsyslog.d/`에
