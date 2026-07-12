@@ -41,8 +41,22 @@ class SeriesBackfillResult:
     """이번 실행에서 UPSERT한 봉 수(겹침 포함, 반드시 신규는 아님)."""
     stored_after: int
     """실행 후 저장소에 존재하는 이 시리즈의 총 봉 수."""
+    first_open_ms: int | None
+    """실행 후 저장소에 존재하는 이 시리즈의 가장 오래된 open_time(없으면 None)."""
     elapsed_s: float
     """이 시리즈 백필 소요 시간(초)."""
+
+    def reached_requested_start(self, *, tolerance_bars: int = 1) -> bool:
+        """저장된 가장 오래된 봉이 요청한 창 시작(`since_ms`)에 도달했는지.
+
+        BTC 1h가 4개월에서 멈춘 사고(WAN-51)의 재발 방지용 완료 확인. 백필이 조용히
+        덜 돌면(레이트리밋·에러·중도 종료·거래소 상장일 이후) 창 시작에 못 미친다.
+        `tolerance_bars`는 창 시작 이전 상장 등 정상적인 근소 미달을 흡수한다.
+        """
+        if self.first_open_ms is None:
+            return False
+        tf_ms = timeframe_to_ms(self.timeframe)
+        return self.first_open_ms <= self.since_ms + tolerance_bars * tf_ms
 
 
 def _log_progress(
@@ -127,6 +141,7 @@ def run_history_backfill(
             )
             elapsed = monotonic() - started
             stored = store.count(symbol, timeframe)
+            first_open = store.first_open_time(symbol, timeframe)
             logger.info(
                 "백필 완료 %s %s: %d봉 처리, 저장 총 %d봉, %.1fs",
                 symbol,
@@ -135,16 +150,28 @@ def run_history_backfill(
                 stored,
                 elapsed,
             )
-            results.append(
-                SeriesBackfillResult(
-                    symbol=symbol,
-                    timeframe=timeframe,
-                    since_ms=aligned_since,
-                    bars_written=written,
-                    stored_after=stored,
-                    elapsed_s=elapsed,
-                )
+            result = SeriesBackfillResult(
+                symbol=symbol,
+                timeframe=timeframe,
+                since_ms=aligned_since,
+                bars_written=written,
+                stored_after=stored,
+                first_open_ms=first_open,
+                elapsed_s=elapsed,
             )
+            # 완료 확인: 창 시작에 도달하지 못하면 경고(WAN-51 재발 방지).
+            if not result.reached_requested_start():
+                logger.warning(
+                    "백필 미완 %s %s: 창 시작 %s 요청했으나 최오래 저장봉은 %s "
+                    "— 레이트리밋·에러·중도 종료 또는 상장일 이후 여부 확인 필요",
+                    symbol,
+                    timeframe,
+                    time.strftime("%Y-%m-%d", time.gmtime(aligned_since / 1000)),
+                    time.strftime("%Y-%m-%d", time.gmtime(first_open / 1000))
+                    if first_open is not None
+                    else "없음",
+                )
+            results.append(result)
 
     return results
 

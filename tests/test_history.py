@@ -155,6 +155,48 @@ def test_history_resume_after_interruption(store: OhlcvStore) -> None:
     assert not report.has_gaps
 
 
+def test_history_reached_requested_start_when_full(store: OhlcvStore) -> None:
+    """창 전체가 채워지면 완료 확인이 도달(True)로 판정된다(WAN-51)."""
+    now = 10 * DAY_MS
+    exchange = WindowExchange(available_from=0, available_to=now)
+    results = run_history_backfill(
+        exchange,
+        store,
+        ["BTC/USDT:USDT"],
+        ["1m"],
+        days=5,
+        now_ms=lambda: now,
+        sleeper=lambda _: None,
+    )
+    r = results[0]
+    assert r.first_open_ms == r.since_ms
+    assert r.reached_requested_start()
+
+
+def test_history_flags_incomplete_when_short(store: OhlcvStore) -> None:
+    """거래소 데이터가 창 시작 이후부터만 있으면 미완(창 시작 미도달)으로 판정된다.
+
+    BTC 1h가 4개월에서 멈춘 사고(WAN-51)와 같은, 창을 다 못 채운 상태를 잡는다.
+    """
+    now = 10 * DAY_MS
+    # 요청 창은 [now-5d, now)이지만 거래소는 now-2d 이후만 제공 → 창 시작 미도달.
+    available_from = now - 2 * DAY_MS
+    exchange = WindowExchange(available_from=available_from, available_to=now)
+    results = run_history_backfill(
+        exchange,
+        store,
+        ["BTC/USDT:USDT"],
+        ["1m"],
+        days=5,
+        now_ms=lambda: now,
+        sleeper=lambda _: None,
+    )
+    r = results[0]
+    assert r.since_ms == now - 5 * DAY_MS
+    assert r.first_open_ms == available_from
+    assert not r.reached_requested_start()
+
+
 def test_history_rejects_nonpositive_days(store: OhlcvStore) -> None:
     exchange = WindowExchange(available_from=0, available_to=DAY_MS)
     with pytest.raises(ValueError):
