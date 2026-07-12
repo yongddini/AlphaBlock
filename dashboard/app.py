@@ -27,7 +27,6 @@ from dashboard.charts import (
     ZONE_CATEGORY_LABELS,
     ZoneCategory,
     build_equity_chart,
-    build_price_chart,
     entered_zone_keys,
     filter_zones,
 )
@@ -40,6 +39,7 @@ from dashboard.health import (
     SeriesFreshness,
 )
 from dashboard.health_data import HealthView, OpenPositionView, build_health_view
+from dashboard.lightweight_chart import build_chart_html
 from dashboard.pipeline import PipelineResult, run_pipeline
 from live.runtime_state import EventRecord
 from paper.parity import build_parity_report
@@ -310,9 +310,10 @@ def _render_analysis(settings: Settings) -> None:
     chart_backtest = None if replay_ms is not None else backtest
 
     st.subheader(f"{symbol} · {timeframe}")
-    st.plotly_chart(
-        build_price_chart(chart_df, zones, chart_backtest, title=f"{symbol} {timeframe}"),
-        use_container_width=True,
+    chart_height = 700
+    st.iframe(
+        build_chart_html(chart_df, zones, chart_backtest, height=chart_height),
+        height=chart_height,
     )
 
     metrics = backtest.metrics
