@@ -12,7 +12,11 @@ import pandas as pd
 from backtest.models import BacktestConfig, PositionSide, Trade
 from backtest.sweep import timeframe_to_ms
 from backtest.synthetic import make_synthetic_ohlcv
-from backtest.zone_limit_backtest import build_result_from_trades, run_zone_limit_backtest
+from backtest.zone_limit_backtest import (
+    build_result_from_trades,
+    run_zone_limit_backtest,
+    run_zone_limit_backtest_verbose,
+)
 from strategy.models import ConfluenceParams
 
 
@@ -37,6 +41,28 @@ def test_end_to_end_runs_and_is_deterministic() -> None:
     assert [t.realized_pnl for t in result_a.trades] == [t.realized_pnl for t in result_b.trades]
     # 파이프라인이 실제로 진입을 산출한다(존에 닿는 순간 진입 동작).
     assert result_a.metrics.num_trades >= 1
+
+
+def test_verbose_returns_fill_and_penetration_stats() -> None:
+    """진단 통계: 대상 셋업·체결·관통 수를 반환하고 체결률이 정합적이다(WAN-46)."""
+    htf, one_min = _synthetic_pair()
+    params = ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime")
+    result, stats = run_zone_limit_backtest_verbose(htf, one_min, "1h", confluence_params=params)
+    assert stats.eligible >= stats.filled >= 0
+    assert 0 <= stats.penetrations <= stats.filled
+    assert stats.fill_rate is not None and 0.0 <= stats.fill_rate <= 1.0
+    # 체결 수는 최종 거래 수 이상이다(단일 포지션 시퀀싱으로 일부가 빠질 수 있으므로).
+    assert stats.filled >= result.metrics.num_trades
+
+
+def test_verbose_matches_plain_result() -> None:
+    """verbose와 기본 함수가 같은 결과를 낸다(래핑 일관성)."""
+    htf, one_min = _synthetic_pair()
+    params = ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime")
+    plain = run_zone_limit_backtest(htf, one_min, "1h", confluence_params=params)
+    verbose, _ = run_zone_limit_backtest_verbose(htf, one_min, "1h", confluence_params=params)
+    assert plain.metrics.num_trades == verbose.metrics.num_trades
+    assert [t.realized_pnl for t in plain.trades] == [t.realized_pnl for t in verbose.trades]
 
 
 def test_trades_reference_1m_substep_times() -> None:
