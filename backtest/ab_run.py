@@ -31,7 +31,10 @@ from backtest.ab_report import ABEntry, build_ab_report
 from backtest.metrics import build_metrics
 from backtest.models import BacktestConfig, BacktestResult, Trade
 from backtest.sweep import bars_per_year, evaluate
-from backtest.zone_limit_backtest import build_result_from_trades, run_zone_limit_backtest
+from backtest.zone_limit_backtest import (
+    build_result_from_trades,
+    run_zone_limit_backtest_verbose,
+)
 from strategy.models import ConfluenceParams, OrderBlockParams, OrderBlockResult
 from strategy.order_blocks import OrderBlockDetector
 
@@ -83,7 +86,7 @@ def build_ab_entries(
 
     # B안: 존-지정가 진입 + 실시간 RSI(1분봉 서브스텝). 자연히 창 안으로 한정됨.
     b_params = _with_entry_mode(confluence_params, entry_mode="zone_limit", rsi_mode="realtime")
-    b_result = run_zone_limit_backtest(
+    b_result, b_stats = run_zone_limit_backtest_verbose(
         htf_df,
         df_1m,
         timeframe,
@@ -96,7 +99,13 @@ def build_ab_entries(
     return [
         ABEntry(symbol=symbol, timeframe=timeframe, variant="A_close_closedbar", result=a_result),
         ABEntry(
-            symbol=symbol, timeframe=timeframe, variant="B_zonelimit_realtime", result=b_result
+            symbol=symbol,
+            timeframe=timeframe,
+            variant="B_zonelimit_realtime",
+            result=b_result,
+            eligible_setups=b_stats.eligible,
+            num_filled=b_stats.filled,
+            num_penetrations=b_stats.penetrations,
         ),
     ]
 

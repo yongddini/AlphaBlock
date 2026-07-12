@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import csv
 import io
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from backtest.models import BacktestResult, Trade
@@ -34,17 +35,30 @@ _COLUMNS: tuple[str, ...] = (
     "total_return",
     "max_drawdown",
     "sharpe",
+    # WAN-46 진단: 지정가 체결률·관통(낙관 편향 감사). B안에서만 채워지고 A안은 빈 칸.
+    "eligible_setups",
+    "num_filled",
+    "fill_rate",
+    "num_penetrations",
 )
 
 
 @dataclass(frozen=True)
 class ABEntry:
-    """비교 대상 한 칸: 심볼·TF·변형(A/B)과 그 백테스트 결과."""
+    """비교 대상 한 칸: 심볼·TF·변형(A/B)과 그 백테스트 결과.
+
+    `eligible_setups`·`num_filled`·`num_penetrations`는 존-지정가(B안) 진단 통계로,
+    지정가 체결률과 관통(같은 스텝 진입+손절) 감사에 쓴다. 확정봉 종가 진입(A안)에는
+    해당 개념이 없어 None이며 리포트에서 빈 칸으로 남는다(WAN-46).
+    """
 
     symbol: str
     timeframe: str
     variant: str
     result: BacktestResult
+    eligible_setups: int | None = None
+    num_filled: int | None = None
+    num_penetrations: int | None = None
 
 
 def _fmt(value: float | int | None) -> str:
@@ -54,6 +68,13 @@ def _fmt(value: float | int | None) -> str:
     if isinstance(value, float):
         return f"{round(value, 6)}"
     return str(value)
+
+
+def _fill_rate(eligible: int | None, filled: int | None) -> float | None:
+    """지정가 체결률 = filled / eligible. 대상 셋업이 없거나 미측정이면 None."""
+    if not eligible or filled is None:
+        return None
+    return filled / eligible
 
 
 def _row_from_entry(entry: ABEntry) -> dict[str, str]:
@@ -73,6 +94,10 @@ def _row_from_entry(entry: ABEntry) -> dict[str, str]:
         "total_return": _fmt(m.total_return),
         "max_drawdown": _fmt(m.max_drawdown),
         "sharpe": _fmt(m.sharpe),
+        "eligible_setups": _fmt(entry.eligible_setups),
+        "num_filled": _fmt(entry.num_filled),
+        "fill_rate": _fmt(_fill_rate(entry.eligible_setups, entry.num_filled)),
+        "num_penetrations": _fmt(entry.num_penetrations),
     }
 
 
@@ -92,6 +117,9 @@ def _aggregate_row(variant: str, entries: list[ABEntry]) -> dict[str, str]:
     gross_profit = sum(t.realized_pnl for t in wins)
     gross_loss = -sum(t.realized_pnl for t in losses)  # 양수로
     profit_factor = gross_profit / gross_loss if gross_loss > 0 else None
+    eligible = _sum_optional(e.eligible_setups for e in entries)
+    num_filled = _sum_optional(e.num_filled for e in entries)
+    penetrations = _sum_optional(e.num_penetrations for e in entries)
     return {
         "symbol": "ALL",
         "timeframe": "ALL",
@@ -107,7 +135,17 @@ def _aggregate_row(variant: str, entries: list[ABEntry]) -> dict[str, str]:
         "total_return": "",
         "max_drawdown": "",
         "sharpe": "",
+        "eligible_setups": _fmt(eligible),
+        "num_filled": _fmt(num_filled),
+        "fill_rate": _fmt(_fill_rate(eligible, num_filled)),
+        "num_penetrations": _fmt(penetrations),
     }
+
+
+def _sum_optional(values: Iterable[int | None]) -> int | None:
+    """None이 아닌 값만 합산. 전부 None이면 None(미측정)."""
+    present = [v for v in values if v is not None]
+    return sum(present) if present else None
 
 
 def build_ab_report(entries: list[ABEntry]) -> str:

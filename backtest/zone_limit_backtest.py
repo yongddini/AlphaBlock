@@ -80,6 +80,32 @@ class _Candidate:
     reason: ExitReason
     stop_price: float
     """리스크 사이징의 손절 참조가(존 원단, 무효화 경계)."""
+    penetration: bool = False
+    """진입과 손절이 **같은 1분 스텝**에서 일어났는지(관통). 낙관 편향 감사용(WAN-46).
+
+    참이면 가격이 존 근단을 지나 손절선까지 관통한 봉에서 체결됐다는 뜻으로, "좋은
+    진입가만 챙기고 손실은 피한" 결과가 아님을 드러낸다.
+    """
+
+
+@dataclass(frozen=True)
+class ZoneLimitStats:
+    """B안 파이프라인 실행 진단 통계 (WAN-46 낙관 편향 감사·지정가 체결률).
+
+    `eligible`는 탭 봉이 1분봉으로 커버돼 실제 시뮬레이션에 들어간 활성 오더블록
+    셋업 수, `filled`는 그중 지정가가 체결된 수다. `penetrations`는 체결된 셋업 중
+    같은 스텝에서 손절까지 간(관통) 수로, 단일 포지션 시퀀싱으로 최종 거래에서
+    빠진 것도 포함한 원(raw) 감사 수치다.
+    """
+
+    eligible: int = 0
+    filled: int = 0
+    penetrations: int = 0
+
+    @property
+    def fill_rate(self) -> float | None:
+        """지정가 체결률 = filled / eligible. 대상 셋업이 없으면 None."""
+        return self.filled / self.eligible if self.eligible else None
 
 
 def _entry_fill(price: float, side: PositionSide, slippage: float) -> float:
@@ -143,13 +169,41 @@ def run_zone_limit_backtest(
     `htf_df`는 상위TF OHLCV(오더블록 탐지·지표·시딩용, 전체 히스토리), `df_1m`은 봉
     내부 재구성용 1분봉이다. `order_block_result`를 주면 오더블록 탐지를 재실행하지
     않고 재사용한다(A/B가 동일 오더블록으로 비교되도록). 반환값은 A안과 같은
-    `BacktestResult`라 `backtest.ab_report`가 그대로 소비한다.
+    `BacktestResult`라 `backtest.ab_report`가 그대로 소비한다. 진단 통계(체결률·관통)가
+    필요하면 `run_zone_limit_backtest_verbose`를 쓴다.
+    """
+    result, _ = run_zone_limit_backtest_verbose(
+        htf_df,
+        df_1m,
+        timeframe,
+        confluence_params=confluence_params,
+        order_block_params=order_block_params,
+        backtest_config=backtest_config,
+        order_block_result=order_block_result,
+    )
+    return result
+
+
+def run_zone_limit_backtest_verbose(
+    htf_df: pd.DataFrame,
+    df_1m: pd.DataFrame,
+    timeframe: str,
+    *,
+    confluence_params: ConfluenceParams | None = None,
+    order_block_params: OrderBlockParams | None = None,
+    backtest_config: BacktestConfig | None = None,
+    order_block_result: OrderBlockResult | None = None,
+) -> tuple[BacktestResult, ZoneLimitStats]:
+    """`run_zone_limit_backtest`와 동일하되 진단 통계도 함께 반환한다(WAN-46).
+
+    반환 통계 `ZoneLimitStats`는 지정가 체결률(체결/대상)과 관통(같은 스텝 진입+손절)
+    건수를 담아 낙관 편향 감사에 쓴다.
     """
     params = confluence_params or ConfluenceParams()
     cfg = backtest_config or BacktestConfig()
     frame = _prepare_htf(htf_df)
     if len(frame) == 0:
-        return _empty_result(cfg)
+        return _empty_result(cfg), ZoneLimitStats()
 
     htf_ms = timeframe_to_ms(timeframe)
     times = [int(t) for t in frame["open_time"].astype("int64").tolist()]
@@ -161,6 +215,9 @@ def run_zone_limit_backtest(
     substep_times = [s.time for s in substeps]
 
     candidates: list[_Candidate] = []
+    eligible = 0
+    filled = 0
+    penetrations = 0
     for signal in ob_result.signals:
         if signal.status != "active":
             continue
@@ -184,6 +241,7 @@ def run_zone_limit_backtest(
         if setup_substeps[0].htf_bar_time != tap_htf:
             continue  # 탭 봉에 1분봉 커버 없음 → 평가 제외.
 
+        eligible += 1
         limit_price = params.zone_limit_price(ob)
         stop_price = ob.bottom if is_long else ob.top
         tp_price = _take_profit_price(is_long, limit_price, _line_snapshot(params, htf_df, pos))
@@ -206,12 +264,18 @@ def run_zone_limit_backtest(
         if not outcome.filled or outcome.entry_time is None or outcome.entry_price is None:
             continue
 
+        filled += 1
+        penetration = False
         if outcome.status is ZoneLimitStatus.FILLED_EXITED:
             assert outcome.exit_time is not None and outcome.exit_price is not None
             exit_time, exit_price = outcome.exit_time, outcome.exit_price
             reason = (
                 _EXIT_REASON[outcome.exit_reason] if outcome.exit_reason else ExitReason.STOP_LOSS
             )
+            # 관통: 같은 1분 스텝에서 진입 + 손절(낙관 편향 감사, WAN-46).
+            if reason is ExitReason.STOP_LOSS and exit_time == outcome.entry_time:
+                penetration = True
+                penetrations += 1
         else:
             # 데이터 종료까지 보유 → 마지막 1분봉 종가로 강제 청산.
             exit_time, exit_price = setup_substeps[-1].time, setup_substeps[-1].close
@@ -225,11 +289,13 @@ def run_zone_limit_backtest(
                 exit_price=exit_price,
                 reason=reason,
                 stop_price=stop_price,
+                penetration=penetration,
             )
         )
 
     trades = _sequence_and_cost(candidates, cfg)
-    return build_result_from_trades(trades, cfg, timeframe)
+    stats = ZoneLimitStats(eligible=eligible, filled=filled, penetrations=penetrations)
+    return build_result_from_trades(trades, cfg, timeframe), stats
 
 
 def _seed_rsi(

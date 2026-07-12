@@ -92,6 +92,9 @@ def test_pierce_same_step_entry_and_stop_is_a_loss() -> None:
     assert out.entry_price == _LIMIT  # 좋은 진입가는 인정하되
     assert out.exit_price == _STOP  # 같은 스텝에서 손절로 청산
     assert out.exit_reason is SignalExitReason.STOP_LOSS
+    # 관통은 진입·청산이 같은 스텝(시각)이라는 신호로 드러난다 — WAN-46 감사 카운터가
+    # 이 조건(entry_time == exit_time & STOP_LOSS)으로 관통 건수를 센다.
+    assert out.entry_time == out.exit_time
 
 
 def test_stop_precedes_take_profit_in_same_step() -> None:
