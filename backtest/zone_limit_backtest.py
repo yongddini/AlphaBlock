@@ -208,9 +208,42 @@ def run_zone_limit_backtest_verbose(
             "동일 비율의 자본을 쓰므로 성과가 리스크 정규화되지 않습니다(WAN-65).",
             cfg.position_fraction * 100.0,
         )
+    candidates, stats = build_zone_limit_candidates(
+        htf_df,
+        df_1m,
+        timeframe,
+        params=params,
+        cfg=cfg,
+        order_block_params=order_block_params,
+        order_block_result=order_block_result,
+    )
+    trades = _sequence_and_cost(candidates, cfg)
+    return build_result_from_trades(trades, cfg, timeframe), stats
+
+
+def build_zone_limit_candidates(
+    htf_df: pd.DataFrame,
+    df_1m: pd.DataFrame,
+    timeframe: str,
+    *,
+    params: ConfluenceParams,
+    cfg: BacktestConfig,
+    order_block_params: OrderBlockParams | None = None,
+    order_block_result: OrderBlockResult | None = None,
+    rsi_oversold: float | None = None,
+    rsi_overbought: float | None = None,
+) -> tuple[list[_Candidate], ZoneLimitStats]:
+    """B안 셋업 순회 → 1분 서브스텝 시뮬레이션까지(비용 반영 전 원가 후보 목록).
+
+    `run_zone_limit_backtest_verbose`의 핵심 루프를 재사용 가능하게 뺀 것이다.
+    `rsi_oversold`/`rsi_overbought`를 지정하면 `params`의 실시간 RSI 게이트 값을
+    덮어쓴다 — 오더블록 존·손절·익절·비용·1분 서브스텝은 동일하게 두고 RSI 진입
+    조건만 무력화(예: `rsi_oversold=100, rsi_overbought=0`은 RSI가 유효하기만 하면
+    항상 통과)한 "무작위 대조군" 풀을 만들 때 쓴다(WAN-70).
+    """
     frame = _prepare_htf(htf_df)
     if len(frame) == 0:
-        return _empty_result(cfg), ZoneLimitStats()
+        return [], ZoneLimitStats()
 
     htf_ms = timeframe_to_ms(timeframe)
     times = [int(t) for t in frame["open_time"].astype("int64").tolist()]
@@ -225,6 +258,9 @@ def run_zone_limit_backtest_verbose(
         dev_length = params.long_deviation_gate_ema_length
         dev_frame = emas(htf_df, lengths=(dev_length,), source=params.source)
         deviation_ema = dev_frame[f"ema_{dev_length}"]
+
+    effective_oversold = params.rsi_oversold if rsi_oversold is None else rsi_oversold
+    effective_overbought = params.rsi_overbought if rsi_overbought is None else rsi_overbought
 
     candidates: list[_Candidate] = []
     eligible = 0
@@ -280,8 +316,8 @@ def run_zone_limit_backtest_verbose(
             stop_price=stop_price,
             substeps=setup_substeps,
             rsi_state=rsi_state,
-            rsi_oversold=params.rsi_oversold,
-            rsi_overbought=params.rsi_overbought,
+            rsi_oversold=effective_oversold,
+            rsi_overbought=effective_overbought,
             take_profit_price=tp_price if params.use_line_take_profit else None,
             limit_valid_bars=params.limit_valid_bars,
             invalidation_time=ob.break_time if params.use_order_block_stop else None,
@@ -320,9 +356,8 @@ def run_zone_limit_backtest_verbose(
             )
         )
 
-    trades = _sequence_and_cost(candidates, cfg)
     stats = ZoneLimitStats(eligible=eligible, filled=filled, penetrations=penetrations)
-    return build_result_from_trades(trades, cfg, timeframe), stats
+    return candidates, stats
 
 
 def _seed_rsi(
