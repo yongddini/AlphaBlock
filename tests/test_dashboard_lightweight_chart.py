@@ -235,6 +235,59 @@ def test_exit_marker_labels_touched_ema_line_and_pnl() -> None:
     assert "%" in text
 
 
+def test_default_theme_is_dark() -> None:
+    payload = _payload(build_chart_html(_df(5), []))
+
+    theme = payload["theme"]
+    assert isinstance(theme, dict)
+    assert theme["background"] == "#131722"
+    assert theme["textColor"] == "#d1d4dc"
+    # RSI/격자/범례 색도 다크로 함께 온다 — 흰 배경이 남는 영역이 없어야 한다.
+    assert payload["rsiColor"] == "#b39ddb"
+    assert "70, 74, 86" in theme["gridColor"]
+    assert "30, 34, 45" in theme["legendBg"]
+
+
+def test_light_theme_overrides_all_surfaces() -> None:
+    payload = _payload(build_chart_html(_df(5), [], theme="light"))
+
+    theme = payload["theme"]
+    assert isinstance(theme, dict)
+    assert theme["background"] == "#ffffff"
+    assert theme["textColor"] == "#333333"
+    assert payload["rsiColor"] == "#7e57c2"
+    assert theme["legendText"] == "#333333"
+
+
+def test_zone_fill_follows_theme() -> None:
+    df = _df(10)
+    active = _order_block(breaker=False)
+
+    dark_box = _payload(build_chart_html(df, [active]))["boxes"][0]  # type: ignore[index]
+    light_box = _payload(build_chart_html(df, [active], theme="light"))["boxes"][0]  # type: ignore[index]
+
+    assert dark_box["fill"] != light_box["fill"]
+    assert light_box["fill"] == "rgba(38, 166, 154, 0.20)"
+
+
+def test_markers_follow_theme() -> None:
+    df = _df(30)
+    signal = OrderBlockSignal(
+        direction=OrderBlockDirection.BULLISH,
+        trigger_time=20 * _STEP,
+        price=100.0,
+        order_block=_order_block(),
+        status="active",
+    )
+    backtest = run_backtest(df, [signal], BacktestConfig(take_profit_pct=0.5))
+
+    dark_entry = _payload(build_chart_html(df, [], backtest))["markers"][0]  # type: ignore[index]
+    light_entry = _payload(build_chart_html(df, [], backtest, theme="light"))["markers"][0]  # type: ignore[index]
+
+    assert dark_entry["color"] == "#42a5f5"
+    assert light_entry["color"] == "#1e88e5"
+
+
 def test_exit_marker_labels_stop_loss_as_order_block_invalidation() -> None:
     df = _df(30)
     ob = _order_block(top=95.0, bottom=90.0)

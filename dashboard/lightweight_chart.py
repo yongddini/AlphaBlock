@@ -64,6 +64,7 @@ import json
 import math
 import uuid
 from collections.abc import Sequence
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
@@ -82,15 +83,109 @@ from strategy.models import (
     SignalExitReason,
 )
 
+#: 캔들 몸통(강세/약세) 색. 트레이딩뷰 기본값이라 밝은/어두운 배경 양쪽에서 잘 보여
+#: 테마와 무관하게 공유한다.
 _BULL_COLOR = "#26a69a"
 _BEAR_COLOR = "#ef5350"
-_BULL_ZONE_LINE = "rgba(38, 166, 154, 0.9)"
-_BEAR_ZONE_LINE = "rgba(239, 83, 80, 0.9)"
-_BULL_ZONE_FILL = "rgba(38, 166, 154, 0.20)"
-_BEAR_ZONE_FILL = "rgba(239, 83, 80, 0.20)"
-#: breaker(무효화)로 전환됐던 존은 옅게 칠해 "깨졌던 것"임을 구분한다.
-_BULL_ZONE_FILL_FADED = "rgba(38, 166, 154, 0.09)"
-_BEAR_ZONE_FILL_FADED = "rgba(239, 83, 80, 0.09)"
+
+
+@dataclass(frozen=True)
+class ChartTheme:
+    """차트 색 팔레트 한 벌(WAN-55).
+
+    배경·격자·글자·범례·오더블록 존·RSI·진입/청산 마커 색을 밝은/어두운 배경 각각에
+    맞춰 뽑아 둔 것이다. 값을 상수에 흩뿌리지 않고 이 객체 하나로 모아, 렌더 함수들이
+    테마만 바꿔 끼우면 되도록 한다. 다크 값은 트레이딩뷰 기본 다크에 준한다.
+    """
+
+    name: str
+    background: str
+    text_color: str
+    grid_color: str
+    legend_bg: str
+    legend_text: str
+    bull_zone_line: str
+    bear_zone_line: str
+    bull_zone_fill: str
+    bear_zone_fill: str
+    #: breaker(무효화)로 전환됐던 존은 옅게 칠해 "깨졌던 것"임을 구분한다.
+    bull_zone_fill_faded: str
+    bear_zone_fill_faded: str
+    rsi_line: str
+    rsi_guide: str
+    entry_marker: str
+    exit_take_profit: str
+    exit_stop_loss: str
+    exit_end_of_data: str
+    exit_default: str
+
+    def exit_marker_colors(self) -> dict[ExitReason, str]:
+        return {
+            ExitReason.TAKE_PROFIT: self.exit_take_profit,
+            ExitReason.PARTIAL_TAKE_PROFIT: self.exit_take_profit,
+            ExitReason.STOP_LOSS: self.exit_stop_loss,
+            ExitReason.END_OF_DATA: self.exit_end_of_data,
+        }
+
+
+_LIGHT_THEME = ChartTheme(
+    name="light",
+    background="#ffffff",
+    text_color="#333333",
+    grid_color="rgba(220, 220, 220, 0.5)",
+    legend_bg="rgba(255, 255, 255, 0.85)",
+    legend_text="#333333",
+    bull_zone_line="rgba(38, 166, 154, 0.9)",
+    bear_zone_line="rgba(239, 83, 80, 0.9)",
+    bull_zone_fill="rgba(38, 166, 154, 0.20)",
+    bear_zone_fill="rgba(239, 83, 80, 0.20)",
+    bull_zone_fill_faded="rgba(38, 166, 154, 0.09)",
+    bear_zone_fill_faded="rgba(239, 83, 80, 0.09)",
+    rsi_line="#7e57c2",
+    rsi_guide="rgba(120, 120, 120, 0.55)",
+    entry_marker="#1e88e5",
+    exit_take_profit="#2e7d32",
+    exit_stop_loss="#c62828",
+    exit_end_of_data="#616161",
+    exit_default="#6d4c41",
+)
+
+#: 다크 테마: 트레이딩뷰 기본 다크에 준한다(배경 #131722, 글자 #d1d4dc, 격자
+#: rgba(70,74,86,0.4)). 밝은 테마에서 고른 진한 색(진입 파랑·청산 초록/빨강/회색·RSI
+#: 보라)은 어두운 배경에서 묻혀, 명도를 높인 값으로 분리한다. 존 채움은 어두운
+#: 배경에서 더 묻히므로 알파를 약간 올린다.
+_DARK_THEME = ChartTheme(
+    name="dark",
+    background="#131722",
+    text_color="#d1d4dc",
+    grid_color="rgba(70, 74, 86, 0.4)",
+    legend_bg="rgba(30, 34, 45, 0.85)",
+    legend_text="#d1d4dc",
+    bull_zone_line="rgba(38, 166, 154, 0.9)",
+    bear_zone_line="rgba(239, 83, 80, 0.9)",
+    bull_zone_fill="rgba(38, 166, 154, 0.22)",
+    bear_zone_fill="rgba(239, 83, 80, 0.22)",
+    bull_zone_fill_faded="rgba(38, 166, 154, 0.12)",
+    bear_zone_fill_faded="rgba(239, 83, 80, 0.12)",
+    rsi_line="#b39ddb",
+    rsi_guide="rgba(150, 150, 150, 0.5)",
+    entry_marker="#42a5f5",
+    exit_take_profit="#66bb6a",
+    exit_stop_loss="#ef5350",
+    exit_end_of_data="#9e9e9e",
+    exit_default="#a1887f",
+)
+
+_THEMES: dict[str, ChartTheme] = {"light": _LIGHT_THEME, "dark": _DARK_THEME}
+
+#: 기본 테마는 다크다(사용자의 실제 트레이딩뷰 사용 환경 — WAN-55).
+DEFAULT_THEME = "dark"
+
+
+def resolve_theme(name: str | None) -> ChartTheme:
+    """테마 이름(`"light"`/`"dark"`)을 팔레트로 바꾼다. 미상이면 기본(다크)."""
+    return _THEMES.get(name or DEFAULT_THEME, _DARK_THEME)
+
 
 #: 초기(첫 렌더) 캔버스에 그릴 봉 수. 완료 기준("2초 이내 초기 렌더")을 만족시키는
 #: 상한. 좌측 끝으로 스크롤하면 이 크기만큼 청크가 더 붙는다(WAN-54).
@@ -100,8 +195,6 @@ _RSI_LENGTH = 14
 _RSI_OVERBOUGHT = 70.0
 _RSI_MIDLINE = 50.0
 _RSI_OVERSOLD = 30.0
-_RSI_LINE_COLOR = "#7e57c2"
-_RSI_GUIDE_COLOR = "rgba(120, 120, 120, 0.55)"
 #: 캔들:RSI 패인 높이 비율 ≈ 3:1.
 _RSI_PANE_HEIGHT_RATIO = 0.25
 
@@ -121,14 +214,6 @@ _EMA_LINE_PALETTE: tuple[str, ...] = (
     "#7cb342",  # olive green
 )
 _VWMA_LINE_COLOR = "#d81b60"  # magenta — VWMA는 항상 이 색으로 고정해 EMA들과 구분.
-
-_EXIT_MARKER_COLORS: dict[ExitReason, str] = {
-    ExitReason.TAKE_PROFIT: "#2e7d32",
-    ExitReason.PARTIAL_TAKE_PROFIT: "#2e7d32",
-    ExitReason.STOP_LOSS: "#c62828",
-    ExitReason.END_OF_DATA: "#616161",
-}
-_EXIT_MARKER_DEFAULT_COLOR = "#6d4c41"
 
 _STATIC_DIR = Path(__file__).parent / "static"
 _LIBRARY_JS_PATH = _STATIC_DIR / "lightweight-charts.standalone.production.js"
@@ -153,7 +238,9 @@ def _zone_span_end(ob: OrderBlock, last_bar_ms: int) -> int:
     return last_bar_ms
 
 
-def _zone_boxes(order_blocks: Sequence[OrderBlock], last_bar_ms: int) -> list[dict[str, object]]:
+def _zone_boxes(
+    order_blocks: Sequence[OrderBlock], last_bar_ms: int, theme: ChartTheme
+) -> list[dict[str, object]]:
     """존마다 `BaselineSeries` 두 점 + 스타일 정보를 담은 dict를 만든다."""
     boxes: list[dict[str, object]] = []
     for ob in order_blocks:
@@ -162,11 +249,11 @@ def _zone_boxes(order_blocks: Sequence[OrderBlock], last_bar_ms: int) -> list[di
         start = ob.start_time
         end = max(_zone_span_end(ob, last_bar_ms), start)
         if is_bull:
-            fill = _BULL_ZONE_FILL_FADED if faded else _BULL_ZONE_FILL
-            line = _BULL_ZONE_LINE
+            fill = theme.bull_zone_fill_faded if faded else theme.bull_zone_fill
+            line = theme.bull_zone_line
         else:
-            fill = _BEAR_ZONE_FILL_FADED if faded else _BEAR_ZONE_FILL
-            line = _BEAR_ZONE_LINE
+            fill = theme.bear_zone_fill_faded if faded else theme.bear_zone_fill
+            line = theme.bear_zone_line
         boxes.append(
             {
                 "start": start // 1000,
@@ -272,9 +359,11 @@ def _entry_exit_markers(
     rsi_by_time: dict[int, float],
     signals: Sequence[OrderBlockSignal],
     tp_lines_by_time: dict[str, dict[int, float]],
+    theme: ChartTheme,
 ) -> list[dict[str, object]]:
     """진입/청산 마커. 진입 마커는 방향·RSI를, 청산 마커는 사유·닿은 선·손익%·R을 담는다."""
     signal_by_entry = _signals_by_trigger_time(signals)
+    exit_colors = theme.exit_marker_colors()
     markers: list[dict[str, object]] = []
     for trade in backtest.trades:
         is_long = trade.side is PositionSide.LONG
@@ -284,7 +373,7 @@ def _entry_exit_markers(
             {
                 "time": trade.entry_time // 1000,
                 "position": "belowBar" if is_long else "aboveBar",
-                "color": "#1e88e5",
+                "color": theme.entry_marker,
                 "shape": "arrowUp" if is_long else "arrowDown",
                 "text": f"{'롱' if is_long else '숏'} RSI{rsi_text}",
             }
@@ -298,7 +387,7 @@ def _entry_exit_markers(
                 {
                     "time": fill.time // 1000,
                     "position": "aboveBar" if is_long else "belowBar",
-                    "color": _EXIT_MARKER_COLORS.get(fill.reason, _EXIT_MARKER_DEFAULT_COLOR),
+                    "color": exit_colors.get(fill.reason, theme.exit_default),
                     "shape": "circle",
                     "text": text,
                 }
@@ -319,12 +408,13 @@ _TEMPLATE = """
     return;
   }
 
+  const theme = payload.theme;
   const chart = LightweightCharts.createChart(container, {
     autoSize: true,
-    layout: { background: { type: "solid", color: "#ffffff" }, textColor: "#333333" },
+    layout: { background: { type: "solid", color: theme.background }, textColor: theme.textColor },
     grid: {
-      vertLines: { color: "rgba(220,220,220,0.5)" },
-      horzLines: { color: "rgba(220,220,220,0.5)" },
+      vertLines: { color: theme.gridColor },
+      horzLines: { color: theme.gridColor },
     },
     rightPriceScale: { borderVisible: false },
     timeScale: { borderVisible: false, timeVisible: true, secondsVisible: false },
@@ -415,9 +505,9 @@ _TEMPLATE = """
   if (payload.lines && payload.lines.length) {
     const legend = document.createElement("div");
     legend.style.cssText =
-      "position:absolute;top:8px;left:8px;z-index:5;background:rgba(255,255,255,0.85);" +
+      "position:absolute;top:8px;left:8px;z-index:5;background:" + theme.legendBg + ";" +
       "padding:4px 8px;border-radius:4px;font:11px -apple-system,sans-serif;" +
-      "line-height:1.6;pointer-events:none;color:#333;";
+      "line-height:1.6;pointer-events:none;color:" + theme.legendText + ";";
     payload.lines.forEach(function (line) {
       const item = document.createElement("div");
       item.innerHTML =
@@ -527,6 +617,7 @@ def build_chart_html(
     *,
     conf_params: ConfluenceParams | None = None,
     visible_lines: frozenset[str] | None = None,
+    theme: str = DEFAULT_THEME,
     height: int = 700,
     initial_bars: int = _INITIAL_BARS,
 ) -> str:
@@ -540,7 +631,11 @@ def build_chart_html(
     (`visible_lines`로 표시할 키만 필터, `None`이면 전부), `backtest`가 있으면 청산
     마커에 사유(익절/손절)·닿은 선·손익%·R 배수를 담는다. `signals`는 각 거래를 발생시킨
     시그널(오더블록·계획 청산)을 역추적하는 데 쓰인다(WAN-59 후속).
+
+    `theme`(`"light"`/`"dark"`, 기본 다크)는 배경·격자·존·마커·RSI 색을 결정한다 —
+    Streamlit 테마에 맞춰 호출부에서 넘긴다(WAN-55).
     """
+    chart_theme = resolve_theme(theme)
     frame = df.sort_values("open_time").reset_index(drop=True)
     if frame.empty:
         return '<div style="padding:2rem;color:#888;">표시할 데이터가 없습니다.</div>'
@@ -595,9 +690,9 @@ def build_chart_html(
             {"key": key, "label": _line_label(key), "color": color, "points": points}
         )
 
-    boxes = _zone_boxes(order_blocks, last_bar_ms)
+    boxes = _zone_boxes(order_blocks, last_bar_ms, chart_theme)
     markers = (
-        _entry_exit_markers(backtest, rsi_by_time, signals, tp_lines_by_time)
+        _entry_exit_markers(backtest, rsi_by_time, signals, tp_lines_by_time, chart_theme)
         if backtest is not None
         else []
     )
@@ -610,8 +705,15 @@ def build_chart_html(
         "lines": lines_payload,
         "initialBars": min(initial_bars, len(candles)),
         "priceColors": {"up": _BULL_COLOR, "down": _BEAR_COLOR},
-        "rsiColor": _RSI_LINE_COLOR,
-        "guideColor": _RSI_GUIDE_COLOR,
+        "rsiColor": chart_theme.rsi_line,
+        "guideColor": chart_theme.rsi_guide,
+        "theme": {
+            "background": chart_theme.background,
+            "textColor": chart_theme.text_color,
+            "gridColor": chart_theme.grid_color,
+            "legendBg": chart_theme.legend_bg,
+            "legendText": chart_theme.legend_text,
+        },
         "height": height,
     }
     container_id = f"lwc-{uuid.uuid4().hex}"

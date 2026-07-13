@@ -117,3 +117,16 @@ def test_build_equity_chart_has_one_point_per_equity_curve_entry() -> None:
 
     assert len(fig.data) == 1
     assert len(fig.data[0].x) == len(backtest.equity_curve)
+
+
+def test_build_equity_chart_theme_selects_template() -> None:
+    backtest = run_backtest(_df(5), [])
+
+    dark = build_equity_chart(backtest)  # 기본 다크
+    light = build_equity_chart(backtest, theme="light")
+
+    assert dark.data[0].line.color == "#42a5f5"
+    assert light.data[0].line.color == "#1e88e5"
+    # 배경은 투명이라 Streamlit 테마와 섞인다.
+    assert dark.layout.paper_bgcolor == "rgba(0,0,0,0)"
+    assert light.layout.paper_bgcolor == "rgba(0,0,0,0)"
