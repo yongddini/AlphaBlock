@@ -580,3 +580,167 @@ def test_display_ema_lengths_rejects_duplicates_and_nonpositive() -> None:
         ConfluenceParams(display_ema_lengths=(20, 20))
     with pytest.raises(ValueError, match="display_ema_lengths"):
         ConfluenceParams(display_ema_lengths=(0, 60))
+
+
+# ------------------------------------------------- WAN-68 진입 근거 게이트 (min_rr·이격도·숏 존폐)
+
+
+def test_wan68_gate_defaults_preserve_current_behavior() -> None:
+    """새 게이트 3종은 모두 기본값이 꺼짐(또는 현행 동작)이라 기존 백테스트가 불변이다."""
+    params = ConfluenceParams()
+    assert params.min_rr is None
+    assert params.long_max_deviation is None
+    assert params.long_deviation_gate_ema_length == 240
+    assert params.short_enabled is True
+
+
+def test_min_rr_gate_rejects_low_reward_to_risk_ratio() -> None:
+    passes = ConfluenceStrategy._passes_min_rr
+    ob = _order_block(_BULL, top=200.0, bottom=108.0)  # risk = 128 - 108 = 20
+    lines = {"ema_60": 129.5}  # reward = 129.5 - 128 = 1.5 -> rr = 0.075
+    assert passes(1, 128.0, ob, lines, min_rr=1.0) is False
+
+
+def test_min_rr_gate_accepts_high_reward_to_risk_ratio() -> None:
+    passes = ConfluenceStrategy._passes_min_rr
+    ob = _order_block(_BULL, top=200.0, bottom=127.0)  # risk = 128 - 127 = 1
+    lines = {"ema_60": 129.5}  # reward = 1.5 -> rr = 1.5
+    assert passes(1, 128.0, ob, lines, min_rr=1.0) is True
+
+
+def test_min_rr_gate_treats_missing_target_as_zero_reward() -> None:
+    passes = ConfluenceStrategy._passes_min_rr
+    ob = _order_block(_BULL, top=200.0, bottom=120.0)
+    assert passes(1, 128.0, ob, lines={}, min_rr=0.01) is False
+
+
+def test_min_rr_gate_works_for_short_direction() -> None:
+    passes = ConfluenceStrategy._passes_min_rr
+    ob = _order_block(_BEAR, top=110.0, bottom=0.0)  # risk = 110 - 100 = 10
+    lines = {"ema_60": 80.0}  # reward = 100 - 80 = 20 -> rr = 2.0
+    assert passes(-1, 100.0, ob, lines, min_rr=1.5) is True
+    assert passes(-1, 100.0, ob, lines, min_rr=3.0) is False
+
+
+def test_min_rr_gate_rejects_when_risk_distance_not_positive() -> None:
+    passes = ConfluenceStrategy._passes_min_rr
+    # 오더블록 경계가 진입가보다 유리한 쪽(비정상 입력) -> risk <= 0 -> 항상 기각.
+    ob = _order_block(_BULL, top=200.0, bottom=140.0)
+    assert passes(1, 128.0, ob, lines={"ema_60": 500.0}, min_rr=0.01) is False
+
+
+def test_min_rr_gate_end_to_end_blocks_and_allows_entry() -> None:
+    """`run()`을 통해 min_rr 게이트가 실제로 확정 진입을 기각/허용하는지 확인한다."""
+    closes = [200.0 - i * 3.0 for i in range(25)]  # 단조 하락 -> RSI 과매도, pos=24
+    df = _df(closes)
+    pos = 24
+    entry_price = closes[pos]  # 128.0
+    # tp_vwma_length=2 -> 진입 스냅샷 vwma = (close[23]+close[24])/2 = 129.5 (진입가 너머 1.5).
+    base = ConfluenceParams(
+        use_line_take_profit=True,
+        tp_ema_lengths=(),
+        tp_vwma_length=2,
+        use_order_block_stop=False,
+    )
+
+    tight_ob = _order_block(_BULL, bottom=entry_price - 20.0)  # risk=20 -> rr=1.5/20 낮음
+    blocked = ConfluenceStrategy(base.model_copy(update={"min_rr": 1.0})).run(
+        df, OrderBlockResult(order_blocks=[], signals=[_signal(_BULL, pos, entry_price, tight_ob)])
+    )
+    assert blocked.entries[0].confirmed is False
+
+    close_ob = _order_block(_BULL, bottom=entry_price - 1.0)  # risk=1 -> rr=1.5/1 충분
+    allowed = ConfluenceStrategy(base.model_copy(update={"min_rr": 1.0})).run(
+        df, OrderBlockResult(order_blocks=[], signals=[_signal(_BULL, pos, entry_price, close_ob)])
+    )
+    assert allowed.entries[0].confirmed is True
+
+    # 게이트가 꺼져 있으면(min_rr=None) risk가 커도 그대로 확정(현행 동작 보존).
+    unblocked = ConfluenceStrategy(base).run(
+        df, OrderBlockResult(order_blocks=[], signals=[_signal(_BULL, pos, entry_price, tight_ob)])
+    )
+    assert unblocked.entries[0].confirmed is True
+
+
+def test_deviation_gate_passes_when_sufficiently_below_ema() -> None:
+    passes = ConfluenceStrategy._passes_deviation_gate
+    assert passes(0, closes=[90.0], ema_vals=[100.0], threshold=-0.05) is True
+
+
+def test_deviation_gate_rejects_when_not_far_enough_below() -> None:
+    passes = ConfluenceStrategy._passes_deviation_gate
+    assert passes(0, closes=[98.0], ema_vals=[100.0], threshold=-0.05) is False
+
+
+def test_deviation_gate_rejects_on_nan_ema() -> None:
+    passes = ConfluenceStrategy._passes_deviation_gate
+    assert passes(0, closes=[90.0], ema_vals=[float("nan")], threshold=-0.05) is False
+
+
+def test_deviation_gate_end_to_end_blocks_and_allows_long_entry() -> None:
+    """`run()`을 통해 롱 이격도 게이트가 실제로 동작하는지 확인한다(EMA 5, 하락 추세)."""
+    closes = [200.0 - i * 3.0 for i in range(25)]  # 단조 하락 -> RSI 과매도, 종가<EMA5
+    df = _df(closes)
+    pos = 24
+    signals = [_signal(_BULL, pos, closes[pos])]
+    base = ConfluenceParams(
+        use_line_take_profit=False,
+        use_order_block_stop=False,
+        long_deviation_gate_ema_length=5,
+    )
+
+    lenient = ConfluenceStrategy(base.model_copy(update={"long_max_deviation": -0.005})).run(
+        df, OrderBlockResult(order_blocks=[], signals=signals)
+    )
+    assert lenient.entries[0].confirmed is True
+
+    strict = ConfluenceStrategy(base.model_copy(update={"long_max_deviation": -0.5})).run(
+        df, OrderBlockResult(order_blocks=[], signals=signals)
+    )
+    assert strict.entries[0].confirmed is False
+
+    # 게이트가 꺼져 있으면(long_max_deviation=None) 현행 동작 보존.
+    off = ConfluenceStrategy(base).run(df, OrderBlockResult(order_blocks=[], signals=signals))
+    assert off.entries[0].confirmed is True
+
+
+def test_deviation_gate_does_not_affect_short_entries() -> None:
+    closes = [100.0 + i * 3.0 for i in range(25)]  # 상승 -> RSI 과매수, 숏 신호
+    df = _df(closes)
+    pos = 24
+    params = ConfluenceParams(
+        use_line_take_profit=False,
+        use_order_block_stop=False,
+        long_deviation_gate_ema_length=5,
+        long_max_deviation=-0.5,  # 매우 엄격해도 숏에는 적용되지 않는다.
+    )
+    result = ConfluenceStrategy(params).run(
+        df, OrderBlockResult(order_blocks=[], signals=[_signal(_BEAR, pos, closes[pos])])
+    )
+    assert result.entries[0].confirmed is True
+
+
+def test_short_enabled_false_rejects_short_even_when_rsi_overbought() -> None:
+    closes = [100.0 + i * 3.0 for i in range(25)]  # 상승 -> RSI 과매수 -> 숏 조건 충족
+    df = _df(closes)
+    pos = 24
+    params = ConfluenceParams(
+        use_line_take_profit=False, use_order_block_stop=False, short_enabled=False
+    )
+    result = ConfluenceStrategy(params).run(
+        df, OrderBlockResult(order_blocks=[], signals=[_signal(_BEAR, pos, closes[pos])])
+    )
+    assert result.entries[0].confirmed is False
+
+
+def test_short_enabled_false_does_not_affect_long_entries() -> None:
+    closes = [200.0 - i * 3.0 for i in range(25)]  # 하락 -> RSI 과매도 -> 롱 조건 충족
+    df = _df(closes)
+    pos = 24
+    params = ConfluenceParams(
+        use_line_take_profit=False, use_order_block_stop=False, short_enabled=False
+    )
+    result = ConfluenceStrategy(params).run(
+        df, OrderBlockResult(order_blocks=[], signals=[_signal(_BULL, pos, closes[pos])])
+    )
+    assert result.entries[0].confirmed is True
