@@ -35,7 +35,8 @@ from pathlib import Path
 import pandas as pd
 
 from backtest.ab_report import ABEntry, build_ab_report
-from backtest.ab_run import build_ab_entries
+from backtest.ab_run import add_cost_args, build_ab_entries, cost_config
+from backtest.models import BacktestConfig
 from backtest.sweep import timeframe_to_ms
 
 #: 본실험 대상 심볼·상위TF·기간(년).
@@ -130,6 +131,7 @@ def run_experiment(
     symbols: tuple[str, ...] = DEFAULT_SYMBOLS,
     timeframes: tuple[str, ...] = DEFAULT_TIMEFRAMES,
     years: float = DEFAULT_YEARS,
+    backtest_config: BacktestConfig | None = None,
 ) -> tuple[list[ABEntry], list[Coverage]]:
     """실데이터로 심볼 × TF A/B 실험을 돌려 리포트 엔트리와 커버리지를 만든다.
 
@@ -154,7 +156,13 @@ def run_experiment(
                 if clipped is None:
                     continue
                 entries.extend(
-                    build_ab_entries(htf_df, clipped, symbol=symbol, timeframe=timeframe)
+                    build_ab_entries(
+                        htf_df,
+                        clipped,
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        backtest_config=backtest_config,
+                    )
                 )
     return entries, coverages
 
@@ -238,6 +246,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--years", type=float, default=DEFAULT_YEARS)
     parser.add_argument("--out", type=Path, default=DEFAULT_REPORT_PATH)
     parser.add_argument("--coverage-out", type=Path, default=DEFAULT_COVERAGE_PATH)
+    add_cost_args(parser)
     args = parser.parse_args(argv)
 
     entries, coverages = run_experiment(
@@ -245,6 +254,7 @@ def main(argv: list[str] | None = None) -> int:
         symbols=tuple(args.symbols),
         timeframes=tuple(args.timeframes),
         years=args.years,
+        backtest_config=cost_config(args),
     )
     report_csv = build_ab_report(entries)
     coverage_csv = build_coverage_csv(coverages)

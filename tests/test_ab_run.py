@@ -6,11 +6,12 @@
 
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 
 import pandas as pd
 
-from backtest.ab_run import build_ab_csv, build_ab_entries, main
+from backtest.ab_run import add_cost_args, build_ab_csv, build_ab_entries, cost_config, main
 from backtest.sweep import timeframe_to_ms
 from backtest.synthetic import make_synthetic_ohlcv
 
@@ -73,3 +74,52 @@ def test_main_writes_synthetic_report(tmp_path: Path) -> None:
     text = out.read_text(encoding="utf-8")
     assert "A_close_closedbar" in text
     assert "B_zonelimit_realtime" in text
+
+
+def test_cost_args_defaults_and_gross() -> None:
+    """WAN-58 비용 플래그: 기본값은 WAN-37 현실 모델, 0으로 넘기면 gross(무비용)."""
+    parser = argparse.ArgumentParser()
+    add_cost_args(parser)
+
+    default_cfg = cost_config(parser.parse_args([]))
+    assert default_cfg.fee_rate == 0.0004
+    assert default_cfg.maker_fee_rate == 0.0002
+    assert default_cfg.slippage == 0.0005
+    # 메이커(B) 진입은 테이커보다 싸다 — 비대칭이 비용 모델에 실린다.
+    assert default_cfg.cost_model.maker_fee_rate < default_cfg.cost_model.taker_fee_rate
+
+    gross_cfg = cost_config(
+        parser.parse_args(["--fee-rate", "0", "--maker-fee-rate", "0", "--slippage", "0"])
+    )
+    assert gross_cfg.fee_rate == 0.0
+    assert gross_cfg.maker_fee_rate == 0.0
+    assert gross_cfg.slippage == 0.0
+    assert gross_cfg.cost_model.slippage_fraction == 0.0
+
+
+def test_gross_beats_net_total_return() -> None:
+    """같은 창에서 gross(무비용) 성과는 net(비용 후)보다 나쁘지 않다."""
+    htf, one_min = _pair()
+    gross = build_ab_entries(
+        htf,
+        one_min,
+        symbol="S",
+        timeframe="1h",
+        backtest_config=cost_config(
+            argparse.Namespace(fee_rate=0.0, maker_fee_rate=0.0, slippage=0.0)
+        ),
+    )
+    net = build_ab_entries(
+        htf,
+        one_min,
+        symbol="S",
+        timeframe="1h",
+        backtest_config=cost_config(
+            argparse.Namespace(fee_rate=0.0004, maker_fee_rate=0.0002, slippage=0.0005)
+        ),
+    )
+    for variant in ("A", "B"):
+        g = next(e for e in gross if e.variant.startswith(variant))
+        n = next(e for e in net if e.variant.startswith(variant))
+        # 거래 집합은 동일(비용은 손익만 바꾼다) → gross 총수익이 net 이상.
+        assert g.result.metrics.total_return >= n.result.metrics.total_return - 1e-9

@@ -42,6 +42,40 @@ from strategy.order_blocks import OrderBlockDetector
 DEFAULT_REPORT_PATH = Path("backtest/reports/wan41_ab_report.csv")
 
 
+def add_cost_args(parser: argparse.ArgumentParser) -> None:
+    """A/B 러너 CLI에 공용 체결 비용 플래그를 추가한다 (WAN-58).
+
+    기본값은 WAN-37 현실 비용 모델(테이커 0.04% / 메이커 0.02% / 슬리피지 5bps).
+    비용 차감 전(`gross`) 재산출을 원하면 세 값을 모두 0으로 넘긴다
+    (``--fee-rate 0 --maker-fee-rate 0 --slippage 0``). 그래야 병합(WAN-56) 효과와
+    비용(WAN-37) 효과를 같은 하네스에서 분리 산출할 수 있다.
+    """
+    parser.add_argument(
+        "--fee-rate", type=float, default=0.0004, help="테이커(시장가) 수수료율 (기본 0.0004)"
+    )
+    parser.add_argument(
+        "--maker-fee-rate",
+        type=float,
+        default=0.0002,
+        help="메이커(지정가) 수수료율. B안 진입 체결에 적용 (기본 0.0002)",
+    )
+    parser.add_argument(
+        "--slippage", type=float, default=0.0005, help="테이커 슬리피지 분수 (기본 0.0005)"
+    )
+
+
+def cost_config(args: argparse.Namespace) -> BacktestConfig:
+    """`add_cost_args`로 파싱한 값으로 `BacktestConfig`를 만든다.
+
+    수수료·슬리피지만 비용 모델에 반영하면 되므로 나머지는 기본값을 쓴다.
+    """
+    return BacktestConfig(
+        fee_rate=args.fee_rate,
+        maker_fee_rate=args.maker_fee_rate,
+        slippage=args.slippage,
+    )
+
+
 def _window(df_1m: pd.DataFrame) -> tuple[int, int]:
     """1분봉이 커버하는 시간창 `[start, end]`(ms)."""
     times = df_1m["open_time"].astype("int64")
