@@ -85,6 +85,8 @@ def summary_dict(result: BacktestResult) -> dict[str, object]:
         "funding_enabled": c.funding_enabled,
         "slippage": c.slippage,
         "position_fraction": c.position_fraction,
+        "sizing_mode": c.sizing_mode,
+        "risk_per_trade": c.risk_per_trade,
         "stop_loss_pct": c.stop_loss_pct,
         "take_profit_pct": c.take_profit_pct,
         "seed": c.seed,
@@ -118,16 +120,37 @@ def format_summary(result: BacktestResult) -> str:
         "--- Params ---",
         f"fee_rate={c.fee_rate} slippage={c.slippage} "
         f"position_fraction={c.position_fraction} seed={c.seed}",
+        f"sizing_mode={c.sizing_mode} risk_per_trade={c.risk_per_trade}",
         f"stop_loss_pct={c.stop_loss_pct} take_profit_pct={c.take_profit_pct} "
         f"partial_take_profit_pct={c.partial_take_profit_pct}",
         f"funding_enabled={c.funding_enabled} "
         f"funding_include_predicted={c.funding_include_predicted} "
         f"funding_missing_policy={c.funding_missing_policy}",
     ]
+    sizing_banner = sizing_mode_banner(result)
+    if sizing_banner:
+        lines.append(sizing_banner)
     banner = funding_coverage_banner(result)
     if banner:
         lines.append(banner)
     return "\n".join(lines)
+
+
+def sizing_mode_banner(result: BacktestResult) -> str | None:
+    """`risk_sizing=None`(전액 진입 모드)이면 리포트 상단에 띄울 경고 배너, 아니면 None.
+
+    리스크 기반 사이징이 켜져 있으면(기본) 배너가 없다. 꺼져 있으면 매 거래가
+    손절 거리와 무관하게 동일 비율의 자본을 쓴다는 것을 명시한다(WAN-65 조용한
+    실패 방지 — `BacktestEngine`도 같은 조건에서 로그 경고를 낸다).
+    """
+    if result.config.risk_sizing is not None:
+        return None
+    return (
+        f"⚠️  risk_sizing=None (전액 진입 모드, position_fraction="
+        f"{result.config.position_fraction:.0%}): 손절 거리와 무관하게 매 거래가 동일 "
+        "비율의 자본을 씁니다. 손익비·MDD·R 배수가 리스크 정규화되지 않았으므로 성과 "
+        "판단에 주의하세요."
+    )
 
 
 def _fmt_coverage(value: float | None) -> str:

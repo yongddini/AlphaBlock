@@ -39,7 +39,13 @@ from pydantic import BaseModel, ConfigDict
 
 from backtest.engine import BacktestEngine
 from backtest.models import BacktestConfig
-from backtest.sweep import ParamGrid, SweepPoint, apply_sweep_point, bars_per_year, run_sweep
+from backtest.sweep import (
+    ParamGrid,
+    SweepPoint,
+    apply_sweep_point,
+    default_backtest_config,
+    run_sweep,
+)
 from data.models import FundingRate
 from strategy.confluence import ConfluenceStrategy
 from strategy.models import ConfluenceParams, OrderBlockParams
@@ -308,7 +314,7 @@ def run_walk_forward(
 
     grid = grid or ParamGrid()
     base_conf = base_confluence or ConfluenceParams()
-    base_bt = base_backtest or BacktestConfig(annualization_factor=bars_per_year(timeframe))
+    base_bt = base_backtest or default_backtest_config(timeframe)
 
     open_times = frame["open_time"].astype("int64") if len(frame) else None
 

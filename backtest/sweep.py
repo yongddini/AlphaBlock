@@ -47,6 +47,7 @@ from pydantic import BaseModel, ConfigDict
 
 from backtest.engine import BacktestEngine
 from backtest.models import BacktestConfig, BacktestResult
+from config.settings import Settings, get_settings
 from data.models import FundingRate
 from strategy.confluence import ConfluenceStrategy
 from strategy.models import ConfluenceParams, OrderBlockParams, OrderBlockResult
@@ -92,15 +93,29 @@ def bars_per_year(timeframe: str) -> float:
     return _YEAR_MS / timeframe_to_ms(timeframe)
 
 
-def default_backtest_config(timeframe: str, *, seed: int = 0) -> BacktestConfig:
-    """리포트·대시보드가 공유하는 기본 백테스트 설정을 만든다 (WAN-59).
+def default_backtest_config(
+    timeframe: str | None = None, *, seed: int = 0, settings: Settings | None = None
+) -> BacktestConfig:
+    """모든 백테스트 진입점이 공유하는 **단일 설정 소스**(공용 팩토리, WAN-59/WAN-65).
 
-    타임프레임에서 유도한 연율화 계수(`bars_per_year`)로 샤프를 연율화하고 시드를
-    고정한다. 이 함수가 CLI 리포트(`scripts/backtest_report.py`)와 대시보드
-    (`dashboard.app`)의 **단일 설정 소스**다 — 두 경로가 각자 다른 `BacktestConfig`를
-    들고 갈라지지 않도록 여기서만 만든다.
+    타임프레임을 주면 그로부터 유도한 연율화 계수(`bars_per_year`)로 샤프를
+    연율화한다(`timeframe=None`이면 봉 단위 샤프를 그대로 둔다 — 타임프레임을 아직
+    모르는 호출부, 예: A/B 비용 오버라이드용). `settings.effective_risk_sizing`
+    (WAN-26)을 `BacktestConfig.risk_sizing`에 실어, 손절 거리에 반비례하는 리스크
+    기반 사이징이 기본으로 켜지게 한다 — 이 배선이 빠지면 모든 진입이 조용히 자본
+    100%를 쓰는 `position_fraction` 경로로 되돌아간다(WAN-65가 고친 조용한 실패).
+    스윕(`run_sweep`)·CLI 리포트(`scripts/backtest_report.py`)·워크포워드
+    (`backtest.walkforward`)·A/B 러너(`backtest.ab_run`)·대시보드(`dashboard.app`)가
+    모두 이 함수(또는 이 함수의 결과를 `model_copy`로 덮어쓴 설정)를 거쳐
+    `BacktestConfig`를 만든다 — `BacktestConfig()`를 진입점에서 직접 생성하지 않는다.
     """
-    return BacktestConfig(annualization_factor=bars_per_year(timeframe), seed=seed)
+    settings = settings or get_settings()
+    annualization_factor = bars_per_year(timeframe) if timeframe is not None else None
+    return BacktestConfig(
+        annualization_factor=annualization_factor,
+        seed=seed,
+        risk_sizing=settings.effective_risk_sizing,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -225,6 +240,9 @@ class SweepRunRow(BaseModel):
     sharpe: float | None
     num_trades: int
     seed: int
+    # --- 사이징(WAN-65, 파일만 봐도 어떤 사이징으로 나온 숫자인지 알 수 있게) ---
+    sizing_mode: str
+    risk_per_trade: float | None
 
 
 # CSV/DataFrame 컬럼 순서.
@@ -243,6 +261,8 @@ _ROW_COLUMNS = [
     "sharpe",
     "num_trades",
     "seed",
+    "sizing_mode",
+    "risk_per_trade",
 ]
 
 # 정렬 가능한(높을수록 좋은) 성과 지표.
@@ -317,6 +337,8 @@ def _build_row(
         sharpe=m.sharpe,
         num_trades=m.num_trades,
         seed=result.config.seed,
+        sizing_mode=result.config.sizing_mode,
+        risk_per_trade=result.config.risk_per_trade,
     )
 
 

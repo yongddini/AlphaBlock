@@ -123,7 +123,9 @@ class PlannedExit(BaseModel):
     time: int
     """청산이 발생하는 봉의 `open_time`(ms)."""
     price: float
-    """청산 참조가. 익절=도달한 선 가격, 손절=무효화 봉 종가."""
+    """청산 참조가. 익절=도달한 선 가격, 손절=무효화 봉 종가와 오더블록 무효화 경계
+    (`ob.bottom`/`ob.top`) 중 진입가에 더 불리한 쪽(WAN-65, 손절이 이익을 내지 않도록
+    clamp)."""
     reason: SignalExitReason
 
 
@@ -331,6 +333,9 @@ class ConfluenceParams(BaseModel):
 
     진입 근거였던 오더블록이 breaker로 무효화되면(존 반대편 돌파 — 무효화 기준
     Wick/Close는 `OrderBlockParams.zone_invalidation`을 재사용) 그 봉에서 손절한다.
+    체결가는 그 봉의 종가와 오더블록 무효화 경계 중 진입가에 더 불리한 쪽이다
+    (WAN-65) — wick 무효화 봉이 반전해 종가가 유리하게 마감해도 손절이 이익을
+    내지 않는다.
 
     ## 우선순위
 

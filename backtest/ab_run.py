@@ -30,7 +30,7 @@ import pandas as pd
 from backtest.ab_report import ABEntry, build_ab_report
 from backtest.metrics import build_metrics
 from backtest.models import BacktestConfig, BacktestResult, Trade
-from backtest.sweep import bars_per_year, evaluate
+from backtest.sweep import bars_per_year, default_backtest_config, evaluate
 from backtest.zone_limit_backtest import (
     build_result_from_trades,
     run_zone_limit_backtest_verbose,
@@ -67,12 +67,17 @@ def add_cost_args(parser: argparse.ArgumentParser) -> None:
 def cost_config(args: argparse.Namespace) -> BacktestConfig:
     """`add_cost_args`로 파싱한 값으로 `BacktestConfig`를 만든다.
 
-    수수료·슬리피지만 비용 모델에 반영하면 되므로 나머지는 기본값을 쓴다.
+    수수료·슬리피지만 비용 모델 위에 덮어쓰면 되므로 나머지는 공용 팩토리
+    (`default_backtest_config`, WAN-65)의 기본값을 쓴다 — 그래야 A/B 실험도 다른
+    진입점과 동일하게 `settings.effective_risk_sizing`이 적용된다.
     """
-    return BacktestConfig(
-        fee_rate=args.fee_rate,
-        maker_fee_rate=args.maker_fee_rate,
-        slippage=args.slippage,
+    base = default_backtest_config()
+    return base.model_copy(
+        update={
+            "fee_rate": args.fee_rate,
+            "maker_fee_rate": args.maker_fee_rate,
+            "slippage": args.slippage,
+        }
     )
 
 
@@ -103,7 +108,7 @@ def build_ab_entries(
     오더블록으로 비교). A안은 `sweep.evaluate`(→`BacktestEngine`), B안은
     `run_zone_limit_backtest`로 돌린 뒤, 성과 집계를 1분봉 커버 창으로 한정한다.
     """
-    cfg = backtest_config or BacktestConfig()
+    cfg = backtest_config or default_backtest_config(timeframe)
     ob_result: OrderBlockResult = OrderBlockDetector(order_block_params).run(htf_df)
     start, end = _window(df_1m)
 

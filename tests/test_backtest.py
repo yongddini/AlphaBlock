@@ -621,6 +621,30 @@ def test_risk_sizing_skips_entry_when_stop_too_close() -> None:
     assert result.metrics.num_trades == 0
 
 
+def test_risk_sizing_none_warns_not_silent(caplog: pytest.LogCaptureFixture) -> None:
+    """risk_sizing=None(전액 진입 모드)이면 조용히 넘어가지 않고 경고를 남긴다(WAN-65)."""
+    df = _make_df([_ENTRY_BAR, _MID_BAR, (104.0, 112.0, 103.0, 110.0, 10.0)])
+    signals = [_signal(OrderBlockDirection.BULLISH, 0, 100.0)]
+    cfg = BacktestConfig(take_profit_pct=0.10)  # risk_sizing 기본값 None
+    with caplog.at_level(logging.WARNING):
+        run_backtest(df, signals, cfg)
+    assert any("risk_sizing" in r.message and "전액 진입" in r.message for r in caplog.records)
+
+
+def test_risk_sizing_set_no_warning(caplog: pytest.LogCaptureFixture) -> None:
+    """risk_sizing이 설정돼 있으면 전액 진입 경고를 내지 않는다."""
+    from execution import PositionSizingParams
+
+    df = _make_df([_ENTRY_BAR, _MID_BAR, (104.0, 112.0, 103.0, 110.0, 10.0)])
+    signals = [_signal_ob(OrderBlockDirection.BULLISH, 0, 100.0, top=101.0, bottom=90.0)]
+    cfg = BacktestConfig(
+        take_profit_pct=0.10, risk_sizing=PositionSizingParams(risk_per_trade=0.01)
+    )
+    with caplog.at_level(logging.WARNING):
+        run_backtest(df, signals, cfg)
+    assert not any("전액 진입" in r.message for r in caplog.records)
+
+
 # --- 지표 순수 함수 ---
 
 
@@ -672,6 +696,31 @@ def test_report_dataframes_and_summary() -> None:
     text = format_summary(result)
     assert "Total Return" in text
     assert "Params" in text
+
+
+def test_summary_reports_sizing_mode() -> None:
+    """WAN-65: 요약·리포트 텍스트에 사이징 방식이 드러나고, 전액 진입이면 배너가 뜬다."""
+    from backtest.report import sizing_mode_banner
+    from execution import PositionSizingParams
+
+    df = _make_df([_ENTRY_BAR, _MID_BAR, (104.0, 112.0, 103.0, 110.0, 10.0)])
+    signals = [_signal(OrderBlockDirection.BULLISH, 0, 100.0)]
+
+    unsized = run_backtest(df, signals, BacktestConfig(take_profit_pct=0.10))
+    summary = summary_dict(unsized)
+    assert summary["sizing_mode"] == "full_position"
+    assert summary["risk_per_trade"] is None
+    assert "sizing_mode=full_position" in format_summary(unsized)
+    assert sizing_mode_banner(unsized) is not None
+
+    sized_cfg = BacktestConfig(
+        take_profit_pct=0.10, risk_sizing=PositionSizingParams(risk_per_trade=0.02)
+    )
+    sized = run_backtest(df, signals, sized_cfg)
+    summary = summary_dict(sized)
+    assert summary["sizing_mode"] == "risk_sizing"
+    assert summary["risk_per_trade"] == pytest.approx(0.02)
+    assert sizing_mode_banner(sized) is None
 
 
 def test_csv_writers(tmp_path: Path) -> None:

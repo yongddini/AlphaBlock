@@ -31,6 +31,7 @@ from backtest.report import (
     format_long_short,
     format_summary,
     funding_coverage_banner,
+    sizing_mode_banner,
     write_equity_csv,
     write_trades_csv,
 )
@@ -238,6 +239,9 @@ def _report_combo(
         print(f"\n--- 추천(best) 조합 상세: {sort_by} 최상위 ---")
         print(f"rsi_oversold={best.rsi_oversold:.0f} rsi_overbought={best.rsi_overbought:.0f}")
         print(format_summary(result))
+        banner = sizing_mode_banner(result)
+        if banner:
+            print(banner)
         banner = funding_coverage_banner(result)
         if banner:
             print(banner)

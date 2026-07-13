@@ -208,20 +208,6 @@ def test_take_profit_price_none_when_no_line_beyond_entry() -> None:
 # --------------------------------------------------------------------------- 계획 청산 (_plan_exit)
 
 
-def _dummy_entry(direction: OrderBlockDirection, price: float) -> ConfluenceSignal:
-    snap = IndicatorSnapshot(time=0, close=price, rsi=25.0, lines={})
-    return ConfluenceSignal(
-        kind=SignalKind.ENTRY,
-        direction=direction,
-        time=0,
-        price=price,
-        confirmed=True,
-        rsi=25.0,
-        order_block=_order_block(direction),
-        indicators=snap,
-    )
-
-
 def _plan(
     strategy: ConfluenceStrategy,
     *,
@@ -230,10 +216,23 @@ def _plan(
     highs: list[float],
     lows: list[float],
     closes: list[float],
+    direction: OrderBlockDirection = _BULL,
+    order_block: OrderBlock | None = None,
 ) -> PlannedExit | None:
     times = [i * _STEP for i in range(len(closes))]
+    snap = IndicatorSnapshot(time=0, close=100.0, rsi=25.0, lines={})
+    entry = ConfluenceSignal(
+        kind=SignalKind.ENTRY,
+        direction=direction,
+        time=0,
+        price=100.0,
+        confirmed=True,
+        rsi=25.0,
+        order_block=order_block or _order_block(direction),
+        indicators=snap,
+    )
     return strategy._plan_exit(
-        _dummy_entry(_BULL, 100.0),
+        entry,
         entry_pos=0,
         break_pos=break_pos,
         n=len(closes),
@@ -263,9 +262,12 @@ def test_plan_exit_take_profit_at_nearest_line() -> None:
 
 
 def test_plan_exit_stop_loss_at_break_bar() -> None:
+    """종가가 무효화 경계보다 더 불리하면(더 하락) 종가를 그대로 손절가로 쓴다."""
     strategy = ConfluenceStrategy(
         ConfluenceParams(use_line_take_profit=False, tp_vwma_length=None, tp_ema_lengths=(5,))
     )
+    # 진입가 100, 오더블록 하단(무효화 경계) 95 — 종가 90은 경계보다 더 불리하다.
+    ob = _order_block(_BULL, bottom=95.0)
     planned = _plan(
         strategy,
         break_pos=2,
@@ -273,11 +275,56 @@ def test_plan_exit_stop_loss_at_break_bar() -> None:
         highs=[100.0, 100.0, 100.0],
         lows=[100.0, 100.0, 100.0],
         closes=[100.0, 99.0, 90.0],
+        order_block=ob,
     )
     assert planned is not None
     assert planned.reason is SignalExitReason.STOP_LOSS
     assert planned.time == 2 * _STEP
     assert planned.price == pytest.approx(90.0)  # 무효화 봉 종가
+
+
+def test_plan_exit_stop_loss_never_favorable_vs_entry_long() -> None:
+    """무효화 봉이 wick으로만 경계를 찍고 진입가보다 유리하게 마감해도 손절은 손실이다(WAN-65).
+
+    오더블록 하단(무효화 경계) 95 아래로 wick이 찍혀 breaker가 됐지만, 그 봉의 종가는
+    102(진입가 100보다 위)로 마감했다. 종가를 그대로 쓰면 "손절인데 이익"이 되므로,
+    체결가는 경계(95)로 clamp돼야 한다.
+    """
+    strategy = ConfluenceStrategy(ConfluenceParams(use_line_take_profit=False))
+    ob = _order_block(_BULL, bottom=95.0)
+    planned = _plan(
+        strategy,
+        break_pos=1,
+        line_cols={},
+        highs=[100.0, 103.0],
+        lows=[100.0, 94.0],
+        closes=[100.0, 102.0],
+        order_block=ob,
+    )
+    assert planned is not None
+    assert planned.reason is SignalExitReason.STOP_LOSS
+    assert planned.price == pytest.approx(95.0)
+    assert planned.price < 100.0  # 진입가보다 반드시 불리하다(손실 보장).
+
+
+def test_plan_exit_stop_loss_never_favorable_vs_entry_short() -> None:
+    """숏 대칭: wick이 상단 경계를 찍고 종가가 진입가보다 유리(더 낮게) 마감해도 손실이다."""
+    strategy = ConfluenceStrategy(ConfluenceParams(use_line_take_profit=False))
+    ob = _order_block(_BEAR, top=105.0)
+    planned = _plan(
+        strategy,
+        break_pos=1,
+        line_cols={},
+        highs=[100.0, 106.0],
+        lows=[100.0, 97.0],
+        closes=[100.0, 98.0],
+        direction=_BEAR,
+        order_block=ob,
+    )
+    assert planned is not None
+    assert planned.reason is SignalExitReason.STOP_LOSS
+    assert planned.price == pytest.approx(105.0)
+    assert planned.price > 100.0  # 진입가보다 반드시 불리하다(손실 보장).
 
 
 def test_plan_exit_stop_priority_when_both_hit_same_bar() -> None:

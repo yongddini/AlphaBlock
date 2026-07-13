@@ -33,6 +33,7 @@ RSI)를 오더블록 탐지(`strategy.order_blocks`)에 **배선**해, `entry_mo
 from __future__ import annotations
 
 import bisect
+import logging
 import math
 from dataclasses import dataclass
 
@@ -49,7 +50,7 @@ from backtest.models import (
     TradeFill,
 )
 from backtest.substep import ZoneLimitStatus, build_substeps, simulate_zone_limit_trade
-from backtest.sweep import bars_per_year, timeframe_to_ms
+from backtest.sweep import bars_per_year, default_backtest_config, timeframe_to_ms
 from common.costs import Liquidity
 from execution.sizing import position_size
 from strategy.indicators import emas, vwma
@@ -62,6 +63,8 @@ from strategy.models import (
 )
 from strategy.order_blocks import OrderBlockDetector
 from strategy.realtime_rsi import RealtimeRsi
+
+logger = logging.getLogger(__name__)
 
 _HTF_COLUMNS = ("open_time", "open", "high", "low", "close", "volume")
 
@@ -196,7 +199,14 @@ def run_zone_limit_backtest_verbose(
     건수를 담아 낙관 편향 감사에 쓴다.
     """
     params = confluence_params or ConfluenceParams()
-    cfg = backtest_config or BacktestConfig()
+    cfg = backtest_config or default_backtest_config(timeframe)
+    if cfg.risk_sizing is None:
+        logger.warning(
+            "risk_sizing=None — B안(존-지정가) 백테스트가 전액 진입 모드"
+            "(position_fraction=%.0f%%)로 실행됩니다. 손절 거리와 무관하게 매 거래가 "
+            "동일 비율의 자본을 쓰므로 성과가 리스크 정규화되지 않습니다(WAN-65).",
+            cfg.position_fraction * 100.0,
+        )
     frame = _prepare_htf(htf_df)
     if len(frame) == 0:
         return _empty_result(cfg), ZoneLimitStats()

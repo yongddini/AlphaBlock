@@ -130,6 +130,21 @@ class BacktestConfig(BaseModel):
             slippage_bps=self.slippage * 10_000.0,
         )
 
+    @property
+    def sizing_mode(self) -> str:
+        """사이징 방식 라벨(WAN-65). `"risk_sizing"`(리스크 기반) 또는
+        `"full_position"`(고정 비율 `position_fraction`).
+
+        리포트 CSV/요약에 실어, 파일만 봐도 어떤 사이징으로 나온 성과 수치인지
+        알 수 있게 한다.
+        """
+        return "risk_sizing" if self.risk_sizing is not None else "full_position"
+
+    @property
+    def risk_per_trade(self) -> float | None:
+        """`risk_sizing`이 설정됐을 때의 거래당 리스크 비율. 없으면 None(WAN-65)."""
+        return self.risk_sizing.risk_per_trade if self.risk_sizing is not None else None
+
 
 class TradeFill(BaseModel):
     """포지션의 (부분) 청산 체결 하나."""

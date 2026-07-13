@@ -309,6 +309,36 @@ uv run python scripts/merge_impact_report.py --out reports/wan56_merge_impact.md
 (gross→net: B +4.39%→+3.99% vs A +0.10%→−0.28%), old 대비 심볼 편중도 완화됐다(ETH 강세 전환).
 따라서 **WAN-57(4h `entry_mode` 기본값 B안 전환)의 게이트는 net 기준으로 통과**다.
 
+## ⚠️ 리스크 사이징 미배선 + 손절 체결가 버그 수정 (WAN-65)
+
+**WAN-65 이전에 산출된 모든 백테스트·스윕·워크포워드·A/B 성과 수치(WAN-19/22/46/50/58
+포함)는 무효다.** 모든 백테스트 진입점이 `BacktestConfig()`를 직접 생성하면서
+`risk_sizing`을 넘기지 않아, 설정(`risk_sizing_enabled=True`)과 무관하게 실제로는
+매 거래가 자본 전액(`position_fraction=1.0`)으로 진입했다. 손절 거리가 0.4%든
+14.3%든 손실 크기가 그대로였다는 뜻이라, MDD·payoff·R 배수가 리스크 정규화되지
+않은 채로 산출됐다. 같은 조사에서 손절(`stop_loss`)로 청산됐는데 수익률이 양수인
+거래(`+4.02%`)도 발견했다 — 무효화(breaker) 판정은 wick 기준인데 체결가는 그 봉의
+종가를 그대로 썼기 때문에, 봉이 반전해 유리하게 마감하면 "손절인데 이익"이 됐다.
+
+수정: `backtest/sweep.py::default_backtest_config()`를 모든 진입점(스윕·CLI 리포트·
+워크포워드·A/B 러너·존-지정가 파이프라인·페이퍼 패리티·대시보드)의 **단일 설정
+소스**로 확정해 `settings.effective_risk_sizing`을 배선했고, `risk_sizing=None`으로
+실행되면 경고를 내도록 했다(WAN-59/WAN-63과 같은 재발 방지 패턴). 손절 체결가는
+무효화 봉 종가와 오더블록 무효화 경계 중 진입가에 더 불리한 쪽으로 clamp해, 손절이
+구조적으로 이익을 낼 수 없게 했다.
+
+측정(3심볼 BTC/ETH/SOL × 5TF 15m/1h/2h/4h/1d, `data/ohlcv.db`, sharpe 최상위 조합 기준):
+
+| 지표 | BEFORE(전액 진입) | AFTER(리스크 사이징) |
+| --- | --- | --- |
+| 평균 MDD | 22.0% | **9.5%**(15/15 조합에서 축소) |
+| 손절 거래의 자본 대비 손실(평균/중앙값) | 제멋대로(0.4%~14%+) | **0.98% / 0.98%**(목표 1.0%) |
+| 이익을 낸 손절 거래 | 24/276건(8.7%, 실측 재현) | **0건** |
+| 진입 명목가치(자본 대비, 평균) | 90.9% | 63.2%(손절 거리에 반비례해 변동) |
+
+전체 비교표·재현 커맨드는 [`reports/wan65_recompute.md`](reports/wan65_recompute.md),
+권위 있는 CSV는 `backtest/reports/wan65_*.csv` 참고.
+
 ## 백테스트 성과 리포트 & 파라미터 스윕 (WAN-19)
 
 WAN-23 재설계 컨플루언스 전략을 WAN-8 백테스트 엔진에 태워 **재현 가능한 성과
@@ -348,7 +378,8 @@ uv run python scripts/backtest_report.py --synthetic --timeframes 1h,4h
 각 행에는 재현을 위해 **심볼·타임프레임·기간(`start_time`/`end_time`/`num_bars`)·시드·
 스윕 파라미터(`rsi_oversold`/`rsi_overbought`)**가 함께 기록된다. 성과 지표는
 총수익률·MDD·승률·손익비(profit factor)·샤프(타임프레임에서 유도한 연율화 계수
-적용)·거래 수다.
+적용)·거래 수다. `sizing_mode`(`risk_sizing`/`full_position`)와 `risk_per_trade`도
+함께 실려(WAN-65) 어떤 사이징으로 나온 숫자인지 파일만 봐도 알 수 있다.
 
 ### 스윕 축 (과적합 억제: 노브 최소화)
 
