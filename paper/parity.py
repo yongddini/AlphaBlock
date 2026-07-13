@@ -28,6 +28,7 @@ from pydantic import BaseModel, ConfigDict
 
 from backtest.engine import BacktestEngine
 from backtest.models import BacktestConfig, BacktestResult
+from common.costs import Liquidity
 from config.settings import Settings, get_settings
 from data.funding import FundingRateStore
 from data.models import FundingRate
@@ -287,8 +288,9 @@ def build_parity_report(
 
     `series`가 None이면 페이퍼 거래가 저장된 시리즈를 대상으로 한다. 각 시리즈에 대해
     저장된 페이퍼 거래(진입시각이 `[start_ms, end_ms)`)와, 같은 심볼·TF·기간의 OHLCV를
-    백테스트로 재실행한 결과를 비교한다. 손익 비용(수수료·펀딩비)은 페이퍼 기록과
-    일관되도록 `settings.paper_fee_rate`·`settings.funding_enabled`를 사용한다.
+    백테스트로 재실행한 결과를 비교한다. 손익 비용(수수료·슬리피지·펀딩비)은 페이퍼
+    기록과 **같은 공용 비용 모델**(`settings.costs`, WAN-37)·`settings.funding_enabled`를
+    써서, 남는 차이가 비용이 아니라 거래 선택·체결 타이밍에서만 비롯되게 한다.
 
     `ohlcv_loader`/`funding_loader`를 주입하면 저장소 없이도(테스트) 동작한다.
     """
@@ -310,9 +312,15 @@ def build_parity_report(
             for symbol, timeframe in target_series
         }
 
+    # 페이퍼 기록과 같은 공용 비용 모델을 백테스트에도 싣는다(WAN-37). 페이퍼 러너의
+    # 진입/청산은 시장가라 A안(taker) 진입으로 재실행한다 — 그래야 슬리피지·수수료가
+    # 페이퍼 기록과 동일 산식으로 적용돼 비용 차이가 상쇄된다.
+    costs = settings.costs
     backtest_config = BacktestConfig(
-        fee_rate=settings.paper_fee_rate,
-        slippage=0.0,
+        fee_rate=costs.taker_fee_rate,
+        maker_fee_rate=costs.maker_fee_rate,
+        slippage=costs.slippage_fraction,
+        entry_liquidity=Liquidity.TAKER,
         funding_enabled=funding_enabled,
         funding_missing_policy="zero",
     )

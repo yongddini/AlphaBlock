@@ -12,6 +12,7 @@ from typing import Literal
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from common.costs import CostModel
 from execution.risk import RiskParams
 from execution.sizing import PositionSizingParams
 from strategy.models import ConfluenceParams
@@ -154,11 +155,12 @@ class Settings(BaseSettings):
     # 실행 엔진(페이퍼) 시작 자본. 리스크·사이징·손익 정산의 기준.
     paper_equity: float = Field(default=10_000.0, gt=0)
 
-    # 페이퍼 성과 추적(WAN-33). 러너가 청산한 가상 거래를 paper_trades 테이블에 누적하고,
-    # 손익률 계산 시 왕복 수수료를 반영한다. 백테스트 대비 패리티도 이 수수료율을 공유해
-    # 둘의 손익 비용 모델을 일치시킨다. 펀딩비는 funding_enabled 수집분(WAN-16/20)을 쓴다.
-    # BacktestConfig 기본값과 동일한 0.04%가 기본.
-    paper_fee_rate: float = Field(default=0.0004, ge=0)
+    # 체결 비용 모델(WAN-37). 메이커/테이커 수수료 + 슬리피지의 **단일 소스**로,
+    # 백테스트와 페이퍼가 같은 값을 공유해 패리티 비교를 유의미하게 한다(paper.parity·
+    # live.runner 가 이 값을 읽어 손익 비용을 산정한다). 펀딩비는 funding_enabled
+    # 수집분(WAN-16/20)을 별도로 가감한다. 개별 필드는 ALPHABLOCK_COSTS__<필드명>로
+    # 덮어쓴다. 예: ALPHABLOCK_COSTS__TAKER_FEE_RATE=0.0005
+    costs: CostModel = Field(default_factory=CostModel)
 
     # 페이퍼 성과 다이제스트(WAN-36). paper_trades(WAN-33)에서 한 기간의 성과 요약을
     # 만들어 텔레그램(WAN-32 경로)으로 주기적으로 보낸다(`scripts/paper_digest.py`).
