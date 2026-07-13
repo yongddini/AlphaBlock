@@ -92,6 +92,17 @@ def bars_per_year(timeframe: str) -> float:
     return _YEAR_MS / timeframe_to_ms(timeframe)
 
 
+def default_backtest_config(timeframe: str, *, seed: int = 0) -> BacktestConfig:
+    """리포트·대시보드가 공유하는 기본 백테스트 설정을 만든다 (WAN-59).
+
+    타임프레임에서 유도한 연율화 계수(`bars_per_year`)로 샤프를 연율화하고 시드를
+    고정한다. 이 함수가 CLI 리포트(`scripts/backtest_report.py`)와 대시보드
+    (`dashboard.app`)의 **단일 설정 소스**다 — 두 경로가 각자 다른 `BacktestConfig`를
+    들고 갈라지지 않도록 여기서만 만든다.
+    """
+    return BacktestConfig(annualization_factor=bars_per_year(timeframe), seed=seed)
+
+
 # --------------------------------------------------------------------------- #
 # 단일 평가: 컨플루언스 → 백테스트
 # --------------------------------------------------------------------------- #
@@ -335,7 +346,7 @@ def run_sweep(
 
     grid = grid or ParamGrid()
     base_conf = base_confluence or ConfluenceParams()
-    base_bt = base_backtest or BacktestConfig(annualization_factor=bars_per_year(timeframe))
+    base_bt = base_backtest or default_backtest_config(timeframe)
 
     num_bars = len(df)
     start_time = int(df["open_time"].min()) if num_bars else None

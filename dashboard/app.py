@@ -20,6 +20,7 @@ import streamlit as st
 
 from backtest.models import BacktestConfig
 from backtest.report import trades_to_dataframe
+from backtest.sweep import default_backtest_config
 from config import get_settings
 from config.settings import Settings
 from dashboard.charts import (
@@ -48,6 +49,7 @@ from paper.report import performance_to_dataframe, records_to_dataframe
 from paper.store import PaperTradeStore
 from strategy.confluence import SignalKind
 from strategy.models import (
+    ConfluenceParams,
     OrderBlock,
     OrderBlockDirection,
     OrderBlockParams,
@@ -150,10 +152,11 @@ def _cached_pipeline(
     end_ms: int,
     params_key: str,
     _ob_params: OrderBlockParams,
+    _conf_params: ConfluenceParams,
     _bt_config: BacktestConfig,
 ) -> PipelineResult:
     df = _cached_ohlcv(db_path, symbol, timeframe, start_ms, end_ms)
-    return run_pipeline(df, _ob_params, _bt_config)
+    return run_pipeline(df, _ob_params, _conf_params, _bt_config)
 
 
 # --- 분석 탭 ----------------------------------------------------------------
@@ -236,12 +239,18 @@ def _render_analysis(settings: Settings) -> None:
         return
 
     ob_params = OrderBlockParams()
-    bt_config = BacktestConfig()
+    conf_params = ConfluenceParams()
+    # CLI 리포트와 동일한 설정 소스(`default_backtest_config`)에서 백테스트 설정을
+    # 가져온다 — 대시보드와 CLI가 서로 다른 설정을 들고 갈라지지 않게 한다(WAN-59).
+    bt_config = default_backtest_config(timeframe)
     # 캐시 키에 심볼·타임프레임·기간·파라미터를 모두 포함시킨다(누락 시 잘못된
     # 결과를 캐시하게 됨). 파라미터는 직렬화해 params_key로 키에 싣는다.
-    params_key = f"{ob_params.model_dump_json()}|{bt_config.model_dump_json()}"
+    params_key = (
+        f"{ob_params.model_dump_json()}|{conf_params.model_dump_json()}"
+        f"|{bt_config.model_dump_json()}"
+    )
     result = _cached_pipeline(
-        db_path, symbol, timeframe, start_ms, end_ms, params_key, ob_params, bt_config
+        db_path, symbol, timeframe, start_ms, end_ms, params_key, ob_params, conf_params, bt_config
     )
     backtest = result.backtest
 

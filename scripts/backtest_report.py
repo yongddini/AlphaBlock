@@ -26,7 +26,6 @@ from pathlib import Path
 
 import pandas as pd
 
-from backtest.models import BacktestConfig
 from backtest.report import format_summary, write_equity_csv, write_trades_csv
 from backtest.sweep import (
     MultiSweepReport,
@@ -35,7 +34,7 @@ from backtest.sweep import (
     SweepReport,
     SweepRunRow,
     apply_sweep_point,
-    bars_per_year,
+    default_backtest_config,
     evaluate,
     run_sweep,
     write_sweep_csv,
@@ -123,7 +122,7 @@ def _report_combo(
     """한 (심볼, 타임프레임)에 대해 스윕 + 최적 조합 상세 리포트를 만들고 저장한다."""
     grid = ParamGrid()
     base_confluence = ConfluenceParams()
-    base_backtest = BacktestConfig(annualization_factor=bars_per_year(timeframe), seed=seed)
+    base_backtest = default_backtest_config(timeframe, seed=seed)
 
     report = run_sweep(
         df,
