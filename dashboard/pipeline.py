@@ -1,9 +1,14 @@
-"""전략 파이프라인: OHLCV → 오더블록 탐지 → 백테스트.
+"""전략 파이프라인: OHLCV → 오더블록 탐지 → 컨플루언스 전략 → 백테스트 (WAN-59).
 
-대시보드는 이 모듈이 반환하는 `PipelineResult`(오더블록·시그널·백테스트
-결과) 스키마에만 의존한다. 시그널 생성 로직(현재 WAN-7 기본 오더블록)이
-추후 WAN-18 컨플루언스 전략 등으로 교체되어도, 이 스키마만 유지되면
-대시보드 쪽 코드는 변경할 필요가 없다.
+대시보드 분석 탭은 이 모듈이 반환하는 `PipelineResult`(오더블록·확정 진입 시그널·
+백테스트 결과) 스키마에만 의존한다.
+
+백테스트는 CLI 리포트(`scripts/backtest_report.py`)와 **동일한 함수**
+(`backtest.sweep.evaluate`)를 호출해 실행한다. 즉 대시보드와 CLI가 같은 코드 경로로
+컨플루언스 전략(WAN-23: 오더블록+RSI 진입 / EMA·VWMA 선 도달 익절 / 오더블록 무효화
+손절)을 태우므로, 두 화면의 거래 수·수익률이 갈라질 수 없다(WAN-59 재발 방지). 오더블록
+탐지는 컨플루언스 파라미터와 무관하므로 한 번만 실행해 차트용 존 아카이브와 백테스트에
+함께 재사용한다.
 """
 
 from __future__ import annotations
@@ -11,9 +16,15 @@ from __future__ import annotations
 import pandas as pd
 from pydantic import BaseModel, ConfigDict
 
-from backtest.engine import BacktestEngine
 from backtest.models import BacktestConfig, BacktestResult
-from strategy.models import OrderBlock, OrderBlockParams, OrderBlockSignal
+from backtest.sweep import evaluate
+from strategy.confluence import ConfluenceStrategy
+from strategy.models import (
+    ConfluenceParams,
+    OrderBlock,
+    OrderBlockParams,
+    OrderBlockSignal,
+)
 from strategy.order_blocks import OrderBlockDetector
 
 
@@ -27,20 +38,35 @@ class PipelineResult(BaseModel):
     rendered_order_blocks: list[OrderBlock]
     """마지막 봉 시점의 렌더링 뷰(트레이딩뷰 패리티). "현재 활성 존" 뷰용."""
     signals: list[OrderBlockSignal]
+    """백테스트가 실제로 소비한 확정 진입(RSI 게이트 통과 + 계획 청산 포함). 차트의
+    "진입한 존" 분류가 이 시그널을 기준으로 하므로 화면과 성과가 일치한다."""
     backtest: BacktestResult
 
 
 def run_pipeline(
     df: pd.DataFrame,
     order_block_params: OrderBlockParams | None = None,
+    confluence_params: ConfluenceParams | None = None,
     backtest_config: BacktestConfig | None = None,
 ) -> PipelineResult:
-    """OHLCV DataFrame에 오더블록 탐지와 백테스트를 순서대로 실행한다."""
+    """OHLCV DataFrame에 오더블록 탐지·컨플루언스 전략·백테스트를 순서대로 실행한다.
+
+    백테스트는 CLI 리포트와 공유하는 `backtest.sweep.evaluate`로 실행해, 두 경로가
+    항상 같은 전략·설정으로 동일한 결과를 내도록 한다(WAN-59). `signals`에는 백테스트가
+    소비한 확정 진입(컨플루언스가 RSI 게이트로 선별하고 계획 청산을 실은 것)을 담는다.
+    """
     detection = OrderBlockDetector(order_block_params).run(df)
-    backtest = BacktestEngine(backtest_config).run(df, detection.signals)
+    confluence = ConfluenceStrategy(confluence_params, order_block_params).run(df, detection)
+    backtest = evaluate(
+        df,
+        confluence_params=confluence_params,
+        order_block_params=order_block_params,
+        backtest_config=backtest_config,
+        order_block_result=detection,
+    )
     return PipelineResult(
         order_blocks=detection.order_blocks,
         rendered_order_blocks=detection.rendered_order_blocks,
-        signals=detection.signals,
+        signals=confluence.order_block_signals,
         backtest=backtest,
     )
