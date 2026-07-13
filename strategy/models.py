@@ -415,6 +415,30 @@ class ConfluenceParams(BaseModel):
     기본 False면 조건이 충족될 때까지(또는 만료·무효화까지) 주문을 유지한다.
     """
 
+    # --- 진입 근거 게이트 (WAN-68) ---
+    min_rr: float | None = Field(default=None, gt=0)
+    """최소 손익비(R:R) 게이트. **기본 `None`(꺼짐, 현행 동작 보존)**.
+
+    진입 시점에 `먹을 거리`(진입가→진입가 너머 가장 가까운 익절선)와 `잃을 거리`
+    (진입가→오더블록 무효화 경계)의 비율(R:R = 먹을 거리 / 잃을 거리)이 이 값보다
+    작으면 시그널 생성 단계에서 진입을 기각한다. 진입가 너머에 익절선이 하나도
+    없으면(먹을 거리 없음) R:R을 0으로 간주해 기각한다.
+    """
+    long_deviation_gate_ema_length: int = Field(default=240, ge=1)
+    """이격도 게이트가 참조할 EMA 길이. `tp_ema_lengths`·`display_ema_lengths`와
+    독립된 필드다(WAN-66 교훈 — 판정용 선과 표시용 선을 한 필드로 섞지 않는다)."""
+    long_max_deviation: float | None = None
+    """롱 이격도 게이트(연속값). **기본 `None`(꺼짐, 현행 동작 보존)**.
+
+    `(종가 − EMA) / 종가`(이격도)가 이 값보다 **더 음수**일 때만 롱 진입을 허용한다
+    (장기선에서 충분히 아래로 벌어졌을 때만 진입). 이격도가 이 값 이상이면(덜
+    벌어졌으면) 기각한다. EMA가 워밍업 중(NaN)이면 판정 불가로 간주해 기각한다.
+    숏에는 적용하지 않는다.
+    """
+    short_enabled: bool = True
+    """숏(약세 오더블록) 진입 허용 여부. **기본 `True`(현행 동작 보존)**.
+    `False`면 숏 신호는 항상 미확정(`confirmed=False`) 처리한다(롱 온리)."""
+
     source: str = "close"
 
     @model_validator(mode="after")

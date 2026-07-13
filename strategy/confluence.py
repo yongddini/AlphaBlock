@@ -185,6 +185,7 @@ class ConfluenceStrategy:
         # 지표를 동일 정렬·필터 프레임 기준으로 계산(위치 인덱스 0..n-1 정렬).
         rsi_vals = [float(v) for v in rsi(df, length=params.rsi_length, source=params.source)]
         line_cols = self._line_columns(df)
+        deviation_ema_vals = self._deviation_ema(df)
 
         ob_result = order_block_result or OrderBlockDetector(self.order_block_params).run(df)
 
@@ -201,7 +202,9 @@ class ConfluenceStrategy:
             if break_pos is not None and break_pos <= pos:
                 continue
 
-            entry = self._evaluate_entry(signal, pos, times, closes, rsi_vals, line_cols)
+            entry = self._evaluate_entry(
+                signal, pos, times, closes, rsi_vals, line_cols, deviation_ema_vals
+            )
             if entry.confirmed:
                 planned = self._plan_exit(
                     entry, pos, break_pos, n, times, highs, lows, closes, line_cols
@@ -238,6 +241,14 @@ class ConfluenceStrategy:
             ]
         return cols
 
+    def _deviation_ema(self, df: pd.DataFrame) -> list[float] | None:
+        """롱 이격도 게이트용 EMA(위치 인덱스 정렬). 게이트가 꺼져 있으면 계산하지 않는다."""
+        params = self.params
+        if params.long_max_deviation is None:
+            return None
+        ema_frame = emas(df, lengths=(params.long_deviation_gate_ema_length,), source=params.source)
+        return [float(v) for v in ema_frame[f"ema_{params.long_deviation_gate_ema_length}"]]
+
     @staticmethod
     def _break_pos(ob: OrderBlock | None, time_to_pos: dict[int, int]) -> int | None:
         """오더블록 무효화(breaker) 봉의 위치 인덱스. 무효화되지 않았으면 None."""
@@ -263,6 +274,7 @@ class ConfluenceStrategy:
         closes: list[float],
         rsi_vals: list[float],
         line_cols: dict[str, list[float]],
+        deviation_ema_vals: list[float] | None,
     ) -> ConfluenceSignal:
         params = self.params
         d = _direction_sign(signal.direction)
@@ -273,11 +285,27 @@ class ConfluenceStrategy:
             rsi_opt <= params.rsi_oversold if d > 0 else rsi_opt >= params.rsi_overbought
         )
 
+        if confirmed and d < 0 and not params.short_enabled:
+            confirmed = False
+
+        lines = self._lines_at(pos, line_cols)
+
+        if confirmed and params.min_rr is not None:
+            confirmed = self._passes_min_rr(
+                d, signal.price, signal.order_block, lines, params.min_rr
+            )
+
+        if confirmed and d > 0 and params.long_max_deviation is not None:
+            assert deviation_ema_vals is not None
+            confirmed = self._passes_deviation_gate(
+                pos, closes, deviation_ema_vals, params.long_max_deviation
+            )
+
         snapshot = IndicatorSnapshot(
             time=times[pos],
             close=closes[pos],
             rsi=rsi_opt,
-            lines=self._lines_at(pos, line_cols),
+            lines=lines,
         )
         return ConfluenceSignal(
             kind=SignalKind.ENTRY,
@@ -289,6 +317,52 @@ class ConfluenceStrategy:
             order_block=signal.order_block,
             indicators=snapshot,
         )
+
+    @staticmethod
+    def _nearest_beyond(
+        direction_sign: int, entry_price: float, lines: dict[str, float]
+    ) -> float | None:
+        """진입가 너머(롱=위·숏=아래)에 있는 선들 중 가장 가까운 값. 없으면 None."""
+        if direction_sign > 0:
+            beyond = [v for v in lines.values() if v > entry_price]
+            return min(beyond) if beyond else None
+        beyond = [v for v in lines.values() if v < entry_price]
+        return max(beyond) if beyond else None
+
+    @classmethod
+    def _passes_min_rr(
+        cls,
+        direction_sign: int,
+        entry_price: float,
+        ob: OrderBlock,
+        lines: dict[str, float],
+        min_rr: float,
+    ) -> bool:
+        """최소 손익비 게이트(WAN-68). 잃을 거리 대비 먹을 거리 비율이 `min_rr` 이상인지."""
+        boundary = ob.bottom if direction_sign > 0 else ob.top
+        risk = entry_price - boundary if direction_sign > 0 else boundary - entry_price
+        if risk <= 0:
+            return False
+        nearest = cls._nearest_beyond(direction_sign, entry_price, lines)
+        reward = 0.0 if nearest is None else abs(nearest - entry_price)
+        return (reward / risk) >= min_rr
+
+    @staticmethod
+    def _passes_deviation_gate(
+        pos: int,
+        closes: list[float],
+        ema_vals: list[float],
+        threshold: float,
+    ) -> bool:
+        """롱 이격도 게이트(WAN-68). `(종가−EMA)/종가`가 임계값보다 더 음수인지."""
+        ema_val = ema_vals[pos]
+        if math.isnan(ema_val):
+            return False
+        close = closes[pos]
+        if close == 0:
+            return False
+        deviation = (close - ema_val) / close
+        return deviation < threshold
 
     # -- 청산 계획 -------------------------------------------------------------
 
@@ -349,8 +423,9 @@ class ConfluenceStrategy:
             return min(close_price, boundary)
         return max(close_price, boundary)
 
-    @staticmethod
+    @classmethod
     def _take_profit_price(
+        cls,
         direction_sign: int,
         entry_price: float,
         high: float,
@@ -358,17 +433,11 @@ class ConfluenceStrategy:
         lines: dict[str, float],
     ) -> float | None:
         """진입가 너머 가장 가까운 선에 봉이 도달했으면 그 선 가격, 아니면 None."""
-        if direction_sign > 0:
-            beyond = [v for v in lines.values() if v > entry_price]
-            if not beyond:
-                return None
-            nearest = min(beyond)
-            return nearest if high >= nearest else None
-        beyond = [v for v in lines.values() if v < entry_price]
-        if not beyond:
+        nearest = cls._nearest_beyond(direction_sign, entry_price, lines)
+        if nearest is None:
             return None
-        nearest = max(beyond)
-        return nearest if low <= nearest else None
+        reached = high >= nearest if direction_sign > 0 else low <= nearest
+        return nearest if reached else None
 
     def _exit_signal(
         self,

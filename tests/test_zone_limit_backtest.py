@@ -87,6 +87,54 @@ def test_empty_1m_yields_no_trades() -> None:
     assert result.metrics.num_trades == 0
 
 
+def test_default_gates_off_preserve_zone_limit_behavior() -> None:
+    """WAN-68 게이트 3종 모두 기본값(꺼짐)이면 B안 결과가 게이트 도입 전과 동일하다."""
+    htf, one_min = _synthetic_pair()
+    default_params = ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime")
+    explicit_off = default_params.model_copy(
+        update={"min_rr": None, "long_max_deviation": None, "short_enabled": True}
+    )
+    a = run_zone_limit_backtest(htf, one_min, "1h", confluence_params=default_params)
+    b = run_zone_limit_backtest(htf, one_min, "1h", confluence_params=explicit_off)
+    assert [t.realized_pnl for t in a.trades] == [t.realized_pnl for t in b.trades]
+
+
+def test_short_enabled_false_yields_only_long_trades() -> None:
+    htf, one_min = _synthetic_pair()
+    baseline_params = ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime")
+    baseline = run_zone_limit_backtest(htf, one_min, "1h", confluence_params=baseline_params)
+    assert any(t.side is PositionSide.SHORT for t in baseline.trades)  # 전제: 숏 거래가 있다
+
+    params = baseline_params.model_copy(update={"short_enabled": False})
+    result = run_zone_limit_backtest(htf, one_min, "1h", confluence_params=params)
+    assert all(t.side is PositionSide.LONG for t in result.trades)
+
+
+def test_min_rr_gate_does_not_increase_trade_count() -> None:
+    htf, one_min = _synthetic_pair()
+    base = ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime")
+    baseline = run_zone_limit_backtest(htf, one_min, "1h", confluence_params=base)
+    gated = run_zone_limit_backtest(
+        htf, one_min, "1h", confluence_params=base.model_copy(update={"min_rr": 50.0})
+    )
+    # 매우 높은 R:R 요구는 거래를 줄이거나 그대로 두지, 늘리지 않는다.
+    assert gated.metrics.num_trades <= baseline.metrics.num_trades
+
+
+def test_long_deviation_gate_does_not_increase_long_trade_count() -> None:
+    htf, one_min = _synthetic_pair()
+    base = ConfluenceParams(
+        entry_mode="zone_limit", rsi_mode="realtime", long_deviation_gate_ema_length=20
+    )
+    baseline = run_zone_limit_backtest(htf, one_min, "1h", confluence_params=base)
+    strict = run_zone_limit_backtest(
+        htf, one_min, "1h", confluence_params=base.model_copy(update={"long_max_deviation": -0.9})
+    )
+    long_baseline = sum(1 for t in baseline.trades if t.side is PositionSide.LONG)
+    long_strict = sum(1 for t in strict.trades if t.side is PositionSide.LONG)
+    assert long_strict <= long_baseline
+
+
 def test_cost_model_applied_slippage_and_fees() -> None:
     """진입/청산 체결가에 슬리피지가 불리하게, 수수료가 차감돼 반영된다."""
     htf, one_min = _synthetic_pair()

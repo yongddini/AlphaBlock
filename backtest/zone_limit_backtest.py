@@ -53,6 +53,7 @@ from backtest.substep import ZoneLimitStatus, build_substeps, simulate_zone_limi
 from backtest.sweep import bars_per_year, default_backtest_config, timeframe_to_ms
 from common.costs import Liquidity
 from execution.sizing import position_size
+from strategy.confluence import ConfluenceStrategy
 from strategy.indicators import emas, vwma
 from strategy.models import (
     ConfluenceParams,
@@ -219,6 +220,11 @@ def run_zone_limit_backtest_verbose(
     ob_result = order_block_result or OrderBlockDetector(order_block_params).run(htf_df)
     substeps = build_substeps(df_1m, htf_ms)
     substep_times = [s.time for s in substeps]
+    deviation_ema: pd.Series | None = None
+    if params.long_max_deviation is not None:
+        dev_length = params.long_deviation_gate_ema_length
+        dev_frame = emas(htf_df, lengths=(dev_length,), source=params.source)
+        deviation_ema = dev_frame[f"ema_{dev_length}"]
 
     candidates: list[_Candidate] = []
     eligible = 0
@@ -235,6 +241,22 @@ def run_zone_limit_backtest_verbose(
         side = PositionSide.LONG if is_long else PositionSide.SHORT
         if (is_long and not cfg.allow_long) or (not is_long and not cfg.allow_short):
             continue
+        if not is_long and not params.short_enabled:
+            continue  # WAN-68: 숏 완전 제거 게이트.
+
+        limit_price = params.zone_limit_price(ob)
+        lines = _line_snapshot(params, htf_df, pos)
+        lines_by_key = {str(i): v for i, v in enumerate(lines)}
+        if params.min_rr is not None and not ConfluenceStrategy._passes_min_rr(
+            1 if is_long else -1, limit_price, ob, lines_by_key, params.min_rr
+        ):
+            continue  # WAN-68: 최소 손익비 게이트.
+        if is_long and params.long_max_deviation is not None:
+            assert deviation_ema is not None
+            if not ConfluenceStrategy._passes_deviation_gate(
+                pos, closes, deviation_ema.tolist(), params.long_max_deviation
+            ):
+                continue  # WAN-68: 롱 이격도 게이트.
 
         # 이 셋업의 서브스텝: 탭 봉부터 데이터 끝까지. 단, **탭 봉이 1분봉으로
         # 커버돼야** 한다 — 탭 봉의 상위TF 슬롯에 1분봉이 없으면(미커버·갭) 이
@@ -248,9 +270,8 @@ def run_zone_limit_backtest_verbose(
             continue  # 탭 봉에 1분봉 커버 없음 → 평가 제외.
 
         eligible += 1
-        limit_price = params.zone_limit_price(ob)
         stop_price = ob.bottom if is_long else ob.top
-        tp_price = _take_profit_price(is_long, limit_price, _line_snapshot(params, htf_df, pos))
+        tp_price = _take_profit_price(is_long, limit_price, lines)
 
         rsi_state = _seed_rsi(params, times, closes, setup_substeps[0].htf_bar_time)
         outcome = simulate_zone_limit_trade(
