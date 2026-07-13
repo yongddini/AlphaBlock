@@ -18,7 +18,7 @@ from backtest.zone_limit_backtest import (
     run_zone_limit_backtest,
     run_zone_limit_backtest_verbose,
 )
-from strategy.models import ConfluenceParams
+from strategy.models import ConfluenceParams, DeviationFilterParams
 
 
 def _synthetic_pair(bars: int = 600, span: int = 120) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -237,6 +237,54 @@ def test_take_profit_mode_fixed_r_runs_end_to_end() -> None:
     )
     result = run_zone_limit_backtest(htf, one_min, "1h", confluence_params=params)
     assert result.metrics.num_trades >= 1
+
+
+def test_deviation_filter_off_matches_baseline() -> None:
+    """`deviation_filter=None`(기본)은 필드 자체가 없던 이전 동작과 동일하다."""
+    htf, one_min = _synthetic_pair()
+    params = ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime", short_enabled=True)
+    baseline = run_zone_limit_backtest(htf, one_min, "1h", confluence_params=params)
+    explicit_off = run_zone_limit_backtest(
+        htf, one_min, "1h", confluence_params=params.model_copy(update={"deviation_filter": None})
+    )
+    baseline_pnls = [t.realized_pnl for t in baseline.trades]
+    explicit_off_pnls = [t.realized_pnl for t in explicit_off.trades]
+    assert baseline_pnls == explicit_off_pnls
+
+
+def test_deviation_filter_extremely_wide_band_rejects_all_setups() -> None:
+    """밴드 폭이 매우 크면(규칙 3 상시 발동) 모든 셋업이 기각되어 후보가 0이 된다."""
+    htf, one_min = _synthetic_pair()
+    params = ConfluenceParams(
+        entry_mode="zone_limit",
+        rsi_mode="realtime",
+        short_enabled=True,
+        deviation_filter=DeviationFilterParams(anchor="close", width_kind="pct", width_value=5.0),
+    )
+    candidates, stats = build_zone_limit_candidates(
+        htf_df=htf, df_1m=one_min, timeframe="1h", params=params, cfg=BacktestConfig()
+    )
+    assert candidates == []
+    assert stats.eligible == 0
+
+
+def test_deviation_filter_does_not_increase_eligible_setups() -> None:
+    htf, one_min = _synthetic_pair()
+    base = ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime", short_enabled=True)
+    baseline, baseline_stats = build_zone_limit_candidates(
+        htf_df=htf, df_1m=one_min, timeframe="1h", params=base, cfg=BacktestConfig()
+    )
+    filtered_params = base.model_copy(
+        update={
+            "deviation_filter": DeviationFilterParams(
+                anchor="sma", sma_length=20, width_kind="stdev", width_value=2.0
+            )
+        }
+    )
+    filtered, filtered_stats = build_zone_limit_candidates(
+        htf_df=htf, df_1m=one_min, timeframe="1h", params=filtered_params, cfg=BacktestConfig()
+    )
+    assert filtered_stats.eligible <= baseline_stats.eligible
 
 
 def test_rsi_gate_mode_override_disables_gate_for_pool_construction() -> None:

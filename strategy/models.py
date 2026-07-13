@@ -337,6 +337,56 @@ def rsi_gate_passes(
     return rsi <= rsi_oversold if is_long else rsi >= rsi_overbought
 
 
+class DeviationFilterParams(BaseModel):
+    """SMA/종가 대비 이격 진입 필터 (WAN-75).
+
+    `ConfluenceParams.deviation_filter`가 `None`이면 꺼짐(기본, 현행 동작 보존).
+    켜지면 기준선(anchor) 대비 폭(width)만큼 떨어진 밴드를 계산해 오더블록 진입가를
+    재산정하거나 진입을 기각한다(`deviation_entry_price` 참고). 롱은 하단선
+    (`anchor - width`), 숏은 상단선(`anchor + width`)을 대칭 적용한다.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    anchor: Literal["close", "sma"] = "close"
+    """밴드 기준선. `close`: 그 봉 종가. `sma`: `sma_length` 단순이동평균."""
+    sma_length: int = Field(default=20, ge=1)
+    """`anchor="sma"`일 때의 SMA 길이. `width_kind="stdev"`(볼린저)의 표준편차 창도
+    동일 길이를 공유한다(볼린저 밴드 표준 정의)."""
+    width_kind: Literal["pct", "stdev", "atr"] = "pct"
+    """밴드 폭 산정 방식. `pct`: 기준선의 고정 비율. `stdev`: `sma_length`창 모표준편차의
+    배수(볼린저). `atr`: `atr_length` ATR의 배수."""
+    width_value: float = Field(gt=0)
+    """`width_kind`별 배수/비율. `pct`는 소수(0.02=2%), `stdev`·`atr`는 배수."""
+    atr_length: int = Field(default=14, ge=1)
+    """`width_kind="atr"`일 때의 ATR 길이."""
+
+
+def deviation_entry_price(direction_sign: int, ob: OrderBlock, band: float) -> float | None:
+    """이격 필터 밴드에 따른 진입가 재산정(WAN-75). A안·B안이 공유하는 순수 함수다.
+
+    존의 근단(proximal, 먼저 닿는 경계)·원단(distal, 무효화 경계)을 밴드와 비교해
+    3가지 규칙 중 하나를 적용한다(롱 기준, 숏은 부호 대칭):
+
+    1. 밴드가 근단보다 진입 방향으로 더 유리한 쪽(= 존 전체가 밴드보다 유리한 쪽)에
+       있으면 근단에서 그대로 진입(필터가 관대해 영향 없음).
+    2. 밴드가 존 안(근단~원단)에 있으면 밴드 값에서 진입(손절은 원단 그대로라
+       손익비가 달라진다).
+    3. 밴드가 원단보다 더 불리한 쪽에 있으면(존 전체가 밴드에 못 미침) 진입하지
+       않는다(`None`).
+    """
+    proximal = ob.top if direction_sign > 0 else ob.bottom
+    distal = ob.bottom if direction_sign > 0 else ob.top
+    signed_band = direction_sign * band
+    signed_proximal = direction_sign * proximal
+    signed_distal = direction_sign * distal
+    if signed_band > signed_proximal:
+        return proximal
+    if signed_band >= signed_distal:
+        return band
+    return None
+
+
 class ConfluenceParams(BaseModel):
     """오더블록 + RSI 진입 / EMA·VWMA 선 익절 / 오더블록 무효화 손절 규칙 (WAN-23).
 
@@ -499,6 +549,11 @@ class ConfluenceParams(BaseModel):
     `take_profit_r`배 지점에 고정 익절선을 둔다(선 재평가 없이 진입 시점에 확정)."""
     take_profit_r: float = Field(default=2.0, gt=0)
     """`take_profit_mode="fixed_r"`일 때의 목표 손익비(R 배수)."""
+
+    # --- 진입가 재산정: SMA/종가 대비 이격 필터 (WAN-75) ---
+    deviation_filter: DeviationFilterParams | None = None
+    """이격 필터. **기본 `None`(꺼짐, 현행 동작 보존)**. 켜면 `deviation_entry_price`
+    규칙에 따라 오더블록 진입가를 밴드 값으로 재산정하거나 진입을 기각한다."""
 
     source: str = "close"
 

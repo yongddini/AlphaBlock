@@ -1,8 +1,9 @@
-"""기술지표(RSI · EMA · VWMA) 계산.
+"""기술지표(RSI · EMA · SMA · VWMA · ATR) 계산.
 
 사용자가 매매에 쓰는 지표를 오더블록(`strategy/order_blocks.py`)과 동일한
 데이터 계약으로 재사용 가능한 **순수 함수**로 구현한다. 수치는 TradingView
-Pine `ta.rsi` / `ta.ema` / `ta.vwma`의 정의와 **패리티**를 맞춘다.
+Pine `ta.rsi` / `ta.ema` / `ta.sma` / `ta.vwma` / `ta.atr`의 정의와 **패리티**를
+맞춘다.
 
 ## 데이터 계약
 
@@ -153,4 +154,62 @@ def vwma(df: pd.DataFrame, length: int = 100, source: str = "close") -> pd.Serie
     total = volume.rolling(window=length).sum()
     result = weighted / total
     result.name = f"vwma_{length}"
+    return result
+
+
+def sma(df: pd.DataFrame, length: int, source: str = "close") -> pd.Series:
+    """단순이동평균 (`ta.sma`). 최초 유효값은 인덱스 `length-1`, 그 이전은 `NaN`."""
+    _require_positive_length(length)
+    frame = _prepare(df, (source,))
+    src = frame[source].astype(float)
+    result = src.rolling(window=length).mean()
+    result.name = f"sma_{length}"
+    return result
+
+
+def stdev(df: pd.DataFrame, length: int, source: str = "close") -> pd.Series:
+    """`length`봉 롤링 모표준편차(`ta.stdev`, 편향 추정량 `ddof=0`).
+
+    TradingView `ta.stdev`는 모표준편차를 쓴다(볼린저 밴드 표준 정의와 동일).
+    최초 유효값은 인덱스 `length-1`, 그 이전은 `NaN`.
+    """
+    _require_positive_length(length)
+    frame = _prepare(df, (source,))
+    src = frame[source].astype(float)
+    result = src.rolling(window=length).std(ddof=0)
+    result.name = f"stdev_{length}"
+    return result
+
+
+def _true_range(
+    highs: Sequence[float], lows: Sequence[float], closes: Sequence[float]
+) -> list[float]:
+    n = len(highs)
+    tr = [0.0] * n
+    for i in range(n):
+        if i == 0:
+            tr[i] = highs[i] - lows[i]
+        else:
+            tr[i] = max(
+                highs[i] - lows[i],
+                abs(highs[i] - closes[i - 1]),
+                abs(lows[i] - closes[i - 1]),
+            )
+    return tr
+
+
+def atr(df: pd.DataFrame, length: int = 14) -> pd.Series:
+    """평균 실질 변동폭 (`ta.atr`). 기본 length=14.
+
+    실질변동폭(true range)을 Wilder RMA로 스무딩한다(`strategy.order_blocks`의
+    내부 ATR과 동일한 정의). 최초 유효값은 인덱스 `length`에서 나타난다.
+    """
+    _require_positive_length(length)
+    frame = _prepare(df, ("high", "low", "close"))
+    highs = frame["high"].astype(float).tolist()
+    lows = frame["low"].astype(float).tolist()
+    closes = frame["close"].astype(float).tolist()
+    tr = _true_range(highs, lows, closes)
+    result = pd.Series(_wilder_rma(tr, length), index=frame.index, dtype="float64")
+    result.name = f"atr_{length}"
     return result

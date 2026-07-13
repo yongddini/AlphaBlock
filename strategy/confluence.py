@@ -25,9 +25,10 @@ from enum import StrEnum
 import pandas as pd
 from pydantic import BaseModel, ConfigDict
 
-from strategy.indicators import emas, rsi, vwma
+from strategy.indicators import atr, emas, rsi, sma, stdev, vwma
 from strategy.models import (
     ConfluenceParams,
+    DeviationFilterParams,
     OrderBlock,
     OrderBlockDirection,
     OrderBlockParams,
@@ -35,6 +36,7 @@ from strategy.models import (
     OrderBlockSignal,
     PlannedExit,
     SignalExitReason,
+    deviation_entry_price,
 )
 from strategy.order_blocks import OrderBlockDetector
 
@@ -186,6 +188,11 @@ class ConfluenceStrategy:
         rsi_vals = [float(v) for v in rsi(df, length=params.rsi_length, source=params.source)]
         line_cols = self._line_columns(df)
         deviation_ema_vals = self._deviation_ema(df)
+        filter_components = (
+            self.deviation_filter_components(df, params.deviation_filter, params.source)
+            if params.deviation_filter is not None
+            else None
+        )
 
         ob_result = order_block_result or OrderBlockDetector(self.order_block_params).run(df)
 
@@ -203,7 +210,14 @@ class ConfluenceStrategy:
                 continue
 
             entry = self._evaluate_entry(
-                signal, pos, times, closes, rsi_vals, line_cols, deviation_ema_vals
+                signal,
+                pos,
+                times,
+                closes,
+                rsi_vals,
+                line_cols,
+                deviation_ema_vals,
+                filter_components,
             )
             if entry.confirmed:
                 planned = self._plan_exit(
@@ -250,6 +264,44 @@ class ConfluenceStrategy:
         return [float(v) for v in ema_frame[f"ema_{params.long_deviation_gate_ema_length}"]]
 
     @staticmethod
+    def deviation_filter_components(
+        df: pd.DataFrame, filter_params: DeviationFilterParams, source: str
+    ) -> tuple[list[float], list[float]]:
+        """이격 필터(WAN-75)의 기준선(anchor)·폭(width) 시리즈를 위치 인덱스 정렬로 계산.
+
+        밴드 값은 호출부가 `anchor - direction_sign*width`로 방향별 조합한다(롱은
+        하단선, 숏은 상단선 — `deviation_entry_price` 참고). A안(`ConfluenceStrategy`)·
+        B안(`backtest.zone_limit_backtest`)이 공유한다. 워밍업 구간은 `NaN`.
+        """
+        if filter_params.anchor == "sma":
+            sma_vals = sma(df, length=filter_params.sma_length, source=source)
+            anchor_vals = [float(v) for v in sma_vals]
+        else:
+            anchor_vals = [float(v) for v in _prepare(df)[source].astype(float)]
+
+        if filter_params.width_kind == "pct":
+            width_vals = [a * filter_params.width_value for a in anchor_vals]
+        elif filter_params.width_kind == "stdev":
+            sd_vals = [float(v) for v in stdev(df, length=filter_params.sma_length, source=source)]
+            width_vals = [v * filter_params.width_value for v in sd_vals]
+        else:  # "atr"
+            atr_vals = [float(v) for v in atr(df, length=filter_params.atr_length)]
+            width_vals = [v * filter_params.width_value for v in atr_vals]
+
+        return anchor_vals, width_vals
+
+    @staticmethod
+    def deviation_band_at(
+        pos: int, direction_sign: int, anchor_vals: list[float], width_vals: list[float]
+    ) -> float | None:
+        """`pos` 위치의 밴드 값(`anchor - direction_sign*width`). 워밍업 중이면 `None`."""
+        anchor_val = anchor_vals[pos]
+        width_val = width_vals[pos]
+        if math.isnan(anchor_val) or math.isnan(width_val):
+            return None
+        return anchor_val - direction_sign * width_val
+
+    @staticmethod
     def _break_pos(ob: OrderBlock | None, time_to_pos: dict[int, int]) -> int | None:
         """오더블록 무효화(breaker) 봉의 위치 인덱스. 무효화되지 않았으면 None."""
         if ob is None or ob.break_time is None:
@@ -275,6 +327,7 @@ class ConfluenceStrategy:
         rsi_vals: list[float],
         line_cols: dict[str, list[float]],
         deviation_ema_vals: list[float] | None,
+        filter_components: tuple[list[float], list[float]] | None,
     ) -> ConfluenceSignal:
         params = self.params
         d = _direction_sign(signal.direction)
@@ -286,11 +339,24 @@ class ConfluenceStrategy:
         if confirmed and d < 0 and not params.short_enabled:
             confirmed = False
 
+        entry_price = signal.price
+        if confirmed and filter_components is not None:
+            anchor_vals, width_vals = filter_components
+            band = self.deviation_band_at(pos, d, anchor_vals, width_vals)
+            if band is None:
+                confirmed = False
+            else:
+                new_price = deviation_entry_price(d, signal.order_block, band)
+                if new_price is None:
+                    confirmed = False
+                else:
+                    entry_price = new_price
+
         lines = self._lines_at(pos, line_cols)
 
         if confirmed and params.min_rr is not None:
             confirmed = self._passes_min_rr(
-                d, signal.price, signal.order_block, lines, params.min_rr
+                d, entry_price, signal.order_block, lines, params.min_rr
             )
 
         if confirmed and d > 0 and params.long_max_deviation is not None:
@@ -309,7 +375,7 @@ class ConfluenceStrategy:
             kind=SignalKind.ENTRY,
             direction=signal.direction,
             time=signal.trigger_time,
-            price=signal.price,
+            price=entry_price,
             confirmed=confirmed,
             rsi=rsi_opt,
             order_block=signal.order_block,
