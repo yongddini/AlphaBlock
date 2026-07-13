@@ -1,0 +1,7 @@
+# AlphaBlock 대시보드 Streamlit 설정 (WAN-55).
+#
+# 기본 테마를 다크로 둔다 — 사용자는 평소 트레이딩뷰를 다크로 쓴다. 차트는
+# `_resolve_chart_theme()`가 "자동"일 때 `st.get_option("theme.base")`를 읽어 이
+# 값을 따라가므로, 여기서 다크로 두면 앱 UI와 차트가 함께 다크로 뜬다.
+[theme]
+base = "dark"

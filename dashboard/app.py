@@ -162,6 +162,32 @@ def _cached_pipeline(
 # --- 분석 탭 ----------------------------------------------------------------
 
 
+def _resolve_chart_theme() -> str:
+    """차트 테마(`"light"`/`"dark"`)를 결정한다 (WAN-55).
+
+    사이드바 오버라이드(자동/라이트/다크)가 우선하고, "자동"이면
+    `st.get_option("theme.base")`(Streamlit 설정 ⋮ → Settings → Theme)를 따라간다.
+    선택은 위젯 `key`로 `st.session_state`에 유지돼 재실행 후에도 초기화되지 않는다.
+    기본은 "자동"이며, 기본 Streamlit 테마가 다크(`.streamlit/config.toml`)라 처음엔
+    다크로 뜬다.
+    """
+    with st.sidebar:
+        st.subheader("차트 테마")
+        choice = st.radio(
+            "테마",
+            options=("자동", "라이트", "다크"),
+            index=0,
+            key="chart_theme_choice",
+            help="자동은 Streamlit 테마를 따라갑니다(⋮ → Settings → Theme). 기본은 다크.",
+        )
+    if choice == "라이트":
+        return "light"
+    if choice == "다크":
+        return "dark"
+    base = st.get_option("theme.base")
+    return "light" if base == "light" else "dark"
+
+
 def _select_chart_zones(
     result: PipelineResult,
     df: pd.DataFrame,
@@ -244,6 +270,8 @@ def _render_analysis(settings: Settings) -> None:
             f"저장된 OHLCV 데이터가 없습니다 ({db_path}). 먼저 데이터 수집(WAN-6)을 실행하세요."
         )
         return
+
+    chart_theme = _resolve_chart_theme()
 
     symbols = sorted({symbol for symbol, _ in series})
     with st.sidebar:
@@ -387,6 +415,7 @@ def _render_analysis(settings: Settings) -> None:
             result.signals,
             conf_params=conf_params,
             visible_lines=frozenset(visible_lines),
+            theme=chart_theme,
             height=chart_height,
         ),
         height=chart_height,
@@ -403,7 +432,7 @@ def _render_analysis(settings: Settings) -> None:
     cols[4].metric("Sharpe", f"{sharpe:.2f}" if sharpe is not None else "N/A")
     cols[5].metric("Trades", str(metrics.num_trades))
 
-    st.plotly_chart(build_equity_chart(backtest), use_container_width=True)
+    st.plotly_chart(build_equity_chart(backtest, theme=chart_theme), use_container_width=True)
 
     st.subheader("거래 목록")
     st.dataframe(trades_to_dataframe(backtest), use_container_width=True)

@@ -102,14 +102,27 @@ def filter_zones(
     return [ob for ob in order_blocks if zone_categories(ob, entered_keys) & wanted]
 
 
-def build_equity_chart(backtest: BacktestResult) -> go.Figure:
-    """자본곡선(equity curve) Figure."""
+def build_equity_chart(backtest: BacktestResult, *, theme: str = "dark") -> go.Figure:
+    """자본곡선(equity curve) Figure.
+
+    `theme`(`"light"`/`"dark"`, 기본 다크)에 맞춰 Plotly 템플릿을 고르고, 배경은
+    투명으로 둬 Streamlit 테마와 자연스레 섞이게 한다(WAN-55).
+    """
+    is_dark = theme != "light"
+    template = "plotly_dark" if is_dark else "plotly_white"
+    line_color = "#42a5f5" if is_dark else "#1e88e5"
     times = [pd.Timestamp(p.time, unit="ms", tz="UTC") for p in backtest.equity_curve]
     equities = [p.equity for p in backtest.equity_curve]
     fig = go.Figure(
         data=[
-            go.Scatter(x=times, y=equities, mode="lines", name="equity", line={"color": "#1e88e5"})
+            go.Scatter(x=times, y=equities, mode="lines", name="equity", line={"color": line_color})
         ]
     )
-    fig.update_layout(title="Equity Curve", template="plotly_white", height=300)
+    fig.update_layout(
+        title="Equity Curve",
+        template=template,
+        height=300,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+    )
     return fig
