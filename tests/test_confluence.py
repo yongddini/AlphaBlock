@@ -18,6 +18,7 @@ from strategy.confluence import (
     ConfluenceStrategy,
     IndicatorSnapshot,
     SignalKind,
+    entry_candidate_signals,
     generate_confluence_signals,
 )
 from strategy.indicators import ema
@@ -744,3 +745,208 @@ def test_short_enabled_false_does_not_affect_long_entries() -> None:
         df, OrderBlockResult(order_blocks=[], signals=[_signal(_BULL, pos, closes[pos])])
     )
     assert result.entries[0].confirmed is True
+
+
+# ------------------------------------------------------------------ WAN-73 신규 파라미터
+
+
+def test_wan73_new_params_preserve_defaults() -> None:
+    """새 파라미터의 기본값은 현행 동작을 보존한다."""
+    params = ConfluenceParams()
+    assert params.retap_mode == "once"
+    assert params.rsi_gate_mode == "extreme"
+    assert params.rsi_neutral_band == (40.0, 60.0)
+    assert params.take_profit_mode == "line"
+    assert params.take_profit_r == 2.0
+    assert params.limit_valid_bars == 24
+
+
+def test_rsi_neutral_band_rejects_invalid_ordering() -> None:
+    with pytest.raises(ValueError):
+        ConfluenceParams(rsi_neutral_band=(60.0, 40.0))
+    with pytest.raises(ValueError):
+        ConfluenceParams(rsi_neutral_band=(0.0, 60.0))
+    with pytest.raises(ValueError):
+        ConfluenceParams(rsi_neutral_band=(40.0, 100.0))
+
+
+def test_limit_valid_bars_accepts_none_for_until_invalidated() -> None:
+    params = ConfluenceParams(limit_valid_bars=None)
+    assert params.limit_valid_bars is None
+
+
+# -- retap_mode (존당 재진입) --
+
+
+def test_entry_candidate_signals_once_mode_returns_original_signals() -> None:
+    """`retap_mode="once"`(기본)은 오더블록 탐지기가 낸 시그널을 그대로 쓴다(현행 보존)."""
+    ob = _order_block(_BULL)
+    original_signals = [_signal(_BULL, 2, 100.0, ob)]
+    ob_result = OrderBlockResult(order_blocks=[ob], signals=original_signals)
+    times = [i * _STEP for i in range(6)]
+    closes = [100.0] * 6
+    time_to_pos = {t: i for i, t in enumerate(times)}
+    candidates = entry_candidate_signals(ob_result, ConfluenceParams(), times, closes, time_to_pos)
+    assert candidates is ob_result.signals
+
+
+def test_entry_candidate_signals_every_tap_uses_archive_tapped_times() -> None:
+    """`retap_mode="every_tap"`은 존의 모든 재탭(`tapped_times`)을 후보로 낸다."""
+    ob = _order_block(_BULL).model_copy(update={"tapped_times": (1 * _STEP, 3 * _STEP, 5 * _STEP)})
+    ob_result = OrderBlockResult(order_blocks=[ob], signals=[])
+    times = [i * _STEP for i in range(6)]
+    closes = [100.0 + i for i in range(6)]
+    time_to_pos = {t: i for i, t in enumerate(times)}
+    params = ConfluenceParams(retap_mode="every_tap")
+    candidates = entry_candidate_signals(ob_result, params, times, closes, time_to_pos)
+    assert [c.trigger_time for c in candidates] == [1 * _STEP, 3 * _STEP, 5 * _STEP]
+    assert all(c.order_block is ob for c in candidates)
+    assert candidates[1].price == closes[3]
+
+
+def test_retap_every_tap_confirms_one_entry_per_tap_end_to_end() -> None:
+    # 탭 위치는 모두 RSI 워밍업(rsi_length=14) 이후라야 확정된다.
+    closes = [100.0 + i for i in range(40)]
+    df = _df(closes)
+    ob = _order_block(_BULL, top=1_000.0, bottom=0.0).model_copy(
+        update={"tapped_times": (20 * _STEP, 28 * _STEP, 36 * _STEP)}
+    )
+    ob_result = OrderBlockResult(order_blocks=[ob], signals=[])
+    params = ConfluenceParams(
+        retap_mode="every_tap",
+        rsi_gate_mode="none",
+        use_line_take_profit=False,
+        use_order_block_stop=False,
+    )
+    result = ConfluenceStrategy(params).run(df, ob_result)
+    assert [e.time for e in result.confirmed_entries] == [20 * _STEP, 28 * _STEP, 36 * _STEP]
+
+
+def test_retap_once_ignores_extra_archive_taps() -> None:
+    """`retap_mode="once"`(기본)은 아카이브에 재탭이 여럿 있어도 첫 탭 시그널 하나만 쓴다."""
+    closes = [100.0 + i for i in range(40)]
+    df = _df(closes)
+    ob = _order_block(_BULL, top=1_000.0, bottom=0.0).model_copy(
+        update={"tapped_times": (20 * _STEP, 28 * _STEP, 36 * _STEP)}
+    )
+    ob_result = OrderBlockResult(order_blocks=[ob], signals=[_signal(_BULL, 20, closes[20], ob)])
+    params = ConfluenceParams(
+        rsi_gate_mode="none", use_line_take_profit=False, use_order_block_stop=False
+    )
+    result = ConfluenceStrategy(params).run(df, ob_result)
+    assert len(result.confirmed_entries) == 1
+
+
+# -- rsi_gate_mode --
+
+
+def test_rsi_gate_mode_neutral_confirms_long_and_short_when_rsi_near_50() -> None:
+    """중립 게이트는 RSI가 밴드 안이면 방향과 무관하게 통과한다."""
+    closes = [100.0, 105.0] * 12  # 오실레이션 -> 확정봉 RSI가 대략 50 부근에서 안정.
+    df = _df(closes)
+    pos = 23
+    params = ConfluenceParams(
+        rsi_gate_mode="neutral",
+        rsi_neutral_band=(40.0, 60.0),
+        use_line_take_profit=False,
+        use_order_block_stop=False,
+    )
+    long_result = ConfluenceStrategy(params).run(
+        df, OrderBlockResult(order_blocks=[], signals=[_signal(_BULL, pos, closes[pos])])
+    )
+    short_result = ConfluenceStrategy(params).run(
+        df, OrderBlockResult(order_blocks=[], signals=[_signal(_BEAR, pos, closes[pos])])
+    )
+    assert long_result.entries[0].confirmed is True
+    assert short_result.entries[0].confirmed is True
+
+
+def test_rsi_gate_mode_neutral_rejects_extreme_rsi() -> None:
+    closes = [200.0 - i * 3.0 for i in range(25)]  # 하락 -> RSI 과매도(극단)
+    df = _df(closes)
+    pos = 24
+    params = ConfluenceParams(
+        rsi_gate_mode="neutral",
+        use_line_take_profit=False,
+        use_order_block_stop=False,
+    )
+    result = ConfluenceStrategy(params).run(
+        df, OrderBlockResult(order_blocks=[], signals=[_signal(_BULL, pos, closes[pos])])
+    )
+    assert result.entries[0].confirmed is False
+
+
+def test_rsi_gate_mode_none_confirms_regardless_of_rsi() -> None:
+    closes = [100.0 + i * 3.0 for i in range(25)]  # 상승 -> RSI 과매수 -> 원래는 롱 기각
+    df = _df(closes)
+    pos = 24
+    params = ConfluenceParams(
+        rsi_gate_mode="none", use_line_take_profit=False, use_order_block_stop=False
+    )
+    result = ConfluenceStrategy(params).run(
+        df, OrderBlockResult(order_blocks=[], signals=[_signal(_BULL, pos, closes[pos])])
+    )
+    assert result.entries[0].confirmed is True
+
+
+# -- take_profit_mode="fixed_r" --
+
+
+def test_plan_exit_fixed_r_take_profit_targets_r_multiple_of_risk() -> None:
+    """`take_profit_mode="fixed_r"`는 진입가~무효화 경계(위험 1R)의 배수를 고정 익절가로 쓴다."""
+    strategy = ConfluenceStrategy(
+        ConfluenceParams(take_profit_mode="fixed_r", take_profit_r=2.0, use_line_take_profit=False)
+    )
+    ob = _order_block(_BULL, bottom=90.0)  # 위험 = 100 - 90 = 10 -> 목표 = 100 + 2*10 = 120
+    planned = _plan(
+        strategy,
+        break_pos=None,
+        line_cols={},
+        highs=[100.0, 115.0, 121.0],
+        lows=[100.0, 100.0, 100.0],
+        closes=[100.0, 110.0, 118.0],
+        order_block=ob,
+    )
+    assert planned is not None
+    assert planned.reason is SignalExitReason.TAKE_PROFIT
+    assert planned.time == 2 * _STEP
+    assert planned.price == pytest.approx(120.0)
+
+
+def test_plan_exit_fixed_r_ignores_lines_even_when_configured() -> None:
+    """fixed_r 모드에서는 `use_line_take_profit`/선 값과 무관하게 고정 R 목표만 본다."""
+    strategy = ConfluenceStrategy(
+        ConfluenceParams(take_profit_mode="fixed_r", take_profit_r=1.0, use_line_take_profit=True)
+    )
+    ob = _order_block(_BULL, bottom=95.0)  # 위험=5 -> 목표=105
+    planned = _plan(
+        strategy,
+        break_pos=None,
+        line_cols={"ema_5": [102.0, 102.0]},  # 선이 있어도 무시돼야 한다.
+        highs=[100.0, 106.0],
+        lows=[100.0, 100.0],
+        closes=[100.0, 103.0],
+        order_block=ob,
+    )
+    assert planned is not None
+    assert planned.price == pytest.approx(105.0)
+
+
+def test_plan_exit_fixed_r_short_direction() -> None:
+    strategy = ConfluenceStrategy(
+        ConfluenceParams(take_profit_mode="fixed_r", take_profit_r=2.0, use_line_take_profit=False)
+    )
+    ob = _order_block(_BEAR, top=110.0)  # 위험 = 110 - 100 = 10 -> 목표 = 100 - 20 = 80
+    planned = _plan(
+        strategy,
+        break_pos=None,
+        line_cols={},
+        highs=[100.0, 100.0, 100.0],
+        lows=[100.0, 85.0, 79.0],
+        closes=[100.0, 90.0, 82.0],
+        direction=_BEAR,
+        order_block=ob,
+    )
+    assert planned is not None
+    assert planned.reason is SignalExitReason.TAKE_PROFIT
+    assert planned.price == pytest.approx(80.0)
