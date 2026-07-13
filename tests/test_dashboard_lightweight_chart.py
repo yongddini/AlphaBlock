@@ -13,7 +13,15 @@ import pandas as pd
 from backtest.engine import run_backtest
 from backtest.models import BacktestConfig
 from dashboard.lightweight_chart import _RSI_LENGTH, build_chart_html
-from strategy.models import OrderBlock, OrderBlockDirection, OrderBlockSignal
+from strategy.indicators import ema
+from strategy.models import (
+    ConfluenceParams,
+    OrderBlock,
+    OrderBlockDirection,
+    OrderBlockSignal,
+    PlannedExit,
+    SignalExitReason,
+)
 
 _STEP = 3_600_000
 
@@ -160,3 +168,90 @@ def test_initial_bars_capped_to_available_candles() -> None:
     payload = _payload(build_chart_html(df, [], initial_bars=1_500))
 
     assert payload["initialBars"] == 5
+
+
+def test_build_chart_html_adds_tp_line_overlays_from_conf_params() -> None:
+    df = _df(30)
+    conf_params = ConfluenceParams(tp_ema_lengths=(20,), tp_vwma_length=None)
+
+    payload = _payload(build_chart_html(df, [], conf_params=conf_params))
+
+    lines = payload["lines"]
+    assert len(lines) == 1  # type: ignore[arg-type]
+    line = lines[0]  # type: ignore[index]
+    assert line["key"] == "ema_20"
+    assert line["label"] == "EMA 20"
+    assert len(line["points"]) == 30
+
+
+def test_build_chart_html_no_conf_params_means_no_lines() -> None:
+    payload = _payload(build_chart_html(_df(10), []))
+
+    assert payload["lines"] == []
+
+
+def test_build_chart_html_visible_lines_filters_overlay() -> None:
+    df = _df(30)
+    conf_params = ConfluenceParams(tp_ema_lengths=(20, 60), tp_vwma_length=100)
+
+    payload = _payload(
+        build_chart_html(df, [], conf_params=conf_params, visible_lines=frozenset({"ema_20"}))
+    )
+
+    lines = payload["lines"]
+    assert isinstance(lines, list)
+    keys = {line["key"] for line in lines}
+    assert keys == {"ema_20"}
+
+
+def test_exit_marker_labels_touched_ema_line_and_pnl() -> None:
+    df = _df(30)
+    conf_params = ConfluenceParams(tp_ema_lengths=(20,), tp_vwma_length=None)
+    frame = df.sort_values("open_time").reset_index(drop=True)
+    ema_20 = ema(frame, length=20)
+    exit_time = 25 * _STEP
+    tp_price = float(ema_20.iloc[25])
+
+    signal = OrderBlockSignal(
+        direction=OrderBlockDirection.BULLISH,
+        trigger_time=20 * _STEP,
+        price=100.0,
+        order_block=_order_block(),
+        status="active",
+        planned_exit=PlannedExit(
+            time=exit_time, price=tp_price, reason=SignalExitReason.TAKE_PROFIT
+        ),
+    )
+    backtest = run_backtest(df, [signal], BacktestConfig())
+
+    payload = _payload(build_chart_html(df, [], backtest, [signal], conf_params=conf_params))
+
+    markers = payload["markers"]
+    assert len(markers) >= 1  # type: ignore[arg-type]
+    exit_marker = markers[-1]  # type: ignore[index]
+    text = exit_marker["text"]
+    assert "익절 · EMA 20" in text
+    assert "%" in text
+
+
+def test_exit_marker_labels_stop_loss_as_order_block_invalidation() -> None:
+    df = _df(30)
+    ob = _order_block(top=95.0, bottom=90.0)
+    signal = OrderBlockSignal(
+        direction=OrderBlockDirection.BULLISH,
+        trigger_time=10 * _STEP,
+        price=100.0,
+        order_block=ob,
+        status="active",
+        planned_exit=PlannedExit(time=15 * _STEP, price=92.0, reason=SignalExitReason.STOP_LOSS),
+    )
+    backtest = run_backtest(df, [signal], BacktestConfig())
+
+    payload = _payload(build_chart_html(df, [], backtest, [signal]))
+
+    markers = payload["markers"]
+    assert len(markers) >= 1  # type: ignore[arg-type]
+    exit_marker = markers[-1]  # type: ignore[index]
+    text = exit_marker["text"]
+    assert "손절 · OB 무효화" in text
+    assert "R" in text

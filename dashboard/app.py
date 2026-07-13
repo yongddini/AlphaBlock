@@ -307,6 +307,17 @@ def _render_analysis(settings: Settings) -> None:
             if show_all_archive:
                 st.warning("전체 아카이브는 존이 매우 많아 렌더가 느릴 수 있습니다.")
 
+        st.subheader("익절 목표선")
+        line_keys = [f"ema_{length}" for length in conf_params.sorted_tp_ema_lengths]
+        if conf_params.tp_vwma_length is not None:
+            line_keys.append(f"vwma_{conf_params.tp_vwma_length}")
+        visible_lines: set[str] = set()
+        for key in line_keys:
+            kind, _, length = key.partition("_")
+            label = f"{kind.upper()} {length}"
+            if st.checkbox(label, value=True, key=f"line_toggle_{key}"):
+                visible_lines.add(key)
+
     chart_df, zones = _select_chart_zones(
         result,
         df,
@@ -321,7 +332,15 @@ def _render_analysis(settings: Settings) -> None:
     st.subheader(f"{symbol} · {timeframe}")
     chart_height = 700
     st.iframe(
-        build_chart_html(chart_df, zones, chart_backtest, height=chart_height),
+        build_chart_html(
+            chart_df,
+            zones,
+            chart_backtest,
+            result.signals,
+            conf_params=conf_params,
+            visible_lines=frozenset(visible_lines),
+            height=chart_height,
+        ),
         height=chart_height,
     )
 

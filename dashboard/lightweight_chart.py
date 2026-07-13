@@ -69,9 +69,18 @@ from pathlib import Path
 
 import pandas as pd
 
-from backtest.models import BacktestResult, PositionSide
+from backtest.models import BacktestResult, ExitReason, PositionSide
+from strategy.indicators import emas as compute_emas
 from strategy.indicators import rsi as compute_rsi
-from strategy.models import OrderBlock, OrderBlockDirection
+from strategy.indicators import vwma as compute_vwma
+from strategy.models import (
+    ConfluenceParams,
+    OrderBlock,
+    OrderBlockDirection,
+    OrderBlockSignal,
+    PlannedExit,
+    SignalExitReason,
+)
 
 _BULL_COLOR = "#26a69a"
 _BEAR_COLOR = "#ef5350"
@@ -98,6 +107,28 @@ _RSI_PANE_HEIGHT_RATIO = 0.25
 
 _LINE_STYLE_DOTTED = 1
 _LINE_STYLE_DASHED = 2
+
+#: 익절 목표선(EMA) 오버레이 색 팔레트. 길이 순서대로 순환 배정한다(WAN-59 후속:
+#: 사용자가 `tp_ema_lengths`를 바꿔도 팔레트가 무너지지 않도록 길이가 아닌 순번으로 매핑).
+#: 밝은/어두운 배경 양쪽에서 식별 가능하도록 중간 채도·명도를 고른다(WAN-55 대비 고려).
+_EMA_LINE_PALETTE: tuple[str, ...] = (
+    "#2962ff",  # blue
+    "#f9a825",  # amber
+    "#ab47bc",  # purple
+    "#ff7043",  # deep orange
+    "#6d4c41",  # brown
+    "#00838f",  # teal
+    "#7cb342",  # olive green
+)
+_VWMA_LINE_COLOR = "#d81b60"  # magenta — VWMA는 항상 이 색으로 고정해 EMA들과 구분.
+
+_EXIT_MARKER_COLORS: dict[ExitReason, str] = {
+    ExitReason.TAKE_PROFIT: "#2e7d32",
+    ExitReason.PARTIAL_TAKE_PROFIT: "#2e7d32",
+    ExitReason.STOP_LOSS: "#c62828",
+    ExitReason.END_OF_DATA: "#616161",
+}
+_EXIT_MARKER_DEFAULT_COLOR = "#6d4c41"
 
 _STATIC_DIR = Path(__file__).parent / "static"
 _LIBRARY_JS_PATH = _STATIC_DIR / "lightweight-charts.standalone.production.js"
@@ -157,10 +188,93 @@ def _rsi_at(rsi_by_time: dict[int, float], time_ms: int) -> float | None:
     return value
 
 
+def _line_label(key: str) -> str:
+    """`ema_120`/`vwma_100` 같은 내부 키를 화면 표시용 라벨(`EMA 120`)로 바꾼다."""
+    kind, _, length = key.partition("_")
+    return f"{kind.upper()} {length}"
+
+
+def _signals_by_trigger_time(
+    signals: Sequence[OrderBlockSignal],
+) -> dict[int, OrderBlockSignal]:
+    """활성 시그널을 진입 봉 시각(`trigger_time`) 기준으로 찾아볼 수 있게 색인한다.
+
+    `BacktestEngine`이 `sig.trigger_time == t`에서 포지션을 여는 것과 대응되므로
+    (`backtest/engine.py::run`), `Trade.entry_time`으로 이 색인을 찾으면 그 거래를
+    발생시킨 오더블록·계획 청산(`PlannedExit`)을 역추적할 수 있다.
+    """
+    return {s.trigger_time: s for s in signals if s.status == "active"}
+
+
+def _touched_line_label(
+    planned: PlannedExit | None, tp_lines_by_time: dict[str, dict[int, float]]
+) -> str | None:
+    """익절 시 실제로 닿은 EMA/VWMA 선의 라벨을 찾는다.
+
+    `PlannedExit.price`는 `ConfluenceStrategy`가 익절 목표선의 값을 그대로 옮겨 실은
+    것이므로(수수료·슬리피지 반영 전), 그 시각(`planned.time`)의 선 값들과 정확히
+    일치하는 키를 찾으면 "어느 선인지"를 재구성할 수 있다.
+    """
+    if planned is None or planned.reason is not SignalExitReason.TAKE_PROFIT:
+        return None
+    for key, series_by_time in tp_lines_by_time.items():
+        value = series_by_time.get(planned.time)
+        if value is None or math.isnan(value):
+            continue
+        if math.isclose(value, planned.price, rel_tol=1e-9, abs_tol=1e-9):
+            return _line_label(key)
+    return None
+
+
+def _fmt_price(price: float) -> str:
+    return f"{price:,.1f}"
+
+
+def _exit_marker_text(
+    fill_price: float,
+    fill_reason: ExitReason,
+    trade_side: PositionSide,
+    entry_price: float,
+    signal: OrderBlockSignal | None,
+    tp_lines_by_time: dict[str, dict[int, float]],
+) -> str:
+    """청산 마커 텍스트: 사유(익절/손절/강제청산) · 닿은 선(익절) · 손익%· R 배수.
+
+    R 배수의 리스크 기준은 오더블록 무효화 경계(`BacktestEngine._sizing_stop_price`와
+    동일 규칙 — 롱은 존 하단, 숏은 존 상단)다. 체결가는 슬리피지·수수료가 반영된
+    값이라 손익%는 근사치(수수료 제외 가격 기준)다.
+    """
+    pnl_pct = (
+        trade_side.sign * (fill_price - entry_price) / entry_price * 100.0 if entry_price else 0.0
+    )
+
+    risk_pct: float | None = None
+    if signal is not None and entry_price:
+        is_long = trade_side is PositionSide.LONG
+        stop_ref = signal.order_block.bottom if is_long else signal.order_block.top
+        candidate = abs(entry_price - stop_ref) / entry_price * 100.0
+        risk_pct = candidate if candidate > 1e-9 else None
+    r_text = f" · R{pnl_pct / risk_pct:+.2f}" if risk_pct is not None else ""
+
+    planned = signal.planned_exit if signal is not None else None
+    if fill_reason in (ExitReason.TAKE_PROFIT, ExitReason.PARTIAL_TAKE_PROFIT):
+        line_label = _touched_line_label(planned, tp_lines_by_time)
+        head = f"익절 · {line_label}" if line_label else "익절"
+    elif fill_reason is ExitReason.STOP_LOSS:
+        head = "손절 · OB 무효화"
+    else:
+        head = "청산 · 데이터 종료"
+    return f"{head} @ {_fmt_price(fill_price)} · {pnl_pct:+.2f}%{r_text}"
+
+
 def _entry_exit_markers(
-    backtest: BacktestResult, rsi_by_time: dict[int, float]
+    backtest: BacktestResult,
+    rsi_by_time: dict[int, float],
+    signals: Sequence[OrderBlockSignal],
+    tp_lines_by_time: dict[str, dict[int, float]],
 ) -> list[dict[str, object]]:
-    """진입/청산 마커. 진입 마커 텍스트에 방향·그 시점 RSI를 함께 담는다."""
+    """진입/청산 마커. 진입 마커는 방향·RSI를, 청산 마커는 사유·닿은 선·손익%·R을 담는다."""
+    signal_by_entry = _signals_by_trigger_time(signals)
     markers: list[dict[str, object]] = []
     for trade in backtest.trades:
         is_long = trade.side is PositionSide.LONG
@@ -175,14 +289,18 @@ def _entry_exit_markers(
                 "text": f"{'롱' if is_long else '숏'} RSI{rsi_text}",
             }
         )
+        signal = signal_by_entry.get(trade.entry_time)
         for fill in trade.exits:
+            text = _exit_marker_text(
+                fill.price, fill.reason, trade.side, trade.entry_price, signal, tp_lines_by_time
+            )
             markers.append(
                 {
                     "time": fill.time // 1000,
                     "position": "aboveBar" if is_long else "belowBar",
-                    "color": "#6d4c41",
+                    "color": _EXIT_MARKER_COLORS.get(fill.reason, _EXIT_MARKER_DEFAULT_COLOR),
                     "shape": "circle",
-                    "text": "청산",
+                    "text": text,
                 }
             )
     markers.sort(key=lambda m: int(m["time"]))  # type: ignore[call-overload]
@@ -280,6 +398,39 @@ _TEMPLATE = """
     candleSeries.attachPrimitive(new OrderBlockBoxesPrimitive(payload.boxes));
   }
 
+  // 익절 목표선(EMA/VWMA) 오버레이 — 사이드바 토글로 켜진 선만 payload.lines에 담겨
+  // 온다(WAN-59 후속). 캔들 패인(0)에 얇은 LineSeries로 겹쳐 그린다.
+  const lineSeriesList = [];
+  (payload.lines || []).forEach(function (line) {
+    const s = chart.addSeries(LightweightCharts.LineSeries, {
+      color: line.color,
+      lineWidth: 1,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      crosshairMarkerVisible: false,
+    }, 0);
+    lineSeriesList.push({ series: s, points: line.points });
+  });
+
+  if (payload.lines && payload.lines.length) {
+    const legend = document.createElement("div");
+    legend.style.cssText =
+      "position:absolute;top:8px;left:8px;z-index:5;background:rgba(255,255,255,0.85);" +
+      "padding:4px 8px;border-radius:4px;font:11px -apple-system,sans-serif;" +
+      "line-height:1.6;pointer-events:none;color:#333;";
+    payload.lines.forEach(function (line) {
+      const item = document.createElement("div");
+      item.innerHTML =
+        '<span style="display:inline-block;width:10px;height:2px;background:' +
+        line.color +
+        ';margin-right:6px;vertical-align:middle;"></span>' +
+        line.label;
+      legend.appendChild(item);
+    });
+    container.style.position = "relative";
+    container.appendChild(legend);
+  }
+
   let rsiSeries = null;
   if (payload.rsi.some(Boolean)) {
     rsiSeries = chart.addSeries(LightweightCharts.LineSeries, {
@@ -313,6 +464,9 @@ _TEMPLATE = """
     if (rsiSeries) {
       rsiSeries.setData(payload.rsi.slice(idx).filter(Boolean));
     }
+    lineSeriesList.forEach(function (entry) {
+      entry.series.setData(entry.points.slice(idx).filter(Boolean));
+    });
   }
   applyFrom(loadedFrom);
   chart.timeScale().fitContent();
@@ -335,18 +489,54 @@ _TEMPLATE = """
 """
 
 
+def _tp_line_series(frame: pd.DataFrame, conf_params: ConfluenceParams) -> dict[str, pd.Series]:
+    """익절 목표선(EMA/VWMA)을 `frame`과 위치가 정렬된 Series로 계산한다.
+
+    지표 계산은 `strategy.indicators`(전략이 백테스트에 쓰는 것과 동일 함수)를
+    재사용해, 차트에 그리는 선이 실제 익절 판정에 쓰인 선과 항상 같도록 한다.
+    키 순서(EMA 오름차순 → VWMA)가 팔레트·범례 순서를 결정한다.
+    """
+    cols: dict[str, pd.Series] = {}
+    lengths = conf_params.sorted_tp_ema_lengths
+    if lengths:
+        ema_frame = compute_emas(frame, lengths=lengths, source=conf_params.source)
+        for length in lengths:
+            cols[f"ema_{length}"] = ema_frame[f"ema_{length}"]
+    if conf_params.tp_vwma_length is not None:
+        key = conf_params.tp_vwma_key
+        assert key is not None
+        cols[key] = compute_vwma(
+            frame, length=conf_params.tp_vwma_length, source=conf_params.source
+        )
+    return cols
+
+
+def _line_color(key: str, ema_index: int) -> str:
+    if key.startswith("vwma_"):
+        return _VWMA_LINE_COLOR
+    return _EMA_LINE_PALETTE[ema_index % len(_EMA_LINE_PALETTE)]
+
+
 def build_chart_html(
     df: pd.DataFrame,
     order_blocks: Sequence[OrderBlock],
     backtest: BacktestResult | None = None,
+    signals: Sequence[OrderBlockSignal] = (),
     *,
+    conf_params: ConfluenceParams | None = None,
+    visible_lines: frozenset[str] | None = None,
     height: int = 700,
     initial_bars: int = _INITIAL_BARS,
 ) -> str:
-    """캔들+오더블록+RSI 패널을 그리는 자족형 HTML을 만든다.
+    """캔들+오더블록+RSI+익절 목표선 패널을 그리는 자족형 HTML을 만든다.
 
     `st.components.v1.html(build_chart_html(...), height=height)`로 임베드한다.
     반환된 HTML은 벤더링된 JS 라이브러리를 인라인 포함해 오프라인에서도 동작한다.
+
+    `conf_params`를 주면 `tp_ema_lengths`/`tp_vwma_length` 선을 캔들 패널에 오버레이하고
+    (`visible_lines`로 표시할 키만 필터, `None`이면 전부), `backtest`가 있으면 청산
+    마커에 사유(익절/손절)·닿은 선·손익%·R 배수를 담는다. `signals`는 각 거래를 발생시킨
+    시그널(오더블록·계획 청산)을 역추적하는 데 쓰인다(WAN-59 후속).
     """
     frame = df.sort_values("open_time").reset_index(drop=True)
     if frame.empty:
@@ -375,14 +565,46 @@ def build_chart_html(
         for t, v in zip(times_sec, rsi_full.tolist(), strict=True)
     ]
 
+    tp_lines = _tp_line_series(frame, conf_params) if conf_params is not None else {}
+    times_ms: list[int] = frame["open_time"].tolist()
+    tp_lines_by_time: dict[str, dict[int, float]] = {
+        key: dict(zip(times_ms, series.tolist(), strict=True)) for key, series in tp_lines.items()
+    }
+    allowed_lines = tp_lines.keys() if visible_lines is None else visible_lines
+    lines_payload: list[dict[str, object]] = []
+    ema_index = 0
+    for key, series in tp_lines.items():
+        color = _line_color(key, ema_index)
+        if not key.startswith("vwma_"):
+            ema_index += 1
+        if key not in allowed_lines:
+            continue
+        # 소수점 2자리로 반올림한다(가격 표시 정밀도로 충분 — `_fmt_price`와 동일).
+        # EMA/VWMA는 부동소수점 나눗셈 결과라 반올림 없이는 유효숫자가 15~17자리까지
+        # 늘어나 6개 선 전체(3년 15m ≈ 10만 봉)를 실으면 페이로드가 크게 불어난다.
+        # 매칭(`_touched_line_label`)은 이 반올림값이 아니라 `tp_lines_by_time`의
+        # 원본 정밀도 값을 쓰므로 정확도에 영향 없다.
+        points: list[dict[str, float] | None] = [
+            None if math.isnan(v) else {"time": t, "value": round(v, 2)}
+            for t, v in zip(times_sec, series.tolist(), strict=True)
+        ]
+        lines_payload.append(
+            {"key": key, "label": _line_label(key), "color": color, "points": points}
+        )
+
     boxes = _zone_boxes(order_blocks, last_bar_ms)
-    markers = _entry_exit_markers(backtest, rsi_by_time) if backtest is not None else []
+    markers = (
+        _entry_exit_markers(backtest, rsi_by_time, signals, tp_lines_by_time)
+        if backtest is not None
+        else []
+    )
 
     payload: dict[str, object] = {
         "candles": candles,
         "rsi": rsi_points,
         "boxes": boxes,
         "markers": markers,
+        "lines": lines_payload,
         "initialBars": min(initial_bars, len(candles)),
         "priceColors": {"up": _BULL_COLOR, "down": _BEAR_COLOR},
         "rsiColor": _RSI_LINE_COLOR,
