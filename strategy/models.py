@@ -150,27 +150,46 @@ def _merge_max_optional(a: int | None, b: int | None) -> int | None:
     return max(a, b)
 
 
+def _ob_area(ob: OrderBlock, now: int) -> float:
+    end = ob.break_time if ob.break_time is not None else now
+    return (end - ob.start_time) * (ob.top - ob.bottom)
+
+
+def obs_touch(a: OrderBlock, b: OrderBlock, now: int) -> bool:
+    """두 존이 병합 대상으로 겹치는지(IoU 교집합/합집합 * 100 > 0). 원본 `doOBsTouch`.
+
+    시간축(존의 왼쪽 변~오른쪽 변)과 가격축(bottom~top)의 교집합 면적을 합집합
+    면적으로 나눈 IoU가 양수면 병합한다. `now`는 아직 무효화되지 않은 존의 오른쪽
+    변(면적 계산용) 센티넬이다. 방향(obType)은 이 함수에서 검사하지 않으므로 호출부가
+    같은 방향끼리만 넘겨야 한다(`combine_order_blocks`·`_generate_merged_signals`).
+    """
+    # 가격축 교집합을 먼저 본다 — 가격대가 다른 대다수 쌍은 여기서 즉시 걸러져
+    # 시간축·면적 계산을 건너뛴다(WAN-56 성능: 매 봉 O(존²) 병합의 핫패스).
+    intersection_price = min(a.top, b.top) - max(a.bottom, b.bottom)
+    if intersection_price <= 0.0:
+        return False
+    a_end = a.break_time if a.break_time is not None else now
+    b_end = b.break_time if b.break_time is not None else now
+    intersection_time = min(a_end, b_end) - max(a.start_time, b.start_time)
+    if intersection_time <= 0:
+        return False
+    intersection = intersection_time * intersection_price
+    union = _ob_area(a, now) + _ob_area(b, now) - intersection
+    if union <= 0:
+        return False
+    return (intersection / union) * 100.0 > 0
+
+
 def combine_order_blocks(obs: list[OrderBlock], now: int) -> list[OrderBlock]:
     """겹치는(IoU 교집합>0) 동일 방향 존을 병합. 원본 `combineOBsFunc`에 대응.
 
-    렌더링 뷰(`select_active`)에서만 쓰인다 — 탐지 아카이브 자체는 병합하지 않는다.
+    렌더링 뷰(`select_active`)와 백테스트 시그널(`_generate_merged_signals`,
+    WAN-56)이 공유한다 — 탐지 아카이브(`order_blocks`) 자체는 원본 단위로 남긴다.
     `now`는 아직 무효화되지 않은 존의 오른쪽 변(면적 계산용) 센티넬이다.
     """
 
-    def area(ob: OrderBlock) -> float:
-        end = ob.break_time if ob.break_time is not None else now
-        return (end - ob.start_time) * (ob.top - ob.bottom)
-
     def touch(a: OrderBlock, b: OrderBlock) -> bool:
-        a_end = a.break_time if a.break_time is not None else now
-        b_end = b.break_time if b.break_time is not None else now
-        intersection_time = max(0, min(a_end, b_end) - max(a.start_time, b.start_time))
-        intersection_price = max(0.0, min(a.top, b.top) - max(a.bottom, b.bottom))
-        intersection = intersection_time * intersection_price
-        union = area(a) + area(b) - intersection
-        if union <= 0:
-            return False
-        return (intersection / union) * 100.0 > 0
+        return obs_touch(a, b, now)
 
     items = list(obs)
     merged = True
