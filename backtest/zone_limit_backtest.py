@@ -62,6 +62,7 @@ from strategy.models import (
     OrderBlockParams,
     OrderBlockResult,
     SignalExitReason,
+    deviation_entry_price,
 )
 from strategy.order_blocks import OrderBlockDetector
 from strategy.realtime_rsi import RealtimeRsi
@@ -284,6 +285,12 @@ def build_zone_limit_candidates(
         dev_frame = emas(htf_df, lengths=(dev_length,), source=params.source)
         deviation_ema = dev_frame[f"ema_{dev_length}"]
 
+    filter_components: tuple[list[float], list[float]] | None = None
+    if params.deviation_filter is not None:
+        filter_components = ConfluenceStrategy.deviation_filter_components(
+            htf_df, params.deviation_filter, params.source
+        )
+
     effective_oversold = params.rsi_oversold if rsi_oversold is None else rsi_oversold
     effective_overbought = params.rsi_overbought if rsi_overbought is None else rsi_overbought
     effective_gate_mode = params.rsi_gate_mode if rsi_gate_mode is None else rsi_gate_mode
@@ -307,6 +314,16 @@ def build_zone_limit_candidates(
             continue  # WAN-68: 숏 완전 제거 게이트.
 
         limit_price = params.zone_limit_price(ob)
+        if filter_components is not None:
+            anchor_vals, width_vals = filter_components
+            d_sign = 1 if is_long else -1
+            band = ConfluenceStrategy.deviation_band_at(pos, d_sign, anchor_vals, width_vals)
+            if band is None:
+                continue  # WAN-75: 워밍업 중이라 판정 불가.
+            new_price = deviation_entry_price(d_sign, ob, band)
+            if new_price is None:
+                continue  # WAN-75: 밴드가 존 전체보다 불리한 쪽 — 진입하지 않음(규칙 3).
+            limit_price = new_price
         lines = _line_snapshot(params, htf_df, pos)
         lines_by_key = {str(i): v for i, v in enumerate(lines)}
         if params.min_rr is not None and not ConfluenceStrategy._passes_min_rr(
