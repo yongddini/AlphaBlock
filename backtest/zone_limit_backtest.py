@@ -3,8 +3,11 @@
 `backtest.substep`(1분봉 서브스텝 시뮬레이터)과 `strategy.realtime_rsi`(봉내 실시간
 RSI)를 오더블록 탐지(`strategy.order_blocks`)에 **배선**해, `entry_mode=zone_limit`
 + `rsi_mode=realtime` 진입이 실제로 동작하는 end-to-end 백테스트를 제공한다. A안
-(종가/확정봉, `backtest.sweep.evaluate` → `BacktestEngine`)과 **동일한 비용 모델**
-(수수료·슬리피지·리스크 사이징)을 써서 A vs B 비교(`backtest.ab_run`)가 공정하다.
+(종가/확정봉, `backtest.sweep.evaluate` → `BacktestEngine`)과 **같은 공용 비용 모델**
+(`common.costs.CostModel`)·리스크 사이징을 쓴다. 다만 B안은 **지정가(메이커) 진입**
+이라 진입에 슬리피지가 붙지 않고 메이커 수수료가 적용되는 반면, A안은 시장가(테이커)
+진입이라 테이커 수수료+슬리피지가 붙는다 — 이 비대칭이 A vs B 비교(`backtest.ab_run`)
+를 실제 체결 비용에 맞게 공정하게 만든다(WAN-37).
 
 ## 파이프라인
 
@@ -47,6 +50,7 @@ from backtest.models import (
 )
 from backtest.substep import ZoneLimitStatus, build_substeps, simulate_zone_limit_trade
 from backtest.sweep import bars_per_year, timeframe_to_ms
+from common.costs import Liquidity
 from execution.sizing import position_size
 from strategy.indicators import emas, vwma
 from strategy.models import (
@@ -106,14 +110,6 @@ class ZoneLimitStats:
     def fill_rate(self) -> float | None:
         """지정가 체결률 = filled / eligible. 대상 셋업이 없으면 None."""
         return self.filled / self.eligible if self.eligible else None
-
-
-def _entry_fill(price: float, side: PositionSide, slippage: float) -> float:
-    return price * (1.0 + slippage) if side is PositionSide.LONG else price * (1.0 - slippage)
-
-
-def _exit_fill(price: float, side: PositionSide, slippage: float) -> float:
-    return price * (1.0 - slippage) if side is PositionSide.LONG else price * (1.0 + slippage)
 
 
 def _prepare_htf(df: pd.DataFrame) -> pd.DataFrame:
@@ -330,9 +326,16 @@ def _sequence_and_cost(candidates: list[_Candidate], cfg: BacktestConfig) -> lis
 
 
 def _to_trade(cand: _Candidate, equity: float, cfg: BacktestConfig) -> Trade | None:
-    """A안 엔진과 동일한 수수료·슬리피지·사이징으로 셋업을 `Trade`로 변환."""
+    """공용 비용 모델로 셋업을 `Trade`로 변환한다(WAN-37).
+
+    B안은 **지정가(메이커) 진입**이므로 진입에는 슬리피지가 붙지 않고 메이커 수수료가
+    적용된다. 청산은 손절·익절 도달 시 시장가 성격이라 테이커(수수료+슬리피지)로 본다.
+    이 비대칭이 A안(시장가=테이커 진입)과의 공정한 비교의 핵심이다.
+    """
     side = cand.side
-    entry_fill = _entry_fill(cand.entry_price, side, cfg.slippage)
+    is_long = side is PositionSide.LONG
+    costs = cfg.cost_model
+    entry_fill = costs.entry_fill(cand.entry_price, is_long=is_long, liquidity=Liquidity.MAKER)
     if cfg.risk_sizing is not None:
         qty = position_size(
             equity=equity,
@@ -345,10 +348,10 @@ def _to_trade(cand: _Candidate, equity: float, cfg: BacktestConfig) -> Trade | N
     else:
         qty = (equity * cfg.position_fraction) / entry_fill
     entry_notional = entry_fill * qty
-    entry_fee = entry_notional * cfg.fee_rate
+    entry_fee = costs.fee(entry_notional, Liquidity.MAKER)
 
-    exit_fill = _exit_fill(cand.exit_price, side, cfg.slippage)
-    exit_fee = exit_fill * qty * cfg.fee_rate
+    exit_fill = costs.exit_fill(cand.exit_price, is_long=is_long, liquidity=Liquidity.TAKER)
+    exit_fee = costs.fee(exit_fill * qty, Liquidity.TAKER)
     gross = side.sign * (exit_fill - entry_fill) * qty
     realized = gross - entry_fee - exit_fee
     return Trade(

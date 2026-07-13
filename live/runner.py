@@ -233,7 +233,7 @@ def run_signal_runner(
     funding_store = FundingRateStore(settings.db_path) if settings.funding_enabled else None
     recorder = PaperTradeRecorder(
         paper_store,
-        fee_rate=settings.paper_fee_rate,
+        cost_model=settings.costs,
         funding_store=funding_store,
     )
     executor = PaperExecutor(

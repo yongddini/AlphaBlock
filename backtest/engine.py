@@ -52,6 +52,7 @@ from backtest.models import (
     Trade,
     TradeFill,
 )
+from common.costs import Liquidity
 from data.funding import Direction, cumulative_funding_cost
 from data.models import FundingRate
 from execution.sizing import position_size
@@ -99,6 +100,10 @@ class BacktestEngine:
 
     def __init__(self, config: BacktestConfig | None = None) -> None:
         self.config = config or BacktestConfig()
+        # 수수료·슬리피지는 공용 CostModel 하나로 적용한다(WAN-37). 진입은 설정된
+        # 유동성(A안=taker, B안=maker), 청산은 항상 taker(시장가 성격)로 본다.
+        self._costs = self.config.cost_model
+        self._entry_liquidity = self.config.entry_liquidity
         # 현재 엔진은 결정적이지만, 시드를 기록·고정해 향후 확률적 슬리피지 등
         # 확장 시에도 재현이 유지되도록 한다.
         random.seed(self.config.seed)
@@ -183,12 +188,14 @@ class BacktestEngine:
         return PositionSide.SHORT if self.config.allow_short else None
 
     def _entry_fill(self, price: float, side: PositionSide) -> float:
-        slip = self.config.slippage
-        return price * (1.0 + slip) if side is PositionSide.LONG else price * (1.0 - slip)
+        return self._costs.entry_fill(
+            price, is_long=side is PositionSide.LONG, liquidity=self._entry_liquidity
+        )
 
     def _exit_fill(self, price: float, side: PositionSide) -> float:
-        slip = self.config.slippage
-        return price * (1.0 - slip) if side is PositionSide.LONG else price * (1.0 + slip)
+        return self._costs.exit_fill(
+            price, is_long=side is PositionSide.LONG, liquidity=Liquidity.TAKER
+        )
 
     @staticmethod
     def _sizing_stop_price(sig: OrderBlockSignal, side: PositionSide) -> float:
@@ -219,7 +226,7 @@ class BacktestEngine:
         else:
             notional = equity * cfg.position_fraction
             quantity = notional / entry_price
-        entry_fee = notional * cfg.fee_rate
+        entry_fee = self._costs.fee(notional, self._entry_liquidity)
         cash -= entry_fee
 
         sign = side.sign
@@ -264,7 +271,7 @@ class BacktestEngine:
     ) -> float:
         fill = self._exit_fill(level_price, pos.side)
         notional = fill * quantity
-        fee = notional * self.config.fee_rate
+        fee = self._costs.fee(notional, Liquidity.TAKER)
         realized = pos.side.sign * (fill - pos.entry_price) * quantity
         cash += realized - fee
         pos.exits.append(TradeFill(time=t, price=fill, quantity=quantity, fee=fee, reason=reason))

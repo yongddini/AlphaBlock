@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Protocol
 
+from common.costs import CostModel, Liquidity
 from execution.models import Fill, Order, OrderStatus, OrderType
 
 if TYPE_CHECKING:  # pragma: no cover - 타입 체크 전용(런타임 임포트 회피)
@@ -40,11 +41,34 @@ class PaperBroker:
 
     체결가는 지정가면 주문 가격, 시장가면 `place_order(mark_price=...)`로 받은
     참조가를 쓴다. 실행된 모든 주문을 `orders`에 기록해 검증에 쓴다.
+
+    ## 수수료 (WAN-37)
+
+    `cost_model`(공용 `CostModel`)을 주면 시장가=테이커, 지정가=메이커로 수수료를
+    구분해 부과한다(엔진의 운영 자본 정산이 현실적이도록). 없으면 레거시 `fee_rate`
+    (플랫)만 쓴다. **슬리피지는 여기서 체결가에 넣지 않는다** — 페이퍼 성과(paper_trades)
+    의 권위 있는 비용 산정은 `paper.store.build_record`가 원(raw) 참조가에 공용
+    `CostModel`을 적용해 백테스트와 동일 산식으로 수행하므로, 브로커가 체결가를 미리
+    미끄러뜨리면 이중 반영이 된다. 그래서 브로커는 체결가를 참조가 그대로 두고
+    수수료만 모델링한다.
     """
 
-    def __init__(self, *, fee_rate: float = 0.0) -> None:
+    def __init__(
+        self,
+        *,
+        fee_rate: float = 0.0,
+        cost_model: CostModel | None = None,
+    ) -> None:
         self.fee_rate = fee_rate
+        self.cost_model = cost_model
         self.orders: list[Order] = []
+
+    def _fee(self, notional: float, order_type: OrderType) -> float:
+        """체결 수수료. `cost_model`이 있으면 메이커/테이커 구분, 없으면 플랫 요율."""
+        if self.cost_model is None:
+            return notional * self.fee_rate
+        liquidity = Liquidity.MAKER if order_type is OrderType.LIMIT else Liquidity.TAKER
+        return self.cost_model.fee(notional, liquidity)
 
     def place_order(self, order: Order, *, mark_price: float | None = None) -> Fill:
         self.orders.append(order)
@@ -57,7 +81,7 @@ class PaperBroker:
                 filled_quantity=0.0,
                 average_price=0.0,
             )
-        fee = fill_price * order.quantity * self.fee_rate
+        fee = self._fee(fill_price * order.quantity, order.type)
         _logger.info(
             "[페이퍼] %s %s %s qty=%s @ %s",
             order.symbol,
