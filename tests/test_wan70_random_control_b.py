@@ -15,6 +15,7 @@ from backtest.sweep import default_backtest_config, timeframe_to_ms
 from backtest.synthetic import make_synthetic_ohlcv
 from backtest.wan70_random_control_b import (
     GATE_PRESETS,
+    RandomControlBResult,
     _hour_bucket,
     run_random_control_b_segment,
     run_symbol_timeframe,
@@ -175,57 +176,76 @@ def test_run_symbol_timeframe_too_few_bars_returns_empty() -> None:
 # --------------------------------------------------------------------------- 판정 문단
 
 
-def test_summarize_verdict_no_edge_when_no_significant_cells() -> None:
-    from backtest.wan70_random_control_b import RandomControlBResult
+def _verdict_row(**overrides: object) -> RandomControlBResult:
+    base: dict[str, object] = dict(
+        symbol="BTC/USDT:USDT",
+        timeframe="1h",
+        segment="IS",
+        gate="off",
+        real_total_return=0.5,
+        real_num_trades=40,
+        real_long=25,
+        real_short=15,
+        pool_size=120,
+        random_mean_return=0.02,
+        random_ci_low=-0.05,
+        random_ci_high=0.08,
+        random_p_value=0.01,
+        iterations=200,
+        bucket_fallback_count=0,
+    )
+    base.update(overrides)
+    return RandomControlBResult(**base)
 
-    rows = [
-        RandomControlBResult(
-            symbol="BTC/USDT:USDT",
-            timeframe="1h",
-            segment="IS",
-            gate="off",
-            real_total_return=0.01,
-            real_num_trades=5,
-            real_long=3,
-            real_short=2,
-            pool_size=20,
-            random_mean_return=0.02,
-            random_ci_low=-0.05,
-            random_ci_high=0.08,
-            random_p_value=0.6,
-            iterations=200,
-            bucket_fallback_count=0,
-        )
-    ]
-    verdict = summarize_verdict(rows)
-    assert "엣지 없다" in verdict
+
+def test_summarize_verdict_no_edge_when_not_significant() -> None:
+    rows = [_verdict_row(real_total_return=0.01, random_p_value=0.6)]
+    assert "엣지 없다" in summarize_verdict(rows)
 
 
 def test_summarize_verdict_edge_when_all_significant() -> None:
-    from backtest.wan70_random_control_b import RandomControlBResult
+    rows = [_verdict_row(real_total_return=0.5, random_p_value=0.01, random_mean_return=0.02)]
+    assert "엣지 있다" in summarize_verdict(rows)
 
+
+def test_summarize_verdict_excludes_tiny_sample_cells() -> None:
+    """거래 수가 min_trades 미만인 셀은 p가 낮아도 유의 판정에서 제외된다(무의미한 소표본)."""
+    rows = [_verdict_row(real_num_trades=2, random_p_value=0.0, real_total_return=-0.02)]
+    verdict = summarize_verdict(rows)
+    assert "판정 불가" in verdict  # 유효 표본 셀이 없다
+    assert "1개 제외" in verdict
+
+
+def test_summarize_verdict_ignores_downside_significance() -> None:
+    """p는 낮지만 실제 수익률이 무작위 평균보다 나쁜(하방) 셀은 엣지로 세지 않는다."""
     rows = [
-        RandomControlBResult(
-            symbol="BTC/USDT:USDT",
-            timeframe="1h",
-            segment="IS",
-            gate="off",
-            real_total_return=0.5,
-            real_num_trades=5,
-            real_long=3,
-            real_short=2,
-            pool_size=20,
-            random_mean_return=0.02,
-            random_ci_low=-0.05,
-            random_ci_high=0.08,
+        _verdict_row(
+            real_num_trades=40,
             random_p_value=0.01,
-            iterations=200,
-            bucket_fallback_count=0,
+            real_total_return=-0.1,
+            random_mean_return=0.05,
         )
     ]
-    verdict = summarize_verdict(rows)
-    assert "엣지 있다" in verdict
+    assert "엣지 없다" in summarize_verdict(rows)
 
 
 def test_summarize_verdict_handles_no_valid_cells() -> None:
     assert "판정 불가" in summarize_verdict([])
+
+
+def test_build_summary_markdown_is_self_contained() -> None:
+    """리포트 마크다운에 셀별 표·귀무가설 정의·판정·결론이 모두 담긴다."""
+    from pathlib import Path
+
+    from backtest.wan70_random_control_b import build_summary_markdown
+
+    rows = [
+        _verdict_row(symbol="BTC/USDT:USDT", timeframe="1h", segment="IS", gate="off"),
+        _verdict_row(real_num_trades=2, random_p_value=0.0, gate="on"),
+    ]
+    md = build_summary_markdown(rows, report_path=Path("backtest/reports/wan70.csv"))
+    assert "## 셀별 결과" in md
+    assert "## 귀무가설(매칭 널)" in md
+    assert "## 판정" in md
+    assert "## 결론" in md
+    assert "BTC/USDT:USDT" in md

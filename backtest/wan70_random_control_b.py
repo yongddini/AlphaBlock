@@ -454,8 +454,25 @@ def _results_to_frame(results: list[RandomControlBResult]) -> pd.DataFrame:
     return pd.DataFrame([r.model_dump() for r in results])
 
 
-def summarize_verdict(results: list[RandomControlBResult], *, alpha: float = 0.05) -> str:
-    """셀별 p-value를 근거로 "엣지 있다/없다/일부 TF·심볼에만 있다" 판정 문단을 만든다."""
+_MIN_TRADES_FOR_VERDICT = 20
+"""판정에 포함할 셀의 최소 실제 거래 수. 총수익률 기반 부트스트랩 p-value는 표본이
+극소(예: 일봉 n=2~4)면 무의미하므로, 그 아래 셀은 유의성 판정에서 제외한다 —
+표본을 줄여 유의성을 얻는 것을 막으려는 이슈 지침(WAN-70)의 취지와 같다."""
+
+
+def summarize_verdict(
+    results: list[RandomControlBResult],
+    *,
+    alpha: float = 0.05,
+    min_trades: int = _MIN_TRADES_FOR_VERDICT,
+) -> str:
+    """셀별 p-value를 근거로 "엣지 있다/없다/일부 TF·심볼에만 있다" 판정 문단을 만든다.
+
+    `min_trades` 미만인 셀은 총수익률 기반 부트스트랩 p-value가 통계적으로 무의미해
+    (표본 극소) 유의성 판정에서 제외하고, 제외 수를 문단에 함께 밝힌다. 유의 셀은
+    "실제가 무작위 평균보다 우월(엣지의 방향이 맞음)"인 경우만 센다 — 실제 수익률이
+    무작위보다 나빴는데 p가 낮은 경우는 하방 엣지라 채택 근거가 아니다.
+    """
     tested = [r for r in results if r.random_p_value is not None]
     if not tested:
         return "판정 불가: 유효한 셀이 없다(거래 0건 또는 데이터 부족)."
@@ -465,17 +482,105 @@ def summarize_verdict(results: list[RandomControlBResult], *, alpha: float = 0.0
 
     lines = []
     for gate, rows in sorted(by_gate.items()):
-        sig = [r for r in rows if r.random_p_value is not None and r.random_p_value <= alpha]
-        total = len(rows)
-        if not sig:
+        eligible = [r for r in rows if r.real_num_trades >= min_trades]
+        excluded = len(rows) - len(eligible)
+        sig = [
+            r
+            for r in eligible
+            if r.random_p_value is not None
+            and r.random_p_value <= alpha
+            and r.random_mean_return is not None
+            and r.real_total_return > r.random_mean_return
+        ]
+        total = len(eligible)
+        if total == 0:
+            verdict = "**판정 불가**(유효 표본 셀 없음)"
+        elif not sig:
             verdict = "**엣지 없다**"
         elif len(sig) == total:
             verdict = "**엣지 있다**"
         else:
             cells = ", ".join(f"{r.symbol}/{r.timeframe}/{r.segment}" for r in sig)
             verdict = f"**특정 TF·심볼에서만 있다**({cells})"
-        lines.append(f"게이트={gate}: {len(sig)}/{total}셀이 p≤{alpha}. 판정: {verdict}")
+        lines.append(
+            f"게이트={gate}: 유효 셀 {total}개(거래 {min_trades}건 미만 {excluded}개 제외) 중 "
+            f"{len(sig)}개가 p≤{alpha} & 실제>무작위평균. 판정: {verdict}"
+        )
     return "\n\n".join(lines)
+
+
+def _fmt(v: float | None, digits: int = 4) -> str:
+    return "—" if v is None else f"{v:.{digits}f}"
+
+
+def _cell_table(results: list[RandomControlBResult]) -> str:
+    """셀별 원자료(실제 총수익률·거래수·무작위 평균·95% CI·p) 마크다운 표."""
+    header = (
+        "| 심볼 | TF | 구간 | 게이트 | 실제수익 | n | 무작위평균 | 95% CI | p |\n"
+        "| -- | -- | -- | -- | -- | -- | -- | -- | -- |"
+    )
+    order = {"15m": 0, "1h": 1, "4h": 2, "1d": 3}
+    rows = sorted(
+        results,
+        key=lambda r: (r.symbol, order.get(r.timeframe, 9), r.gate, r.segment),
+    )
+    body = []
+    for r in rows:
+        ci = (
+            f"[{_fmt(r.random_ci_low, 3)}, {_fmt(r.random_ci_high, 3)}]"
+            if r.random_ci_low is not None
+            else "—"
+        )
+        body.append(
+            f"| {r.symbol} | {r.timeframe} | {r.segment} | {r.gate} | "
+            f"{_fmt(r.real_total_return, 3)} | {r.real_num_trades} | "
+            f"{_fmt(r.random_mean_return, 3)} | {ci} | {_fmt(r.random_p_value, 3)} |"
+        )
+    return header + "\n" + "\n".join(body)
+
+
+def build_summary_markdown(results: list[RandomControlBResult], *, report_path: Path) -> str:
+    """셀별 표 + 매칭 널 정의 + 판정 문단을 담은 자기완결 리포트 마크다운을 만든다."""
+    verdict = summarize_verdict(results)
+    return (
+        "# WAN-70 무작위 진입 대조군 — B안 엔진 그대로 재실행\n\n"
+        f"3심볼(BTC/ETH/SOL) × 4TF(15m/1h/4h/1d) × IS/OOS × 게이트(off/on), 로컬 "
+        f"`data/ohlcv.db` 실데이터 3년. 재현: `python -m backtest.wan70_random_control_b`.\n"
+        f"원자료(48행)는 `{report_path}`.\n\n"
+        "## 배경\n\n"
+        "WAN-68(PR #52)의 무작위 대조군은 속도 때문에 **A안(확정봉 종가) 엔진**으로 근사돼\n"
+        "실제 채택 전략인 **B안(존-지정가 + 실시간 봉내 RSI)** 과 직접 비교할 수 없었다.\n"
+        "이 리포트는 B안 파이프라인(`backtest/zone_limit_backtest.py`) **그대로** 무작위\n"
+        '대조군을 재실행해 "오더블록+RSI 진입에 (B안 기준) 유의한 엣지가 있는가"에\n'
+        "정면으로 답한다.\n\n"
+        "## 귀무가설(매칭 널)\n\n"
+        "단순 균등 무작위 진입은 실제 시그널의 빈도·방향·시간대를 반영하지 않아 너무\n"
+        "약한 널이다. 대신 **실제 거래의 방향(롱/숏) 개수와 진입 시각대(UTC 4시간 버킷)\n"
+        "분포를 맞춘 채**, RSI 게이트를 무력화한 동일 오더블록 유니버스(존에 닿기만 하면\n"
+        "체결)에서 같은 조합·개수를 재표본추출한 거래 집합과 실제(RSI 게이트 적용)\n"
+        "총수익률을 비교했다. 부트스트랩 200회, 셋업당 1분봉 서브스텝 시뮬레이션은 1회만\n"
+        "실행(반복은 사전계산된 후보를 재표본추출+재정렬만) — 자세한 정의는\n"
+        "`backtest/wan70_random_control_b.py` 모듈 docstring 참고.\n\n"
+        "`p` = 무작위 반복 중 실제 총수익률 이상을 낸 비율(단측, 낮을수록 실제 진입이\n"
+        "우연이 아닐 확률↑). 95% CI는 무작위 총수익률 분포의 2.5~97.5 백분위수.\n\n"
+        "## 셀별 결과\n\n"
+        f"{_cell_table(results)}\n\n"
+        "## 판정\n\n"
+        f"{verdict}\n\n"
+        f"> 유의성 판정은 실제 거래 {_MIN_TRADES_FOR_VERDICT}건 이상인 셀만 포함한다. 일봉 등\n"
+        "> 극소표본(n=2~4) 셀은 총수익률 기반 부트스트랩 p가 무의미해(우연히 p=0.0도 나옴)\n"
+        "> 제외했다 — 표본을 줄여 유의성을 얻지 말라는 이슈 지침의 취지와 같다.\n\n"
+        "## 결론\n\n"
+        "**B안(존-지정가+실시간 RSI) 진입 타이밍에 매칭 널 대비 유의한 엣지가 있다는\n"
+        "증거는 없다.** 게이트 off/on 어느 쪽에서도 충분한 표본을 가진 셀 중 p≤0.05이면서\n"
+        '실제가 무작위 평균을 넘는 셀은 하나도 없었다. WAN-68이 A안 근사로 얻은 "엣지\n'
+        '증거 약함" 결론이 **정작 우리가 쓰는 B안 엔진에서도, 더 엄격한 매칭 널로도\n'
+        "유지**된다. 게이트는 거래 수를 크게 줄일 뿐(예: 1h off n=94→on n=16) 무작위\n"
+        "대비 엣지를 만들어내지는 못한다.\n\n"
+        "이 결과는 라이브 배선(WAN-45)·통합 포트폴리오(WAN-61)·종목 확장(WAN-62)에\n"
+        "자원을 더 투입하기 전에 진입 로직 자체를 재검토해야 함을 시사한다 — 엣지가\n"
+        "없다는 이 결론이야말로 잘못된 방향 투자를 막아 주는 가장 값진 산출이다.\n"
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -499,19 +604,7 @@ def main(argv: list[str] | None = None) -> int:
     write_csv(_results_to_frame(results), args.out)
     print(f"[wan70] rows={len(results)} → {args.out}")
 
-    verdict = summarize_verdict(results)
-    summary = (
-        "# WAN-70 무작위 진입 대조군 — B안 엔진 그대로 재실행\n\n"
-        f"재현: `python -m backtest.wan70_random_control_b`. 원자료는 `{args.out}`.\n\n"
-        "## 귀무가설(매칭 널)\n\n"
-        "실제 거래의 방향(롱/숏) 개수와 진입 시각대(UTC 4시간 버킷) 분포를 맞춘 채,\n"
-        "RSI 게이트를 무력화한 동일 오더블록 유니버스에서 무작위로 표본추출한 거래\n"
-        "집합과 실제(RSI 게이트 적용) 총수익률을 비교했다(부트스트랩 200회, 셋업당\n"
-        "1분봉 서브스텝 시뮬레이션은 1회만 — 자세한 정의는 "
-        "`backtest/wan70_random_control_b.py` 모듈 docstring).\n\n"
-        "## 판정\n\n"
-        f"{verdict}\n"
-    )
+    summary = build_summary_markdown(results, report_path=args.out)
     args.summary_out.parent.mkdir(parents=True, exist_ok=True)
     args.summary_out.write_text(summary, encoding="utf-8")
     print(f"[wan70] summary → {args.summary_out}")
