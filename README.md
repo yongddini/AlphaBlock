@@ -288,6 +288,27 @@ uv run python scripts/merge_impact_report.py --out reports/wan56_merge_impact.md
 해당 CLI는 이제 병합 적용 신호를 자동으로 쓰므로 다시 실행하면 새 수치가 나온다. 이전
 커밋의 성과 수치·해석은 이 수정 이전 값이므로 무효다.
 
+### ✅ 재산출 완료 (WAN-58) — 병합 존 + 공용 비용 모델 기준
+
+위 4개 리포트를 **WAN-56(병합) + WAN-37(비용 모델)이 모두 머지된 뒤** 재실행했다. 전체
+비교표·심볼별 분해·복리 병기·판정은 [`reports/wan58_recompute.md`](reports/wan58_recompute.md),
+권위 있는 CSV는 `backtest/reports/wan58_*.csv`(신규 파일 — 기존 `wan46_*`/`wan50_*` CSV는 병합
+전 베이스라인으로만 남김). 병합 효과와 비용 효과를 분리하려고 A/B는 **gross(비용 전) / net(비용 후)**
+두 벌로 낸다(`backtest.ab_run.add_cost_args`, `--fee-rate/--maker-fee-rate/--slippage`).
+
+핵심 결과(net = 실거래 근사, WAN-57 판정 기준):
+
+| 리포트 | 이전 결론 | 병합+net 재산출 | 뒤집힘? |
+| --- | --- | --- | --- |
+| **WAN-50** (4h A/B, WAN-57 게이트) | 4h B안 우월 | **4h B안 우월 — net 3심볼 모두 +**(BTC +1.1%/ETH +39%/SOL +54.5% 복리), A는 net 음(−) | ❌ 유지·강화 |
+| WAN-46 (A/B 본실험) | B > A | B > A 유지(net PF: B 1.10 vs A 0.70). 진입 1.30× 축소 | ❌ 유지 |
+| WAN-19 (스윕) | (미커밋) | A-진입 스윕 6/15 조합만 양(+), ETH 전 TF 부진 | — |
+| WAN-22 (워크포워드) | (미커밋) | A-진입 OOS 대체로 부진(SOL 4h만 +21.3%), IS→OOS 격차는 작음 | — |
+
+**비용 비대칭이 B(메이커·슬리피지 0)에 유리하게 작동**해 4h에서 B 우위가 오히려 넓어졌고
+(gross→net: B +4.39%→+3.99% vs A +0.10%→−0.28%), old 대비 심볼 편중도 완화됐다(ETH 강세 전환).
+따라서 **WAN-57(4h `entry_mode` 기본값 B안 전환)의 게이트는 net 기준으로 통과**다.
+
 ## 백테스트 성과 리포트 & 파라미터 스윕 (WAN-19)
 
 WAN-23 재설계 컨플루언스 전략을 WAN-8 백테스트 엔진에 태워 **재현 가능한 성과
