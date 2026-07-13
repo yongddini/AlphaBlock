@@ -28,6 +28,7 @@ from pydantic import BaseModel, ConfigDict
 
 from backtest.engine import BacktestEngine
 from backtest.models import BacktestConfig, BacktestResult
+from backtest.sweep import default_backtest_config
 from common.costs import Liquidity
 from config.settings import Settings, get_settings
 from data.funding import FundingRateStore
@@ -312,17 +313,21 @@ def build_parity_report(
             for symbol, timeframe in target_series
         }
 
-    # 페이퍼 기록과 같은 공용 비용 모델을 백테스트에도 싣는다(WAN-37). 페이퍼 러너의
-    # 진입/청산은 시장가라 A안(taker) 진입으로 재실행한다 — 그래야 슬리피지·수수료가
-    # 페이퍼 기록과 동일 산식으로 적용돼 비용 차이가 상쇄된다.
+    # 페이퍼 기록과 같은 공용 비용 모델·리스크 사이징을 백테스트에도 싣는다(WAN-37/65).
+    # 페이퍼 러너의 진입/청산은 시장가라 A안(taker) 진입으로 재실행한다 — 그래야
+    # 슬리피지·수수료·사이징이 페이퍼 기록과 동일 산식으로 적용돼 남는 차이가 비용·
+    # 포지션 크기가 아니라 거래 선택·체결 타이밍에서만 비롯된다.
     costs = settings.costs
-    backtest_config = BacktestConfig(
-        fee_rate=costs.taker_fee_rate,
-        maker_fee_rate=costs.maker_fee_rate,
-        slippage=costs.slippage_fraction,
-        entry_liquidity=Liquidity.TAKER,
-        funding_enabled=funding_enabled,
-        funding_missing_policy="zero",
+    base = default_backtest_config(settings=settings)
+    backtest_config = base.model_copy(
+        update={
+            "fee_rate": costs.taker_fee_rate,
+            "maker_fee_rate": costs.maker_fee_rate,
+            "slippage": costs.slippage_fraction,
+            "entry_liquidity": Liquidity.TAKER,
+            "funding_enabled": funding_enabled,
+            "funding_missing_policy": "zero",
+        }
     )
 
     rows: list[ParityRow] = []

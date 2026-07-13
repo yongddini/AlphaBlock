@@ -29,6 +29,7 @@ from strategy.models import (
     ConfluenceParams,
     OrderBlock,
     OrderBlockDirection,
+    OrderBlockParams,
     OrderBlockResult,
     OrderBlockSignal,
 )
@@ -174,6 +175,59 @@ def test_write_sweep_csv_roundtrip(tmp_path: Path) -> None:
     loaded = pd.read_csv(path)
     assert len(loaded) == ParamGrid().size
     assert "total_return" in loaded.columns
+
+
+def test_sweep_row_reports_sizing_mode_from_default_config() -> None:
+    """WAN-65: 파일만 봐도 어떤 사이징으로 나온 숫자인지 알 수 있어야 한다.
+
+    `base_backtest`를 안 주면 `default_backtest_config`가 기본 켜진
+    `settings.effective_risk_sizing`을 실으므로, 스윕 행은 sizing_mode="risk_sizing"과
+    그때의 risk_per_trade를 보고한다.
+    """
+    df = make_synthetic_ohlcv(bars=200, seed=3)
+    report = run_sweep(df, symbol="X", timeframe="1h")
+    for row in report.rows:
+        assert row.sizing_mode == "risk_sizing"
+        assert row.risk_per_trade == pytest.approx(0.01)
+    frame = report.to_dataframe()
+    assert "sizing_mode" in frame.columns
+    assert "risk_per_trade" in frame.columns
+
+
+def test_sweep_row_reports_full_position_when_risk_sizing_disabled() -> None:
+    df = make_synthetic_ohlcv(bars=200, seed=3)
+    unsized = BacktestConfig(annualization_factor=bars_per_year("1h"), risk_sizing=None)
+    report = run_sweep(df, symbol="X", timeframe="1h", base_backtest=unsized)
+    for row in report.rows:
+        assert row.sizing_mode == "full_position"
+        assert row.risk_per_trade is None
+
+
+def test_sweep_row_reports_entry_mode_rsi_mode_combine_obs() -> None:
+    """WAN-65: 스윕 행에 진입 방식·RSI 모드·병합 여부도 함께 기록된다.
+
+    이 필드들은 트레이딩뷰 대비 A안/B안, wick/close 무효화 같은 실행 경로 차이를
+    구분하는 핵심 정보라, 파일만 봐서는 A안인지 B안인지조차 알 수 없었던 문제
+    (WAN-47/56/59/63과 동일 패턴)를 막는다.
+    """
+    df = make_synthetic_ohlcv(bars=200, seed=3)
+    zone_limit_conf = ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime")
+    no_merge_ob = OrderBlockParams(combine_obs=False)
+    report = run_sweep(
+        df,
+        symbol="X",
+        timeframe="1h",
+        base_confluence=zone_limit_conf,
+        order_block_params=no_merge_ob,
+    )
+    frame = report.to_dataframe()
+    for col in ("entry_mode", "rsi_mode", "combine_obs", "funding_coverage"):
+        assert col in frame.columns
+    for row in report.rows:
+        assert row.entry_mode == "zone_limit"
+        assert row.rsi_mode == "realtime"
+        assert row.combine_obs is False
+        assert row.funding_coverage is None  # 펀딩 미사용 시 None
 
 
 def test_empty_dataframe_yields_zero_trade_rows() -> None:

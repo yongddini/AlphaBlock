@@ -621,6 +621,30 @@ def test_risk_sizing_skips_entry_when_stop_too_close() -> None:
     assert result.metrics.num_trades == 0
 
 
+def test_risk_sizing_none_warns_not_silent(caplog: pytest.LogCaptureFixture) -> None:
+    """risk_sizing=None(전액 진입 모드)이면 조용히 넘어가지 않고 경고를 남긴다(WAN-65)."""
+    df = _make_df([_ENTRY_BAR, _MID_BAR, (104.0, 112.0, 103.0, 110.0, 10.0)])
+    signals = [_signal(OrderBlockDirection.BULLISH, 0, 100.0)]
+    cfg = BacktestConfig(take_profit_pct=0.10)  # risk_sizing 기본값 None
+    with caplog.at_level(logging.WARNING):
+        run_backtest(df, signals, cfg)
+    assert any("risk_sizing" in r.message and "전액 진입" in r.message for r in caplog.records)
+
+
+def test_risk_sizing_set_no_warning(caplog: pytest.LogCaptureFixture) -> None:
+    """risk_sizing이 설정돼 있으면 전액 진입 경고를 내지 않는다."""
+    from execution import PositionSizingParams
+
+    df = _make_df([_ENTRY_BAR, _MID_BAR, (104.0, 112.0, 103.0, 110.0, 10.0)])
+    signals = [_signal_ob(OrderBlockDirection.BULLISH, 0, 100.0, top=101.0, bottom=90.0)]
+    cfg = BacktestConfig(
+        take_profit_pct=0.10, risk_sizing=PositionSizingParams(risk_per_trade=0.01)
+    )
+    with caplog.at_level(logging.WARNING):
+        run_backtest(df, signals, cfg)
+    assert not any("전액 진입" in r.message for r in caplog.records)
+
+
 # --- 지표 순수 함수 ---
 
 
@@ -672,6 +696,64 @@ def test_report_dataframes_and_summary() -> None:
     text = format_summary(result)
     assert "Total Return" in text
     assert "Params" in text
+
+
+def test_summary_reports_sizing_mode() -> None:
+    """WAN-65: 요약·리포트 텍스트에 사이징 방식이 드러나고, 전액 진입이면 배너가 뜬다."""
+    from backtest.report import sizing_mode_banner
+    from execution import PositionSizingParams
+
+    df = _make_df([_ENTRY_BAR, _MID_BAR, (104.0, 112.0, 103.0, 110.0, 10.0)])
+    signals = [_signal(OrderBlockDirection.BULLISH, 0, 100.0)]
+
+    unsized = run_backtest(df, signals, BacktestConfig(take_profit_pct=0.10))
+    summary = summary_dict(unsized)
+    assert summary["sizing_mode"] == "full_position"
+    assert summary["risk_per_trade"] is None
+    assert "sizing_mode=full_position" in format_summary(unsized)
+    assert sizing_mode_banner(unsized) is not None
+
+    sized_cfg = BacktestConfig(
+        take_profit_pct=0.10, risk_sizing=PositionSizingParams(risk_per_trade=0.02)
+    )
+    sized = run_backtest(df, signals, sized_cfg)
+    summary = summary_dict(sized)
+    assert summary["sizing_mode"] == "risk_sizing"
+    assert summary["risk_per_trade"] == pytest.approx(0.02)
+    assert sizing_mode_banner(sized) is None
+
+
+def test_reports_carry_entry_mode_rsi_mode_combine_obs() -> None:
+    """WAN-65: 거래/요약 리포트에 진입 방식·RSI 모드·병합 여부가 함께 기록된다.
+
+    이 컬럼들이 없으면 CSV 파일만 봐서는 A안/B안인지, 병합이 켜졌는지 알 수 없다
+    (WAN-47/56/59/63과 동일 패턴의 재발 방지).
+    """
+    from strategy.models import ConfluenceParams, OrderBlockParams
+
+    df = _make_df([_ENTRY_BAR, _MID_BAR, (104.0, 112.0, 103.0, 110.0, 10.0)])
+    signals = [_signal(OrderBlockDirection.BULLISH, 0, 100.0)]
+    result = run_backtest(df, signals, BacktestConfig(take_profit_pct=0.10))
+    conf = ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime")
+    ob = OrderBlockParams(combine_obs=False)
+
+    summary = summary_dict(result, confluence=conf, order_block=ob)
+    assert summary["entry_mode"] == "zone_limit"
+    assert summary["rsi_mode"] == "realtime"
+    assert summary["combine_obs"] is False
+
+    text = format_summary(result, confluence=conf, order_block=ob)
+    assert "entry_mode=zone_limit" in text
+    assert "combine_obs=False" in text
+
+    trades_df = trades_to_dataframe(result, confluence=conf, order_block=ob)
+    assert (trades_df["entry_mode"] == "zone_limit").all()
+    assert (trades_df["combine_obs"] == False).all()  # noqa: E712
+
+    # 명시하지 않으면 기본값(A안·병합 ON)으로 채워지되 컬럼 자체는 항상 존재한다.
+    default_summary = summary_dict(result)
+    assert default_summary["entry_mode"] == "close"
+    assert default_summary["combine_obs"] is True
 
 
 def test_csv_writers(tmp_path: Path) -> None:

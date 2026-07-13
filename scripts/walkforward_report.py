@@ -27,8 +27,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from backtest.models import BacktestConfig
-from backtest.sweep import ParamGrid, bars_per_year
+from backtest.sweep import ParamGrid, default_backtest_config
 from backtest.synthetic import make_synthetic_ohlcv
 from backtest.walkforward import WalkForwardReport, run_walk_forward, write_walk_forward_csv
 from config.settings import get_settings
@@ -134,7 +133,7 @@ def _report_combo(
 ) -> WalkForwardReport:
     """한 (심볼, 타임프레임)에 대해 워크포워드를 실행하고 비교표를 저장한다."""
     base_confluence = ConfluenceParams()
-    base_backtest = BacktestConfig(annualization_factor=bars_per_year(timeframe), seed=seed)
+    base_backtest = default_backtest_config(timeframe, seed=seed)
 
     report = run_walk_forward(
         df,

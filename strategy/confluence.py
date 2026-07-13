@@ -321,14 +321,33 @@ class ConfluenceStrategy:
             )
             # 동일 봉에서 손절·익절 동시 충족 시 기본은 손절 우선(보수적).
             if sl_hit and (tp_price is None or params.stop_before_take_profit):
+                # sl_hit는 break_pos(오더블록 무효화 봉)가 있을 때만 True이고,
+                # break_pos는 entry.order_block에서 유도되므로 여기선 항상 존재한다.
+                assert entry.order_block is not None
+                stop_price = self._stop_loss_price(d, entry.order_block, closes[j])
                 return PlannedExit(
-                    time=times[j], price=closes[j], reason=SignalExitReason.STOP_LOSS
+                    time=times[j], price=stop_price, reason=SignalExitReason.STOP_LOSS
                 )
             if tp_price is not None:
                 return PlannedExit(
                     time=times[j], price=tp_price, reason=SignalExitReason.TAKE_PROFIT
                 )
         return None
+
+    @staticmethod
+    def _stop_loss_price(direction_sign: int, ob: OrderBlock, close_price: float) -> float:
+        """손절 체결가: 무효화 봉 종가를 오더블록 무효화 경계로 clamp한다(WAN-65).
+
+        무효화(breaker)는 저가/고가(wick) 기준으로 판정되므로, 무효화 봉이 반전해
+        경계 반대편(진입가에 유리한 방향)으로 마감하면 종가를 그대로 쓸 경우
+        "손절인데 이익"이라는 모순이 생긴다. 종가와 경계 중 진입가에 더 불리한
+        쪽을 체결가로 쓴다 — 경계(`ob.bottom`/`ob.top`)는 탭 진입가보다 항상
+        불리하므로, 이렇게 하면 손절은 절대 이익을 낼 수 없다.
+        """
+        boundary = ob.bottom if direction_sign > 0 else ob.top
+        if direction_sign > 0:
+            return min(close_price, boundary)
+        return max(close_price, boundary)
 
     @staticmethod
     def _take_profit_price(

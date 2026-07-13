@@ -22,6 +22,8 @@ WAN-23 재설계 컨플루언스 전략(오더블록+RSI 진입 / EMA·VWMA 선 
 from __future__ import annotations
 
 import argparse
+import json
+import subprocess
 from pathlib import Path
 
 import pandas as pd
@@ -31,6 +33,7 @@ from backtest.report import (
     format_long_short,
     format_summary,
     funding_coverage_banner,
+    sizing_mode_banner,
     write_equity_csv,
     write_trades_csv,
 )
@@ -51,7 +54,53 @@ from config.settings import get_settings
 from data.funding import FundingRateStore
 from data.models import FundingRate
 from data.storage import OhlcvStore
-from strategy.models import ConfluenceParams
+from strategy.models import ConfluenceParams, OrderBlockParams
+
+
+def _git_commit_hash() -> str | None:
+    """현재 커밋 해시(재현 증적용). git 정보를 못 읽으면 None."""
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True, timeout=5
+        )
+        return out.stdout.strip()
+    except Exception:
+        return None
+
+
+def _write_run_config_json(
+    path: Path,
+    *,
+    confluence: ConfluenceParams,
+    order_block_params: OrderBlockParams,
+    backtest_config: BacktestConfig,
+) -> Path:
+    """실행 설정 전체(재현 증적)를 JSON으로 남긴다(WAN-65).
+
+    CSV 컬럼으로 매 행 반복하기 부담스러운 부가 필드(`retap_rule`·`swing_length`·
+    `zone_count` 등)까지 포함해, 리포트 디렉터리 하나만 봐도 어떤 설정·어떤 코드
+    버전으로 나온 숫자인지 완결적으로 알 수 있게 한다. CSV에는 핵심 4개
+    (`entry_mode`/`sizing_mode`/`combine_obs`/`funding_coverage`)만 남기고 나머지는
+    여기로 위임한다.
+    """
+    payload = {
+        "commit": _git_commit_hash(),
+        "entry_mode": confluence.entry_mode,
+        "rsi_mode": confluence.rsi_mode,
+        "combine_obs": order_block_params.combine_obs,
+        "retap_rule": "first_tap",
+        "swing_length": order_block_params.swing_length,
+        "zone_count": order_block_params.zone_count,
+        "sizing_mode": backtest_config.sizing_mode,
+        "risk_per_trade": backtest_config.risk_per_trade,
+        "fee_rate": backtest_config.fee_rate,
+        "maker_fee_rate": backtest_config.maker_fee_rate,
+        "slippage": backtest_config.slippage,
+        "funding_enabled": backtest_config.funding_enabled,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    return path
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -233,11 +282,20 @@ def _report_combo(
             backtest_config=base_backtest,
             funding_rates=funding_rates if funding_enabled else None,
         )
-        trades_path = write_trades_csv(result, combo_dir / "best_trades.csv")
+        trades_path = write_trades_csv(result, combo_dir / "best_trades.csv", confluence=confluence)
         equity_path = write_equity_csv(result, combo_dir / "best_equity.csv")
+        run_config_path = _write_run_config_json(
+            combo_dir / "run_config.json",
+            confluence=confluence,
+            order_block_params=OrderBlockParams(),
+            backtest_config=base_backtest,
+        )
         print(f"\n--- 추천(best) 조합 상세: {sort_by} 최상위 ---")
         print(f"rsi_oversold={best.rsi_oversold:.0f} rsi_overbought={best.rsi_overbought:.0f}")
-        print(format_summary(result))
+        print(format_summary(result, confluence=confluence))
+        banner = sizing_mode_banner(result)
+        if banner:
+            print(banner)
         banner = funding_coverage_banner(result)
         if banner:
             print(banner)
@@ -245,6 +303,7 @@ def _report_combo(
         print(format_long_short(result))
         print(f"거래 CSV: {trades_path}")
         print(f"자본곡선 CSV: {equity_path}")
+        print(f"실행 설정 JSON: {run_config_path}")
 
     return report
 

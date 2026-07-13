@@ -120,6 +120,7 @@ class BacktestEngine:
     ) -> BacktestResult:
         frame = self._prepare(df)
         cfg = self.config
+        self._warn_if_unsized(cfg)
         self._funding_rates = list(funding_rates) if funding_rates else []
         missing_funding = cfg.funding_enabled and not self._funding_rates
         if missing_funding and cfg.funding_missing_policy == "error":
@@ -189,6 +190,27 @@ class BacktestEngine:
             funding_coverage=coverage,
         )
         return BacktestResult(config=cfg, trades=trades, equity_curve=equity_curve, metrics=metrics)
+
+    @staticmethod
+    def _warn_if_unsized(cfg: BacktestConfig) -> None:
+        """`risk_sizing=None`(전액 진입 모드)이면 소리를 낸다(WAN-65).
+
+        `risk_sizing`이 없으면 손절 거리와 무관하게 매 진입이 `position_fraction`
+        (기본 100%)를 노셔널로 쓴다 — 손절이 걸리면 손절 거리가 클수록 손실도
+        커지므로, 손익비·MDD·R 배수가 리스크 정규화되지 않은 채로 나온다. 진입점이
+        `backtest.sweep.default_backtest_config`(공용 팩토리)를 거치지 않고 `risk_
+        sizing`을 빠뜨렸을 때 조용히 잘못된 성과가 나오지 않도록 여기서 경고한다.
+        """
+        if cfg.risk_sizing is not None:
+            return
+        logger.warning(
+            "risk_sizing=None — 전액 진입 모드(position_fraction=%.0f%%)로 백테스트를 "
+            "실행합니다. 손절 거리와 무관하게 매 거래가 동일 비율의 자본을 쓰므로, "
+            "손익비·MDD·R 배수가 리스크 정규화되지 않습니다. 성과 판단용 리포트라면 "
+            "config.Settings.effective_risk_sizing을 BacktestConfig.risk_sizing에 "
+            "연결하세요.",
+            cfg.position_fraction * 100.0,
+        )
 
     def _check_funding_coverage(self, times: Sequence[int]) -> float | None:
         """백테스트 구간의 펀딩 커버리지를 계산하고 결측이면 소리를 낸다(WAN-63).
