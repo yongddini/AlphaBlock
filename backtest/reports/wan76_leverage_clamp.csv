@@ -1,0 +1,3 @@
+group,num_trades,clamp_rate,mean_effective_risk_fraction
+all,1170,0.647008547008547,0.007054407803093274
+clamped_only,757,1.0,0.005447367410329195
