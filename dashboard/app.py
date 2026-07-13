@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 import pandas as pd
 import streamlit as st
 
-from backtest.models import BacktestConfig
+from backtest.models import BacktestConfig, BacktestMetrics
 from backtest.report import trades_to_dataframe
 from backtest.sweep import default_backtest_config
 from config import get_settings
@@ -194,6 +194,47 @@ def _select_chart_zones(
     return df, filter_zones(result.order_blocks, categories, entered)
 
 
+def _run_config_badge_text(
+    conf_params: ConfluenceParams, ob_params: OrderBlockParams, bt_config: BacktestConfig
+) -> str:
+    """현재 실행 설정을 한 줄로 요약한다(WAN-65).
+
+    "구현은 됐는데 실제 실행 경로에 안 붙어서 조용히 잘못된 값이 나온다"는 이
+    프로젝트의 반복 버그 패턴(WAN-47/56/59/63/65)에 대한 방어책 — 대시보드가 지금
+    무슨 설정으로 백테스트를 돌리고 있는지 화면에 항상 드러낸다.
+    """
+    entry_label = "A안(봉 마감 종가)" if conf_params.entry_mode == "close" else "B안(존-지정가)"
+    rsi_label = "확정봉" if conf_params.rsi_mode == "closed_bar" else "실시간"
+    if bt_config.risk_sizing is not None:
+        sizing_label = f"리스크 {bt_config.risk_sizing.risk_per_trade * 100:.1f}%"
+    else:
+        sizing_label = f"전액({bt_config.position_fraction * 100:.0f}%, 사이징 미적용)"
+    merge_label = "ON" if ob_params.combine_obs else "OFF"
+    funding_label = "반영됨" if bt_config.funding_enabled else "미반영"
+    return (
+        f"진입: {entry_label} · RSI: {rsi_label} · 사이징: {sizing_label} · "
+        f"병합: {merge_label} · 펀딩비: {funding_label}"
+    )
+
+
+def _render_run_config_badge(
+    conf_params: ConfluenceParams,
+    ob_params: OrderBlockParams,
+    bt_config: BacktestConfig,
+    metrics: BacktestMetrics,
+) -> None:
+    """분석 탭 상단 실행 설정 배지. 비정상 설정(사이징 미적용·펀딩 커버리지 미달)은
+    경고 색으로 강조한다(WAN-65).
+    """
+    text = _run_config_badge_text(conf_params, ob_params, bt_config)
+    coverage = metrics.funding_coverage
+    abnormal = bt_config.risk_sizing is None or (coverage is not None and coverage < 1.0)
+    if abnormal:
+        st.warning(f"⚙️ {text}")
+    else:
+        st.caption(f"⚙️ {text}")
+
+
 def _render_analysis(settings: Settings) -> None:
     db_path = settings.db_path
 
@@ -330,6 +371,7 @@ def _render_analysis(settings: Settings) -> None:
     chart_backtest = None if replay_ms is not None else backtest
 
     st.subheader(f"{symbol} · {timeframe}")
+    _render_run_config_badge(conf_params, ob_params, bt_config, backtest.metrics)
     chart_height = 700
     st.iframe(
         build_chart_html(

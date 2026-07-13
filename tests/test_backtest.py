@@ -723,6 +723,39 @@ def test_summary_reports_sizing_mode() -> None:
     assert sizing_mode_banner(sized) is None
 
 
+def test_reports_carry_entry_mode_rsi_mode_combine_obs() -> None:
+    """WAN-65: 거래/요약 리포트에 진입 방식·RSI 모드·병합 여부가 함께 기록된다.
+
+    이 컬럼들이 없으면 CSV 파일만 봐서는 A안/B안인지, 병합이 켜졌는지 알 수 없다
+    (WAN-47/56/59/63과 동일 패턴의 재발 방지).
+    """
+    from strategy.models import ConfluenceParams, OrderBlockParams
+
+    df = _make_df([_ENTRY_BAR, _MID_BAR, (104.0, 112.0, 103.0, 110.0, 10.0)])
+    signals = [_signal(OrderBlockDirection.BULLISH, 0, 100.0)]
+    result = run_backtest(df, signals, BacktestConfig(take_profit_pct=0.10))
+    conf = ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime")
+    ob = OrderBlockParams(combine_obs=False)
+
+    summary = summary_dict(result, confluence=conf, order_block=ob)
+    assert summary["entry_mode"] == "zone_limit"
+    assert summary["rsi_mode"] == "realtime"
+    assert summary["combine_obs"] is False
+
+    text = format_summary(result, confluence=conf, order_block=ob)
+    assert "entry_mode=zone_limit" in text
+    assert "combine_obs=False" in text
+
+    trades_df = trades_to_dataframe(result, confluence=conf, order_block=ob)
+    assert (trades_df["entry_mode"] == "zone_limit").all()
+    assert (trades_df["combine_obs"] == False).all()  # noqa: E712
+
+    # 명시하지 않으면 기본값(A안·병합 ON)으로 채워지되 컬럼 자체는 항상 존재한다.
+    default_summary = summary_dict(result)
+    assert default_summary["entry_mode"] == "close"
+    assert default_summary["combine_obs"] is True
+
+
 def test_csv_writers(tmp_path: Path) -> None:
     df = _make_df([_ENTRY_BAR, _MID_BAR, (104.0, 112.0, 103.0, 110.0, 10.0)])
     signals = [_signal(OrderBlockDirection.BULLISH, 0, 100.0)]

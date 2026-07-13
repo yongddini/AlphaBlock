@@ -12,9 +12,13 @@ from pathlib import Path
 import pytest
 from streamlit.testing.v1 import AppTest
 
+from backtest.models import BacktestConfig
 from config.settings import get_settings
+from dashboard.app import _run_config_badge_text
 from data.models import Candle
 from data.storage import OhlcvStore
+from execution import PositionSizingParams
+from strategy.models import ConfluenceParams, OrderBlockParams
 
 _STEP = 3_600_000
 
@@ -42,6 +46,34 @@ def seeded_db_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[
     get_settings.cache_clear()
 
 
+def test_run_config_badge_text_reports_current_settings() -> None:
+    """WAN-65: 배지 문구가 진입 방식·RSI·사이징·병합·펀딩비 반영 여부를 담는다."""
+    conf = ConfluenceParams(entry_mode="close", rsi_mode="closed_bar")
+    ob = OrderBlockParams(combine_obs=True)
+    sized = BacktestConfig(
+        risk_sizing=PositionSizingParams(risk_per_trade=0.01), funding_enabled=True
+    )
+    text = _run_config_badge_text(conf, ob, sized)
+    assert "A안" in text
+    assert "확정봉" in text
+    assert "리스크 1.0%" in text
+    assert "병합: ON" in text
+    assert "펀딩비: 반영됨" in text
+
+
+def test_run_config_badge_text_flags_full_position_mode() -> None:
+    """risk_sizing=None(전액 진입)이면 배지 문구에 "사이징 미적용"이 드러난다."""
+    conf = ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime")
+    ob = OrderBlockParams(combine_obs=False)
+    unsized = BacktestConfig(risk_sizing=None, funding_enabled=False)
+    text = _run_config_badge_text(conf, ob, unsized)
+    assert "B안" in text
+    assert "실시간" in text
+    assert "사이징 미적용" in text
+    assert "병합: OFF" in text
+    assert "펀딩비: 미반영" in text
+
+
 def test_app_renders_price_chart_and_metrics_when_data_available(seeded_db_path: str) -> None:
     at = AppTest.from_file("dashboard/app.py")
     at.run(timeout=30)
@@ -63,6 +95,10 @@ def test_app_renders_price_chart_and_metrics_when_data_available(seeded_db_path:
     # 시드 데이터로는 시그널이 없어 거래 0건 — 값도 의미 있게 검증한다.
     metrics_by_label = {m.label: m.value for m in at.metric}
     assert metrics_by_label["Trades"] == "0"
+    # 분석 탭 상단 실행 설정 배지(WAN-65)가 그려진다. 기본 설정(리스크 사이징 on,
+    # 펀딩비 대시보드 기본 off)이면 경고가 아니라 caption으로 렌더된다.
+    captions = [c.value for c in at.caption]
+    assert any("진입:" in c and "사이징:" in c for c in captions)
 
 
 def test_app_health_tab_renders_without_error(seeded_db_path: str) -> None:

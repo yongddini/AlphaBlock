@@ -327,6 +327,15 @@ uv run python scripts/merge_impact_report.py --out reports/wan56_merge_impact.md
 무효화 봉 종가와 오더블록 무효화 경계 중 진입가에 더 불리한 쪽으로 clamp해, 손절이
 구조적으로 이익을 낼 수 없게 했다.
 
+**리포트 자기서술**: "구현은 됐는데 실행 경로에 안 붙어 조용히 틀린 값이 나온다"는
+패턴(WAN-47/56/59/63/65)의 근본 원인 중 하나가 "파일만 봐서는 어떤 설정으로 나온
+숫자인지 알 수 없다"는 것이었다. 거래 단위·요약·스윕 CSV 모두 핵심 4개 컬럼
+(`entry_mode`/`sizing_mode`/`combine_obs`/`funding_coverage`)을 실어, `scripts/
+backtest_report.py`는 조합 디렉터리마다 `run_config.json`(전체 설정 + git 커밋
+해시)도 함께 쓴다. 대시보드 분석 탭 상단에는 `진입: A안(봉 마감 종가) · RSI: 확정봉
+· 사이징: 리스크 1% · 병합: ON · 펀딩비: 반영됨` 형태의 실행 설정 배지가 뜨고,
+사이징 미적용이거나 펀딩 커버리지가 100% 미만이면 경고색으로 강조된다.
+
 측정(3심볼 BTC/ETH/SOL × 5TF 15m/1h/2h/4h/1d, `data/ohlcv.db`, sharpe 최상위 조합 기준):
 
 | 지표 | BEFORE(전액 진입) | AFTER(리스크 사이징) |

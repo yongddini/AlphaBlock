@@ -240,9 +240,14 @@ class SweepRunRow(BaseModel):
     sharpe: float | None
     num_trades: int
     seed: int
-    # --- 사이징(WAN-65, 파일만 봐도 어떤 사이징으로 나온 숫자인지 알 수 있게) ---
+    # --- 실행 설정(WAN-65, 파일만 봐도 어떤 설정으로 나온 숫자인지 알 수 있게 —
+    # WAN-47/56/59/63과 같은 "구현은 됐는데 조용히 안 붙는" 패턴 재발 방지) ---
+    entry_mode: str
+    rsi_mode: str
+    combine_obs: bool
     sizing_mode: str
     risk_per_trade: float | None
+    funding_coverage: float | None
 
 
 # CSV/DataFrame 컬럼 순서.
@@ -261,8 +266,12 @@ _ROW_COLUMNS = [
     "sharpe",
     "num_trades",
     "seed",
+    "entry_mode",
+    "rsi_mode",
+    "combine_obs",
     "sizing_mode",
     "risk_per_trade",
+    "funding_coverage",
 ]
 
 # 정렬 가능한(높을수록 좋은) 성과 지표.
@@ -320,6 +329,8 @@ def _build_row(
     start_time: int | None,
     end_time: int | None,
     num_bars: int,
+    confluence: ConfluenceParams,
+    order_block: OrderBlockParams,
 ) -> SweepRunRow:
     m = result.metrics
     return SweepRunRow(
@@ -337,8 +348,12 @@ def _build_row(
         sharpe=m.sharpe,
         num_trades=m.num_trades,
         seed=result.config.seed,
+        entry_mode=confluence.entry_mode,
+        rsi_mode=confluence.rsi_mode,
+        combine_obs=order_block.combine_obs,
         sizing_mode=result.config.sizing_mode,
         risk_per_trade=result.config.risk_per_trade,
+        funding_coverage=m.funding_coverage,
     )
 
 
@@ -375,7 +390,8 @@ def run_sweep(
     end_time = int(df["open_time"].max()) if num_bars else None
 
     # 오더블록 탐지는 컨플루언스 파라미터와 무관하므로 그리드 전체에서 한 번만 실행.
-    ob_result = OrderBlockDetector(order_block_params).run(df)
+    ob_params = order_block_params or OrderBlockParams()
+    ob_result = OrderBlockDetector(ob_params).run(df)
 
     rows: list[SweepRunRow] = []
     for point in grid.points():
@@ -397,6 +413,8 @@ def run_sweep(
                 start_time=start_time,
                 end_time=end_time,
                 num_bars=num_bars,
+                confluence=confluence,
+                order_block=ob_params,
             )
         )
 

@@ -11,10 +11,24 @@ from pathlib import Path
 import pandas as pd
 
 from backtest.models import BacktestResult, PositionSide
+from strategy.models import ConfluenceParams, OrderBlockParams
 
 
-def trades_to_dataframe(result: BacktestResult) -> pd.DataFrame:
-    """거래 목록을 DataFrame으로. 부분 청산은 마지막 청산 사유로 대표한다."""
+def trades_to_dataframe(
+    result: BacktestResult,
+    *,
+    confluence: ConfluenceParams | None = None,
+    order_block: OrderBlockParams | None = None,
+) -> pd.DataFrame:
+    """거래 목록을 DataFrame으로. 부분 청산은 마지막 청산 사유로 대표한다.
+
+    `confluence`/`order_block`을 주면 `entry_mode`/`rsi_mode`/`combine_obs`를 매 행에
+    함께 싣는다(WAN-65) — 이 파일만 봐도 어떤 실행 설정으로 나온 거래인지 알 수
+    있게 한다. 주지 않으면 각 파라미터의 기본값을 쓴다(호출부가 실제 값을 모르는
+    저수준 호출 — 대부분의 실제 리포트 경로는 값을 명시적으로 넘긴다).
+    """
+    conf = confluence or ConfluenceParams()
+    ob = order_block or OrderBlockParams()
     rows: list[dict[str, object]] = []
     for tr in result.trades:
         rows.append(
@@ -31,6 +45,12 @@ def trades_to_dataframe(result: BacktestResult) -> pd.DataFrame:
                 "funding_cost": tr.funding_cost,
                 "realized_pnl": tr.realized_pnl,
                 "return_pct": tr.return_pct,
+                "entry_mode": conf.entry_mode,
+                "rsi_mode": conf.rsi_mode,
+                "combine_obs": ob.combine_obs,
+                "sizing_mode": result.config.sizing_mode,
+                "risk_per_trade": result.config.risk_per_trade,
+                "funding_coverage": result.metrics.funding_coverage,
             }
         )
     columns = [
@@ -46,6 +66,12 @@ def trades_to_dataframe(result: BacktestResult) -> pd.DataFrame:
         "funding_cost",
         "realized_pnl",
         "return_pct",
+        "entry_mode",
+        "rsi_mode",
+        "combine_obs",
+        "sizing_mode",
+        "risk_per_trade",
+        "funding_coverage",
     ]
     return pd.DataFrame(rows, columns=columns)
 
@@ -60,11 +86,25 @@ def equity_to_dataframe(result: BacktestResult) -> pd.DataFrame:
     )
 
 
-def summary_dict(result: BacktestResult) -> dict[str, object]:
-    """지표·핵심 파라미터를 담은 평면 딕셔너리 (직렬화·로깅용)."""
+def summary_dict(
+    result: BacktestResult,
+    *,
+    confluence: ConfluenceParams | None = None,
+    order_block: OrderBlockParams | None = None,
+) -> dict[str, object]:
+    """지표·핵심 파라미터를 담은 평면 딕셔너리 (직렬화·로깅용).
+
+    `confluence`/`order_block`을 주면 `entry_mode`/`rsi_mode`/`combine_obs`도 함께
+    싣는다(WAN-65, `trades_to_dataframe` 참고).
+    """
+    conf = confluence or ConfluenceParams()
+    ob = order_block or OrderBlockParams()
     m = result.metrics
     c = result.config
     return {
+        "entry_mode": conf.entry_mode,
+        "rsi_mode": conf.rsi_mode,
+        "combine_obs": ob.combine_obs,
         "initial_capital": m.initial_capital,
         "final_equity": m.final_equity,
         "total_return": m.total_return,
@@ -99,8 +139,15 @@ def _fmt(value: float | None, *, pct: bool = False) -> str:
     return f"{value * 100:.2f}%" if pct else f"{value:,.2f}"
 
 
-def format_summary(result: BacktestResult) -> str:
+def format_summary(
+    result: BacktestResult,
+    *,
+    confluence: ConfluenceParams | None = None,
+    order_block: OrderBlockParams | None = None,
+) -> str:
     """성과 지표를 정렬된 표 형태의 문자열로 반환."""
+    conf = confluence or ConfluenceParams()
+    ob = order_block or OrderBlockParams()
     m = result.metrics
     c = result.config
     lines = [
@@ -118,6 +165,7 @@ def format_summary(result: BacktestResult) -> str:
         f"{'Funding Cost':<20}{_fmt(m.total_funding_cost):>16}",
         f"{'Funding Coverage':<20}{_fmt_coverage(m.funding_coverage):>16}",
         "--- Params ---",
+        f"entry_mode={conf.entry_mode} rsi_mode={conf.rsi_mode} combine_obs={ob.combine_obs}",
         f"fee_rate={c.fee_rate} slippage={c.slippage} "
         f"position_fraction={c.position_fraction} seed={c.seed}",
         f"sizing_mode={c.sizing_mode} risk_per_trade={c.risk_per_trade}",
@@ -236,11 +284,19 @@ def format_long_short(result: BacktestResult) -> str:
     return "\n".join(lines)
 
 
-def write_trades_csv(result: BacktestResult, path: str | Path) -> Path:
+def write_trades_csv(
+    result: BacktestResult,
+    path: str | Path,
+    *,
+    confluence: ConfluenceParams | None = None,
+    order_block: OrderBlockParams | None = None,
+) -> Path:
     """거래 목록을 CSV로 저장하고 경로를 반환."""
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    trades_to_dataframe(result).to_csv(out, index=False)
+    trades_to_dataframe(result, confluence=confluence, order_block=order_block).to_csv(
+        out, index=False
+    )
     return out
 
 

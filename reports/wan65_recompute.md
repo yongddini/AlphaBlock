@@ -29,6 +29,15 @@
    봉 종가와 오더블록 무효화 경계(`ob.bottom`/`ob.top`) 중 진입가에 더 불리한
    쪽으로 정한다. 경계는 항상 진입가보다 불리하므로(탭 진입은 존 안에서 일어난다)
    손절은 구조적으로 절대 이익을 낼 수 없다.
+4. **리포트 자기서술(착수 후 추가 범위)** — WAN-47/56/59/63/65가 반복해서 보여준
+   패턴("구현은 됐는데 실제 실행 경로에 안 붙어서 조용히 잘못된 값이 나온다")의
+   근본 원인 중 하나가 "리포트 파일만 봐서는 무슨 설정으로 나온 숫자인지 알 수
+   없다"는 것이었다. 거래 단위·요약·스윕 CSV 모두에 핵심 4개 컬럼
+   (`entry_mode`/`sizing_mode`/`combine_obs`/`funding_coverage`)을 싣고,
+   `scripts/backtest_report.py`는 조합 디렉터리마다 `run_config.json`(전체 설정 +
+   git 커밋 해시)을 함께 쓴다. 대시보드 분석 탭 상단에는 진입 방식·RSI 모드·
+   사이징·병합·펀딩비 반영 여부 배지가 뜨고, 사이징 미적용이거나 펀딩 커버리지가
+   100% 미만이면 경고색으로 강조된다(`dashboard/app.py::_render_run_config_badge`).
 
 ## 재현 커맨드
 
@@ -50,9 +59,11 @@ uv run python scripts/backtest_report.py \
 `exits[-1].reason == "stop_loss" and realized_pnl > 0`으로 집계했다.
 
 산출물: `backtest/reports/wan65_sweep_before.csv` / `wan65_sweep_after.csv`(조합별
-전체 스윕 행, `sizing_mode`/`risk_per_trade` 포함), `wan65_comparison_best.csv`
-((심볼,TF)별 sharpe 최상위 조합의 전/후 비교), `wan65_stop_loss_convergence.csv`
-(수정 후 모든 손절 거래의 자본 대비 손실 — 아래 검증 근거).
+전체 스윕 행, `entry_mode`/`rsi_mode`/`combine_obs`/`sizing_mode`/`risk_per_trade`/
+`funding_coverage` 포함), `wan65_comparison_best.csv`((심볼,TF)별 sharpe 최상위
+조합의 전/후 비교), `wan65_stop_loss_convergence.csv`(수정 후 모든 손절 거래의
+자본 대비 손실 — 아래 검증 근거). 위 CLI를 직접 실행하면 조합 디렉터리마다
+`run_config.json`(전체 실행 설정 + git 커밋 해시)도 함께 쓰인다.
 
 ## 결과 1 — MDD가 15개 조합 전부에서 축소된다
 
