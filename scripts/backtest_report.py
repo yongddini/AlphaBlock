@@ -26,7 +26,14 @@ from pathlib import Path
 
 import pandas as pd
 
-from backtest.report import format_summary, write_equity_csv, write_trades_csv
+from backtest.models import BacktestConfig
+from backtest.report import (
+    format_long_short,
+    format_summary,
+    funding_coverage_banner,
+    write_equity_csv,
+    write_trades_csv,
+)
 from backtest.sweep import (
     MultiSweepReport,
     ParamGrid,
@@ -41,6 +48,8 @@ from backtest.sweep import (
 )
 from backtest.synthetic import make_synthetic_ohlcv
 from config.settings import get_settings
+from data.funding import FundingRateStore
+from data.models import FundingRate
 from data.storage import OhlcvStore
 from strategy.models import ConfluenceParams
 
@@ -73,6 +82,21 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--synthetic-bars", type=int, default=1500, help="합성 봉 수")
     parser.add_argument("--seed", type=int, default=0, help="백테스트/합성 데이터 시드(재현용)")
+    parser.add_argument(
+        "--no-funding",
+        action="store_true",
+        help="펀딩비를 손익에 반영하지 않는다(기본: 반영). 합성 데이터는 항상 미반영.",
+    )
+    parser.add_argument(
+        "--strict-costs",
+        action="store_true",
+        help="펀딩 데이터 커버리지가 100%% 미만이면 실행을 중단한다(조용한 0원 처리 금지).",
+    )
+    parser.add_argument(
+        "--funding-include-predicted",
+        action="store_true",
+        help="예측(미정산) 펀딩비까지 반영한다(기본: 확정값만).",
+    )
     return parser.parse_args(argv)
 
 
@@ -109,6 +133,47 @@ def _load_df(
     return df, "synthetic"
 
 
+def _funding_config(
+    timeframe: str,
+    *,
+    seed: int,
+    funding_enabled: bool,
+    strict_costs: bool,
+    include_predicted: bool,
+) -> BacktestConfig:
+    """리포트용 백테스트 설정. 기본으로 펀딩비를 손익에 반영한다(WAN-63).
+
+    `strict_costs=True`이면 펀딩 데이터 커버리지가 100% 미만일 때 엔진이 실행을 중단해
+    "조용한 0원 처리"를 원천 차단한다.
+    """
+    base = default_backtest_config(timeframe, seed=seed)
+    return base.model_copy(
+        update={
+            "funding_enabled": funding_enabled,
+            "funding_include_predicted": include_predicted,
+            "funding_missing_policy": "error" if strict_costs else "zero",
+        }
+    )
+
+
+def _load_funding(
+    symbol: str,
+    *,
+    db_path: str,
+    start_ms: int | None,
+    end_ms: int | None,
+) -> list[FundingRate]:
+    """저장소에서 심볼의 펀딩 이력을 로드한다(예측 포함). 없으면 빈 리스트.
+
+    DB 파일이 없거나 테이블이 비어 있으면 빈 리스트를 돌려주며, 그 경우 엔진이
+    커버리지 0을 감지해 경고/중단하도록 한다(WAN-63 조용한 실패 방지).
+    """
+    if not Path(db_path).exists():
+        return []
+    with FundingRateStore(db_path) as store:
+        return store.get_rates(symbol, start_ms=start_ms, end_ms=end_ms, include_predicted=True)
+
+
 def _report_combo(
     symbol: str,
     timeframe: str,
@@ -118,11 +183,25 @@ def _report_combo(
     out_dir: Path,
     sort_by: str,
     seed: int,
+    funding_rates: list[FundingRate],
+    funding_enabled: bool,
+    strict_costs: bool,
+    include_predicted: bool,
 ) -> SweepReport:
-    """한 (심볼, 타임프레임)에 대해 스윕 + 최적 조합 상세 리포트를 만들고 저장한다."""
+    """한 (심볼, 타임프레임)에 대해 스윕 + 최적 조합 상세 리포트를 만들고 저장한다.
+
+    저장된 펀딩 이력(`funding_rates`)을 손익에 반영한다. 합성 데이터에는 실제 펀딩이
+    없으므로 호출부에서 `funding_enabled=False`로 넘긴다.
+    """
     grid = ParamGrid()
     base_confluence = ConfluenceParams()
-    base_backtest = default_backtest_config(timeframe, seed=seed)
+    base_backtest = _funding_config(
+        timeframe,
+        seed=seed,
+        funding_enabled=funding_enabled,
+        strict_costs=strict_costs,
+        include_predicted=include_predicted,
+    )
 
     report = run_sweep(
         df,
@@ -131,6 +210,7 @@ def _report_combo(
         grid=grid,
         base_confluence=base_confluence,
         base_backtest=base_backtest,
+        funding_rates=funding_rates if funding_enabled else None,
         sort_by=sort_by,
     )
 
@@ -138,19 +218,31 @@ def _report_combo(
     combo_dir = out_dir / slug
     sweep_path = write_sweep_csv(report, combo_dir / "sweep.csv")
 
+    n_rates = len(funding_rates) if funding_enabled else 0
     print(f"\n########## {symbol} {timeframe} (source={source}, bars={len(df)}) ##########")
+    print(f"펀딩비 반영: {funding_enabled} (저장 펀딩 {n_rates}행, strict_costs={strict_costs})")
     print(report.to_table())
     print(f"\n스윕 비교표 저장: {sweep_path}")
 
     best = report.best()
     if best is not None:
         confluence = apply_sweep_point(base_confluence, _point_from_row(best))
-        result = evaluate(df, confluence_params=confluence, backtest_config=base_backtest)
+        result = evaluate(
+            df,
+            confluence_params=confluence,
+            backtest_config=base_backtest,
+            funding_rates=funding_rates if funding_enabled else None,
+        )
         trades_path = write_trades_csv(result, combo_dir / "best_trades.csv")
         equity_path = write_equity_csv(result, combo_dir / "best_equity.csv")
         print(f"\n--- 추천(best) 조합 상세: {sort_by} 최상위 ---")
         print(f"rsi_oversold={best.rsi_oversold:.0f} rsi_overbought={best.rsi_overbought:.0f}")
         print(format_summary(result))
+        banner = funding_coverage_banner(result)
+        if banner:
+            print(banner)
+        print()
+        print(format_long_short(result))
         print(f"거래 CSV: {trades_path}")
         print(f"자본곡선 CSV: {equity_path}")
 
@@ -174,6 +266,8 @@ def main(argv: list[str] | None = None) -> None:
 
     reports: list[SweepReport] = []
     for symbol in symbols:
+        # 펀딩 이력은 심볼당 한 번만 조회해 모든 타임프레임에 공유한다.
+        funding_rates = _load_funding(symbol, db_path=db_path, start_ms=start_ms, end_ms=end_ms)
         for timeframe in timeframes:
             df, source = _load_df(
                 symbol,
@@ -185,6 +279,8 @@ def main(argv: list[str] | None = None) -> None:
                 synthetic_bars=args.synthetic_bars,
                 seed=args.seed,
             )
+            # 합성 데이터에는 실제 펀딩이 없으므로 펀딩 반영을 끈다.
+            funding_enabled = not args.no_funding and source == "db"
             report = _report_combo(
                 symbol,
                 timeframe,
@@ -193,6 +289,10 @@ def main(argv: list[str] | None = None) -> None:
                 out_dir=args.out_dir,
                 sort_by=args.sort_by,
                 seed=args.seed,
+                funding_rates=funding_rates,
+                funding_enabled=funding_enabled,
+                strict_costs=args.strict_costs,
+                include_predicted=args.funding_include_predicted,
             )
             reports.append(report)
 

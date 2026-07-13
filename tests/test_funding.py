@@ -18,8 +18,10 @@ from data.funding import (
     backfill_funding_all,
     backfill_funding_symbol,
     cumulative_funding_cost,
+    expected_funding_count,
     fetch_current_funding,
     funding_cost_for_position,
+    funding_coverage,
     refresh_funding,
     run_funding_refresh,
 )
@@ -382,6 +384,75 @@ def test_funding_cost_for_position_from_store(store: FundingRateStore) -> None:
         position_notional=10_000,
     )
     assert cost == pytest.approx(30.0)  # 확정 두 건만
+
+
+# --------------------------------------------------------------------------- #
+# 커버리지 (WAN-63 — 조용한 실패 방지)
+# --------------------------------------------------------------------------- #
+
+# 8h 경계에 정렬된 기준 시각(정산 시각은 interval의 배수에 정렬됨).
+A0 = (T0 // EIGHT_H) * EIGHT_H
+
+
+def test_expected_funding_count_counts_boundaries() -> None:
+    # [A0, A0+3*8h) 안의 8h 경계 = A0, A0+8h, A0+16h → 3개
+    assert expected_funding_count(A0, A0 + 3 * EIGHT_H) == 3
+    # 경계와 정확히 겹치지 않는 짧은 구간(1ms)은 0
+    assert expected_funding_count(A0 + 1, A0 + 2) == 0
+    # end <= start → 0
+    assert expected_funding_count(A0, A0) == 0
+    assert expected_funding_count(A0 + 10, A0) == 0
+
+
+def test_funding_coverage_full_partial_empty() -> None:
+    rates = [
+        FundingRate(SYMBOL, A0, 0.001),
+        FundingRate(SYMBOL, A0 + EIGHT_H, 0.001),
+        FundingRate(SYMBOL, A0 + 2 * EIGHT_H, 0.001),
+    ]
+    window_end = A0 + 3 * EIGHT_H
+    # 3/3 = 완전
+    assert funding_coverage(rates, A0, window_end) == pytest.approx(1.0)
+    # 하나 빠지면 2/3
+    assert funding_coverage(rates[:2], A0, window_end) == pytest.approx(2 / 3)
+    # 데이터 전무 → 0.0 (조용한 실패 신호)
+    assert funding_coverage([], A0, window_end) == pytest.approx(0.0)
+
+
+def test_funding_coverage_excludes_predicted_by_default() -> None:
+    rates = [
+        FundingRate(SYMBOL, A0, 0.001, is_predicted=False),
+        FundingRate(SYMBOL, A0 + EIGHT_H, 0.001, is_predicted=True),
+    ]
+    window_end = A0 + 2 * EIGHT_H
+    # 예측 제외(기본) → 1/2
+    assert funding_coverage(rates, A0, window_end) == pytest.approx(0.5)
+    # 예측 포함 → 2/2
+    assert funding_coverage(rates, A0, window_end, include_predicted=True) == pytest.approx(1.0)
+
+
+def test_funding_coverage_no_expected_is_full() -> None:
+    # 기대 정산이 없는 짧은 구간은 결측이 아니므로 1.0
+    assert funding_coverage([], A0 + 1, A0 + 2) == pytest.approx(1.0)
+
+
+def test_backfill_all_uses_backfill_start_when_empty(store: FundingRateStore) -> None:
+    """저장분이 없으면 settings.funding_backfill_start(ISO)부터 수집한다(WAN-63)."""
+    import pandas as pd
+
+    from config.settings import Settings
+
+    start_iso = "2023-07-01"
+    start_ms = int(pd.Timestamp(start_iso, tz="UTC").timestamp() * 1000)
+    exchange = FakeFundingExchange(history=_history(3, start=start_ms))
+    settings = Settings(symbols=[SYMBOL], funding_backfill_start=start_iso)
+    now = start_ms + 3 * EIGHT_H
+    results = backfill_funding_all(
+        exchange, store, [SYMBOL], settings=settings, now_ms=lambda: now, sleeper=lambda _: None
+    )
+    assert results[SYMBOL] == 3
+    # 첫 호출 since 가 룩백(30일 전)이 아니라 백필 시작일이어야 한다.
+    assert exchange.history_calls[0][0] == start_ms
 
 
 # --------------------------------------------------------------------------- #
