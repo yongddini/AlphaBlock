@@ -73,8 +73,12 @@ def _project(signals: list[OrderBlockSignal]) -> list[tuple[str, int, float, str
 
 
 def test_bisect_signals_match_linear_reference() -> None:
-    """이진 탐색 시그널이 구버전 선형 스캔 참조와 완전히 동일하다."""
-    params = OrderBlockParams()
+    """이진 탐색 시그널이 구버전 선형 스캔 참조와 완전히 동일하다.
+
+    이 테스트는 원본 단위(`_generate_signals`) 경로의 이진 탐색 최적화를 검증하므로
+    `combine_obs=False`로 고정한다(WAN-56: 기본값 `True`는 병합 존 경로를 탄다).
+    """
+    params = OrderBlockParams(combine_obs=False)
     df = make_synthetic_ohlcv(timeframe="1h", bars=1500, seed=11)
     result = OrderBlockDetector(params).run(df)
 
