@@ -348,8 +348,14 @@ def _render_analysis(settings: Settings) -> None:
             if show_all_archive:
                 st.warning("전체 아카이브는 존이 매우 많아 렌더가 느릴 수 있습니다.")
 
-        st.subheader("익절 목표선")
-        line_keys = [f"ema_{length}" for length in conf_params.sorted_tp_ema_lengths]
+        st.subheader("차트 표시선 (EMA/VWMA)")
+        st.caption(
+            "차트에 그리는 선입니다. 익절 판정은 이 중 EMA "
+            f"{'/'.join(str(n) for n in conf_params.sorted_tp_ema_lengths)}"
+            + (f" + VWMA {conf_params.tp_vwma_length}" if conf_params.tp_vwma_length else "")
+            + "에서만 일어납니다(WAN-66)."
+        )
+        line_keys = [f"ema_{length}" for length in conf_params.sorted_display_ema_lengths]
         if conf_params.tp_vwma_length is not None:
             line_keys.append(f"vwma_{conf_params.tp_vwma_length}")
         visible_lines: set[str] = set()

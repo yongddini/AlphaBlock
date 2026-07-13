@@ -17,6 +17,7 @@ from strategy.indicators import (
 )
 from strategy.models import (
     DEFAULT_CONFLUENCE_EMA_LENGTHS,
+    DEFAULT_TP_EMA_LENGTHS,
     ConfluenceParams,
     OrderBlock,
     OrderBlockDirection,
@@ -33,6 +34,7 @@ from strategy.order_blocks import OrderBlockDetector, detect_order_blocks
 __all__ = [
     "DEFAULT_CONFLUENCE_EMA_LENGTHS",
     "DEFAULT_EMA_LENGTHS",
+    "DEFAULT_TP_EMA_LENGTHS",
     "ConfluenceParams",
     "ConfluenceResult",
     "ConfluenceSignal",

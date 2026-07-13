@@ -539,3 +539,44 @@ def test_zone_limit_price_by_reference() -> None:
     assert ConfluenceParams(zone_limit_ref="mid").zone_limit_price(long_ob) == 95.0
     assert ConfluenceParams(zone_limit_ref="proximal").zone_limit_price(short_ob) == 90.0
     assert ConfluenceParams(zone_limit_ref="distal").zone_limit_price(short_ob) == 100.0
+
+
+# ---------------------------------------- WAN-66 익절 목표선 = EMA 60 + VWMA 100
+
+
+def test_default_take_profit_lines_are_ema60_and_vwma100_only() -> None:
+    """기본 익절 판정선은 EMA 60 + VWMA 100 두 개뿐이다(WAN-66).
+
+    표시선(EMA 20/120/240/365)이 익절 후보로 새어 들어가면 가장 빠른 선에서
+    조기 익절하던 버그가 재발한다 — 이를 회귀로 고정한다.
+    """
+    params = ConfluenceParams()
+    assert params.tp_ema_lengths == (60,)
+    assert params.tp_vwma_length == 100
+
+    strategy = ConfluenceStrategy(params)
+    # 익절 판정이 실제로 참조하는 선 집합(_line_columns)에 EMA 20/120/240/365가 없다.
+    df = _df([100.0 + i * 0.1 for i in range(400)])
+    line_cols = strategy._line_columns(df)
+    assert set(line_cols) == {"ema_60", "vwma_100"}
+    for excluded in ("ema_20", "ema_120", "ema_240", "ema_365"):
+        assert excluded not in line_cols
+
+
+def test_display_lines_are_separate_from_take_profit_lines() -> None:
+    """차트 표시선(display_ema_lengths)은 익절 판정선과 분리된 필드다(WAN-66)."""
+    params = ConfluenceParams()
+    # 표시선은 5개 EMA 전부, 익절선은 EMA 60뿐 — 서로 다른 필드가 담는다.
+    assert params.sorted_display_ema_lengths == [20, 60, 120, 240, 365]
+    assert params.sorted_tp_ema_lengths == [60]
+    # 표시선을 바꿔도 익절 판정선은 영향받지 않는다.
+    wider = ConfluenceParams(display_ema_lengths=(7, 25, 99))
+    assert wider.sorted_display_ema_lengths == [7, 25, 99]
+    assert wider.tp_ema_lengths == (60,)
+
+
+def test_display_ema_lengths_rejects_duplicates_and_nonpositive() -> None:
+    with pytest.raises(ValueError, match="display_ema_lengths"):
+        ConfluenceParams(display_ema_lengths=(20, 20))
+    with pytest.raises(ValueError, match="display_ema_lengths"):
+        ConfluenceParams(display_ema_lengths=(0, 60))

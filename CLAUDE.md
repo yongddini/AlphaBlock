@@ -69,6 +69,20 @@ AlphaBlock/
 └── pyproject.toml
 ```
 
+## 전략 규칙 요약 (WAN-23 / WAN-66)
+
+컨플루언스 전략(`strategy/confluence.py`)의 확정 규칙:
+
+- **진입** = 활성 오더블록 첫 탭 + RSI 게이트(롱=과매도, 숏=과매수).
+- **익절** = 진입가 너머 가장 가까운 **익절선** 도달 → 전량 청산. **익절선은 EMA 60 +
+  VWMA 100 두 개뿐이다**(`ConfluenceParams.tp_ema_lengths=(60,)`, `tp_vwma_length=100`).
+- **손절** = 진입 근거 오더블록의 무효화(breaker). 이 규칙은 변경 없음.
+
+⚠️ **차트 표시선 ≠ 익절선**: 대시보드는 EMA 20/60/120/240/365를 그리지만
+(`ConfluenceParams.display_ema_lengths`) 익절 판정에는 EMA 60만 쓴다. WAN-23 명세가
+두 선 집합을 한 배열로 뒤섞어 적어 EMA 20에서 조기 익절하던 버그(WAN-66)를 낳았으니,
+표시선과 익절선을 절대 다시 한 필드로 합치지 말 것.
+
 ## 기술 스택
 
 Python 3.11+ · uv · ccxt · pandas · asyncio · pydantic-settings
