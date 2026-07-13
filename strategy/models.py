@@ -13,8 +13,16 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 _ZONE_COUNT_LIMITS: dict[str, int] = {"high": 10, "medium": 5, "low": 3, "one": 1}
 
-#: 컨플루언스 EMA 배열의 기본 세트(사용자 트레이딩뷰 설정, `indicators.DEFAULT_EMA_LENGTHS`와 동일).
+#: **차트 표시선** EMA 세트(사용자 트레이딩뷰 설정, `indicators.DEFAULT_EMA_LENGTHS`와 동일).
+#: 익절 판정이 아니라 오직 대시보드 오버레이용이다(WAN-66). 익절 목표선은 아래
+#: `DEFAULT_TP_EMA_LENGTHS`를 쓴다.
 DEFAULT_CONFLUENCE_EMA_LENGTHS: tuple[int, ...] = (20, 60, 120, 240, 365)
+
+#: **익절 판정선** EMA 세트(WAN-66). 사용자 확정 규칙: 익절 목표선은 EMA 60 + VWMA 100
+#: 두 개뿐이다. EMA 20/120/240/365는 차트에 그리기만 하는 선이지 익절 판정에 쓰지 않는다.
+#: (배경) WAN-23 명세가 "차트 표시선"과 "익절 목표선"을 한 배열로 뒤섞어 적어, 코드가
+#: 표시선 5개 전부를 익절 후보로 써 왔다 — 가장 빠른 EMA 20에서 사실상 항상 조기 익절.
+DEFAULT_TP_EMA_LENGTHS: tuple[int, ...] = (60,)
 
 
 class OrderBlockDirection(StrEnum):
@@ -323,11 +331,17 @@ class ConfluenceParams(BaseModel):
 
     ## 익절 (EMA/VWMA 중 진입가 너머 가장 가까운 선 도달)
 
-    대상 선은 `tp_ema_lengths` EMA들과 `tp_vwma_length` VWMA. 진입 이후 매 봉,
-    진입가 **너머**(롱은 위·숏은 아래)에 있는 대상 선들 중 **가장 가까운 선**에
-    고가(롱)/저가(숏)가 도달하면 그 선 가격에서 **전량 익절**한다. 선은 봉마다
-    움직이므로 매 봉 재평가한다. 진입가 너머에 대상 선이 하나도 없으면 익절 목표가
-    없어 손절/청산에만 의존한다.
+    대상 선은 `tp_ema_lengths` EMA들과 `tp_vwma_length` VWMA. **기본은 EMA 60 +
+    VWMA 100 두 개뿐이다**(WAN-66 사용자 확정 규칙). 진입 이후 매 봉, 진입가 **너머**
+    (롱은 위·숏은 아래)에 있는 대상 선들 중 **가장 가까운 선**에 고가(롱)/저가(숏)가
+    도달하면 그 선 가격에서 **전량 익절**한다. 선은 봉마다 움직이므로 매 봉
+    재평가한다. 진입가 너머에 대상 선이 하나도 없으면 익절 목표가 없어 손절/청산에만
+    의존한다.
+
+    **차트 표시선과 익절 목표선은 다르다**(WAN-66). 대시보드는 `display_ema_lengths`
+    (기본 EMA 20/60/120/240/365)를 그리고, 익절 판정은 이 필드가 아니라
+    `tp_ema_lengths`(기본 EMA 60)만 본다. 두 역할을 한 필드가 겸하면 EMA 20에서
+    조기 익절하던 버그가 재발하므로 반드시 분리한다.
 
     ## 손절 (오더블록 무효화)
 
@@ -353,10 +367,17 @@ class ConfluenceParams(BaseModel):
     # --- 익절: EMA/VWMA 목표선 ---
     use_line_take_profit: bool = True
     """익절(선 도달) 규칙 on/off. False면 손절/강제청산에만 의존."""
-    tp_ema_lengths: tuple[int, ...] = DEFAULT_CONFLUENCE_EMA_LENGTHS
-    """익절 목표로 쓸 EMA 길이들. 비우면 EMA 목표선 없음."""
+    tp_ema_lengths: tuple[int, ...] = DEFAULT_TP_EMA_LENGTHS
+    """**익절 판정**에 쓸 EMA 길이들(WAN-66, 기본 EMA 60뿐). 비우면 EMA 목표선 없음.
+    차트에 그리기만 하는 선은 여기가 아니라 `display_ema_lengths`에 둔다."""
     tp_vwma_length: int | None = Field(default=100, ge=1)
     """익절 목표로 쓸 VWMA 길이. None이면 VWMA 목표선 없음."""
+
+    # --- 차트 표시선 (익절 판정과 무관, WAN-66) ---
+    display_ema_lengths: tuple[int, ...] = DEFAULT_CONFLUENCE_EMA_LENGTHS
+    """**대시보드 차트에만** 그리는 EMA 길이들(기본 20/60/120/240/365). 익절 판정에는
+    쓰지 않는다 — 판정선은 `tp_ema_lengths`. 두 필드를 분리해 표시선이 익절 후보로
+    새어 들어가는 WAN-66 버그의 재발을 막는다."""
 
     # --- 손절: 오더블록 무효화 ---
     use_order_block_stop: bool = True
@@ -404,6 +425,10 @@ class ConfluenceParams(BaseModel):
             raise ValueError("tp_ema_lengths의 모든 길이는 1 이상이어야 합니다.")
         if len(set(self.tp_ema_lengths)) != len(self.tp_ema_lengths):
             raise ValueError("tp_ema_lengths에 중복된 길이가 있습니다.")
+        if any(length < 1 for length in self.display_ema_lengths):
+            raise ValueError("display_ema_lengths의 모든 길이는 1 이상이어야 합니다.")
+        if len(set(self.display_ema_lengths)) != len(self.display_ema_lengths):
+            raise ValueError("display_ema_lengths에 중복된 길이가 있습니다.")
         if self.use_line_take_profit and not self.tp_ema_lengths and self.tp_vwma_length is None:
             raise ValueError(
                 "use_line_take_profit=True면 tp_ema_lengths 또는 tp_vwma_length 중 "
@@ -431,5 +456,10 @@ class ConfluenceParams(BaseModel):
 
     @property
     def sorted_tp_ema_lengths(self) -> list[int]:
-        """익절 EMA 길이들을 오름차순 정렬한 리스트."""
+        """**익절 판정**에 쓰는 EMA 길이들을 오름차순 정렬한 리스트."""
         return sorted(self.tp_ema_lengths)
+
+    @property
+    def sorted_display_ema_lengths(self) -> list[int]:
+        """**차트 표시**용 EMA 길이들을 오름차순 정렬한 리스트(WAN-66, 익절과 무관)."""
+        return sorted(self.display_ema_lengths)

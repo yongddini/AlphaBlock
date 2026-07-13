@@ -490,14 +490,16 @@ _TEMPLATE = """
 
 
 def _tp_line_series(frame: pd.DataFrame, conf_params: ConfluenceParams) -> dict[str, pd.Series]:
-    """익절 목표선(EMA/VWMA)을 `frame`과 위치가 정렬된 Series로 계산한다.
+    """차트 표시선(EMA/VWMA)을 `frame`과 위치가 정렬된 Series로 계산한다.
 
+    **차트 표시선(`display_ema_lengths`, 기본 5개)은 익절 판정선(`tp_ema_lengths`,
+    기본 EMA 60)과 다르다**(WAN-66) — 사용자는 EMA 5개 전부를 눈으로 보되 익절은
+    EMA 60 + VWMA 100에서만 한다. 그래서 여기서는 `display_ema_lengths`를 그린다.
     지표 계산은 `strategy.indicators`(전략이 백테스트에 쓰는 것과 동일 함수)를
-    재사용해, 차트에 그리는 선이 실제 익절 판정에 쓰인 선과 항상 같도록 한다.
-    키 순서(EMA 오름차순 → VWMA)가 팔레트·범례 순서를 결정한다.
+    재사용한다. 키 순서(EMA 오름차순 → VWMA)가 팔레트·범례 순서를 결정한다.
     """
     cols: dict[str, pd.Series] = {}
-    lengths = conf_params.sorted_tp_ema_lengths
+    lengths = conf_params.sorted_display_ema_lengths
     if lengths:
         ema_frame = compute_emas(frame, lengths=lengths, source=conf_params.source)
         for length in lengths:
@@ -533,7 +535,8 @@ def build_chart_html(
     `st.components.v1.html(build_chart_html(...), height=height)`로 임베드한다.
     반환된 HTML은 벤더링된 JS 라이브러리를 인라인 포함해 오프라인에서도 동작한다.
 
-    `conf_params`를 주면 `tp_ema_lengths`/`tp_vwma_length` 선을 캔들 패널에 오버레이하고
+    `conf_params`를 주면 `display_ema_lengths`(차트 표시선)/`tp_vwma_length` 선을
+    캔들 패널에 오버레이하고(익절 판정선 `tp_ema_lengths`와 별개 — WAN-66)
     (`visible_lines`로 표시할 키만 필터, `None`이면 전부), `backtest`가 있으면 청산
     마커에 사유(익절/손절)·닿은 선·손익%·R 배수를 담는다. `signals`는 각 거래를 발생시킨
     시그널(오더블록·계획 청산)을 역추적하는 데 쓰인다(WAN-59 후속).

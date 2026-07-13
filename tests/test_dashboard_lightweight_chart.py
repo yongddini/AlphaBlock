@@ -172,7 +172,8 @@ def test_initial_bars_capped_to_available_candles() -> None:
 
 def test_build_chart_html_adds_tp_line_overlays_from_conf_params() -> None:
     df = _df(30)
-    conf_params = ConfluenceParams(tp_ema_lengths=(20,), tp_vwma_length=None)
+    # 차트에 그리는 선은 display_ema_lengths(익절 판정선 tp_ema_lengths와 별개, WAN-66).
+    conf_params = ConfluenceParams(display_ema_lengths=(20,), tp_vwma_length=None)
 
     payload = _payload(build_chart_html(df, [], conf_params=conf_params))
 
@@ -192,7 +193,7 @@ def test_build_chart_html_no_conf_params_means_no_lines() -> None:
 
 def test_build_chart_html_visible_lines_filters_overlay() -> None:
     df = _df(30)
-    conf_params = ConfluenceParams(tp_ema_lengths=(20, 60), tp_vwma_length=100)
+    conf_params = ConfluenceParams(display_ema_lengths=(20, 60), tp_vwma_length=100)
 
     payload = _payload(
         build_chart_html(df, [], conf_params=conf_params, visible_lines=frozenset({"ema_20"}))
@@ -206,7 +207,7 @@ def test_build_chart_html_visible_lines_filters_overlay() -> None:
 
 def test_exit_marker_labels_touched_ema_line_and_pnl() -> None:
     df = _df(30)
-    conf_params = ConfluenceParams(tp_ema_lengths=(20,), tp_vwma_length=None)
+    conf_params = ConfluenceParams(display_ema_lengths=(20,), tp_vwma_length=None)
     frame = df.sort_values("open_time").reset_index(drop=True)
     ema_20 = ema(frame, length=20)
     exit_time = 25 * _STEP
