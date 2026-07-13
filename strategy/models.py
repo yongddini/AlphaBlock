@@ -464,9 +464,17 @@ class ConfluenceParams(BaseModel):
     벌어졌으면) 기각한다. EMA가 워밍업 중(NaN)이면 판정 불가로 간주해 기각한다.
     숏에는 적용하지 않는다.
     """
-    short_enabled: bool = True
-    """숏(약세 오더블록) 진입 허용 여부. **기본 `True`(현행 동작 보존)**.
-    `False`면 숏 신호는 항상 미확정(`confirmed=False`) 처리한다(롱 온리)."""
+    short_enabled: bool = False
+    """숏(약세 오더블록) 진입 허용 여부. **기본 `False`(롱 온리, WAN-69)**.
+    `False`면 숏 신호는 항상 미확정(`confirmed=False`) 처리한다.
+
+    WAN-68 OOS 비교(`backtest/reports/wan68_short_variant_comparison.csv`)에서 BTC 일봉
+    레짐 게이트(C/D)가 롱 온리보다 평균 OOS 수익률·우월 셀 수에서 근소하게 앞섰지만
+    (+3.08%/+2.90% vs +1.58%, 10/12 vs 8/12), WAN-70·WAN-74가 매칭 널 검정으로 게이트
+    도입이 거래 수만 줄일 뿐 통계적으로 유의한 진입 엣지를 만들지 못함을 이미 확인했다.
+    작은 표본(다수 셀 n<10)에서 나온 근소한 차이를 신뢰하기보다, 라이브/페이퍼 경로에
+    BTC 일봉 데이터 상시 조회 배선을 새로 추가할 필요가 없는 단순한 쪽(롱 온리)을
+    채택했다(이슈 본문의 "차이가 유의하지 않으면 단순성 우선" 기준)."""
 
     # --- 진입/익절 재현 (WAN-73) ---
     retap_mode: Literal["once", "every_tap"] = "once"

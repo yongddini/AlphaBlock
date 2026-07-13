@@ -119,7 +119,9 @@ def test_bearish_tap_with_overbought_rsi_confirms_short() -> None:
     closes = [100.0 + i * 3.0 for i in range(25)]  # 단조 상승 -> RSI 과매수
     df = _df(closes)
     pos = 24
-    params = ConfluenceParams(use_line_take_profit=False, use_order_block_stop=False)
+    params = ConfluenceParams(
+        use_line_take_profit=False, use_order_block_stop=False, short_enabled=True
+    )
     result = ConfluenceStrategy(params=params).run(
         df, OrderBlockResult(order_blocks=[], signals=[_signal(_BEAR, pos, closes[pos])])
     )
@@ -587,12 +589,16 @@ def test_display_ema_lengths_rejects_duplicates_and_nonpositive() -> None:
 
 
 def test_wan68_gate_defaults_preserve_current_behavior() -> None:
-    """새 게이트 3종은 모두 기본값이 꺼짐(또는 현행 동작)이라 기존 백테스트가 불변이다."""
+    """min_rr·이격도 게이트는 기본값이 꺼짐(현행 동작 보존).
+
+    `short_enabled`는 WAN-69에서 기본값이 `False`(롱 온리)로 바뀌었다 — WAN-68 OOS
+    비교에서 레짐 게이트 대비 유의한 차이가 없어 라이브 배선이 필요없는 단순한 쪽을
+    채택했다."""
     params = ConfluenceParams()
     assert params.min_rr is None
     assert params.long_max_deviation is None
     assert params.long_deviation_gate_ema_length == 240
-    assert params.short_enabled is True
+    assert params.short_enabled is False
 
 
 def test_min_rr_gate_rejects_low_reward_to_risk_ratio() -> None:
@@ -714,6 +720,7 @@ def test_deviation_gate_does_not_affect_short_entries() -> None:
         use_order_block_stop=False,
         long_deviation_gate_ema_length=5,
         long_max_deviation=-0.5,  # 매우 엄격해도 숏에는 적용되지 않는다.
+        short_enabled=True,
     )
     result = ConfluenceStrategy(params).run(
         df, OrderBlockResult(order_blocks=[], signals=[_signal(_BEAR, pos, closes[pos])])
@@ -850,6 +857,7 @@ def test_rsi_gate_mode_neutral_confirms_long_and_short_when_rsi_near_50() -> Non
         rsi_neutral_band=(40.0, 60.0),
         use_line_take_profit=False,
         use_order_block_stop=False,
+        short_enabled=True,
     )
     long_result = ConfluenceStrategy(params).run(
         df, OrderBlockResult(order_blocks=[], signals=[_signal(_BULL, pos, closes[pos])])

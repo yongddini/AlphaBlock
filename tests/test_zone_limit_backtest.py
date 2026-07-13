@@ -34,7 +34,9 @@ def _synthetic_pair(bars: int = 600, span: int = 120) -> tuple[pd.DataFrame, pd.
 
 def test_end_to_end_runs_and_is_deterministic() -> None:
     htf, one_min = _synthetic_pair()
-    params = ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime")
+    # 이 합성 시드는 숏 셋업만 낸다 — WAN-69 기본값(롱 온리)과 무관하게 엔진 동작을
+    # 검증하려면 명시적으로 켠다.
+    params = ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime", short_enabled=True)
     result_a = run_zone_limit_backtest(htf, one_min, "1h", confluence_params=params)
     result_b = run_zone_limit_backtest(htf, one_min, "1h", confluence_params=params)
     # 결정적: 같은 입력 → 같은 결과.
@@ -70,7 +72,9 @@ def test_trades_reference_1m_substep_times() -> None:
     """진입/청산 시각이 1분봉 서브스텝(1m 해상도)에서 나온다 — 봉 내부 재구성 증거."""
     htf, one_min = _synthetic_pair()
     minute_times = set(int(t) for t in one_min["open_time"].astype("int64"))
-    params = ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime")
+    # 이 합성 시드는 숏 셋업만 낸다 — WAN-69 기본값(롱 온리)과 무관하게 엔진 동작을
+    # 검증하려면 명시적으로 켠다.
+    params = ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime", short_enabled=True)
     result = run_zone_limit_backtest(htf, one_min, "1h", confluence_params=params)
     assert result.trades
     for trade in result.trades:
@@ -89,11 +93,11 @@ def test_empty_1m_yields_no_trades() -> None:
 
 
 def test_default_gates_off_preserve_zone_limit_behavior() -> None:
-    """WAN-68 게이트 3종 모두 기본값(꺼짐)이면 B안 결과가 게이트 도입 전과 동일하다."""
+    """WAN-68 게이트 3종 모두 기본값(꺼짐/WAN-69 롱 온리)이면 B안 결과가 명시적 off와 동일하다."""
     htf, one_min = _synthetic_pair()
     default_params = ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime")
     explicit_off = default_params.model_copy(
-        update={"min_rr": None, "long_max_deviation": None, "short_enabled": True}
+        update={"min_rr": None, "long_max_deviation": None, "short_enabled": False}
     )
     a = run_zone_limit_backtest(htf, one_min, "1h", confluence_params=default_params)
     b = run_zone_limit_backtest(htf, one_min, "1h", confluence_params=explicit_off)
@@ -102,7 +106,9 @@ def test_default_gates_off_preserve_zone_limit_behavior() -> None:
 
 def test_short_enabled_false_yields_only_long_trades() -> None:
     htf, one_min = _synthetic_pair()
-    baseline_params = ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime")
+    baseline_params = ConfluenceParams(
+        entry_mode="zone_limit", rsi_mode="realtime", short_enabled=True
+    )
     baseline = run_zone_limit_backtest(htf, one_min, "1h", confluence_params=baseline_params)
     assert any(t.side is PositionSide.SHORT for t in baseline.trades)  # 전제: 숏 거래가 있다
 
@@ -139,7 +145,9 @@ def test_long_deviation_gate_does_not_increase_long_trade_count() -> None:
 def test_cost_model_applied_slippage_and_fees() -> None:
     """진입/청산 체결가에 슬리피지가 불리하게, 수수료가 차감돼 반영된다."""
     htf, one_min = _synthetic_pair()
-    params = ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime")
+    # 이 합성 시드는 숏 셋업만 낸다 — WAN-69 기본값(롱 온리)과 무관하게 엔진 동작을
+    # 검증하려면 명시적으로 켠다.
+    params = ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime", short_enabled=True)
     zero = run_zone_limit_backtest(
         htf,
         one_min,
@@ -218,11 +226,14 @@ def test_limit_valid_bars_none_runs_end_to_end() -> None:
 def test_take_profit_mode_fixed_r_runs_end_to_end() -> None:
     """`take_profit_mode="fixed_r"`도 B안 파이프라인에서 정상 동작한다."""
     htf, one_min = _synthetic_pair()
+    # 이 합성 시드는 숏 셋업만 낸다 — WAN-69 기본값(롱 온리)과 무관하게 엔진 동작을
+    # 검증하려면 명시적으로 켠다.
     params = ConfluenceParams(
         entry_mode="zone_limit",
         rsi_mode="realtime",
         take_profit_mode="fixed_r",
         take_profit_r=2.0,
+        short_enabled=True,
     )
     result = run_zone_limit_backtest(htf, one_min, "1h", confluence_params=params)
     assert result.metrics.num_trades >= 1
