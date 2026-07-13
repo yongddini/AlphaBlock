@@ -61,8 +61,13 @@ def build_metrics(
     equities: Sequence[float],
     trades: Sequence[Trade],
     annualization_factor: float | None = None,
+    funding_coverage: float | None = None,
 ) -> BacktestMetrics:
-    """자본곡선·거래로부터 전체 성과 지표를 조립한다."""
+    """자본곡선·거래로부터 전체 성과 지표를 조립한다.
+
+    `funding_coverage`(0.0~1.0)는 펀딩비를 반영한 경우 백테스트 구간의 펀딩 데이터
+    커버리지 비율이다. 펀딩 미사용이면 None으로 둔다(WAN-63).
+    """
     final_equity = equities[-1] if equities else initial_capital
     total_return = (final_equity - initial_capital) / initial_capital if initial_capital else 0.0
 
@@ -94,4 +99,5 @@ def build_metrics(
         avg_win=avg_win,
         avg_loss=avg_loss,
         total_funding_cost=total_funding_cost,
+        funding_coverage=funding_coverage,
     )

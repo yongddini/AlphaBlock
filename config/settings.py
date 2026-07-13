@@ -86,6 +86,10 @@ class Settings(BaseSettings):
     funding_enabled: bool = Field(default=True)  # 펀딩 수집 on/off
     funding_refresh_interval_seconds: int = Field(default=300)  # 현재 펀딩비 갱신 간격(초)
     funding_backfill_lookback_days: int = Field(default=30)  # 저장분 없을 때 백필 룩백(일)
+    # 저장분이 없을 때 이 날짜(ISO, 예 "2023-07-01")부터 펀딩을 백필한다. 설정하면
+    # 룩백일수 대신 우선한다 — 백테스트 구간 전체를 커버하려면 이 값을 쓴다(WAN-63).
+    # None이면 기존 룩백(30일) 동작을 유지한다.
+    funding_backfill_start: str | None = Field(default=None)
 
     # 전략 규칙(WAN-23): 진입=오더블록+RSI, 익절=EMA/VWMA 선 도달, 손절=오더블록 무효화.
     # 기본값은 트레이딩뷰 설정과 일치. 개별 필드는 ALPHABLOCK_CONFLUENCE__<필드명>로 덮어쓴다.

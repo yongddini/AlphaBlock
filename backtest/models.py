@@ -207,6 +207,12 @@ class BacktestMetrics(BaseModel):
     avg_loss: float
     total_funding_cost: float = 0.0
     """모든 거래에 걸친 누적 펀딩비용(양수=순지불, 음수=순수취)."""
+    funding_coverage: float | None = None
+    """백테스트 구간의 펀딩 데이터 커버리지 비율(0.0~1.0). 펀딩 미사용이면 None.
+
+    1.0 미만이면 결측 구간의 펀딩비를 0으로 때웠다는 뜻이므로 비용이 **과소 계상**됐을
+    수 있다(WAN-63의 조용한 실패 신호). 리포트가 이 값을 노출하고 1.0 미만이면 경고한다.
+    """
 
 
 class BacktestResult(BaseModel):

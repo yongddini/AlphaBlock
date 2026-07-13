@@ -35,6 +35,7 @@
 
 from __future__ import annotations
 
+import logging
 import random
 from collections import defaultdict
 from collections.abc import Sequence
@@ -53,10 +54,12 @@ from backtest.models import (
     TradeFill,
 )
 from common.costs import Liquidity
-from data.funding import Direction, cumulative_funding_cost
+from data.funding import Direction, cumulative_funding_cost, funding_coverage
 from data.models import FundingRate
 from execution.sizing import position_size
 from strategy.models import OrderBlockDirection, OrderBlockSignal, PlannedExit, SignalExitReason
+
+logger = logging.getLogger(__name__)
 
 _REQUIRED_COLUMNS = ("open_time", "open", "high", "low", "close")
 _QTY_EPS = 1e-12
@@ -131,6 +134,10 @@ class BacktestEngine:
         closes = frame["close"].astype(float).tolist()
         n = len(frame)
 
+        # 펀딩 데이터 커버리지 검사 — 결측 구간을 조용히 0으로 때우지 않도록 소리를
+        # 낸다(WAN-63). 1.0 미만이면 경고를 남기고, strict('error') 정책이면 중단한다.
+        coverage = self._check_funding_coverage(times)
+
         signals_by_time: dict[int, list[OrderBlockSignal]] = defaultdict(list)
         for sig in signals:
             if sig.status == "active":
@@ -179,8 +186,44 @@ class BacktestEngine:
             equities=equities,
             trades=trades,
             annualization_factor=cfg.annualization_factor,
+            funding_coverage=coverage,
         )
         return BacktestResult(config=cfg, trades=trades, equity_curve=equity_curve, metrics=metrics)
+
+    def _check_funding_coverage(self, times: Sequence[int]) -> float | None:
+        """백테스트 구간의 펀딩 커버리지를 계산하고 결측이면 소리를 낸다(WAN-63).
+
+        펀딩 미사용(`funding_enabled=False`)이면 None을 돌려준다(검사 대상 아님).
+        커버리지가 1.0 미만이면 결측 구간을 0으로 처리한다는 경고를 남기고, 정책이
+        ``"error"``면 `ValueError`로 실행을 중단한다(strict_costs). 그래야 "net"이라
+        이름 붙은 성과가 실제로는 펀딩비를 빠뜨린 값이라는 조용한 실패가 드러난다.
+        """
+        cfg = self.config
+        if not cfg.funding_enabled:
+            return None
+        if not times:
+            return 1.0
+        coverage = funding_coverage(
+            self._funding_rates,
+            times[0],
+            times[-1],
+            include_predicted=cfg.funding_include_predicted,
+        )
+        if coverage < 1.0:
+            logger.warning(
+                "펀딩 데이터 커버리지 %.1f%% (<100%%) — 결측 구간 펀딩비를 0으로 처리합니다. "
+                "비용이 과소 계상되어 성과가 부풀려질 수 있습니다. 구간=[%d, %d)",
+                coverage * 100.0,
+                times[0],
+                times[-1],
+            )
+            if cfg.funding_missing_policy == "error":
+                raise ValueError(
+                    "funding_missing_policy='error'인데 펀딩 데이터 커버리지가 "
+                    f"{coverage:.1%}로 100% 미만입니다. 백테스트 구간 전체의 펀딩 이력을 "
+                    "백필하거나 정책을 'zero'로 두세요."
+                )
+        return coverage
 
     def _resolve_side(self, sig: OrderBlockSignal) -> PositionSide | None:
         if sig.direction is OrderBlockDirection.BULLISH:

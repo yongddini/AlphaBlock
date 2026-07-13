@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import sqlite3
 import time
 from collections.abc import Awaitable, Callable, Iterable, Sequence
@@ -32,6 +33,10 @@ logger = logging.getLogger(__name__)
 
 # ccxt fetch_funding_rate_history 페이지 최대 크기(바이낸스).
 DEFAULT_LIMIT = 1000
+
+# 바이낸스 무기한 선물 펀딩 정산 간격(8시간, 하루 3회). 정산 시각은 UTC 00:00/08:00/
+# 16:00으로 8시간 경계(에폭 기준 interval의 배수)에 정렬된다. 커버리지 계산에 쓴다.
+FUNDING_INTERVAL_MS = 8 * 3_600_000
 
 Direction = Literal["long", "short"]
 
@@ -425,6 +430,28 @@ def backfill_funding_symbol(
     return total
 
 
+def _resolve_backfill_start(
+    settings: Settings,
+    *,
+    lookback_days: int | None,
+    start_ms: int | None,
+    now_ms: Callable[[], int],
+) -> int:
+    """저장분이 없는 심볼의 백필 시작 시각(ms)을 결정한다.
+
+    우선순위: 명시 `start_ms` > 명시 `lookback_days` > 설정 `funding_backfill_start`
+    (ISO 날짜) > 설정 룩백일수(기본 30일). 백테스트 구간 전체를 커버하려면
+    `funding_backfill_start`를 백테스트 시작일로 두는 것이 핵심이다(WAN-63).
+    """
+    if start_ms is not None:
+        return start_ms
+    if lookback_days is not None:
+        return now_ms() - lookback_days * 86_400_000
+    if settings.funding_backfill_start:
+        return int(pd.Timestamp(settings.funding_backfill_start, tz="UTC").timestamp() * 1000)
+    return now_ms() - settings.funding_backfill_lookback_days * 86_400_000
+
+
 def backfill_funding_all(
     exchange: FundingRateSource,
     store: FundingRateStore,
@@ -432,6 +459,7 @@ def backfill_funding_all(
     *,
     settings: Settings | None = None,
     lookback_days: int | None = None,
+    start_ms: int | None = None,
     limit: int = DEFAULT_LIMIT,
     max_retries: int = 5,
     backoff_base: float = 1.0,
@@ -440,19 +468,19 @@ def backfill_funding_all(
 ) -> dict[str, int]:
     """모든 심볼의 펀딩 이력을 백필한다.
 
-    각 심볼은 저장된 마지막 확정 펀딩 다음부터(재시작 복구), 없으면 설정 룩백일수만큼
-    과거부터 수집한다. (심볼→저장 건수) 맵을 반환한다.
+    각 심볼은 저장된 마지막 확정 펀딩 다음부터(재시작 복구), 없으면 `start_ms`/설정
+    `funding_backfill_start`/룩백일수 순으로 결정한 과거 시점부터 수집한다.
+    (심볼→저장 건수) 맵을 반환한다.
     """
     settings = settings or get_settings()
-    if lookback_days is not None:
-        lookback = lookback_days
-    else:
-        lookback = settings.funding_backfill_lookback_days
+    default_since = _resolve_backfill_start(
+        settings, lookback_days=lookback_days, start_ms=start_ms, now_ms=now_ms
+    )
     results: dict[str, int] = {}
 
     for symbol in symbols:
         last = store.last_funding_time(symbol, confirmed_only=True)
-        since = last + 1 if last is not None else now_ms() - lookback * 86_400_000
+        since = last + 1 if last is not None else default_since
         results[symbol] = backfill_funding_symbol(
             exchange,
             store,
@@ -501,6 +529,53 @@ def cumulative_funding_cost(
             continue
         total += position_notional * r.rate * sign
     return total
+
+
+def expected_funding_count(
+    start_ms: int,
+    end_ms: int,
+    *,
+    interval_ms: int = FUNDING_INTERVAL_MS,
+) -> int:
+    """`[start_ms, end_ms)` 구간에 **기대되는** 펀딩 정산 횟수.
+
+    바이낸스 정산 시각은 8시간 경계(`interval_ms`의 배수)에 정렬되므로, 구간에
+    포함되는 배수의 개수를 정확히 센다. `end_ms <= start_ms`이면 0.
+    """
+    if end_ms <= start_ms:
+        return 0
+    first = math.ceil(start_ms / interval_ms) * interval_ms
+    if first >= end_ms:
+        return 0
+    return (end_ms - 1 - first) // interval_ms + 1
+
+
+def funding_coverage(
+    rates: Iterable[FundingRate],
+    start_ms: int,
+    end_ms: int,
+    *,
+    interval_ms: int = FUNDING_INTERVAL_MS,
+    include_predicted: bool = False,
+) -> float:
+    """`[start_ms, end_ms)` 구간의 펀딩 데이터 커버리지 비율(0.0~1.0).
+
+    분모는 그 구간에 **기대되는** 정산 횟수(`expected_funding_count`), 분자는 실제로
+    보유한 (구간 내) 정산 시각의 개수다. 데이터가 하나도 없으면 0.0, 빠짐없이 있으면
+    1.0. 기대 정산이 0인 짧은 구간은 결측이 아니므로 1.0을 돌려준다.
+
+    이 값이 1.0 미만이면 백테스트·페이퍼가 결측 구간의 펀딩비를 0으로 때우고 있다는
+    뜻이다 — **조용한 실패를 드러내기 위한 신호**로 쓴다(WAN-63).
+    """
+    expected = expected_funding_count(start_ms, end_ms, interval_ms=interval_ms)
+    if expected <= 0:
+        return 1.0
+    seen = {
+        r.funding_time
+        for r in rates
+        if start_ms <= r.funding_time < end_ms and (include_predicted or not r.is_predicted)
+    }
+    return min(1.0, len(seen) / expected)
 
 
 def funding_cost_for_position(

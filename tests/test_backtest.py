@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Literal
@@ -452,6 +453,84 @@ def test_funding_predicted_excluded_by_default_included_when_enabled() -> None:
         df, signals, _long_tp_cfg(funding_enabled=True, funding_include_predicted=True), rates
     )
     assert included.trades[0].funding_cost == pytest.approx(10.0)
+
+
+# --- 펀딩 커버리지 · 조용한 실패 방지 (WAN-63) ---
+
+_EIGHT_H = 8 * 3_600_000
+
+
+def _wide_df() -> pd.DataFrame:
+    """진입(t=0)부터 마지막 봉(t=3*8h)까지 청산 없이 보유하는 2봉 프레임.
+
+    커버리지 창 `[0, 3*8h)` 안에 8h 정산 경계가 3개(0, 8h, 16h) 있으므로,
+    공급하는 펀딩 개수로 커버리지(0/3·2/3·3/3)를 정확히 만들 수 있다.
+    """
+    return pd.DataFrame(
+        {
+            "open_time": [0, 3 * _EIGHT_H],
+            "open": [100.0, 100.0],
+            "high": [101.0, 101.0],
+            "low": [99.0, 99.0],
+            "close": [100.0, 100.0],
+            "volume": [10.0, 10.0],
+        }
+    )
+
+
+def _wide_cfg(**kw: object) -> BacktestConfig:
+    base: dict[str, object] = {
+        "initial_capital": 10_000.0,
+        "fee_rate": 0.0,
+        "slippage": 0.0,
+        "position_fraction": 1.0,
+        "funding_enabled": True,
+    }
+    base.update(kw)
+    return BacktestConfig(**base)
+
+
+def test_funding_missing_data_warns_not_silent(caplog: pytest.LogCaptureFixture) -> None:
+    """펀딩 데이터가 전무한 구간을 0으로 때울 때 조용히 넘어가지 않고 경고를 남긴다."""
+    df = _wide_df()
+    signals = [_signal(OrderBlockDirection.BULLISH, 0, 100.0)]
+    with caplog.at_level(logging.WARNING):
+        result = run_backtest(df, signals, _wide_cfg())  # 펀딩 데이터 미전달
+    assert result.metrics.funding_coverage == pytest.approx(0.0)
+    assert result.trades[0].funding_cost == pytest.approx(0.0)  # 0으로 진행하되
+    assert any("커버리지" in r.message for r in caplog.records)  # 소리는 낸다
+
+
+def test_funding_partial_coverage_warns_and_reports(caplog: pytest.LogCaptureFixture) -> None:
+    """일부만 있는 커버리지(2/3)를 지표에 노출하고 경고한다."""
+    df = _wide_df()
+    signals = [_signal(OrderBlockDirection.BULLISH, 0, 100.0)]
+    rates = [_funding(0, 0.0), _funding(_EIGHT_H, 0.0)]  # 3개 중 2개(16h 결측)
+    with caplog.at_level(logging.WARNING):
+        result = run_backtest(df, signals, _wide_cfg(), rates)
+    assert result.metrics.funding_coverage == pytest.approx(2 / 3)
+    assert any("커버리지" in r.message for r in caplog.records)
+
+
+def test_funding_strict_costs_raises_on_partial_coverage() -> None:
+    """strict(error) 정책에서 커버리지가 100% 미만이면 실행을 중단한다."""
+    df = _wide_df()
+    signals = [_signal(OrderBlockDirection.BULLISH, 0, 100.0)]
+    rates = [_funding(0, 0.0), _funding(_EIGHT_H, 0.0)]  # 커버리지 2/3 < 1.0
+    cfg = _wide_cfg(funding_missing_policy="error")
+    with pytest.raises(ValueError, match="커버리지"):
+        run_backtest(df, signals, cfg, rates)
+
+
+def test_funding_full_coverage_no_warning(caplog: pytest.LogCaptureFixture) -> None:
+    """커버리지가 완전(3/3)하면 경고 없이 1.0을 보고한다."""
+    df = _wide_df()
+    signals = [_signal(OrderBlockDirection.BULLISH, 0, 100.0)]
+    rates = [_funding(0, 0.0), _funding(_EIGHT_H, 0.0), _funding(2 * _EIGHT_H, 0.0)]
+    with caplog.at_level(logging.WARNING):
+        result = run_backtest(df, signals, _wide_cfg(), rates)
+    assert result.metrics.funding_coverage == pytest.approx(1.0)
+    assert not any("커버리지" in r.message for r in caplog.records)
 
 
 # --- 리스크 기반 포지션 사이징 (WAN-26) ---
