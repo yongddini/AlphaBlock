@@ -34,10 +34,11 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Literal
 
 import pandas as pd
 
-from strategy.models import OrderBlockDirection, SignalExitReason
+from strategy.models import OrderBlockDirection, SignalExitReason, rsi_gate_passes
 from strategy.realtime_rsi import RealtimeRsi
 
 _SUBSTEP_COLUMNS = ("open_time", "high", "low", "close")
@@ -49,7 +50,8 @@ class ZoneLimitStatus(StrEnum):
     NO_TOUCH = "no_touch"
     """유효 기간 내 지정가에 닿지 않음(또는 데이터 종료까지 미체결)."""
     CANCELLED_EXPIRED = "cancelled_expired"
-    """`limit_valid_bars` 경과로 미체결 취소."""
+    """`limit_valid_bars` 경과로 미체결 취소. `limit_valid_bars=None`이면 발생하지
+    않는다(WAN-73 — 존 무효화까지 무기한 대기)."""
     CANCELLED_INVALIDATED = "cancelled_invalidated"
     """오더블록 무효화로 미체결 취소."""
     CANCELLED_CONDITION_FAILED = "cancelled_condition_failed"
@@ -128,10 +130,12 @@ def simulate_zone_limit_trade(
     rsi_oversold: float,
     rsi_overbought: float,
     take_profit_price: float | None = None,
-    limit_valid_bars: int = 24,
+    limit_valid_bars: int | None = 24,
     invalidation_time: int | None = None,
     cancel_on_condition_fail: bool = False,
     stop_before_tp: bool = True,
+    rsi_gate_mode: Literal["extreme", "neutral", "none"] = "extreme",
+    rsi_neutral_band: tuple[float, float] = (40.0, 60.0),
 ) -> ZoneLimitOutcome:
     """한 오더블록 셋업의 존-지정가 진입·청산을 1분 서브스텝으로 시뮬레이션한다.
 
@@ -170,14 +174,19 @@ def simulate_zone_limit_trade(
             # 미체결 취소: 오더블록 무효화가 먼저(보수적), 그다음 유효기간 경과.
             if invalidation_time is not None and step.time >= invalidation_time:
                 return ZoneLimitOutcome(status=ZoneLimitStatus.CANCELLED_INVALIDATED)
-            if htf_elapsed >= limit_valid_bars:
+            if limit_valid_bars is not None and htf_elapsed >= limit_valid_bars:
                 return ZoneLimitOutcome(status=ZoneLimitStatus.CANCELLED_EXPIRED)
 
             touched = step.low <= limit_price if is_long else step.high >= limit_price
             if touched:
                 live_rsi = rsi_state.value(step.close)
-                condition = live_rsi is not None and (
-                    live_rsi <= rsi_oversold if is_long else live_rsi >= rsi_overbought
+                condition = live_rsi is not None and rsi_gate_passes(
+                    live_rsi,
+                    is_long=is_long,
+                    mode=rsi_gate_mode,
+                    rsi_oversold=rsi_oversold,
+                    rsi_overbought=rsi_overbought,
+                    rsi_neutral_band=rsi_neutral_band,
                 )
                 if condition:
                     position_open = True

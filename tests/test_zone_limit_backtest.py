@@ -14,6 +14,7 @@ from backtest.sweep import timeframe_to_ms
 from backtest.synthetic import make_synthetic_ohlcv
 from backtest.zone_limit_backtest import (
     build_result_from_trades,
+    build_zone_limit_candidates,
     run_zone_limit_backtest,
     run_zone_limit_backtest_verbose,
 )
@@ -189,3 +190,51 @@ def test_build_result_from_trades_single_position_sequencing() -> None:
     result = build_result_from_trades([trade], cfg, "1h")
     assert result.metrics.num_trades == 1
     assert result.equity_curve[-1].equity == cfg.initial_capital + 50.0
+
+
+# ------------------------------------------------------------------ WAN-73 신규 파라미터
+
+
+def test_retap_every_tap_yields_at_least_as_many_eligible_setups() -> None:
+    """`retap_mode="every_tap"`는 존 생존 중 모든 탭을 후보로 내 대상 셋업이 늘거나 같다."""
+    htf, one_min = _synthetic_pair()
+    cfg_kwargs = dict(htf_df=htf, df_1m=one_min, timeframe="1h", cfg=BacktestConfig())
+    once_params = ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime")
+    every_tap_params = once_params.model_copy(update={"retap_mode": "every_tap"})
+    _, once_stats = build_zone_limit_candidates(params=once_params, **cfg_kwargs)
+    _, every_tap_stats = build_zone_limit_candidates(params=every_tap_params, **cfg_kwargs)
+    assert every_tap_stats.eligible >= once_stats.eligible
+
+
+def test_limit_valid_bars_none_runs_end_to_end() -> None:
+    """`limit_valid_bars=None`(무기한 대기)도 정상 동작하며 결정적이다."""
+    htf, one_min = _synthetic_pair()
+    params = ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime", limit_valid_bars=None)
+    result_a = run_zone_limit_backtest(htf, one_min, "1h", confluence_params=params)
+    result_b = run_zone_limit_backtest(htf, one_min, "1h", confluence_params=params)
+    assert [t.realized_pnl for t in result_a.trades] == [t.realized_pnl for t in result_b.trades]
+
+
+def test_take_profit_mode_fixed_r_runs_end_to_end() -> None:
+    """`take_profit_mode="fixed_r"`도 B안 파이프라인에서 정상 동작한다."""
+    htf, one_min = _synthetic_pair()
+    params = ConfluenceParams(
+        entry_mode="zone_limit",
+        rsi_mode="realtime",
+        take_profit_mode="fixed_r",
+        take_profit_r=2.0,
+    )
+    result = run_zone_limit_backtest(htf, one_min, "1h", confluence_params=params)
+    assert result.metrics.num_trades >= 1
+
+
+def test_rsi_gate_mode_override_disables_gate_for_pool_construction() -> None:
+    """`build_zone_limit_candidates`의 `rsi_gate_mode` 오버라이드로 게이트를 무력화한 풀을
+    만들 수 있다(WAN-70 매칭 널 재사용 대비)."""
+    htf, one_min = _synthetic_pair()
+    params = ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime")
+    gated, _ = build_zone_limit_candidates(htf, one_min, "1h", params=params, cfg=BacktestConfig())
+    ungated, _ = build_zone_limit_candidates(
+        htf, one_min, "1h", params=params, cfg=BacktestConfig(), rsi_gate_mode="none"
+    )
+    assert len(ungated) >= len(gated)

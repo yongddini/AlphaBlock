@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 import pandas as pd
 
 from backtest.substep import (
@@ -43,10 +45,12 @@ def _simulate_long(
     steps: list[SubStep],
     *,
     state: RealtimeRsi | None = None,
-    limit_valid_bars: int = 24,
+    limit_valid_bars: int | None = 24,
     invalidation_time: int | None = None,
     cancel_on_condition_fail: bool = False,
     take_profit_price: float | None = _TP,
+    rsi_gate_mode: Literal["extreme", "neutral", "none"] = "extreme",
+    rsi_neutral_band: tuple[float, float] = (40.0, 60.0),
 ) -> ZoneLimitOutcome:
     return simulate_zone_limit_trade(
         direction=OrderBlockDirection.BULLISH,
@@ -60,6 +64,8 @@ def _simulate_long(
         limit_valid_bars=limit_valid_bars,
         invalidation_time=invalidation_time,
         cancel_on_condition_fail=cancel_on_condition_fail,
+        rsi_gate_mode=rsi_gate_mode,
+        rsi_neutral_band=rsi_neutral_band,
     )
 
 
@@ -204,3 +210,71 @@ def test_build_substeps_groups_by_htf_bar() -> None:
     steps = build_substeps(df, htf_ms=htf_ms)
     assert [s.htf_bar_time for s in steps] == [0, 0, 0, 180_000, 180_000]
     assert steps[0].close == 0.8
+
+
+# ---------------------------------------------------- WAN-73: limit_valid_bars=None
+
+
+def test_limit_valid_bars_none_never_expires() -> None:
+    """`limit_valid_bars=None`이면 유효기간 경과로 취소되지 않고 무기한 대기한다."""
+    steps = [
+        _step(i * 60_000, high=105, low=101, close=103, htf=i * 60_000) for i in range(50)
+    ]  # 50 상위TF 봉 동안 미터치 — 기본(24)이면 진작에 만료됐을 것.
+    out = _simulate_long(steps, limit_valid_bars=None)
+    assert out.status is ZoneLimitStatus.NO_TOUCH  # 만료가 아니라 단순 미터치
+
+
+def test_limit_valid_bars_none_still_cancels_on_invalidation() -> None:
+    """`limit_valid_bars=None`이어도 오더블록 무효화는 여전히 즉시 취소한다."""
+    steps = [
+        _step(0, high=105, low=101, close=103),
+        _step(60_000, high=105, low=101, close=103),
+    ]
+    out = _simulate_long(steps, limit_valid_bars=None, invalidation_time=60_000)
+    assert out.status is ZoneLimitStatus.CANCELLED_INVALIDATED
+
+
+# ---------------------------------------------------- WAN-73: rsi_gate_mode
+
+
+def test_rsi_gate_mode_extreme_matches_current_default_behavior() -> None:
+    """`rsi_gate_mode="extreme"`(기본)은 현행 동작과 동일하다."""
+    steps = [_step(0, high=101, low=99, close=99)]
+    out = _simulate_long(steps, rsi_gate_mode="extreme")
+    assert out.status is ZoneLimitStatus.FILLED_OPEN  # 과매도 → 체결(단일 스텝, 익절 미도달)
+
+
+def test_rsi_gate_mode_neutral_rejects_extreme_oversold_rsi() -> None:
+    """중립 게이트는 극단(과매도) RSI에서는 통과하지 않는다."""
+    steps = [_step(0, high=101, low=99, close=99)]  # 터치는 하지만 시딩이 과매도(극단)
+    out = _simulate_long(
+        steps, rsi_gate_mode="neutral", cancel_on_condition_fail=False, take_profit_price=None
+    )
+    assert out.status is ZoneLimitStatus.NO_TOUCH  # 조건 미충족 → 대기 유지 → 미체결
+
+
+def test_rsi_gate_mode_neutral_accepts_rsi_within_band() -> None:
+    """중립 게이트는 밴드 안의 RSI에서 방향과 무관하게 통과한다."""
+    # 시딩 [100,105,100,105] 이후 현재가 102 → RSI≈51.3(밴드 40~60 안).
+    neutral_state = RealtimeRsi.seed_from_closed([100.0, 105.0, 100.0, 105.0], length=3)
+    steps = [_step(0, high=103, low=99, close=102)]
+    out = _simulate_long(
+        steps,
+        state=neutral_state,
+        rsi_gate_mode="neutral",
+        rsi_neutral_band=(40.0, 60.0),
+        take_profit_price=None,
+    )
+    assert out.status is ZoneLimitStatus.FILLED_OPEN  # 중립 RSI → 체결(청산은 없음)
+
+
+def test_rsi_gate_mode_none_always_passes() -> None:
+    """게이트 없음(`none`)은 RSI 값과 무관하게 항상 통과한다."""
+    steps = [_step(0, high=116, low=99, close=115)]  # 극단 과매수 시딩이어도
+    out = _simulate_long(
+        steps,
+        state=RealtimeRsi.seed_from_closed(_OVERBOUGHT_SEED, length=3),
+        rsi_gate_mode="none",
+        take_profit_price=None,
+    )
+    assert out.status is ZoneLimitStatus.FILLED_OPEN

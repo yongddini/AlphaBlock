@@ -312,6 +312,31 @@ class OrderBlockResult(BaseModel):
         return select_active(self.order_blocks, time_ms, limit=limit, combine=combine)
 
 
+def rsi_gate_passes(
+    rsi: float,
+    *,
+    is_long: bool,
+    mode: Literal["extreme", "neutral", "none"] = "extreme",
+    rsi_oversold: float = 30.0,
+    rsi_overbought: float = 70.0,
+    rsi_neutral_band: tuple[float, float] = (40.0, 60.0),
+) -> bool:
+    """RSI 게이트 판정(WAN-73). A안(`strategy.confluence`)과 B안
+    (`backtest.substep.simulate_zone_limit_trade`)이 공유하는 순수 함수다.
+
+    `mode="extreme"`(기본): 롱은 `rsi <= rsi_oversold`, 숏은 `rsi >= rsi_overbought`
+    (과매도/과매수 극단). `"neutral"`: 방향과 무관하게 `rsi_neutral_band` 안이면 통과
+    (존이 조용히 지켜지는 국면). `"none"`: 항상 통과 — 호출부가 이미 RSI 워밍업
+    (NaN) 여부는 걸러내고 유효값만 넘겨야 한다.
+    """
+    if mode == "none":
+        return True
+    if mode == "neutral":
+        low, high = rsi_neutral_band
+        return low <= rsi <= high
+    return rsi <= rsi_oversold if is_long else rsi >= rsi_overbought
+
+
 class ConfluenceParams(BaseModel):
     """오더블록 + RSI 진입 / EMA·VWMA 선 익절 / 오더블록 무효화 손절 규칙 (WAN-23).
 
@@ -407,8 +432,12 @@ class ConfluenceParams(BaseModel):
     `proximal`(기본): 존 근단(롱=존 상단, 숏=존 하단) — 가장 먼저 닿는 경계.
     `mid`: 존 중앙. `distal`: 존 원단(무효화 경계에 가장 가까움 — 더 깊은 진입).
     """
-    limit_valid_bars: int = Field(default=24, ge=1)
-    """미체결 지정가 주문이 유효한 상위TF 봉 수. 경과하면 취소한다(`zone_limit`)."""
+    limit_valid_bars: int | None = Field(default=24, ge=1)
+    """미체결 지정가 주문이 유효한 상위TF 봉 수. 경과하면 취소한다(`zone_limit`).
+
+    **기본 `24`(현행 동작 보존)**. `None`(WAN-73): 유효기간을 두지 않고 존이 무효화
+    (breaker)될 때까지 지정가를 유지한다 — 실측 사례에서 존 생성 후 6주 뒤에 첫 탭이
+    발생하는 등, 사용자는 존이 살아있는 한 계속 지켜보기 때문이다."""
     cancel_limit_on_condition_fail: bool = False
     """지정가에 닿았지만 실시간 RSI 조건 미충족 시 주문을 취소할지 여부.
 
@@ -439,6 +468,30 @@ class ConfluenceParams(BaseModel):
     """숏(약세 오더블록) 진입 허용 여부. **기본 `True`(현행 동작 보존)**.
     `False`면 숏 신호는 항상 미확정(`confirmed=False`) 처리한다(롱 온리)."""
 
+    # --- 진입/익절 재현 (WAN-73) ---
+    retap_mode: Literal["once", "every_tap"] = "once"
+    """존당 재진입 허용 여부. **기본 `once`(현행 동작 보존)**: 존 확정 후 첫 탭만 진입
+    후보로 삼는다. `every_tap`: 존이 무효화되기 전까지 매 탭(재진입)마다 진입을
+    평가한다(RSI 게이트 등 다른 조건은 그대로 적용). 동시 포지션은 여전히 1개로
+    제한되므로(백테스트 엔진이 플랫일 때만 진입) 청산 후에만 다음 탭이 진입으로
+    이어진다."""
+    rsi_gate_mode: Literal["extreme", "neutral", "none"] = "extreme"
+    """RSI 게이트 방향. **기본 `extreme`(현행 동작 보존)**: 롱은 `RSI <= rsi_oversold`,
+    숏은 `RSI >= rsi_overbought`(과매도/과매수 극단).
+
+    `neutral`: RSI가 `rsi_neutral_band` 안(방향 무관, 존이 조용히 지켜지는 국면)이면
+    진입. `none`: RSI가 워밍업만 끝나면(NaN 아니면) 항상 통과(게이트 없음)."""
+    rsi_neutral_band: tuple[float, float] = (40.0, 60.0)
+    """`rsi_gate_mode="neutral"`일 때의 RSI 허용 밴드 `(하한, 상한)`."""
+    take_profit_mode: Literal["line", "fixed_r"] = "line"
+    """익절 목표 산정 방식. **기본 `line`(현행 동작 보존)**: `tp_ema_lengths`·
+    `tp_vwma_length` 선 중 진입가 너머 가장 가까운 선(`use_line_take_profit`로 on/off).
+
+    `fixed_r`: 진입가로부터 진입 근거 오더블록 무효화 경계까지의 거리(위험 R 1개)의
+    `take_profit_r`배 지점에 고정 익절선을 둔다(선 재평가 없이 진입 시점에 확정)."""
+    take_profit_r: float = Field(default=2.0, gt=0)
+    """`take_profit_mode="fixed_r"`일 때의 목표 손익비(R 배수)."""
+
     source: str = "close"
 
     @model_validator(mode="after")
@@ -458,7 +511,21 @@ class ConfluenceParams(BaseModel):
                 "use_line_take_profit=True면 tp_ema_lengths 또는 tp_vwma_length 중 "
                 "최소 하나의 익절 목표선이 필요합니다."
             )
+        low, high = self.rsi_neutral_band
+        if not (0.0 < low < high < 100.0):
+            raise ValueError("rsi_neutral_band는 0 < 하한 < 상한 < 100을 만족해야 합니다.")
         return self
+
+    def rsi_gate_passes(self, is_long: bool, rsi: float) -> bool:
+        """`rsi_gate_mode`에 따른 RSI 게이트 판정(WAN-73). `rsi`는 워밍업 통과(NaN 아님) 값."""
+        return rsi_gate_passes(
+            rsi,
+            is_long=is_long,
+            mode=self.rsi_gate_mode,
+            rsi_oversold=self.rsi_oversold,
+            rsi_overbought=self.rsi_overbought,
+            rsi_neutral_band=self.rsi_neutral_band,
+        )
 
     def zone_limit_price(self, order_block: OrderBlock) -> float:
         """`zone_limit_ref`에 따른 지정가(존 내 기준선)를 반환한다 (WAN-41).

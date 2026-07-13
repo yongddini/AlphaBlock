@@ -192,7 +192,7 @@ class ConfluenceStrategy:
         entries: list[ConfluenceSignal] = []
         exits: list[ConfluenceSignal] = []
 
-        for signal in ob_result.signals:
+        for signal in entry_candidate_signals(ob_result, params, times, closes, time_to_pos):
             pos = time_to_pos.get(signal.trigger_time)
             if pos is None:
                 continue
@@ -281,9 +281,7 @@ class ConfluenceStrategy:
         rsi_val = rsi_vals[pos]
         rsi_opt = None if math.isnan(rsi_val) else rsi_val
 
-        confirmed = rsi_opt is not None and (
-            rsi_opt <= params.rsi_oversold if d > 0 else rsi_opt >= params.rsi_overbought
-        )
+        confirmed = rsi_opt is not None and params.rsi_gate_passes(d > 0, rsi_opt)
 
         if confirmed and d < 0 and not params.short_enabled:
             confirmed = False
@@ -384,15 +382,30 @@ class ConfluenceStrategy:
         entry_price = entry.price
         stop_pos = break_pos if params.use_order_block_stop else None
 
+        fixed_tp_target: float | None = None
+        if params.take_profit_mode == "fixed_r":
+            assert entry.order_block is not None
+            fixed_tp_target = self._fixed_r_target(
+                d, entry_price, entry.order_block, params.take_profit_r
+            )
+
         for j in range(entry_pos + 1, n):
             sl_hit = stop_pos is not None and j == stop_pos
-            tp_price = (
-                self._take_profit_price(
-                    d, entry_price, highs[j], lows[j], self._lines_at(j, line_cols)
+            if params.take_profit_mode == "fixed_r":
+                tp_price = (
+                    fixed_tp_target
+                    if fixed_tp_target is not None
+                    and self._reached(d, fixed_tp_target, highs[j], lows[j])
+                    else None
                 )
-                if params.use_line_take_profit
-                else None
-            )
+            else:
+                tp_price = (
+                    self._take_profit_price(
+                        d, entry_price, highs[j], lows[j], self._lines_at(j, line_cols)
+                    )
+                    if params.use_line_take_profit
+                    else None
+                )
             # 동일 봉에서 손절·익절 동시 충족 시 기본은 손절 우선(보수적).
             if sl_hit and (tp_price is None or params.stop_before_take_profit):
                 # sl_hit는 break_pos(오더블록 무효화 봉)가 있을 때만 True이고,
@@ -439,6 +452,26 @@ class ConfluenceStrategy:
         reached = high >= nearest if direction_sign > 0 else low <= nearest
         return nearest if reached else None
 
+    @staticmethod
+    def _fixed_r_target(
+        direction_sign: int, entry_price: float, ob: OrderBlock, r: float
+    ) -> float | None:
+        """`take_profit_mode="fixed_r"`의 고정 익절가(WAN-73).
+
+        진입가로부터 진입 근거 오더블록 무효화 경계까지의 거리(위험 1R)의 `r`배를
+        진입가 너머(롱=위·숏=아래)에 둔다. 진입 시점에 한 번만 계산하고 이후 봉마다
+        재평가하지 않는다(선 기반 익절과 달리 고정).
+        """
+        boundary = ob.bottom if direction_sign > 0 else ob.top
+        risk = entry_price - boundary if direction_sign > 0 else boundary - entry_price
+        if risk <= 0:
+            return None
+        return entry_price + direction_sign * risk * r
+
+    @staticmethod
+    def _reached(direction_sign: int, target: float, high: float, low: float) -> bool:
+        return high >= target if direction_sign > 0 else low <= target
+
     def _exit_signal(
         self,
         entry: ConfluenceSignal,
@@ -464,6 +497,44 @@ class ConfluenceStrategy:
             indicators=snapshot,
             exit_reason=planned.reason,
         )
+
+
+def entry_candidate_signals(
+    ob_result: OrderBlockResult,
+    params: ConfluenceParams,
+    times: list[int],
+    closes: list[float],
+    time_to_pos: dict[int, int],
+) -> list[OrderBlockSignal]:
+    """진입 후보 시그널(WAN-73). A안(`ConfluenceStrategy`)·B안(`backtest.zone_limit_backtest`)
+    이 공유한다.
+
+    `retap_mode="once"`(기본, 현행 동작 보존)면 오더블록 탐지기가 이미 존당 첫 탭
+    하나로 제한해 낸 `ob_result.signals`를 그대로 쓴다. `retap_mode="every_tap"`이면
+    존이 무효화되기 전까지의 **모든** 탭(`OrderBlock.tapped_times`, 병합
+    (`combine_obs`) 여부와 무관하게 원본 존 단위로 기록됨)을 후보로 낸다 — 병합은
+    렌더링·`once` 시그널 생성에만 영향을 주고, 재탭 후보는 원본 존 경계를 그대로
+    쓴다. 동시 포지션 1개 제약은 백테스트 엔진(플랫일 때만 진입)이 이미 강제하므로
+    별도 상태 추적 없이 후보를 그대로 늘어놓아도 "청산 후 재진입"이 자연히 성립한다.
+    """
+    if params.retap_mode == "once":
+        return ob_result.signals
+    candidates: list[OrderBlockSignal] = []
+    for ob in ob_result.order_blocks:
+        for tap_time in ob.tapped_times:
+            pos = time_to_pos.get(tap_time)
+            if pos is None:
+                continue
+            candidates.append(
+                OrderBlockSignal(
+                    direction=ob.direction,
+                    trigger_time=tap_time,
+                    price=closes[pos],
+                    order_block=ob,
+                    status="active",
+                )
+            )
+    return candidates
 
 
 def generate_confluence_signals(

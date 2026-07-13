@@ -36,6 +36,7 @@ import bisect
 import logging
 import math
 from dataclasses import dataclass
+from typing import Literal
 
 import pandas as pd
 
@@ -53,7 +54,7 @@ from backtest.substep import ZoneLimitStatus, build_substeps, simulate_zone_limi
 from backtest.sweep import bars_per_year, default_backtest_config, timeframe_to_ms
 from common.costs import Liquidity
 from execution.sizing import position_size
-from strategy.confluence import ConfluenceStrategy
+from strategy.confluence import ConfluenceStrategy, entry_candidate_signals
 from strategy.indicators import emas, vwma
 from strategy.models import (
     ConfluenceParams,
@@ -154,6 +155,29 @@ def _take_profit_price(is_long: bool, entry_price: float, lines: list[float]) ->
     return max(beyond) if beyond else None
 
 
+def _resolve_take_profit(
+    params: ConfluenceParams,
+    is_long: bool,
+    entry_price: float,
+    stop_price: float,
+    lines: list[float],
+) -> float | None:
+    """`take_profit_mode`에 따른 익절 목표가(WAN-73).
+
+    `fixed_r`: 진입가~손절 참조가(위험 1R)의 `take_profit_r`배를 진입가 너머에 고정.
+    `line`(기본): 현행대로 `use_line_take_profit`이면 진입가 너머 가장 가까운 선.
+    """
+    if params.take_profit_mode == "fixed_r":
+        risk = entry_price - stop_price if is_long else stop_price - entry_price
+        if risk <= 0:
+            return None
+        signed_risk = risk * params.take_profit_r
+        return entry_price + (signed_risk if is_long else -signed_risk)
+    if not params.use_line_take_profit:
+        return None
+    return _take_profit_price(is_long, entry_price, lines)
+
+
 def run_zone_limit_backtest(
     htf_df: pd.DataFrame,
     df_1m: pd.DataFrame,
@@ -232,14 +256,15 @@ def build_zone_limit_candidates(
     order_block_result: OrderBlockResult | None = None,
     rsi_oversold: float | None = None,
     rsi_overbought: float | None = None,
+    rsi_gate_mode: Literal["extreme", "neutral", "none"] | None = None,
 ) -> tuple[list[_Candidate], ZoneLimitStats]:
     """B안 셋업 순회 → 1분 서브스텝 시뮬레이션까지(비용 반영 전 원가 후보 목록).
 
     `run_zone_limit_backtest_verbose`의 핵심 루프를 재사용 가능하게 뺀 것이다.
-    `rsi_oversold`/`rsi_overbought`를 지정하면 `params`의 실시간 RSI 게이트 값을
-    덮어쓴다 — 오더블록 존·손절·익절·비용·1분 서브스텝은 동일하게 두고 RSI 진입
-    조건만 무력화(예: `rsi_oversold=100, rsi_overbought=0`은 RSI가 유효하기만 하면
-    항상 통과)한 "무작위 대조군" 풀을 만들 때 쓴다(WAN-70).
+    `rsi_oversold`/`rsi_overbought`/`rsi_gate_mode`를 지정하면 `params`의 실시간 RSI
+    게이트 값을 덮어쓴다 — 오더블록 존·손절·익절·비용·1분 서브스텝은 동일하게 두고
+    RSI 진입 조건만 무력화(예: `rsi_gate_mode="none"`은 RSI가 유효하기만 하면 항상
+    통과)한 "무작위 대조군" 풀을 만들 때 쓴다(WAN-70).
     """
     frame = _prepare_htf(htf_df)
     if len(frame) == 0:
@@ -261,12 +286,13 @@ def build_zone_limit_candidates(
 
     effective_oversold = params.rsi_oversold if rsi_oversold is None else rsi_oversold
     effective_overbought = params.rsi_overbought if rsi_overbought is None else rsi_overbought
+    effective_gate_mode = params.rsi_gate_mode if rsi_gate_mode is None else rsi_gate_mode
 
     candidates: list[_Candidate] = []
     eligible = 0
     filled = 0
     penetrations = 0
-    for signal in ob_result.signals:
+    for signal in entry_candidate_signals(ob_result, params, times, closes, time_to_pos):
         if signal.status != "active":
             continue
         pos = time_to_pos.get(signal.trigger_time)
@@ -307,7 +333,7 @@ def build_zone_limit_candidates(
 
         eligible += 1
         stop_price = ob.bottom if is_long else ob.top
-        tp_price = _take_profit_price(is_long, limit_price, lines)
+        tp_price = _resolve_take_profit(params, is_long, limit_price, stop_price, lines)
 
         rsi_state = _seed_rsi(params, times, closes, setup_substeps[0].htf_bar_time)
         outcome = simulate_zone_limit_trade(
@@ -318,11 +344,13 @@ def build_zone_limit_candidates(
             rsi_state=rsi_state,
             rsi_oversold=effective_oversold,
             rsi_overbought=effective_overbought,
-            take_profit_price=tp_price if params.use_line_take_profit else None,
+            take_profit_price=tp_price,
             limit_valid_bars=params.limit_valid_bars,
             invalidation_time=ob.break_time if params.use_order_block_stop else None,
             cancel_on_condition_fail=params.cancel_limit_on_condition_fail,
             stop_before_tp=params.stop_before_take_profit,
+            rsi_gate_mode=effective_gate_mode,
+            rsi_neutral_band=params.rsi_neutral_band,
         )
         if not outcome.filled or outcome.entry_time is None or outcome.entry_price is None:
             continue
