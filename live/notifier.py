@@ -24,8 +24,13 @@ from execution.engine import EntryIntent
 from execution.models import Position
 from live.executor import PaperExecutor, TradeReport
 from live.paper import ClosedTrade, PaperBook, PaperPosition
-from strategy.confluence import ConfluenceResult, ConfluenceSignal, SignalKind
-from strategy.models import OrderBlock, OrderBlockDirection, SignalExitReason
+from strategy.confluence import (
+    ConfluenceResult,
+    ConfluenceSignal,
+    SignalKind,
+    fixed_r_take_profit_price,
+)
+from strategy.models import ConfluenceParams, OrderBlock, OrderBlockDirection, SignalExitReason
 
 _logger = logging.getLogger(__name__)
 
@@ -113,7 +118,11 @@ def _line_label(key: str) -> str:
 def _nearest_take_profit_line(
     direction: OrderBlockDirection, entry_price: float, lines: dict[str, float]
 ) -> tuple[str, float] | None:
-    """진입가 너머 가장 가까운 익절 목표선(라벨, 값). 없으면 None."""
+    """진입가 너머 가장 가까운 익절 목표선(라벨, 값). 없으면 None.
+
+    `take_profit_mode="line"` 전용 경로(레거시). 기본값(`fixed_r`)은
+    `_planned_take_profit`이 처리한다.
+    """
     if direction is OrderBlockDirection.BULLISH:
         beyond = {k: v for k, v in lines.items() if v > entry_price}
         if not beyond:
@@ -127,13 +136,44 @@ def _nearest_take_profit_line(
     return _line_label(key), beyond[key]
 
 
+def _planned_take_profit(
+    sig: ConfluenceSignal, params: ConfluenceParams
+) -> tuple[str, float] | None:
+    """진입 신호의 익절 목표(라벨, 가격)를 전략 엔진과 같은 산식으로 계산한다(WAN-85).
+
+    과거 대시보드가 컨플루언스 전략을 안 쓰거나(WAN-59) 존 병합이 백테스트에만
+    반영되던(WAN-56) 정합성 사고와 같은 유형 — WAN-81이 기본 익절을 EMA/VWMA 선
+    도달에서 고정 1.5R로 바꿨는데 이 알림 경로만 옛 선 도달 로직에 남아 있었다.
+    `fixed_r`(기본값)은 오더블록 무효화 경계 기준 고정 목표가를, `line`은 기존
+    EMA/VWMA 선 도달 목표를 쓴다.
+    """
+    if params.take_profit_mode == "fixed_r":
+        if sig.order_block is None:
+            return None
+        price = fixed_r_take_profit_price(
+            sig.direction, sig.price, sig.order_block, params.take_profit_r
+        )
+        if price is None:
+            return None
+        return f"{params.take_profit_r:g}R", price
+    return _nearest_take_profit_line(sig.direction, sig.price, sig.indicators.lines)
+
+
+def _take_profit_reason_label(params: ConfluenceParams) -> str:
+    """청산 메시지의 익절 사유 문구를 실제 활성 모드에 맞춘다(WAN-85)."""
+    if params.take_profit_mode == "fixed_r":
+        return f"익절 (고정 {params.take_profit_r:g}R 목표가 도달)"
+    return "익절 (EMA/VWMA 선 도달)"
+
+
 def _stop_loss_price(direction: OrderBlockDirection, order_block: OrderBlock) -> float:
     """오더블록 무효화(손절) 참조가: 롱은 존 하단, 숏은 존 상단."""
     return order_block.bottom if direction is OrderBlockDirection.BULLISH else order_block.top
 
 
-def format_entry(event: SignalEvent) -> str:
+def format_entry(event: SignalEvent, params: ConfluenceParams | None = None) -> str:
     """진입 신호를 마크다운 메시지로 포맷한다."""
+    resolved_params = params if params is not None else ConfluenceParams()
     sig = event.signal
     direction = sig.direction
     lines = [
@@ -148,7 +188,7 @@ def format_entry(event: SignalEvent) -> str:
         ob = sig.order_block
         lines.append(f"오더블록 존: `{_fmt_price(ob.bottom)} ~ {_fmt_price(ob.top)}`")
         lines.append(f"손절가: `{_fmt_price(_stop_loss_price(direction, ob))}` (오더블록 무효화)")
-    tp = _nearest_take_profit_line(direction, sig.price, sig.indicators.lines)
+    tp = _planned_take_profit(sig, resolved_params)
     if tp is not None:
         label, value = tp
         lines.append(f"익절 목표선: `{label} {_fmt_price(value)}`")
@@ -158,12 +198,17 @@ def format_entry(event: SignalEvent) -> str:
     return "\n".join(lines)
 
 
-def format_exit(event: SignalEvent, trade: ClosedTrade | None) -> str:
+def format_exit(
+    event: SignalEvent, trade: ClosedTrade | None, params: ConfluenceParams | None = None
+) -> str:
     """청산 신호를 마크다운 메시지로 포맷한다. `trade`가 있으면 실현 손익을 덧붙인다."""
+    resolved_params = params if params is not None else ConfluenceParams()
     sig = event.signal
     is_take_profit = sig.exit_reason is SignalExitReason.TAKE_PROFIT
     header_emoji = "🎯" if is_take_profit else "🛑"
-    reason_label = "익절 (EMA/VWMA 선 도달)" if is_take_profit else "손절 (오더블록 무효화)"
+    reason_label = (
+        _take_profit_reason_label(resolved_params) if is_take_profit else "손절 (오더블록 무효화)"
+    )
     lines = [
         f"{header_emoji} *청산 신호* — `{event.symbol}` `{event.timeframe}`",
         f"방향: *{_direction_label(sig.direction)}* 청산",
@@ -179,10 +224,10 @@ def format_exit(event: SignalEvent, trade: ClosedTrade | None) -> str:
     return "\n".join(lines)
 
 
-def _entry_intent(event: SignalEvent) -> EntryIntent:
+def _entry_intent(event: SignalEvent, params: ConfluenceParams) -> EntryIntent:
     """진입 신호 이벤트를 execution 엔진 진입 의도로 변환한다.
 
-    손절가는 오더블록 무효화(존 경계), 익절가는 진입가 너머 가장 가까운 목표선을
+    손절가는 오더블록 무효화(존 경계), 익절가는 활성 익절 모드의 목표가(WAN-85)를
     쓴다. 손절 참조가가 없으면(오더블록 없음) 사이징이 불가하므로 엔진이 진입을
     스킵한다.
     """
@@ -190,7 +235,7 @@ def _entry_intent(event: SignalEvent) -> EntryIntent:
     stop_price = (
         _stop_loss_price(sig.direction, sig.order_block) if sig.order_block is not None else None
     )
-    tp = _nearest_take_profit_line(sig.direction, sig.price, sig.indicators.lines)
+    tp = _planned_take_profit(sig, params)
     return EntryIntent(
         symbol=event.symbol,
         timeframe=event.timeframe,
@@ -213,9 +258,11 @@ def _position_summary(positions: list[Position]) -> str:
     return " · ".join(parts)
 
 
-def format_entry_exec(event: SignalEvent, report: TradeReport) -> str:
+def format_entry_exec(
+    event: SignalEvent, report: TradeReport, params: ConfluenceParams | None = None
+) -> str:
     """진입 신호 + 페이퍼 집행 결과(체결가·수량·리스크·포지션 요약)를 포맷한다."""
-    lines = [format_entry(event)]
+    lines = [format_entry(event, params)]
     outcome = report.outcome
     if report.accepted and outcome.position is not None and outcome.fill is not None:
         pos = outcome.position
@@ -230,9 +277,11 @@ def format_entry_exec(event: SignalEvent, report: TradeReport) -> str:
     return "\n".join(lines)
 
 
-def format_exit_exec(event: SignalEvent, report: TradeReport | None) -> str:
+def format_exit_exec(
+    event: SignalEvent, report: TradeReport | None, params: ConfluenceParams | None = None
+) -> str:
     """청산 신호 + 페이퍼 집행 결과(실현손익·잔여 포지션)를 포맷한다."""
-    lines = [format_exit(event, None)]
+    lines = [format_exit(event, None, params)]
     if report is None:
         return "\n".join(lines)
     outcome = report.outcome
@@ -292,11 +341,17 @@ class Notifier:
         *,
         trade_sink: TradeSink | None = None,
         executor: PaperExecutor | None = None,
+        confluence_params: ConfluenceParams | None = None,
     ) -> None:
         self._telegram = telegram
         self.book = book if book is not None else PaperBook()
         self._trade_sink = trade_sink
         self._executor = executor
+        # 익절 목표(라벨·가격) 계산에 쓰는 활성 전략 파라미터(WAN-85). 미지정 시
+        # 전략 엔진 기본값(현재 fixed_r 1.5R)을 그대로 따른다.
+        self._confluence_params = (
+            confluence_params if confluence_params is not None else ConfluenceParams()
+        )
 
     @property
     def open_positions(self) -> list[PaperPosition]:
@@ -317,8 +372,10 @@ class Notifier:
         assert self._executor is not None  # handle()에서 보장.
         sig = event.signal
         if event.is_entry:
-            report = self._executor.enter(_entry_intent(event), now_ms=now_ms)
-            message = format_entry_exec(event, report)
+            report = self._executor.enter(
+                _entry_intent(event, self._confluence_params), now_ms=now_ms
+            )
+            message = format_entry_exec(event, report, self._confluence_params)
         else:
             report = None
             if sig.exit_reason is not None:
@@ -330,7 +387,7 @@ class Notifier:
                     reason=sig.exit_reason,
                     now_ms=now_ms,
                 )
-            message = format_exit_exec(event, report)
+            message = format_exit_exec(event, report, self._confluence_params)
         return self._send(message)
 
     def _handle_with_book(self, event: SignalEvent) -> bool:
@@ -342,7 +399,7 @@ class Notifier:
                 if sig.order_block is not None
                 else None
             )
-            tp = _nearest_take_profit_line(sig.direction, sig.price, sig.indicators.lines)
+            tp = _planned_take_profit(sig, self._confluence_params)
             self.book.open(
                 PaperPosition(
                     symbol=event.symbol,
@@ -354,7 +411,7 @@ class Notifier:
                     take_profit_price=tp[1] if tp is not None else None,
                 )
             )
-            message = format_entry(event)
+            message = format_entry(event, self._confluence_params)
         else:
             trade: ClosedTrade | None = None
             if sig.exit_reason is not None:
@@ -367,7 +424,7 @@ class Notifier:
                 )
                 if trade is not None and self._trade_sink is not None:
                     self._trade_sink.record(trade)
-            message = format_exit(event, trade)
+            message = format_exit(event, trade, self._confluence_params)
         return self._send(message)
 
     def _send(self, message: str) -> bool:

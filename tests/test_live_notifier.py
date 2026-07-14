@@ -41,9 +41,15 @@ def _entry(
     rsi: float | None = 28.4,
     lines: dict[str, float] | None = None,
     ob: OrderBlock | None = None,
+    no_order_block: bool = False,
 ) -> ConfluenceSignal:
     resolved_lines = lines if lines is not None else {"ema_20": 64_000.0, "ema_240": 66_500.0}
-    resolved_ob = ob if ob is not None else _order_block(direction, top=65_200.0, bottom=64_500.0)
+    if no_order_block:
+        resolved_ob = None
+    else:
+        resolved_ob = (
+            ob if ob is not None else _order_block(direction, top=65_200.0, bottom=64_500.0)
+        )
     return ConfluenceSignal(
         kind=SignalKind.ENTRY,
         direction=direction,
@@ -77,6 +83,8 @@ def _exit(
 
 
 def test_format_entry_long_contains_key_fields() -> None:
+    # 오더블록 bottom=64,500, entry=65,000 → risk=500, 기본 1.5R 목표=65,000+750=65,750
+    # (WAN-85: 기본 익절 모드가 fixed_r이므로 EMA/VWMA 선이 아니라 이 값이 나와야 한다).
     event = SignalEvent(symbol="BTC/USDT:USDT", timeframe="1h", signal=_entry())
     msg = format_entry(event)
     assert "진입 신호" in msg
@@ -86,10 +94,11 @@ def test_format_entry_long_contains_key_fields() -> None:
     assert "28.4" in msg and "과매도" in msg
     assert "64,500 ~ 65,200" in msg  # 오더블록 존
     assert "손절가: `64,500`" in msg  # 롱 손절 = 존 하단
-    assert "EMA240 66,500" in msg  # 진입가 너머 가장 가까운 선
+    assert "1.5R 65,750" in msg  # 고정 1.5R 목표가(기본 익절 모드)
 
 
-def test_format_entry_short_take_profit_line_below() -> None:
+def test_format_entry_short_fixed_r_target_above_entry() -> None:
+    # ob.top=66,000, entry=65,000 → risk=1,000, 목표=65,000-1,500=63,500.
     ob = _order_block(OrderBlockDirection.BEARISH, top=66_000.0, bottom=65_500.0)
     event = SignalEvent(
         symbol="ETH/USDT:USDT",
@@ -105,14 +114,33 @@ def test_format_entry_short_take_profit_line_below() -> None:
     msg = format_entry(event)
     assert "숏" in msg and "과매수" in msg
     assert "손절가: `66,000`" in msg  # 숏 손절 = 존 상단
-    assert "VWMA100 64,000" in msg  # 진입가 아래 가장 가까운 선
+    assert "1.5R 63,500" in msg  # 고정 1.5R 목표가
 
 
-def test_format_entry_without_take_profit_line() -> None:
+def test_format_entry_line_mode_uses_nearest_line() -> None:
+    """`take_profit_mode="line"`을 명시하면 레거시 EMA/VWMA 선 도달 목표를 쓴다."""
+    params = ConfluenceParams(take_profit_mode="line")
+    event = SignalEvent(symbol="BTC/USDT:USDT", timeframe="1h", signal=_entry())
+    msg = format_entry(event, params)
+    assert "EMA240 66,500" in msg  # 진입가 너머 가장 가까운 선
+
+
+def test_format_entry_without_take_profit_when_no_order_block() -> None:
+    event = SignalEvent(
+        symbol="BTC/USDT:USDT",
+        timeframe="1h",
+        signal=_entry(price=65_000.0, lines={}, no_order_block=True),
+    )
+    msg = format_entry(event)
+    assert "익절 목표선: `없음`" in msg
+
+
+def test_format_entry_line_mode_without_take_profit_line() -> None:
+    params = ConfluenceParams(take_profit_mode="line")
     event = SignalEvent(
         symbol="BTC/USDT:USDT", timeframe="1h", signal=_entry(price=65_000.0, lines={})
     )
-    msg = format_entry(event)
+    msg = format_entry(event, params)
     assert "익절 목표선: `없음`" in msg
 
 

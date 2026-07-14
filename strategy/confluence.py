@@ -603,3 +603,17 @@ def generate_confluence_signals(
 ) -> ConfluenceResult:
     """`ConfluenceStrategy(...).run(...)`의 편의 함수."""
     return ConfluenceStrategy(params, order_block_params).run(df, order_block_result)
+
+
+def fixed_r_take_profit_price(
+    direction: OrderBlockDirection, entry_price: float, order_block: OrderBlock, r: float
+) -> float | None:
+    """`take_profit_mode="fixed_r"`의 고정 익절 목표가(WAN-73).
+
+    미래 봉 없이 진입가·오더블록만으로 진입 시점에 확정되므로(`_fixed_r_target`과
+    동일 산식), 백테스트 엔진뿐 아니라 live 알림·집행 경로(WAN-85)도 이 함수로 같은
+    값을 계산해 화면 표기와 실제 청산 목표가 어긋나지 않게 한다.
+    """
+    return ConfluenceStrategy._fixed_r_target(
+        _direction_sign(direction), entry_price, order_block, r
+    )
