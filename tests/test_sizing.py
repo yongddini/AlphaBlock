@@ -79,6 +79,23 @@ def test_min_stop_distance_fraction_skips_when_too_close() -> None:
     assert ok > 0.0
 
 
+def test_default_min_stop_distance_floor_enabled() -> None:
+    """WAN-79: 기본값이 0.003으로 켜져, 손절폭 0.3% 미만 진입이 하한에 걸려 스킵된다."""
+    params = PositionSizingParams(risk_per_trade=0.01, leverage=100.0)
+    assert params.min_stop_distance_fraction == pytest.approx(0.003)
+    # 손절 거리 0.1%(99.9) < 기본 하한 0.3% → 스킵(0).
+    too_close = position_size(equity=10_000.0, entry_price=100.0, stop_price=99.9, params=params)
+    assert too_close == pytest.approx(0.0)
+    # 하한이 원인임을 격리: 같은 거래를 하한 0으로 두면 진입한다.
+    no_floor = PositionSizingParams(
+        risk_per_trade=0.01, leverage=100.0, min_stop_distance_fraction=0.0
+    )
+    assert position_size(equity=10_000.0, entry_price=100.0, stop_price=99.9, params=no_floor) > 0.0
+    # 손절 거리 0.5%(99.5) ≥ 기본 하한 → 진입.
+    ok = position_size(equity=10_000.0, entry_price=100.0, stop_price=99.5, params=params)
+    assert ok > 0.0
+
+
 def test_non_positive_equity_skips() -> None:
     params = PositionSizingParams()
     assert position_size(equity=0.0, entry_price=100.0, stop_price=90.0, params=params) == 0.0

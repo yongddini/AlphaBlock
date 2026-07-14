@@ -42,8 +42,13 @@ class PositionSizingParams(BaseModel):
     """최소 주문 수량 단위(lot). 0이면 반올림하지 않는다. 산출 수량을 이 배수로 내림."""
     min_qty: float = Field(default=0.0, ge=0)
     """최소 주문 수량. 내림 후 이 값 미만이면 진입 스킵(0 반환)."""
-    min_stop_distance_fraction: float = Field(default=0.0, ge=0, lt=1)
-    """진입가 대비 최소 손절 거리(분수). 손절이 이보다 가까우면 진입 스킵(0 반환)."""
+    min_stop_distance_fraction: float = Field(default=0.003, ge=0, lt=1)
+    """진입가 대비 최소 손절 거리(분수). 손절이 이보다 가까우면 진입 스킵(0 반환).
+
+    기본값 `0.003`(0.3%)은 신뢰성 가드다(WAN-79, WAN-76 감사 권고). 왕복 체결 비용
+    ≈0.11%(슬리피지 5bps + 테이커 4bps + 메이커 2bps, `common.costs`) 대비 약 3배
+    여유를 둬, 손절폭이 체결 비용에 묻히는 극단 근접 손절 거래를 사이징에서 배제한다.
+    `0.0`으로 두면 하한이 꺼진다(과거 동작)."""
 
 
 def position_size(
