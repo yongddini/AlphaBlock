@@ -134,12 +134,18 @@ def _generate_signals(
     highs: list[float],
     lows: list[float],
     closes: list[float],
+    *,
+    include_retaps: bool = False,
 ) -> list[OrderBlockSignal]:
     """활성(비-breaker) 존에 가격이 재진입(tap)하면 진입 후보 시그널 생성.
 
-    원본에는 없는 AlphaBlock 확장(기본 골격). 존이 확정된 이후 첫 재진입만
-    시그널로 기록하고, breaker로 전환된 존은 `status="cancelled"`로 표시한다.
-    세부 규칙(리테스트 확인, 손절 등)은 WAN-8/9에서 확정한다.
+    원본에는 없는 AlphaBlock 확장(기본 골격). `include_retaps=False`(기본)면 존이
+    확정된 이후 **첫 재진입만**(`tap_index=0`) 시그널로 기록한다(`OrderBlockResult.
+    signals`가 쓰는 경로). `include_retaps=True`면 존이 무효화되기 전까지의 **모든**
+    재진입을 `tap_index`(0-based) 부착해 기록한다(WAN-81, `OrderBlockResult.
+    retap_signals`가 쓰는 경로) — 이미 `_invalidate()`가 바깥→안 전이 시각만 기록해 둔
+    `ob.tapped_times`를 그대로 순회한다. 두 경로 모두 breaker로 전환된 존은
+    `status="cancelled"`로 표시한다.
 
     WAN-47: `order_blocks`는 **전체 아카이브**(살아남은 존뿐 아니라 깨지고 소멸한
     존까지)를 받는다. 이로써 생존자 편향 없이 모든 존의 탭·손절이 백테스트에
@@ -156,30 +162,52 @@ def _generate_signals(
     # bisect_left(break_time): 무효화 시각 **이상**인 첫 봉(구버전 `< ` 루프와 동일).
     # break_time > confirmed_time 이 항상 성립하므로 break_pos >= start_pos 가 보장된다.
     for ob in order_blocks:
-        start_pos = bisect.bisect_right(times, ob.confirmed_time)
-        # 무효화 봉의 위치. 이 봉까지(포함) 탭을 살핀다.
         break_pos: int | None = None
         if ob.break_time is not None:
             break_pos = bisect.bisect_left(times, ob.break_time)
-        end_pos = n if break_pos is None else min(n, break_pos + 1)
 
-        for i in range(start_pos, end_pos):
-            if lows[i] <= ob.top and highs[i] >= ob.bottom:
-                # WAN-47: 상태는 존의 **최종** breaker 여부가 아니라 **이 탭이 무효화
-                # 전인지**로 정한다. 무효화 봉 자체에서의 탭만 cancelled고, 그 전의
-                # 탭은 유효한 진입(나중에 무효화되면 손절)이다. 최종 상태로 판정하면
-                # 결국 깨질 존의 정상 진입까지 모두 배제돼 생존자 편향이 재발한다.
-                is_break_bar = break_pos is not None and i >= break_pos
-                signals.append(
-                    OrderBlockSignal(
-                        direction=ob.direction,
-                        trigger_time=times[i],
-                        price=closes[i],
-                        order_block=ob,
-                        status="cancelled" if is_break_bar else "active",
+        if not include_retaps:
+            start_pos = bisect.bisect_right(times, ob.confirmed_time)
+            end_pos = n if break_pos is None else min(n, break_pos + 1)
+            for i in range(start_pos, end_pos):
+                if lows[i] <= ob.top and highs[i] >= ob.bottom:
+                    # WAN-47: 상태는 존의 **최종** breaker 여부가 아니라 **이 탭이
+                    # 무효화 전인지**로 정한다. 무효화 봉 자체에서의 탭만 cancelled고,
+                    # 그 전의 탭은 유효한 진입(나중에 무효화되면 손절)이다. 최종
+                    # 상태로 판정하면 결국 깨질 존의 정상 진입까지 모두 배제돼
+                    # 생존자 편향이 재발한다.
+                    is_break_bar = break_pos is not None and i >= break_pos
+                    signals.append(
+                        OrderBlockSignal(
+                            direction=ob.direction,
+                            trigger_time=times[i],
+                            price=closes[i],
+                            order_block=ob,
+                            status="cancelled" if is_break_bar else "active",
+                            tap_index=0,
+                        )
                     )
+                    break
+            continue
+
+        # include_retaps=True(WAN-81): 이미 기록된 모든 탭 전이 시각을 재생한다.
+        for tap_index, tap_time in enumerate(ob.tapped_times):
+            pos = bisect.bisect_left(times, tap_time)
+            if pos >= n or times[pos] != tap_time:
+                continue  # 방어적: tapped_times는 항상 times의 원소여야 한다.
+            if break_pos is not None and pos > break_pos:
+                break  # tapped_times는 오름차순 — 무효화 창을 벗어나면 이후도 모두 벗어남.
+            is_break_bar = break_pos is not None and pos >= break_pos
+            signals.append(
+                OrderBlockSignal(
+                    direction=ob.direction,
+                    trigger_time=tap_time,
+                    price=closes[pos],
+                    order_block=ob,
+                    status="cancelled" if is_break_bar else "active",
+                    tap_index=tap_index,
                 )
-                break
+            )
     return signals
 
 
@@ -317,18 +345,30 @@ def _generate_merged_signals(
     highs: list[float],
     lows: list[float],
     closes: list[float],
+    *,
+    include_retaps: bool = False,
 ) -> list[OrderBlockSignal]:
     """병합 존(combine_obs) 기준으로 탭 진입 시그널을 **시간 순 재생**으로 생성한다 (WAN-56).
 
     렌더링에만 적용되던 존 병합을 백테스트 시그널까지 끌어올린다. 원본이 매 봉
     `combineOBsFunc`을 호출하듯, 각 봉 `t`에서 **그 시점까지 확정·미소멸한 존들**의 병합
-    상태를 구성하고, 그 병합 존에 대해 탭(재진입)을 판정한다. 미래에 생길 존과 미리
-    합치지 않으므로 look-ahead가 없다(데이터를 미래에서 잘라도 과거 신호 불변).
+    상태를 구성하고, 그 병합 존에 대해 탭(재진입, 바깥→안 전이)을 판정한다. 미래에
+    생길 존과 미리 합치지 않으므로 look-ahead가 없다(데이터를 미래에서 잘라도 과거
+    신호 불변).
 
-    "병합 단위당 첫 탭 1회"(R1)는 `entered`(진입 완료된 구성 존의 아카이브 인덱스 집합)로
-    유지한다: 어떤 병합 존이 진입하면 그 순간의 구성 존을 모두 진입 처리하고, 이후 그
-    구성 존을 포함하는(성장한) 병합 존은 재진입하지 않는다. 구성 존이 모두 소멸한 뒤 같은
-    가격대에 새로 생긴 병합 존은 진입 대상이 다시 된다.
+    **개별 존 단위 `entered` 추적 (WAN-81 §5, 구 WAN-82 버그 흡수)**: 예전 구현은
+    `entered`를 구성 인덱스 집합 전체로만 검사해, 이미 진입한 클러스터에 **새로
+    편입된 존**(그 존 자신은 한 번도 탭된 적이 없음)까지 영구적으로 진입 기회를
+    잃었다. 이제는 `g.member_indices - entered`(아직 진입하지 않은 구성 존)가
+    비어있지 않은 탭만 "새 진입"(`tap_index=0`)으로 세고, 그 순간의 구성 존
+    전체를 `entered`에 편입한다. 이미 모든 구성원이 진입을 마친 병합 단위가 다시
+    탭되면(재탭) `include_retaps=True`일 때만 `tap_index`를 1부터 증가시키며
+    추가 시그널을 낸다(`include_retaps=False`면 스킵 — `OrderBlockResult.signals`가
+    쓰는 경로로, "병합 단위당 존별 첫 탭만" 유지).
+
+    탭은 **바깥→안 전이**만 센다(`inside_state`로 직전 봉의 포함 여부를 병합
+    구성(`member_indices`) 단위로 추적) — 그렇지 않으면 가격이 며칠씩 존 안에
+    머무는 매 봉마다 재탭이 발생해 버린다.
 
     성능(WAN-49): 병합 상태는 활성 집합이 바뀔 때(존 확정·무효화·소멸)만 재계산하고,
     변화 없는 봉에서는 캐시한 병합 존에 탭만 확인한다. 겹치지 않는(단일) 존은
@@ -343,6 +383,8 @@ def _generate_merged_signals(
     add_ptr = 0
     alive: list[tuple[int, OrderBlock]] = []
     entered: set[int] = set()
+    inside_state: dict[frozenset[int], bool] = {}
+    retap_counter: dict[frozenset[int], int] = {}
     groups: list[_MergedGroup] = []
     dirty = True
     signals: list[OrderBlockSignal] = []
@@ -368,24 +410,34 @@ def _generate_merged_signals(
             dirty = False
 
         for g in groups:
-            if g.member_indices & entered:
-                continue  # 이미 진입한 병합 단위 — R1.
             if now <= g.latest_confirmed:
                 continue  # 병합 존 형성 봉의 자기-포함 탭 배제(원본 확정 봉 제외와 동일).
-            if g.break_time is not None and now > g.break_time:
-                continue  # 무효화 이후 탭은 진입이 아니다(_generate_signals와 동일 창).
-            if lows[t] <= g.top and highs[t] >= g.bottom:
-                is_break_bar = g.break_time is not None and now >= g.break_time
-                signals.append(
-                    OrderBlockSignal(
-                        direction=g.direction,
-                        trigger_time=now,
-                        price=closes[t],
-                        order_block=g.merged_ob,
-                        status="cancelled" if is_break_bar else "active",
+            in_window = g.break_time is None or now <= g.break_time
+            is_inside = lows[t] <= g.top and highs[t] >= g.bottom
+            was_inside = inside_state.get(g.member_indices, False)
+            if in_window and is_inside and not was_inside:
+                new_members = g.member_indices - entered
+                tap_index: int | None = None
+                if new_members:
+                    tap_index = 0
+                    entered |= g.member_indices
+                    retap_counter[g.member_indices] = 1
+                elif include_retaps:
+                    tap_index = retap_counter.get(g.member_indices, 1)
+                    retap_counter[g.member_indices] = tap_index + 1
+                if tap_index is not None:
+                    is_break_bar = g.break_time is not None and now >= g.break_time
+                    signals.append(
+                        OrderBlockSignal(
+                            direction=g.direction,
+                            trigger_time=now,
+                            price=closes[t],
+                            order_block=g.merged_ob,
+                            status="cancelled" if is_break_bar else "active",
+                            tap_index=tap_index,
+                        )
                     )
-                )
-                entered |= g.member_indices
+            inside_state[g.member_indices] = is_inside
     return signals
 
 
@@ -503,10 +555,19 @@ class OrderBlockDetector:
         # WAN-56: `combine_obs`면 병합 존 기준으로 시그널을 낸다(트레이딩뷰 렌더와 동일한
         # 존 집합을 백테스트도 본다). `combine_obs=False`는 원본 단위 경로를 유지해 비교
         # 가능하게 남긴다. 아카이브(`order_blocks`)는 두 경로 모두 원본 단위로 보존한다.
+        # WAN-81: `retap_signals`는 `ConfluenceParams.retap_mode="every_tap"`이 소비하는
+        # 전체 탭(재탭 포함) 뷰 — combine_obs 여부에 따라 병합/원본 경로를 그대로 따른다
+        # (갭B: 재탭 경로도 병합을 반영해야 한다).
         if params.combine_obs:
             signals = _generate_merged_signals(archive, times, highs, lows, closes)
+            retap_signals = _generate_merged_signals(
+                archive, times, highs, lows, closes, include_retaps=True
+            )
         else:
             signals = _generate_signals(archive, times, highs, lows, closes)
+            retap_signals = _generate_signals(
+                archive, times, highs, lows, closes, include_retaps=True
+            )
 
         # 렌더 뷰(트레이딩뷰 "현재 그림"): 마지막 봉에서 max_distance_to_last_bar봉 이내에
         # 확정된 존만 대상으로, 방향별 zone_limit개를 병합해 낸다. 데이터가 스캔 상한보다
@@ -519,7 +580,10 @@ class OrderBlockDetector:
         )
 
         return OrderBlockResult(
-            order_blocks=archive, signals=signals, rendered_order_blocks=rendered
+            order_blocks=archive,
+            signals=signals,
+            retap_signals=retap_signals,
+            rendered_order_blocks=rendered,
         )
 
     @staticmethod

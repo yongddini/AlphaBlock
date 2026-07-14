@@ -41,8 +41,12 @@ def _synthetic_pair(bars: int = 600, span: int = 120) -> tuple[pd.DataFrame, pd.
 def test_end_to_end_runs_and_is_deterministic() -> None:
     htf, one_min = _synthetic_pair()
     # 이 합성 시드는 숏 셋업만 낸다 — WAN-69 기본값(롱 온리)과 무관하게 엔진 동작을
-    # 검증하려면 명시적으로 켠다.
-    params = ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime", short_enabled=True)
+    # 검증하려면 명시적으로 켠다. deviation_filter(WAN-81 볼린저 기본값)은 이 작은
+    # 합성 데이터셋에서 후보를 모두 걸러낼 수 있으므로 파이프라인 배선 검증과는
+    # 무관하게 꺼 둔다.
+    params = ConfluenceParams(
+        entry_mode="zone_limit", rsi_mode="realtime", short_enabled=True, deviation_filter=None
+    )
     result_a = run_zone_limit_backtest(htf, one_min, "1h", confluence_params=params)
     result_b = run_zone_limit_backtest(htf, one_min, "1h", confluence_params=params)
     # 결정적: 같은 입력 → 같은 결과.
@@ -79,8 +83,11 @@ def test_trades_reference_1m_substep_times() -> None:
     htf, one_min = _synthetic_pair()
     minute_times = set(int(t) for t in one_min["open_time"].astype("int64"))
     # 이 합성 시드는 숏 셋업만 낸다 — WAN-69 기본값(롱 온리)과 무관하게 엔진 동작을
-    # 검증하려면 명시적으로 켠다.
-    params = ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime", short_enabled=True)
+    # 검증하려면 명시적으로 켠다. deviation_filter는 WAN-81 볼린저 기본값이 이 작은
+    # 합성 데이터셋의 후보를 모두 걸러낼 수 있어 배선 검증을 위해 꺼 둔다.
+    params = ConfluenceParams(
+        entry_mode="zone_limit", rsi_mode="realtime", short_enabled=True, deviation_filter=None
+    )
     result = run_zone_limit_backtest(htf, one_min, "1h", confluence_params=params)
     assert result.trades
     for trade in result.trades:
@@ -113,7 +120,7 @@ def test_default_gates_off_preserve_zone_limit_behavior() -> None:
 def test_short_enabled_false_yields_only_long_trades() -> None:
     htf, one_min = _synthetic_pair()
     baseline_params = ConfluenceParams(
-        entry_mode="zone_limit", rsi_mode="realtime", short_enabled=True
+        entry_mode="zone_limit", rsi_mode="realtime", short_enabled=True, deviation_filter=None
     )
     baseline = run_zone_limit_backtest(htf, one_min, "1h", confluence_params=baseline_params)
     assert any(t.side is PositionSide.SHORT for t in baseline.trades)  # 전제: 숏 거래가 있다
@@ -152,8 +159,11 @@ def test_cost_model_applied_slippage_and_fees() -> None:
     """진입/청산 체결가에 슬리피지가 불리하게, 수수료가 차감돼 반영된다."""
     htf, one_min = _synthetic_pair()
     # 이 합성 시드는 숏 셋업만 낸다 — WAN-69 기본값(롱 온리)과 무관하게 엔진 동작을
-    # 검증하려면 명시적으로 켠다.
-    params = ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime", short_enabled=True)
+    # 검증하려면 명시적으로 켠다. deviation_filter는 WAN-81 볼린저 기본값이 이 작은
+    # 합성 데이터셋의 후보를 모두 걸러낼 수 있어 배선 검증을 위해 꺼 둔다.
+    params = ConfluenceParams(
+        entry_mode="zone_limit", rsi_mode="realtime", short_enabled=True, deviation_filter=None
+    )
     zero = run_zone_limit_backtest(
         htf,
         one_min,
@@ -233,29 +243,34 @@ def test_take_profit_mode_fixed_r_runs_end_to_end() -> None:
     """`take_profit_mode="fixed_r"`도 B안 파이프라인에서 정상 동작한다."""
     htf, one_min = _synthetic_pair()
     # 이 합성 시드는 숏 셋업만 낸다 — WAN-69 기본값(롱 온리)과 무관하게 엔진 동작을
-    # 검증하려면 명시적으로 켠다.
+    # 검증하려면 명시적으로 켠다. deviation_filter는 WAN-81 볼린저 기본값이 이 작은
+    # 합성 데이터셋의 후보를 모두 걸러낼 수 있어 배선 검증을 위해 꺼 둔다.
     params = ConfluenceParams(
         entry_mode="zone_limit",
         rsi_mode="realtime",
         take_profit_mode="fixed_r",
         take_profit_r=2.0,
         short_enabled=True,
+        deviation_filter=None,
     )
     result = run_zone_limit_backtest(htf, one_min, "1h", confluence_params=params)
     assert result.metrics.num_trades >= 1
 
 
-def test_deviation_filter_off_matches_baseline() -> None:
-    """`deviation_filter=None`(기본)은 필드 자체가 없던 이전 동작과 동일하다."""
+def test_deviation_filter_off_yields_at_least_as_many_trades_as_default() -> None:
+    """`deviation_filter=None`(필터 끔)은 WAN-81 기본 볼린저 필터보다 거래를 줄이지 않는다.
+
+    이격 필터는 순수 거부 필터(규칙 3에서만 진입을 기각)이므로, 꺼두면 후보가
+    늘거나 같아야 한다. (WAN-81 이전엔 기본이 `None`이라 이 둘이 항상 동일했지만,
+    이제 기본이 볼린저라 더 이상 항상 같지 않다.)
+    """
     htf, one_min = _synthetic_pair()
     params = ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime", short_enabled=True)
     baseline = run_zone_limit_backtest(htf, one_min, "1h", confluence_params=params)
     explicit_off = run_zone_limit_backtest(
         htf, one_min, "1h", confluence_params=params.model_copy(update={"deviation_filter": None})
     )
-    baseline_pnls = [t.realized_pnl for t in baseline.trades]
-    explicit_off_pnls = [t.realized_pnl for t in explicit_off.trades]
-    assert baseline_pnls == explicit_off_pnls
+    assert len(explicit_off.trades) >= len(baseline.trades)
 
 
 def test_deviation_filter_extremely_wide_band_rejects_all_setups() -> None:
@@ -342,7 +357,9 @@ def test_incremental_rsi_seeder_returns_independent_copy() -> None:
 def test_line_snapshots_matches_manual_ema_vwma_per_position() -> None:
     """사전계산된 스냅샷이 시그널마다 재계산하던 이전 로직과 값이 같아야 한다."""
     htf, _ = _synthetic_pair(bars=400)
-    params = ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime")
+    params = ConfluenceParams(
+        entry_mode="zone_limit", rsi_mode="realtime", use_line_take_profit=True
+    )
     snapshots = _line_snapshots(params, htf)
     assert snapshots is not None
     assert params.tp_vwma_length is not None

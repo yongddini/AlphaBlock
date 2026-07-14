@@ -67,6 +67,8 @@ def _signal(
     pos: int,
     price: float,
     order_block: OrderBlock | None = None,
+    *,
+    tap_index: int = 0,
 ) -> OrderBlockSignal:
     return OrderBlockSignal(
         direction=direction,
@@ -74,7 +76,30 @@ def _signal(
         price=price,
         order_block=order_block or _order_block(direction),
         status="active",
+        tap_index=tap_index,
     )
+
+
+def _legacy_params(**overrides: object) -> ConfluenceParams:
+    """WAN-81 이전 구 엔진 기본값 프리셋.
+
+    이 파일의 많은 테스트는 RSI 게이트·선 익절·오더블록 손절 등 **개별 규칙**을
+    단일 오더블록 시그널 주입으로 격리해서 검증한다. WAN-81이 메인 엔진 기본값을
+    통째로 바꿨으므로(재탭 허용, 첫 탭 RSI 면제, 고정 1.5R 익절, 볼린저 진입가,
+    숏 활성화), 그 규칙들과 무관한 테스트는 이 프리셋으로 구 엔진 조합을 복원해
+    원래 검증 대상만 격리한다. WAN-81 자체의 새 기본값을 검증하는 테스트는 이
+    프리셋을 쓰지 않는다."""
+    base: dict[str, object] = {
+        "retap_mode": "once",
+        "rsi_gate_mode": "extreme",
+        "take_profit_mode": "line",
+        "take_profit_r": 2.0,
+        "use_line_take_profit": True,
+        "deviation_filter": None,
+        "short_enabled": False,
+    }
+    base.update(overrides)
+    return ConfluenceParams(**base)
 
 
 def _df(closes: list[float], *, wick: float = 2.0, volume: float = 10.0) -> pd.DataFrame:
@@ -107,7 +132,7 @@ def test_bullish_tap_with_oversold_rsi_confirms_long() -> None:
     closes = [200.0 - i * 3.0 for i in range(25)]  # 단조 하락 -> RSI 과매도
     df = _df(closes)
     pos = 24
-    params = ConfluenceParams(use_line_take_profit=False, use_order_block_stop=False)
+    params = _legacy_params(use_line_take_profit=False, use_order_block_stop=False)
     result = ConfluenceStrategy(params=params).run(
         df, OrderBlockResult(order_blocks=[], signals=[_signal(_BULL, pos, closes[pos])])
     )
@@ -123,7 +148,7 @@ def test_bearish_tap_with_overbought_rsi_confirms_short() -> None:
     closes = [100.0 + i * 3.0 for i in range(25)]  # 단조 상승 -> RSI 과매수
     df = _df(closes)
     pos = 24
-    params = ConfluenceParams(
+    params = _legacy_params(
         use_line_take_profit=False, use_order_block_stop=False, short_enabled=True
     )
     result = ConfluenceStrategy(params=params).run(
@@ -138,7 +163,7 @@ def test_long_tap_rejected_when_rsi_not_oversold() -> None:
     closes = [100.0 + i * 3.0 for i in range(25)]  # 상승 -> RSI 높음 -> 롱 기각
     df = _df(closes)
     pos = 24
-    result = ConfluenceStrategy(params=ConfluenceParams()).run(
+    result = ConfluenceStrategy(params=_legacy_params()).run(
         df, OrderBlockResult(order_blocks=[], signals=[_signal(_BULL, pos, closes[pos])])
     )
     entry = result.entries[0]
@@ -155,7 +180,7 @@ def test_ema_vwma_do_not_gate_entry() -> None:
     closes = [100.0 + i * 3.0 for i in range(25)]  # 강한 상승
     df = _df(closes)
     pos = 24
-    result = ConfluenceStrategy(params=ConfluenceParams()).run(
+    result = ConfluenceStrategy(params=_legacy_params()).run(
         df, OrderBlockResult(order_blocks=[], signals=[_signal(_BULL, pos, closes[pos])])
     )
     # 종가가 EMA 위(정배열)이지만 RSI 과매도가 아니므로 롱 진입은 없다.
@@ -163,10 +188,15 @@ def test_ema_vwma_do_not_gate_entry() -> None:
 
 
 def test_rsi_warmup_nan_does_not_confirm() -> None:
+    """`rsi_gate_mode="extreme"`(구 엔진)는 RSI 워밍업(NaN)이면 진입하지 않는다.
+
+    WAN-81 기본값(`first_tap_free`)에서는 첫 탭이 NaN이어도 진입한다 — 그 반대
+    사례는 `test_first_tap_confirms_even_with_nan_rsi`가 고정한다.
+    """
     closes = [200.0 - i * 3.0 for i in range(5)]  # RSI 워밍업(length=14) 구간
     df = _df(closes)
     pos = 3
-    result = ConfluenceStrategy(params=ConfluenceParams()).run(
+    result = ConfluenceStrategy(params=_legacy_params()).run(
         df, OrderBlockResult(order_blocks=[], signals=[_signal(_BULL, pos, closes[pos])])
     )
     entry = result.entries[0]
@@ -180,10 +210,69 @@ def test_tap_after_invalidation_is_skipped() -> None:
     pos = 20
     # 무효화 시각이 탭보다 앞(<=탭)이면 활성 오더블록 탭이 아니므로 건너뛴다.
     ob = _order_block(_BULL, bottom=0.0, break_time=10 * _STEP)
-    result = ConfluenceStrategy(params=ConfluenceParams()).run(
+    result = ConfluenceStrategy(params=_legacy_params()).run(
         df, OrderBlockResult(order_blocks=[], signals=[_signal(_BULL, pos, closes[pos], ob)])
     )
     assert result.entries == []
+
+
+# ------------------------------------ WAN-81 첫 탭 면제 / 재탭 RSI (rsi_gate_mode="first_tap_free")
+
+
+def test_first_tap_confirms_with_neutral_rsi() -> None:
+    """`rsi_gate_mode="first_tap_free"`(기본)는 첫 탭이면 RSI 50(극단 아님)이어도 진입한다."""
+    closes = [100.0, 105.0] * 12  # 오실레이션 -> 확정봉 RSI가 대략 50 부근에서 안정.
+    df = _df(closes)
+    pos = 23
+    params = ConfluenceParams(use_line_take_profit=False, use_order_block_stop=False)
+    assert params.rsi_gate_mode == "first_tap_free"
+    signal = _signal(_BULL, pos, closes[pos])
+    result = ConfluenceStrategy(params).run(
+        df, OrderBlockResult(order_blocks=[], signals=[signal], retap_signals=[signal])
+    )
+    entry = result.entries[0]
+    assert entry.rsi is not None and not (entry.rsi <= params.rsi_oversold)  # 극단이 아님
+    assert entry.confirmed is True
+
+
+def test_first_tap_confirms_even_with_nan_rsi() -> None:
+    """`rsi_gate_mode="first_tap_free"`(기본)는 첫 탭이면 RSI 워밍업(NaN)이어도 진입한다."""
+    closes = [200.0 - i * 3.0 for i in range(5)]  # RSI 워밍업(length=14) 구간
+    df = _df(closes)
+    pos = 3
+    params = ConfluenceParams(
+        use_line_take_profit=False, use_order_block_stop=False, deviation_filter=None
+    )
+    signal = _signal(_BULL, pos, closes[pos], tap_index=0)
+    result = ConfluenceStrategy(params).run(
+        df, OrderBlockResult(order_blocks=[], signals=[signal], retap_signals=[signal])
+    )
+    entry = result.entries[0]
+    assert entry.rsi is None
+    assert entry.confirmed is True
+
+
+def test_retap_rejected_when_rsi_not_extreme_but_zone_not_burned() -> None:
+    """두 번째 탭(재탭, RSI 50)은 기각되지만 존은 소각되지 않고, 세 번째 탭(과매도)은 진입한다."""
+    closes = [100.0, 105.0] * 12  # 확정봉 RSI가 대략 50 부근.
+    df = _df(closes)
+    neutral_pos = 23
+    params = ConfluenceParams(use_line_take_profit=False, use_order_block_stop=False)
+    ob = _order_block(_BULL)
+
+    second_tap = _signal(_BULL, neutral_pos, closes[neutral_pos], ob, tap_index=1)
+    result = ConfluenceStrategy(params).run(
+        df, OrderBlockResult(order_blocks=[], signals=[], retap_signals=[second_tap])
+    )
+    assert result.entries[0].confirmed is False  # 재탭인데 RSI가 극단이 아니라 기각.
+
+    oversold_closes = [200.0 - i * 3.0 for i in range(25)]
+    df_oversold = _df(oversold_closes)
+    third_tap = _signal(_BULL, 24, oversold_closes[24], ob, tap_index=2)
+    result2 = ConfluenceStrategy(params).run(
+        df_oversold, OrderBlockResult(order_blocks=[], signals=[], retap_signals=[third_tap])
+    )
+    assert result2.entries[0].confirmed is True  # 존은 소각되지 않고 다음 탭에서 재평가.
 
 
 # ----------------------------------------------------------------- 익절(선 도달) 순수 로직
@@ -252,7 +341,7 @@ def _plan(
 
 
 def test_plan_exit_take_profit_at_nearest_line() -> None:
-    strategy = ConfluenceStrategy(ConfluenceParams(tp_ema_lengths=(5,), tp_vwma_length=None))
+    strategy = ConfluenceStrategy(_legacy_params(tp_ema_lengths=(5,), tp_vwma_length=None))
     # 선 ema_5가 진입가(100) 위 105에 있고 봉2에서 고가가 도달 -> 익절.
     planned = _plan(
         strategy,
@@ -271,7 +360,7 @@ def test_plan_exit_take_profit_at_nearest_line() -> None:
 def test_plan_exit_stop_loss_at_break_bar() -> None:
     """종가가 무효화 경계보다 더 불리하면(더 하락) 종가를 그대로 손절가로 쓴다."""
     strategy = ConfluenceStrategy(
-        ConfluenceParams(use_line_take_profit=False, tp_vwma_length=None, tp_ema_lengths=(5,))
+        _legacy_params(use_line_take_profit=False, tp_vwma_length=None, tp_ema_lengths=(5,))
     )
     # 진입가 100, 오더블록 하단(무효화 경계) 95 — 종가 90은 경계보다 더 불리하다.
     ob = _order_block(_BULL, bottom=95.0)
@@ -297,7 +386,7 @@ def test_plan_exit_stop_loss_never_favorable_vs_entry_long() -> None:
     102(진입가 100보다 위)로 마감했다. 종가를 그대로 쓰면 "손절인데 이익"이 되므로,
     체결가는 경계(95)로 clamp돼야 한다.
     """
-    strategy = ConfluenceStrategy(ConfluenceParams(use_line_take_profit=False))
+    strategy = ConfluenceStrategy(_legacy_params(use_line_take_profit=False))
     ob = _order_block(_BULL, bottom=95.0)
     planned = _plan(
         strategy,
@@ -316,7 +405,7 @@ def test_plan_exit_stop_loss_never_favorable_vs_entry_long() -> None:
 
 def test_plan_exit_stop_loss_never_favorable_vs_entry_short() -> None:
     """숏 대칭: wick이 상단 경계를 찍고 종가가 진입가보다 유리(더 낮게) 마감해도 손실이다."""
-    strategy = ConfluenceStrategy(ConfluenceParams(use_line_take_profit=False))
+    strategy = ConfluenceStrategy(_legacy_params(use_line_take_profit=False))
     ob = _order_block(_BEAR, top=105.0)
     planned = _plan(
         strategy,
@@ -341,13 +430,13 @@ def test_plan_exit_stop_priority_when_both_hit_same_bar() -> None:
     closes = [100.0, 101.0, 102.0]
     # 봉1에서 손절(break_pos=1)과 익절 동시 충족.
     strict = ConfluenceStrategy(
-        ConfluenceParams(tp_ema_lengths=(5,), tp_vwma_length=None, stop_before_take_profit=True)
+        _legacy_params(tp_ema_lengths=(5,), tp_vwma_length=None, stop_before_take_profit=True)
     )
     planned = _plan(strict, break_pos=1, line_cols=line_cols, highs=highs, lows=lows, closes=closes)
     assert planned is not None and planned.reason is SignalExitReason.STOP_LOSS
 
     relaxed = ConfluenceStrategy(
-        ConfluenceParams(tp_ema_lengths=(5,), tp_vwma_length=None, stop_before_take_profit=False)
+        _legacy_params(tp_ema_lengths=(5,), tp_vwma_length=None, stop_before_take_profit=False)
     )
     planned2 = _plan(
         relaxed, break_pos=1, line_cols=line_cols, highs=highs, lows=lows, closes=closes
@@ -356,7 +445,7 @@ def test_plan_exit_stop_priority_when_both_hit_same_bar() -> None:
 
 
 def test_plan_exit_none_when_no_target_reached() -> None:
-    strategy = ConfluenceStrategy(ConfluenceParams(tp_ema_lengths=(5,), tp_vwma_length=None))
+    strategy = ConfluenceStrategy(_legacy_params(tp_ema_lengths=(5,), tp_vwma_length=None))
     planned = _plan(
         strategy,
         break_pos=None,
@@ -375,7 +464,7 @@ def test_confirmed_long_take_profit_end_to_end() -> None:
     closes = _falling_then_rising(down=22, up=12)  # 저점서 과매도, 이후 상승
     df = _df(closes, wick=1.0)
     trough = 21
-    params = ConfluenceParams(tp_ema_lengths=(5,), tp_vwma_length=None, use_order_block_stop=False)
+    params = _legacy_params(tp_ema_lengths=(5,), tp_vwma_length=None, use_order_block_stop=False)
     ob = _order_block(_BULL, bottom=0.0)  # 무효화 없음
     result = ConfluenceStrategy(params=params).run(
         df, OrderBlockResult(order_blocks=[], signals=[_signal(_BULL, trough, closes[trough], ob)])
@@ -400,7 +489,7 @@ def test_confirmed_long_stop_loss_end_to_end() -> None:
     entry_pos = 18
     break_pos = 22
     ob = _order_block(_BULL, bottom=closes[entry_pos] - 1.0, break_time=break_pos * _STEP)
-    params = ConfluenceParams(use_line_take_profit=False)
+    params = _legacy_params(use_line_take_profit=False)
     result = ConfluenceStrategy(params=params).run(
         df,
         OrderBlockResult(
@@ -419,7 +508,7 @@ def test_backtest_consumes_planned_take_profit() -> None:
     closes = _falling_then_rising(down=22, up=12)
     df = _df(closes, wick=1.0)
     trough = 21
-    params = ConfluenceParams(tp_ema_lengths=(5,), tp_vwma_length=None, use_order_block_stop=False)
+    params = _legacy_params(tp_ema_lengths=(5,), tp_vwma_length=None, use_order_block_stop=False)
     ob = _order_block(_BULL, bottom=0.0)
     result = generate_confluence_signals(
         df,
@@ -444,7 +533,7 @@ def test_backtest_consumes_planned_stop_loss() -> None:
     entry_pos = 18
     break_pos = 22
     ob = _order_block(_BULL, bottom=closes[entry_pos] - 1.0, break_time=break_pos * _STEP)
-    params = ConfluenceParams(use_line_take_profit=False)
+    params = _legacy_params(use_line_take_profit=False)
     result = generate_confluence_signals(
         df,
         params,
@@ -463,7 +552,7 @@ def test_no_planned_exit_falls_through_to_end_of_data() -> None:
     df = _df(closes)
     entry_pos = 20
     ob = _order_block(_BULL, bottom=0.0)  # 무효화 없음
-    params = ConfluenceParams(use_order_block_stop=False)
+    params = _legacy_params(use_order_block_stop=False)
     result = generate_confluence_signals(
         df,
         params,
@@ -492,7 +581,7 @@ def test_order_block_signals_bridge_only_confirmed() -> None:
         _signal(_BEAR, pos, closes[pos]),  # 과매도인데 숏 -> 기각
     ]
     result = ConfluenceStrategy(
-        params=ConfluenceParams(use_line_take_profit=False, use_order_block_stop=False)
+        params=_legacy_params(use_line_take_profit=False, use_order_block_stop=False)
     ).run(df, OrderBlockResult(order_blocks=[], signals=signals))
     bridged = result.order_block_signals
     assert len(bridged) == 1
@@ -595,14 +684,14 @@ def test_display_ema_lengths_rejects_duplicates_and_nonpositive() -> None:
 def test_wan68_gate_defaults_preserve_current_behavior() -> None:
     """min_rr·이격도 게이트는 기본값이 꺼짐(현행 동작 보존).
 
-    `short_enabled`는 WAN-69에서 기본값이 `False`(롱 온리)로 바뀌었다 — WAN-68 OOS
-    비교에서 레짐 게이트 대비 유의한 차이가 없어 라이브 배선이 필요없는 단순한 쪽을
-    채택했다."""
+    `short_enabled`는 WAN-69에서 한때 `False`(롱 온리)였으나, WAN-81 사용자 확정
+    규칙이 그 결정을 뒤집어 기본값을 다시 `True`로 바꿨다(약세 오더블록에도 동일
+    규칙 적용)."""
     params = ConfluenceParams()
     assert params.min_rr is None
     assert params.long_max_deviation is None
     assert params.long_deviation_gate_ema_length == 240
-    assert params.short_enabled is False
+    assert params.short_enabled is True
 
 
 def test_min_rr_gate_rejects_low_reward_to_risk_ratio() -> None:
@@ -647,7 +736,7 @@ def test_min_rr_gate_end_to_end_blocks_and_allows_entry() -> None:
     pos = 24
     entry_price = closes[pos]  # 128.0
     # tp_vwma_length=2 -> 진입 스냅샷 vwma = (close[23]+close[24])/2 = 129.5 (진입가 너머 1.5).
-    base = ConfluenceParams(
+    base = _legacy_params(
         use_line_take_profit=True,
         tp_ema_lengths=(),
         tp_vwma_length=2,
@@ -694,7 +783,7 @@ def test_deviation_gate_end_to_end_blocks_and_allows_long_entry() -> None:
     df = _df(closes)
     pos = 24
     signals = [_signal(_BULL, pos, closes[pos])]
-    base = ConfluenceParams(
+    base = _legacy_params(
         use_line_take_profit=False,
         use_order_block_stop=False,
         long_deviation_gate_ema_length=5,
@@ -719,7 +808,7 @@ def test_deviation_gate_does_not_affect_short_entries() -> None:
     closes = [100.0 + i * 3.0 for i in range(25)]  # 상승 -> RSI 과매수, 숏 신호
     df = _df(closes)
     pos = 24
-    params = ConfluenceParams(
+    params = _legacy_params(
         use_line_take_profit=False,
         use_order_block_stop=False,
         long_deviation_gate_ema_length=5,
@@ -736,7 +825,7 @@ def test_short_enabled_false_rejects_short_even_when_rsi_overbought() -> None:
     closes = [100.0 + i * 3.0 for i in range(25)]  # 상승 -> RSI 과매수 -> 숏 조건 충족
     df = _df(closes)
     pos = 24
-    params = ConfluenceParams(
+    params = _legacy_params(
         use_line_take_profit=False, use_order_block_stop=False, short_enabled=False
     )
     result = ConfluenceStrategy(params).run(
@@ -749,7 +838,7 @@ def test_short_enabled_false_does_not_affect_long_entries() -> None:
     closes = [200.0 - i * 3.0 for i in range(25)]  # 하락 -> RSI 과매도 -> 롱 조건 충족
     df = _df(closes)
     pos = 24
-    params = ConfluenceParams(
+    params = _legacy_params(
         use_line_take_profit=False, use_order_block_stop=False, short_enabled=False
     )
     result = ConfluenceStrategy(params).run(
@@ -762,13 +851,13 @@ def test_short_enabled_false_does_not_affect_long_entries() -> None:
 
 
 def test_wan73_new_params_preserve_defaults() -> None:
-    """새 파라미터의 기본값은 현행 동작을 보존한다."""
+    """WAN-73이 만든 파라미터의 현재 기본값(WAN-81 메인 엔진으로 전환됨)."""
     params = ConfluenceParams()
-    assert params.retap_mode == "once"
-    assert params.rsi_gate_mode == "extreme"
+    assert params.retap_mode == "every_tap"
+    assert params.rsi_gate_mode == "first_tap_free"
     assert params.rsi_neutral_band == (40.0, 60.0)
-    assert params.take_profit_mode == "line"
-    assert params.take_profit_r == 2.0
+    assert params.take_profit_mode == "fixed_r"
+    assert params.take_profit_r == 1.5
     assert params.limit_valid_bars == 24
 
 
@@ -790,40 +879,53 @@ def test_limit_valid_bars_accepts_none_for_until_invalidated() -> None:
 
 
 def test_entry_candidate_signals_once_mode_returns_original_signals() -> None:
-    """`retap_mode="once"`(기본)은 오더블록 탐지기가 낸 시그널을 그대로 쓴다(현행 보존)."""
+    """`retap_mode="once"`은 오더블록 탐지기가 낸 첫 탭 전용 시그널을 그대로 쓴다."""
     ob = _order_block(_BULL)
     original_signals = [_signal(_BULL, 2, 100.0, ob)]
     ob_result = OrderBlockResult(order_blocks=[ob], signals=original_signals)
     times = [i * _STEP for i in range(6)]
     closes = [100.0] * 6
     time_to_pos = {t: i for i, t in enumerate(times)}
-    candidates = entry_candidate_signals(ob_result, ConfluenceParams(), times, closes, time_to_pos)
+    params = ConfluenceParams(retap_mode="once")
+    candidates = entry_candidate_signals(ob_result, params, times, closes, time_to_pos)
     assert candidates is ob_result.signals
 
 
-def test_entry_candidate_signals_every_tap_uses_archive_tapped_times() -> None:
-    """`retap_mode="every_tap"`은 존의 모든 재탭(`tapped_times`)을 후보로 낸다."""
-    ob = _order_block(_BULL).model_copy(update={"tapped_times": (1 * _STEP, 3 * _STEP, 5 * _STEP)})
-    ob_result = OrderBlockResult(order_blocks=[ob], signals=[])
+def test_entry_candidate_signals_every_tap_uses_retap_signals() -> None:
+    """`retap_mode="every_tap"`(기본, WAN-81)은 `ob_result.retap_signals`를 그대로 쓴다.
+
+    재탭 후보 생성(모든 탭 재생 + `tap_index` 부착, 병합 존 경계 반영)은
+    `strategy.order_blocks`가 책임진다(WAN-81 갭B) — 여기서는 위임만 검증한다.
+    """
+    ob = _order_block(_BULL)
+    retap_signals = [
+        _signal(_BULL, 1, 100.0, ob).model_copy(update={"tap_index": 0}),
+        _signal(_BULL, 3, 102.0, ob).model_copy(update={"tap_index": 1}),
+        _signal(_BULL, 5, 104.0, ob).model_copy(update={"tap_index": 2}),
+    ]
+    ob_result = OrderBlockResult(order_blocks=[ob], signals=[], retap_signals=retap_signals)
     times = [i * _STEP for i in range(6)]
     closes = [100.0 + i for i in range(6)]
     time_to_pos = {t: i for i, t in enumerate(times)}
     params = ConfluenceParams(retap_mode="every_tap")
     candidates = entry_candidate_signals(ob_result, params, times, closes, time_to_pos)
+    assert candidates is ob_result.retap_signals
     assert [c.trigger_time for c in candidates] == [1 * _STEP, 3 * _STEP, 5 * _STEP]
-    assert all(c.order_block is ob for c in candidates)
-    assert candidates[1].price == closes[3]
+    assert [c.tap_index for c in candidates] == [0, 1, 2]
 
 
 def test_retap_every_tap_confirms_one_entry_per_tap_end_to_end() -> None:
     # 탭 위치는 모두 RSI 워밍업(rsi_length=14) 이후라야 확정된다.
     closes = [100.0 + i for i in range(40)]
     df = _df(closes)
-    ob = _order_block(_BULL, top=1_000.0, bottom=0.0).model_copy(
-        update={"tapped_times": (20 * _STEP, 28 * _STEP, 36 * _STEP)}
-    )
-    ob_result = OrderBlockResult(order_blocks=[ob], signals=[])
-    params = ConfluenceParams(
+    ob = _order_block(_BULL, top=1_000.0, bottom=0.0)
+    retap_signals = [
+        _signal(_BULL, 20, closes[20], ob).model_copy(update={"tap_index": 0}),
+        _signal(_BULL, 28, closes[28], ob).model_copy(update={"tap_index": 1}),
+        _signal(_BULL, 36, closes[36], ob).model_copy(update={"tap_index": 2}),
+    ]
+    ob_result = OrderBlockResult(order_blocks=[ob], signals=[], retap_signals=retap_signals)
+    params = _legacy_params(
         retap_mode="every_tap",
         rsi_gate_mode="none",
         use_line_take_profit=False,
@@ -834,15 +936,25 @@ def test_retap_every_tap_confirms_one_entry_per_tap_end_to_end() -> None:
 
 
 def test_retap_once_ignores_extra_archive_taps() -> None:
-    """`retap_mode="once"`(기본)은 아카이브에 재탭이 여럿 있어도 첫 탭 시그널 하나만 쓴다."""
+    """`retap_mode="once"`은 재탭 시그널이 있어도 첫 탭 시그널 하나만 쓴다."""
     closes = [100.0 + i for i in range(40)]
     df = _df(closes)
-    ob = _order_block(_BULL, top=1_000.0, bottom=0.0).model_copy(
-        update={"tapped_times": (20 * _STEP, 28 * _STEP, 36 * _STEP)}
+    ob = _order_block(_BULL, top=1_000.0, bottom=0.0)
+    retap_signals = [
+        _signal(_BULL, 20, closes[20], ob).model_copy(update={"tap_index": 0}),
+        _signal(_BULL, 28, closes[28], ob).model_copy(update={"tap_index": 1}),
+        _signal(_BULL, 36, closes[36], ob).model_copy(update={"tap_index": 2}),
+    ]
+    ob_result = OrderBlockResult(
+        order_blocks=[ob],
+        signals=[_signal(_BULL, 20, closes[20], ob)],
+        retap_signals=retap_signals,
     )
-    ob_result = OrderBlockResult(order_blocks=[ob], signals=[_signal(_BULL, 20, closes[20], ob)])
-    params = ConfluenceParams(
-        rsi_gate_mode="none", use_line_take_profit=False, use_order_block_stop=False
+    params = _legacy_params(
+        retap_mode="once",
+        rsi_gate_mode="none",
+        use_line_take_profit=False,
+        use_order_block_stop=False,
     )
     result = ConfluenceStrategy(params).run(df, ob_result)
     assert len(result.confirmed_entries) == 1
@@ -856,7 +968,7 @@ def test_rsi_gate_mode_neutral_confirms_long_and_short_when_rsi_near_50() -> Non
     closes = [100.0, 105.0] * 12  # 오실레이션 -> 확정봉 RSI가 대략 50 부근에서 안정.
     df = _df(closes)
     pos = 23
-    params = ConfluenceParams(
+    params = _legacy_params(
         rsi_gate_mode="neutral",
         rsi_neutral_band=(40.0, 60.0),
         use_line_take_profit=False,
@@ -877,7 +989,7 @@ def test_rsi_gate_mode_neutral_rejects_extreme_rsi() -> None:
     closes = [200.0 - i * 3.0 for i in range(25)]  # 하락 -> RSI 과매도(극단)
     df = _df(closes)
     pos = 24
-    params = ConfluenceParams(
+    params = _legacy_params(
         rsi_gate_mode="neutral",
         use_line_take_profit=False,
         use_order_block_stop=False,
@@ -892,7 +1004,7 @@ def test_rsi_gate_mode_none_confirms_regardless_of_rsi() -> None:
     closes = [100.0 + i * 3.0 for i in range(25)]  # 상승 -> RSI 과매수 -> 원래는 롱 기각
     df = _df(closes)
     pos = 24
-    params = ConfluenceParams(
+    params = _legacy_params(
         rsi_gate_mode="none", use_line_take_profit=False, use_order_block_stop=False
     )
     result = ConfluenceStrategy(params).run(
@@ -947,8 +1059,16 @@ def test_plan_exit_fixed_r_ignores_lines_even_when_configured() -> None:
 # ------------------------------------------------------------------ WAN-75 이격 필터
 
 
-def test_deviation_filter_default_off() -> None:
-    assert ConfluenceParams().deviation_filter is None
+def test_deviation_filter_default_is_bollinger() -> None:
+    """WAN-81: 기본 진입가 재산정 필터는 볼린저밴드(SMA 20 ± 2σ)로 켜져 있다."""
+    filt = ConfluenceParams().deviation_filter
+    assert filt is not None
+    assert filt.anchor == "sma"
+    assert filt.sma_length == 20
+    assert filt.width_kind == "stdev"
+    assert filt.width_value == pytest.approx(2.0)
+    # 명시적으로 끄면(구 엔진) 필드 자체가 없던 이전 동작으로 돌아간다.
+    assert ConfluenceParams(deviation_filter=None).deviation_filter is None
 
 
 def test_deviation_entry_price_long_rule1_zone_entirely_below_band() -> None:
@@ -1033,7 +1153,7 @@ def test_deviation_filter_end_to_end_rule1_keeps_zone_boundary() -> None:
     df = _df(closes)
     pos = 24  # close=128.0
     ob = _order_block(_BULL, top=110.0, bottom=90.0)  # 밴드(pct 10%: 128-12.8=115.2) > top
-    params = ConfluenceParams(
+    params = _legacy_params(
         use_line_take_profit=False,
         use_order_block_stop=False,
         deviation_filter=DeviationFilterParams(anchor="close", width_kind="pct", width_value=0.1),
@@ -1051,7 +1171,7 @@ def test_deviation_filter_end_to_end_rule2_overrides_entry_to_band() -> None:
     df = _df(closes)
     pos = 24  # close=128.0, band=115.2
     ob = _order_block(_BULL, top=120.0, bottom=100.0)
-    params = ConfluenceParams(
+    params = _legacy_params(
         use_line_take_profit=False,
         use_order_block_stop=False,
         deviation_filter=DeviationFilterParams(anchor="close", width_kind="pct", width_value=0.1),
@@ -1069,7 +1189,7 @@ def test_deviation_filter_end_to_end_rule3_rejects_entry() -> None:
     df = _df(closes)
     pos = 24  # close=128.0, band=115.2
     ob = _order_block(_BULL, top=140.0, bottom=120.0)
-    params = ConfluenceParams(
+    params = _legacy_params(
         use_line_take_profit=False,
         use_order_block_stop=False,
         deviation_filter=DeviationFilterParams(anchor="close", width_kind="pct", width_value=0.1),
@@ -1086,12 +1206,53 @@ def test_deviation_filter_off_preserves_current_behavior() -> None:
     df = _df(closes)
     pos = 24
     ob = _order_block(_BULL, top=140.0, bottom=90.0)
-    params = ConfluenceParams(use_line_take_profit=False, use_order_block_stop=False)
+    params = _legacy_params(use_line_take_profit=False, use_order_block_stop=False)
     result = ConfluenceStrategy(params).run(
         df, OrderBlockResult(order_blocks=[], signals=[_signal(_BULL, pos, closes[pos], ob)])
     )
     assert result.entries[0].confirmed is True
     assert result.entries[0].price == pytest.approx(closes[pos])
+
+
+def test_fixed_r_target_moves_with_bollinger_repriced_entry() -> None:
+    """WAN-81: 볼린저로 진입가가 낮아지면(롱) 1R이 줄어 고정 익절 목표도 함께 낮아진다.
+
+    진입 근거 오더블록 경계(무효화 경계)는 그대로이므로, 재산정된(더 낮은) 진입가
+    기준 위험 거리(1R)가 줄고 목표가(entry + r*R)도 그만큼 아래로 내려온다.
+    """
+    decline = [200.0 - i * 3.0 for i in range(25)]  # 단조 하락 -> RSI 과매도, close[24]=128.0
+    rise = [128.0 + 5.0 * i for i in range(1, 12)]  # 이후 급등 -> 두 목표가 모두 도달.
+    closes = decline + rise
+    df = _df(closes)
+    pos = 24
+    ob = _order_block(_BULL, top=120.0, bottom=100.0)
+    signal = _signal(_BULL, pos, closes[pos], ob)
+
+    off_params = ConfluenceParams(
+        use_order_block_stop=False, deviation_filter=None, take_profit_r=1.5, retap_mode="once"
+    )
+    on_params = ConfluenceParams(
+        use_order_block_stop=False,
+        deviation_filter=DeviationFilterParams(anchor="close", width_kind="pct", width_value=0.1),
+        take_profit_r=1.5,
+        retap_mode="once",
+    )
+    assert off_params.take_profit_mode == "fixed_r"  # WAN-81 기본값 전제.
+
+    ob_result = OrderBlockResult(order_blocks=[], signals=[signal])
+    off = ConfluenceStrategy(off_params).run(df, ob_result)
+    on = ConfluenceStrategy(on_params).run(df, ob_result)
+
+    off_entry, on_entry = off.entries[0], on.entries[0]
+    assert off_entry.confirmed is True and on_entry.confirmed is True
+    assert on_entry.price < off_entry.price  # 볼린저 하단선이 존 안 -> 밴드로 재산정(더 낮음).
+    assert off_entry.planned_exit is not None and on_entry.planned_exit is not None
+    # 진입가가 낮아진 만큼 위험(1R)이 줄고, 고정 목표가도 함께 낮아진다.
+    off_risk = off_entry.price - ob.bottom
+    on_risk = on_entry.price - ob.bottom
+    assert on_risk < off_risk
+    assert on_entry.planned_exit.price == pytest.approx(on_entry.price + 1.5 * on_risk)
+    assert on_entry.planned_exit.price < off_entry.planned_exit.price
 
 
 def test_plan_exit_fixed_r_short_direction() -> None:

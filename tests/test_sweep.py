@@ -289,7 +289,16 @@ def test_evaluate_executes_trade_with_injected_order_block() -> None:
         status="active",
     )
     ob_result = OrderBlockResult(order_blocks=[ob], signals=[signal])
-    params = ConfluenceParams(rsi_overbought=50.0, rsi_oversold=30.0, short_enabled=True)
+    params = ConfluenceParams(
+        rsi_overbought=50.0,
+        rsi_oversold=30.0,
+        short_enabled=True,
+        retap_mode="once",
+        rsi_gate_mode="extreme",
+        deviation_filter=None,
+        use_line_take_profit=False,
+        take_profit_mode="line",
+    )
 
     result = evaluate(
         df,
@@ -327,7 +336,16 @@ def _forced_short_setup() -> tuple[pd.DataFrame, OrderBlockResult, ConfluencePar
         status="active",
     )
     ob_result = OrderBlockResult(order_blocks=[ob], signals=[signal])
-    params = ConfluenceParams(rsi_overbought=50.0, rsi_oversold=30.0, short_enabled=True)
+    params = ConfluenceParams(
+        rsi_overbought=50.0,
+        rsi_oversold=30.0,
+        short_enabled=True,
+        retap_mode="once",
+        rsi_gate_mode="extreme",
+        deviation_filter=None,
+        use_line_take_profit=False,
+        take_profit_mode="line",
+    )
     return df, ob_result, params
 
 

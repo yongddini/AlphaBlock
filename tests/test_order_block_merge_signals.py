@@ -131,9 +131,13 @@ def test_merged_signals_are_look_ahead_free_at_scale() -> None:
     raw = OrderBlockDetector(raw_params).run(df)
     times = [int(t) for t in df["open_time"].astype("int64")]
 
-    # 병합이 실제로 시그널을 줄였는지(테스트 유효성): 병합 진입 < 원본 진입.
-    # (원본은 겹치는 존을 각각 세어 진입이 부풀려진다 — R1 병합이 그걸 제거한다.)
-    assert len(full.signals) < len(raw.signals), "병합이 겹치는 진입을 실제로 줄여야 한다"
+    # WAN-81 §5: 병합이 여러 존의 동시 커버(같은 봉에서 여러 존이 함께 탭)를
+    # 하나로 접으므로 여전히 대체로 원본보다 적지만, §5 버그 수정(개별 존 단위
+    # entered 추적)으로 예전엔 억눌리던 신규 편입 존의 첫 탭이 되살아나 원본보다
+    # 소폭 많아질 수도 있다(이 시드에서 34 vs 32) — "항상 더 적다"는 더 이상
+    # 불변식이 아니다. 두 경로 모두 신호가 실제로 나오는지만 확인한다.
+    assert full.signals
+    assert raw.signals
 
     full_proj = _entry_projection(full.signals)
     for cut in (1000, 2000, 2800):
@@ -141,4 +145,92 @@ def test_merged_signals_are_look_ahead_free_at_scale() -> None:
         truncated = OrderBlockDetector(params).run(df.iloc[:cut])
         before_full = [s for s in full_proj if s[1] < t_cut]
         before_trunc = [s for s in _entry_projection(truncated.signals) if s[1] < t_cut]
+        assert before_full == before_trunc
+
+
+# --------------------------------------------------------------- WAN-81 §5 (구 WAN-82 버그 흡수)
+
+
+# 10봉 타임라인. A는 t2 확정, t4에서 탭(첫 진입). B는 t6 확정(A와 겹침 → 병합 클러스터
+# 성장). t8에서 가격이 B 고유 구간([98,100))에만 닿는다 — 병합 top/bottom(105/98) 안이지만
+# A의 구간([100,105])과는 겹치지 않는다.
+_S5_TIMES = list(range(10))
+#              t0     t1     t2     t3     t4      t5     t6     t7      t8     t9
+_S5_HIGHS = [120.0, 120.0, 120.0, 120.0, 102.0, 120.0, 120.0, 120.0, 99.0, 99.0]
+_S5_LOWS = [115.0, 115.0, 115.0, 115.0, 99.0, 115.0, 115.0, 115.0, 97.0, 97.0]
+_S5_CLOSES = [117.0] * 10
+
+
+def test_new_zone_joining_entered_cluster_still_gets_its_own_first_tap() -> None:
+    """§5: 이미 진입한 병합 클러스터에 새로 편입된 존은 자신의 첫 탭에서 진입해야 한다.
+
+    구 버그: `entered`를 병합 단위 전체로만 검사해, A 진입 이후 A와 겹치며 새로
+    확정된 B가 (한 번도 탭된 적 없음에도) 영구적으로 진입 기회를 잃었다(WAN-82).
+    수정 후: B가 자신의 구간에서 처음 탭되는 t8에서 `tap_index=0`으로 진입한다.
+    """
+    a = _bull(105.0, 100.0, confirmed=2)  # A: [100,105], t4에서 첫 탭.
+    b = _bull(103.0, 98.0, confirmed=6)  # B: [98,103], A와 겹쳐 t6에 병합 클러스터로 편입.
+    archive = [a, b]
+
+    signals = _generate_merged_signals(archive, _S5_TIMES, _S5_HIGHS, _S5_LOWS, _S5_CLOSES)
+
+    assert [(s.trigger_time, s.tap_index) for s in signals] == [(4, 0), (8, 0)]
+    # t4엔 B가 아직 확정 전이라 A 단독 경계, t8엔 병합 경계(top=105, bottom=98)를
+    # 쓴다(look-ahead 없음 — 그 시점에 존재하는 존만으로 병합한다, WAN-56 유지).
+    by_time = {s.trigger_time: s for s in signals}
+    assert (by_time[4].order_block.top, by_time[4].order_block.bottom) == (105.0, 100.0)
+    assert (by_time[8].order_block.top, by_time[8].order_block.bottom) == (105.0, 98.0)
+
+
+def test_new_zone_joining_entered_cluster_does_not_infinitely_reenter() -> None:
+    """§5 수정이 같은 존 조합에서 무한 재진입을 만들지 않는다.
+
+    t8 탭 이후 t9에도 가격이 그대로 B 구간에 머물지만(바깥→안 전이 없음), 추가
+    시그널이 나오지 않는다.
+    """
+    a = _bull(105.0, 100.0, confirmed=2)
+    b = _bull(103.0, 98.0, confirmed=6)
+    signals = _generate_merged_signals([a, b], _S5_TIMES, _S5_HIGHS, _S5_LOWS, _S5_CLOSES)
+    assert [s.trigger_time for s in signals] == [4, 8]  # t9엔 추가 시그널 없음.
+
+
+def test_retap_path_uses_merged_zone_boundary_for_new_member_tap() -> None:
+    """WAN-81 갭B: `include_retaps=True` 재탭 경로도 병합 존 경계를 그대로 쓴다.
+
+    §5와 같은 시나리오에서 재탭 포함 생성기를 호출해도(every_tap 경로), B의 첫
+    탭(t8)이 병합 경계(top=105, bottom=98)로 나온다 — 재탭 경로가 원본 존 단위로
+    되돌아가지 않는다.
+    """
+    a = _bull(105.0, 100.0, confirmed=2)
+    b = _bull(103.0, 98.0, confirmed=6)
+    signals = _generate_merged_signals(
+        [a, b], _S5_TIMES, _S5_HIGHS, _S5_LOWS, _S5_CLOSES, include_retaps=True
+    )
+    by_time = {s.trigger_time: s for s in signals}
+    assert by_time[8].order_block.top == 105.0
+    assert by_time[8].order_block.bottom == 98.0
+    assert by_time[8].tap_index == 0
+
+
+def test_retap_signals_are_look_ahead_free_at_scale() -> None:
+    """`retap_signals`(모든 탭 재생, WAN-81)도 look-ahead가 없다.
+
+    `signals`(첫 탭만)에 이미 있는 불변식(`test_merged_signals_are_look_ahead_free_at_scale`)을
+    재탭 포함 뷰에도 동일하게 고정한다 — 이 뷰는 `retap_mode="every_tap"`이 소비하므로
+    (WAN-81 갭B) 별도로 검증이 필요하다.
+    """
+    params = OrderBlockParams(combine_obs=True)
+    df = make_synthetic_ohlcv(timeframe="1h", bars=3000, seed=7)
+    full = OrderBlockDetector(params).run(df)
+    times = [int(t) for t in df["open_time"].astype("int64")]
+
+    assert full.retap_signals
+    assert len(full.retap_signals) >= len(full.signals)
+
+    full_proj = _entry_projection(full.retap_signals)
+    for cut in (1000, 2000, 2800):
+        t_cut = times[cut]
+        truncated = OrderBlockDetector(params).run(df.iloc[:cut])
+        before_full = [s for s in full_proj if s[1] < t_cut]
+        before_trunc = [s for s in _entry_projection(truncated.retap_signals) if s[1] < t_cut]
         assert before_full == before_trunc
