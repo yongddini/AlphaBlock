@@ -32,7 +32,13 @@ def test_live_and_backtest_paths_produce_identical_signal_set() -> None:
     live_result = ConfluenceStrategy(settings.confluence, OrderBlockParams()).run(df)
 
     # 백테스트/대시보드 경로: dashboard.pipeline.run_pipeline (CLI 리포트와 공유, WAN-59).
-    pipeline = run_pipeline(df, OrderBlockParams(), ConfluenceParams())
+    # 대시보드/백테스트(A안) 경로는 종가 진입으로 명시한다 — WAN-95로 채택 기본값은
+    # 지정가(zone_limit)가 됐지만, `ConfluenceStrategy`(=실시간 러너가 쓰는 시그널
+    # 생성기)는 진입 방식과 무관하게 같은 시그널 집합을 낸다. 즉 이 패리티는 유지되나,
+    # **실시간 러너는 아직 지정가를 집행하지 못한다**(WAN-45에서 배선).
+    pipeline = run_pipeline(
+        df, OrderBlockParams(), ConfluenceParams(entry_mode="close", rsi_mode="closed_bar")
+    )
 
     live_entries = [
         (e.time, e.direction, e.price, e.confirmed) for e in live_result.confirmed_entries

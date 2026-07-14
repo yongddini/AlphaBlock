@@ -10,18 +10,23 @@ from __future__ import annotations
 import math
 
 import pandas as pd
+import pytest
 
-from backtest.models import BacktestConfig, PositionSide, Trade
+from backtest.models import BacktestConfig, ExitReason, PositionSide, Trade
 from backtest.sweep import timeframe_to_ms
 from backtest.synthetic import make_synthetic_ohlcv
 from backtest.zone_limit_backtest import (
+    _Candidate,
     _IncrementalRsiSeeder,
     _line_snapshots,
+    _to_trade,
     build_result_from_trades,
     build_zone_limit_candidates,
     run_zone_limit_backtest,
     run_zone_limit_backtest_verbose,
 )
+from common.costs import Liquidity
+from data.models import FundingRate
 from strategy.indicators import emas, vwma
 from strategy.models import ConfluenceParams, DeviationFilterParams
 from strategy.realtime_rsi import RealtimeRsi
@@ -383,3 +388,124 @@ def test_line_snapshots_none_when_line_take_profit_disabled() -> None:
         entry_mode="zone_limit", rsi_mode="realtime", use_line_take_profit=False
     )
     assert _line_snapshots(params, htf) is None
+
+
+# ------------------------------------------------------- WAN-95 지정가 채택 배선
+
+
+def test_maker_fee_default_is_two_bp_and_below_taker() -> None:
+    """WAN-95 드리프트 가드: 지정가(메이커) 진입에 테이커 요율이 붙지 않는다.
+
+    기본값이 지정가 진입으로 바뀐 이상 `maker_fee_rate=None`(→ 테이커 4bp 폴백)은
+    비용을 2bp 과대 계상한다. 공용 `CostModel`의 메이커 기본값과도 같은 값이어야
+    한다 — 두 곳이 다른 상수를 들면 페이퍼-백테스트 패리티가 무의미해진다(WAN-37).
+    """
+    cfg = BacktestConfig()
+    assert cfg.maker_fee_rate == 0.0002
+    costs = cfg.cost_model
+    assert costs.fee_rate(Liquidity.MAKER) == 0.0002
+    assert costs.fee_rate(Liquidity.TAKER) == cfg.fee_rate == 0.0004
+    assert costs.fee_rate(Liquidity.MAKER) < costs.fee_rate(Liquidity.TAKER)
+    # 메이커(지정가) 체결에는 슬리피지가 붙지 않는다.
+    assert costs.slippage_for(Liquidity.MAKER) == 0.0
+    assert costs.slippage_for(Liquidity.TAKER) > 0.0
+
+
+def test_entry_is_maker_and_exit_is_taker() -> None:
+    """진입=메이커(슬리피지 0), 청산=테이커(수수료+슬리피지)로 구분 적용된다."""
+    htf, one_min = _synthetic_pair()
+    params = ConfluenceParams(
+        entry_mode="zone_limit", rsi_mode="realtime", short_enabled=True, deviation_filter=None
+    )
+    cfg = BacktestConfig(fee_rate=0.0004, maker_fee_rate=0.0002, slippage=0.0005)
+    result = run_zone_limit_backtest(
+        htf, one_min, "1h", confluence_params=params, backtest_config=cfg
+    )
+    assert result.trades, "이 시드는 체결 거래를 내야 한다"
+    for trade in result.trades:
+        entry_notional = trade.entry_price * trade.quantity
+        # 진입 수수료는 메이커 요율(2bp)로 계산된다.
+        assert trade.entry_fee == pytest.approx(entry_notional * 0.0002, rel=1e-9)
+        for fill in trade.exits:
+            # 청산 수수료는 테이커 요율(4bp).
+            assert fill.fee == pytest.approx(fill.price * fill.quantity * 0.0004, rel=1e-9)
+
+
+def test_zone_limit_rejects_close_entry_params() -> None:
+    """B안 진입점에 종가 진입 파라미터가 들어오면 거부한다(WAN-95)."""
+    htf, one_min = _synthetic_pair()
+    close_params = ConfluenceParams(entry_mode="close", rsi_mode="closed_bar")
+    with pytest.raises(ValueError, match="지정가 진입"):
+        run_zone_limit_backtest(htf, one_min, "1h", confluence_params=close_params)
+
+
+def test_funding_cost_is_deducted_over_hold_window() -> None:
+    """WAN-95: 보유 구간에 정산된 펀딩이 B안 거래 손익에서 실제로 차감된다.
+
+    A안 엔진(`BacktestEngine._funding_cost`)과 같은 산식 — 진입 명목가 × rate × 방향
+    부호를 `[진입시각, 청산시각)` 구간의 정산에 대해 합산한다. 롱은 rate>0이면 지불.
+    """
+    hour = 60 * 60_000
+    cand = _Candidate(
+        side=PositionSide.LONG,
+        entry_time=0,
+        entry_price=100.0,
+        exit_time=9 * hour,
+        exit_price=100.0,
+        reason=ExitReason.TAKE_PROFIT,
+        stop_price=90.0,
+    )
+    cfg = BacktestConfig(
+        funding_enabled=True, risk_sizing=None, position_fraction=1.0, initial_capital=10_000.0
+    )
+    # 보유 구간 안에 8h 정산 1건(4h 시점), 밖에 1건(20h 시점).
+    rates = [
+        FundingRate(symbol="X", funding_time=4 * hour, rate=0.001),
+        FundingRate(symbol="X", funding_time=20 * hour, rate=0.001),
+    ]
+    without = _to_trade(cand, cfg.initial_capital, cfg, None)
+    with_rates = _to_trade(cand, cfg.initial_capital, cfg, rates)
+    assert without is not None and with_rates is not None
+    assert without.funding_cost == 0.0
+    # 구간 안 정산 1건만 반영: 진입 명목가 × 0.001. (롱 + rate>0 → 지불(양수 비용))
+    entry_notional = with_rates.entry_price * with_rates.quantity
+    assert with_rates.funding_cost == pytest.approx(entry_notional * 0.001, rel=1e-9)
+    # 펀딩만큼 실현손익이 줄어든다.
+    assert with_rates.realized_pnl == pytest.approx(
+        without.realized_pnl - with_rates.funding_cost, rel=1e-9
+    )
+
+
+def test_funding_enabled_without_rates_shows_zero_coverage() -> None:
+    """`funding_enabled=True`인데 rates를 안 넘기면 커버리지 0%로 드러난다(WAN-63/95).
+
+    비용을 조용히 0으로 채우고 "반영했다"고 하지 않는 것이 핵심이다.
+    """
+    htf, one_min = _synthetic_pair()
+    params = ConfluenceParams(
+        entry_mode="zone_limit", rsi_mode="realtime", short_enabled=True, deviation_filter=None
+    )
+    result = run_zone_limit_backtest(
+        htf,
+        one_min,
+        "1h",
+        confluence_params=params,
+        backtest_config=BacktestConfig(funding_enabled=True),
+    )
+    assert all(t.funding_cost == 0.0 for t in result.trades)
+    assert result.metrics.funding_coverage == pytest.approx(0.0)
+
+
+def test_funding_disabled_ignores_rates() -> None:
+    """`funding_enabled=False`면 펀딩 데이터를 넘겨도 반영하지 않는다(커버리지 None)."""
+    htf, one_min = _synthetic_pair()
+    params = ConfluenceParams(
+        entry_mode="zone_limit", rsi_mode="realtime", short_enabled=True, deviation_filter=None
+    )
+    cfg = BacktestConfig(funding_enabled=False)
+    rates = [FundingRate(symbol="X", funding_time=int(htf["open_time"].iloc[0]), rate=0.01)]
+    result = run_zone_limit_backtest(
+        htf, one_min, "1h", confluence_params=params, backtest_config=cfg, funding_rates=rates
+    )
+    assert all(t.funding_cost == 0.0 for t in result.trades)
+    assert result.metrics.funding_coverage is None

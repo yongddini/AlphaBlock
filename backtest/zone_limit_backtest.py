@@ -36,6 +36,7 @@ import bisect
 import copy
 import logging
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import pandas as pd
@@ -53,6 +54,8 @@ from backtest.models import (
 from backtest.substep import ZoneLimitStatus, build_substeps, simulate_zone_limit_trade
 from backtest.sweep import bars_per_year, default_backtest_config, timeframe_to_ms
 from common.costs import Liquidity
+from data.funding import Direction, cumulative_funding_cost, funding_coverage
+from data.models import FundingRate
 from execution.sizing import position_size
 from strategy.confluence import ConfluenceStrategy, entry_candidate_signals
 from strategy.indicators import emas, vwma
@@ -197,6 +200,7 @@ def run_zone_limit_backtest(
     order_block_params: OrderBlockParams | None = None,
     backtest_config: BacktestConfig | None = None,
     order_block_result: OrderBlockResult | None = None,
+    funding_rates: Sequence[FundingRate] | None = None,
 ) -> BacktestResult:
     """존-지정가 + 실시간 RSI(B안) 백테스트를 실행한다.
 
@@ -205,6 +209,11 @@ def run_zone_limit_backtest(
     않고 재사용한다(A/B가 동일 오더블록으로 비교되도록). 반환값은 A안과 같은
     `BacktestResult`라 `backtest.ab_report`가 그대로 소비한다. 진단 통계(체결률·관통)가
     필요하면 `run_zone_limit_backtest_verbose`를 쓴다.
+
+    `funding_rates`(WAN-95)를 주고 `backtest_config.funding_enabled=True`이면 보유
+    구간 펀딩비가 손익에 반영된다 — A안 `evaluate()`와 동일하게 **호출부가 심볼별
+    펀딩 데이터를 직접 넘겨야** 한다. 안 넘기면 `funding_missing_policy`에 따라
+    커버리지 0%가 결과에 드러난다(조용히 0으로 때우지 않는다).
     """
     result, _ = run_zone_limit_backtest_verbose(
         htf_df,
@@ -214,6 +223,7 @@ def run_zone_limit_backtest(
         order_block_params=order_block_params,
         backtest_config=backtest_config,
         order_block_result=order_block_result,
+        funding_rates=funding_rates,
     )
     return result
 
@@ -227,6 +237,7 @@ def run_zone_limit_backtest_verbose(
     order_block_params: OrderBlockParams | None = None,
     backtest_config: BacktestConfig | None = None,
     order_block_result: OrderBlockResult | None = None,
+    funding_rates: Sequence[FundingRate] | None = None,
 ) -> tuple[BacktestResult, ZoneLimitStats]:
     """`run_zone_limit_backtest`와 동일하되 진단 통계도 함께 반환한다(WAN-46).
 
@@ -234,7 +245,19 @@ def run_zone_limit_backtest_verbose(
     건수를 담아 낙관 편향 감사에 쓴다.
     """
     params = confluence_params or ConfluenceParams()
+    if params.entry_mode != "zone_limit":
+        raise ValueError(
+            f'run_zone_limit_backtest()는 지정가 진입(B안) 전용인데 entry_mode="'
+            f'{params.entry_mode}"가 들어왔습니다. 종가 진입은 backtest.sweep.evaluate()를 '
+            "쓰세요(WAN-95)."
+        )
     cfg = backtest_config or default_backtest_config(timeframe)
+    rates = list(funding_rates) if funding_rates else []
+    if cfg.funding_enabled and not rates and cfg.funding_missing_policy == "error":
+        raise ValueError(
+            "funding_enabled=True인데 펀딩비 데이터가 없습니다. "
+            "funding_missing_policy='zero'로 두거나 펀딩비를 전달하세요."
+        )
     if cfg.risk_sizing is None:
         logger.warning(
             "risk_sizing=None — B안(존-지정가) 백테스트가 전액 진입 모드"
@@ -251,8 +274,45 @@ def run_zone_limit_backtest_verbose(
         order_block_params=order_block_params,
         order_block_result=order_block_result,
     )
-    trades = _sequence_and_cost(candidates, cfg)
-    return build_result_from_trades(trades, cfg, timeframe), stats
+    trades = _sequence_and_cost(candidates, cfg, rates)
+    coverage = _check_funding_coverage(htf_df, rates, cfg)
+    result = build_result_from_trades(trades, cfg, timeframe, funding_coverage_value=coverage)
+    return result, stats
+
+
+def _check_funding_coverage(
+    htf_df: pd.DataFrame, rates: list[FundingRate], cfg: BacktestConfig
+) -> float | None:
+    """백테스트 구간의 펀딩 커버리지(WAN-63/WAN-95). 펀딩 미사용이면 None.
+
+    A안 엔진(`BacktestEngine._check_funding_coverage`)과 같은 규칙으로, 커버리지가
+    100% 미만이면 경고하고 정책이 `"error"`면 중단한다 — "net"이라 이름 붙은 성과가
+    실은 펀딩을 빠뜨린 값이라는 조용한 실패를 드러내기 위해서다.
+    """
+    if not cfg.funding_enabled:
+        return None
+    frame = _prepare_htf(htf_df)
+    if len(frame) == 0:
+        return 1.0
+    times = [int(t) for t in frame["open_time"].astype("int64").tolist()]
+    coverage = funding_coverage(
+        rates, times[0], times[-1], include_predicted=cfg.funding_include_predicted
+    )
+    if coverage < 1.0:
+        logger.warning(
+            "펀딩 데이터 커버리지 %.1f%% (<100%%) — 결측 구간 펀딩비를 0으로 처리합니다. "
+            "비용이 과소 계상되어 성과가 부풀려질 수 있습니다. 구간=[%d, %d)",
+            coverage * 100.0,
+            times[0],
+            times[-1],
+        )
+        if cfg.funding_missing_policy == "error":
+            raise ValueError(
+                "funding_missing_policy='error'인데 펀딩 데이터 커버리지가 "
+                f"{coverage:.1%}로 100% 미만입니다. 백테스트 구간 전체의 펀딩 이력을 "
+                "백필하거나 정책을 'zero'로 두세요."
+            )
+    return coverage
 
 
 def build_zone_limit_candidates(
@@ -457,12 +517,17 @@ class _IncrementalRsiSeeder:
         return copy.copy(self._state)
 
 
-def _sequence_and_cost(candidates: list[_Candidate], cfg: BacktestConfig) -> list[Trade]:
+def _sequence_and_cost(
+    candidates: list[_Candidate],
+    cfg: BacktestConfig,
+    funding_rates: Sequence[FundingRate] | None = None,
+) -> list[Trade]:
     """동시 1포지션 제약으로 셋업을 시간순 배치하고 비용 모델로 `Trade`를 만든다.
 
     진입 시각 오름차순으로 훑으며, 직전 포지션의 청산 시각 이후에 진입하는 셋업만
     채택한다(겹치면 스킵 — WAN-23의 단일 포지션 규칙). 사이징 자본은 A안 엔진과
-    동일하게 진행 중 현금을 쓴다.
+    동일하게 진행 중 현금을 쓴다. `funding_rates`를 주면 보유 구간 펀딩비를 A안
+    엔진과 같은 산식으로 손익에서 차감한다(WAN-95).
     """
     ordered = sorted(candidates, key=lambda c: (c.entry_time, c.exit_time))
     cash = cfg.initial_capital
@@ -471,7 +536,7 @@ def _sequence_and_cost(candidates: list[_Candidate], cfg: BacktestConfig) -> lis
     for cand in ordered:
         if cand.entry_time < busy_until:
             continue
-        trade = _to_trade(cand, cash, cfg)
+        trade = _to_trade(cand, cash, cfg, funding_rates)
         if trade is None:
             continue
         cash += trade.realized_pnl
@@ -480,12 +545,21 @@ def _sequence_and_cost(candidates: list[_Candidate], cfg: BacktestConfig) -> lis
     return trades
 
 
-def _to_trade(cand: _Candidate, equity: float, cfg: BacktestConfig) -> Trade | None:
+def _to_trade(
+    cand: _Candidate,
+    equity: float,
+    cfg: BacktestConfig,
+    funding_rates: Sequence[FundingRate] | None = None,
+) -> Trade | None:
     """공용 비용 모델로 셋업을 `Trade`로 변환한다(WAN-37).
 
     B안은 **지정가(메이커) 진입**이므로 진입에는 슬리피지가 붙지 않고 메이커 수수료가
     적용된다. 청산은 손절·익절 도달 시 시장가 성격이라 테이커(수수료+슬리피지)로 본다.
     이 비대칭이 A안(시장가=테이커 진입)과의 공정한 비교의 핵심이다.
+
+    보유 구간 `[진입시각, 청산시각)`의 펀딩비는 A안 엔진(`BacktestEngine._funding_cost`)
+    과 동일하게 진입 명목가 기준으로 산출해 실현손익에서 뺀다(WAN-95). B안은 부분청산이
+    없어 구간 분할이 필요 없다.
     """
     side = cand.side
     is_long = side is PositionSide.LONG
@@ -508,7 +582,8 @@ def _to_trade(cand: _Candidate, equity: float, cfg: BacktestConfig) -> Trade | N
     exit_fill = costs.exit_fill(cand.exit_price, is_long=is_long, liquidity=Liquidity.TAKER)
     exit_fee = costs.fee(exit_fill * qty, Liquidity.TAKER)
     gross = side.sign * (exit_fill - entry_fill) * qty
-    realized = gross - entry_fee - exit_fee
+    funding_cost = _funding_cost_for(cand, entry_notional, cfg, funding_rates)
+    realized = gross - entry_fee - exit_fee - funding_cost
     return Trade(
         side=side,
         entry_time=cand.entry_time,
@@ -524,18 +599,46 @@ def _to_trade(cand: _Candidate, equity: float, cfg: BacktestConfig) -> Trade | N
                 reason=cand.reason,
             )
         ],
+        funding_cost=funding_cost,
         realized_pnl=realized,
         return_pct=realized / entry_notional if entry_notional else 0.0,
     )
 
 
+def _funding_cost_for(
+    cand: _Candidate,
+    entry_notional: float,
+    cfg: BacktestConfig,
+    funding_rates: Sequence[FundingRate] | None,
+) -> float:
+    """셋업 보유 구간의 누적 펀딩비용(양수=지불, 음수=수취). 미사용/무데이터면 0."""
+    if not cfg.funding_enabled or not funding_rates:
+        return 0.0
+    direction: Direction = "long" if cand.side is PositionSide.LONG else "short"
+    return cumulative_funding_cost(
+        funding_rates,
+        position_notional=entry_notional,
+        direction=direction,
+        start_ms=cand.entry_time,
+        end_ms=cand.exit_time,
+        include_predicted=cfg.funding_include_predicted,
+    )
+
+
 def build_result_from_trades(
-    trades: list[Trade], cfg: BacktestConfig, timeframe: str
+    trades: list[Trade],
+    cfg: BacktestConfig,
+    timeframe: str,
+    *,
+    funding_coverage_value: float | None = None,
 ) -> BacktestResult:
     """시간순 `Trade` 리스트로 자본곡선·지표를 만들어 `BacktestResult`를 낸다.
 
     자본곡선은 각 거래의 청산 시각에 실현손익을 순차 반영한 점들로 구성한다(진입
     시작점 포함). MDD·샤프는 이 거래 단위 곡선에서 산출한다.
+
+    `funding_coverage_value`는 결과에 그대로 실어 "펀딩을 얼마나 반영했는지"가
+    리포트에 드러나게 한다(WAN-63/WAN-95).
     """
     equity = cfg.initial_capital
     curve: list[EquityPoint] = []
@@ -554,6 +657,7 @@ def build_result_from_trades(
         equities=[p.equity for p in curve] or [cfg.initial_capital],
         trades=ordered,
         annualization_factor=annualization,
+        funding_coverage=funding_coverage_value,
     )
     return BacktestResult(config=cfg, trades=ordered, equity_curve=curve, metrics=metrics)
 

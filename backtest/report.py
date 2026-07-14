@@ -14,6 +14,19 @@ from backtest.models import BacktestResult, PositionSide
 from strategy.models import ConfluenceParams, OrderBlockParams
 
 
+def _engine_labels(confluence: ConfluenceParams | None) -> tuple[str, str]:
+    """리포트에 실을 진입 방식·RSI 모드 라벨(WAN-95).
+
+    호출부가 파라미터를 주지 않으면 `"unknown"`이다 — 예전처럼 `ConfluenceParams()`
+    기본값으로 채우면, 채택 기본값이 바뀐 순간(WAN-95: close → zone_limit) **A안
+    엔진이 낸 결과에 "zone_limit" 라벨이 붙는다.** 리포트가 어느 엔진의 결과인지
+    모르면 "모른다"고 적어야지, 그럴듯한 기본값으로 지어내면 안 된다.
+    """
+    if confluence is None:
+        return "unknown", "unknown"
+    return confluence.entry_mode, confluence.rsi_mode
+
+
 def trades_to_dataframe(
     result: BacktestResult,
     *,
@@ -27,7 +40,7 @@ def trades_to_dataframe(
     있게 한다. 주지 않으면 각 파라미터의 기본값을 쓴다(호출부가 실제 값을 모르는
     저수준 호출 — 대부분의 실제 리포트 경로는 값을 명시적으로 넘긴다).
     """
-    conf = confluence or ConfluenceParams()
+    entry_mode, rsi_mode = _engine_labels(confluence)
     ob = order_block or OrderBlockParams()
     rows: list[dict[str, object]] = []
     for tr in result.trades:
@@ -45,8 +58,8 @@ def trades_to_dataframe(
                 "funding_cost": tr.funding_cost,
                 "realized_pnl": tr.realized_pnl,
                 "return_pct": tr.return_pct,
-                "entry_mode": conf.entry_mode,
-                "rsi_mode": conf.rsi_mode,
+                "entry_mode": entry_mode,
+                "rsi_mode": rsi_mode,
                 "combine_obs": ob.combine_obs,
                 "sizing_mode": result.config.sizing_mode,
                 "risk_per_trade": result.config.risk_per_trade,
@@ -97,13 +110,13 @@ def summary_dict(
     `confluence`/`order_block`을 주면 `entry_mode`/`rsi_mode`/`combine_obs`도 함께
     싣는다(WAN-65, `trades_to_dataframe` 참고).
     """
-    conf = confluence or ConfluenceParams()
+    entry_mode, rsi_mode = _engine_labels(confluence)
     ob = order_block or OrderBlockParams()
     m = result.metrics
     c = result.config
     return {
-        "entry_mode": conf.entry_mode,
-        "rsi_mode": conf.rsi_mode,
+        "entry_mode": entry_mode,
+        "rsi_mode": rsi_mode,
         "combine_obs": ob.combine_obs,
         "initial_capital": m.initial_capital,
         "final_equity": m.final_equity,
@@ -146,7 +159,7 @@ def format_summary(
     order_block: OrderBlockParams | None = None,
 ) -> str:
     """성과 지표를 정렬된 표 형태의 문자열로 반환."""
-    conf = confluence or ConfluenceParams()
+    entry_mode, rsi_mode = _engine_labels(confluence)
     ob = order_block or OrderBlockParams()
     m = result.metrics
     c = result.config
@@ -165,7 +178,7 @@ def format_summary(
         f"{'Funding Cost':<20}{_fmt(m.total_funding_cost):>16}",
         f"{'Funding Coverage':<20}{_fmt_coverage(m.funding_coverage):>16}",
         "--- Params ---",
-        f"entry_mode={conf.entry_mode} rsi_mode={conf.rsi_mode} combine_obs={ob.combine_obs}",
+        f"entry_mode={entry_mode} rsi_mode={rsi_mode} combine_obs={ob.combine_obs}",
         f"fee_rate={c.fee_rate} slippage={c.slippage} "
         f"position_fraction={c.position_fraction} seed={c.seed}",
         f"sizing_mode={c.sizing_mode} risk_per_trade={c.risk_per_trade}",

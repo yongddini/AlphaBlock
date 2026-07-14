@@ -40,7 +40,12 @@ from pydantic import BaseModel, ConfigDict
 
 from backtest.engine import run_backtest
 from backtest.models import BacktestConfig, BacktestMetrics
-from backtest.sweep import default_backtest_config, evaluate, timeframe_to_ms
+from backtest.sweep import (
+    CLOSE_ENTRY_DEFAULTS,
+    default_backtest_config,
+    evaluate,
+    timeframe_to_ms,
+)
 from backtest.zone_limit_backtest import run_zone_limit_backtest_verbose
 from strategy.confluence import (
     ConfluenceSignal,
@@ -461,7 +466,9 @@ def run_random_entry_control(
     속도를 위해 상위TF 확정봉 엔진(`backtest.sweep.evaluate`)을 쓴다 — B안의 1분봉
     서브스텝으로 `iterations`회 반복하면 비현실적으로 느리다(모듈 docstring 참고).
     """
-    params = confluence_params or ConfluenceParams()
+    # A안(확정봉 종가) 엔진 경로 — WAN-95로 저장소 기본값이 지정가로 바뀐 뒤에도
+    # 이 대조군은 속도 때문에 A안을 쓰므로 명시적으로 선언한다.
+    params = confluence_params or CLOSE_ENTRY_DEFAULTS
     cfg = backtest_config or default_backtest_config(timeframe)
     strategy = ConfluenceStrategy(params, order_block_params)
 

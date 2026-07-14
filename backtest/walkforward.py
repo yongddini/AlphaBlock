@@ -40,6 +40,7 @@ from pydantic import BaseModel, ConfigDict
 from backtest.engine import BacktestEngine
 from backtest.models import BacktestConfig
 from backtest.sweep import (
+    CLOSE_ENTRY_DEFAULTS,
     ParamGrid,
     SweepPoint,
     apply_sweep_point,
@@ -313,7 +314,7 @@ def run_walk_forward(
     )
 
     grid = grid or ParamGrid()
-    base_conf = base_confluence or ConfluenceParams()
+    base_conf = base_confluence or CLOSE_ENTRY_DEFAULTS
     base_bt = base_backtest or default_backtest_config(timeframe)
 
     open_times = frame["open_time"].astype("int64") if len(frame) else None

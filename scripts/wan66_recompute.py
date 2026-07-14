@@ -37,10 +37,17 @@ from strategy.models import (
 )
 from strategy.order_blocks import OrderBlockDetector
 
+# WAN-66 재산출은 A안(종가 진입) 리포트다 — WAN-95로 저장소 기본값이 지정가로 바뀐 뒤에도
+# 당시 엔진을 명시적으로 고정해 수치를 재현한다.
 # BEFORE: 버그 상태 — 표시선 5개 EMA를 전부 익절 후보로(WAN-66 이전 기본값).
-_BEFORE = ConfluenceParams(tp_ema_lengths=DEFAULT_CONFLUENCE_EMA_LENGTHS, tp_vwma_length=100)
+_BEFORE = ConfluenceParams(
+    tp_ema_lengths=DEFAULT_CONFLUENCE_EMA_LENGTHS,
+    tp_vwma_length=100,
+    entry_mode="close",
+    rsi_mode="closed_bar",
+)
 # AFTER: 사용자 확정 규칙 — EMA 60 + VWMA 100 (WAN-66 이후 기본값).
-_AFTER = ConfluenceParams()
+_AFTER = ConfluenceParams(entry_mode="close", rsi_mode="closed_bar")
 
 
 def _load_funding(symbol: str, db_path: str) -> list[FundingRate]:

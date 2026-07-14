@@ -27,12 +27,11 @@ from pathlib import Path
 
 import pandas as pd
 
-from backtest.sweep import ParamGrid, default_backtest_config
+from backtest.sweep import CLOSE_ENTRY_DEFAULTS, ParamGrid, default_backtest_config
 from backtest.synthetic import make_synthetic_ohlcv
 from backtest.walkforward import WalkForwardReport, run_walk_forward, write_walk_forward_csv
 from config.settings import get_settings
 from data.storage import OhlcvStore
-from strategy.models import ConfluenceParams
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -132,7 +131,8 @@ def _report_combo(
     seed: int,
 ) -> WalkForwardReport:
     """한 (심볼, 타임프레임)에 대해 워크포워드를 실행하고 비교표를 저장한다."""
-    base_confluence = ConfluenceParams()
+    # A안(종가 진입) 전용 경로임을 명시(WAN-95).
+    base_confluence = CLOSE_ENTRY_DEFAULTS
     base_backtest = default_backtest_config(timeframe, seed=seed)
 
     report = run_walk_forward(

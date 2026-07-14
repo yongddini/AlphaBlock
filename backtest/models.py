@@ -50,11 +50,18 @@ class BacktestConfig(BaseModel):
     initial_capital: float = Field(default=10_000.0, gt=0)
     fee_rate: float = Field(default=0.0004, ge=0)
     """테이커(시장가) 체결 노셔널 대비 수수료율. 예: 0.0004 = 0.04%."""
-    maker_fee_rate: float | None = Field(default=None, ge=0)
-    """메이커(지정가) 수수료율(WAN-37). None이면 `fee_rate`(테이커)와 동일하게 본다.
+    maker_fee_rate: float | None = Field(default=0.0002, ge=0)
+    """메이커(지정가) 수수료율. **기본 0.0002(2bp, WAN-95)**. None이면 `fee_rate`
+    (테이커)와 동일하게 본다.
 
     지정가 진입(B안, `entry_liquidity=maker`)에 이 요율이 적용된다. 청산은 손절·익절
     도달 시 시장가 성격이라 항상 테이커(`fee_rate`)로 본다.
+
+    WAN-95 이전 기본값은 `None`이라 **지정가 진입에도 테이커 4bp가 붙었다** — 채택
+    기본값이 지정가(B안)로 바뀐 이상 이 폴백은 실제보다 비용을 2bp 과대 계상한다.
+    2bp는 `common.costs.CostModel.maker_fee_rate`의 기존 기본값과 같은 값으로 맞춘
+    것이다(두 곳이 서로 다른 상수를 들면 패리티 비교가 무의미해진다 — WAN-37).
+    테이커 4bp→5bp 등 비용 가정 현실화는 WAN-92 범위이므로 여기서 건드리지 않는다.
     """
     slippage: float = Field(default=0.0005, ge=0)
     """테이커 체결가에 불리하게 적용되는 슬리피지 분수. 예: 0.0005 = 0.05%.

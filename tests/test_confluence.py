@@ -616,11 +616,17 @@ def test_planned_exit_model_roundtrip() -> None:
 # --------------------------------------------------- WAN-41 진입 방식 전환 설정
 
 
-def test_entry_mode_defaults_preserve_variant_a() -> None:
-    """새 설정의 기본값은 현행(A안)을 보존한다: 종가 진입 + 확정봉 RSI."""
+def test_entry_mode_defaults_are_zone_limit_realtime() -> None:
+    """WAN-95 드리프트 가드: 채택 기본값은 지정가 진입 + 실시간 RSI다.
+
+    사용자의 실매매는 "존에 지정가를 걸어두고 닿는 순간 체결"이다. 기본값이 종가
+    진입(`close`)으로 되돌아가면 백테스트가 다시 **사용자가 하지 않는 매매**의 손익을
+    내므로, 그 회귀를 여기서 잡는다. `realtime` RSI는 한 세트다 — 지정가는 봉 중간에
+    체결되므로 확정봉 RSI로 판정하면 체결 시점과 판정 시점이 어긋난다.
+    """
     params = ConfluenceParams()
-    assert params.entry_mode == "close"
-    assert params.rsi_mode == "closed_bar"
+    assert params.entry_mode == "zone_limit"
+    assert params.rsi_mode == "realtime"
     assert params.zone_limit_ref == "proximal"
     assert params.limit_valid_bars == 24
     assert params.cancel_limit_on_condition_fail is False

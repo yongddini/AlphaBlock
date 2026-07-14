@@ -230,21 +230,22 @@ def test_sweep_row_reports_entry_mode_rsi_mode_combine_obs() -> None:
     (WAN-47/56/59/63과 동일 패턴)를 막는다.
     """
     df = make_synthetic_ohlcv(bars=200, seed=3)
-    zone_limit_conf = ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime")
     no_merge_ob = OrderBlockParams(combine_obs=False)
     report = run_sweep(
         df,
         symbol="X",
         timeframe="1h",
-        base_confluence=zone_limit_conf,
         order_block_params=no_merge_ob,
     )
     frame = report.to_dataframe()
     for col in ("entry_mode", "rsi_mode", "combine_obs", "funding_coverage"):
         assert col in frame.columns
     for row in report.rows:
-        assert row.entry_mode == "zone_limit"
-        assert row.rsi_mode == "realtime"
+        # WAN-95: 스윕은 A안(종가 진입) 엔진이므로 라벨도 A안이어야 한다. 예전에는
+        # base_confluence로 zone_limit을 넘기면 종가 진입으로 돌린 결과에 "zone_limit"
+        # 라벨만 붙었다 — 이제 그 조합은 evaluate()가 거부한다.
+        assert row.entry_mode == "close"
+        assert row.rsi_mode == "closed_bar"
         assert row.combine_obs is False
         # WAN-91: default_backtest_config가 funding_enabled=True를 기본으로 실은 뒤로는,
         # funding_rates를 안 넘겨도 "펀딩 미사용"이 아니라 "커버리지 0%"로 명시적으로
@@ -312,6 +313,8 @@ def test_evaluate_executes_trade_with_injected_order_block() -> None:
     )
     ob_result = OrderBlockResult(order_blocks=[ob], signals=[signal])
     params = ConfluenceParams(
+        entry_mode="close",  # A안(evaluate) 전용 경로 — WAN-95 기본값은 zone_limit.
+        rsi_mode="closed_bar",
         rsi_overbought=50.0,
         rsi_oversold=30.0,
         short_enabled=True,
@@ -359,6 +362,8 @@ def _forced_short_setup() -> tuple[pd.DataFrame, OrderBlockResult, ConfluencePar
     )
     ob_result = OrderBlockResult(order_blocks=[ob], signals=[signal])
     params = ConfluenceParams(
+        entry_mode="close",  # A안(evaluate) 전용 경로 — WAN-95 기본값은 zone_limit.
+        rsi_mode="closed_bar",
         rsi_overbought=50.0,
         rsi_oversold=30.0,
         short_enabled=True,

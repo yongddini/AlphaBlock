@@ -162,8 +162,15 @@ def _windowed_result(
     timeframe: str,
     start: int,
     end: int,
+    *,
+    funding_coverage: float | None = None,
 ) -> BacktestResult:
-    """A안 엔진 거래를 창으로 한정해 B안과 동일한 방식으로 재집계한 결과."""
+    """A안 엔진 거래를 창으로 한정해 B안과 동일한 방식으로 재집계한 결과.
+
+    `funding_coverage`는 원본 결과(`evaluate`)의 값을 그대로 물려준다 — 창으로 자르는
+    건 거래 집계일 뿐 펀딩 데이터 커버리지를 바꾸지 않는데, 넘기지 않으면 재집계 과정에서
+    커버리지가 `None`으로 사라져 "펀딩을 반영했는지" 알 수 없게 된다(WAN-95).
+    """
     in_window = _trades_in_window(trades, start, end)
     if not in_window:
         metrics = build_metrics(
@@ -171,9 +178,12 @@ def _windowed_result(
             equities=[cfg.initial_capital],
             trades=[],
             annualization_factor=bars_per_year(timeframe),
+            funding_coverage=funding_coverage,
         )
         return BacktestResult(config=cfg, trades=[], equity_curve=[], metrics=metrics)
-    return build_result_from_trades(in_window, cfg, timeframe)
+    return build_result_from_trades(
+        in_window, cfg, timeframe, funding_coverage_value=funding_coverage
+    )
 
 
 def build_ab_csv(
