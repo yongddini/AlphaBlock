@@ -12,6 +12,12 @@
 ```
 python -m backtest.run --symbol BTCUSDT,ETHUSDT,SOLUSDT --tf 1h --fill pen_5bp --format csv
 ```
+
+⚠️ skip 판정은 **파일 존재가 아니라 실제 데이터 유무**로 한다. `data/ohlcv.db` 파일이
+있다고 봉이 들어 있는 건 아니다 — `OhlcvStore.__init__`이 `sqlite3.connect`로 빈 DB를
+스키마만 만들어 놓고, 실제로 `dashboard.app` 임포트(= `tests/test_dashboard_app.py`
+수집)만으로도 그 빈 파일이 생긴다. 그 모듈이 이 모듈보다 알파벳순으로 앞이라, 파일
+존재로 판정하면 CI에서 skip이 안 걸리고 "0행" 실패가 난다.
 """
 
 from __future__ import annotations
@@ -21,27 +27,36 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from backtest.harness import RunRow
+from backtest.harness import RunRow, load_market_data
 from backtest.run import RunOptions, build_parser, grid_from_args, run_grid
 
-_DB_PATH = Path("data/ohlcv.db")
 _WAN95_CSV = Path("backtest/reports/wan95_zone_limit_recompute.csv")
 _WAN99_CSV = Path("backtest/reports/wan99_zone_limit_offset.csv")
 
 #: 대조 심볼·TF. 1분봉 로딩이 실행 시간을 지배하므로 1셀로 좁힌다.
 _SYMBOL = "BTC/USDT:USDT"
 _TIMEFRAME = "1h"
+_YEARS = 3.0
 
-pytestmark = pytest.mark.skipif(
-    not _DB_PATH.exists(),
-    reason=f"실데이터({_DB_PATH})가 없어 회귀 대조를 건너뜁니다(CI 기본).",
-)
+
+@pytest.fixture(autouse=True)
+def _require_real_data() -> None:
+    """대조 심볼의 봉이 실제로 있을 때만 돈다(없으면 skip).
+
+    1분봉은 읽지 않는다 — 존재 확인에 수백 MB를 읽을 이유가 없다.
+    """
+    market = load_market_data(_SYMBOL, _TIMEFRAME, years=_YEARS, need_1m=False, funding=False)
+    if market.empty:
+        pytest.skip(f"{_SYMBOL} {_TIMEFRAME} 실데이터가 없어 회귀 대조를 건너뜁니다(CI 기본).")
 
 
 def _run(argv: list[str]) -> RunRow:
-    """CLI 인자로 한 셀을 돌려 그 행을 낸다."""
+    """CLI 인자로 한 셀을 돌려 그 행을 낸다.
+
+    데이터 유무는 픽스처가 이미 확인했으므로, 여기서 0행이 나오면 그건 진짜 배선 버그다.
+    """
     grid = grid_from_args(build_parser().parse_args(argv))
-    rows = run_grid(grid, RunOptions(years=3.0), log=False)
+    rows = run_grid(grid, RunOptions(years=_YEARS), log=False)
     assert len(rows) == 1, f"대조는 한 셀이어야 합니다: {len(rows)}행"
     return rows[0]
 
