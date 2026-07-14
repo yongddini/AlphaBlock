@@ -246,7 +246,7 @@ def run_signal_runner(
         runner = SignalRunner(
             store=store,
             strategy=ConfluenceStrategy(settings.confluence),
-            notifier=Notifier(telegram, executor=executor),
+            notifier=Notifier(telegram, executor=executor, confluence_params=settings.confluence),
             state=WatermarkStore(settings.live_signal_state_path),
             series=series,
             lookback_bars=settings.live_signal_lookback_bars,
