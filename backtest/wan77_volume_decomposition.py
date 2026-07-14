@@ -112,8 +112,9 @@ SENSITIVITY_FLOORS: tuple[float, ...] = (0.0, 0.005, 0.01)
 
 #: 채택 전략(B안): 존-지정가 + 실시간 RSI. WAN-70/75/76과 동일 정의.
 B_ENGINE_PARAMS = ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime")
-#: A안 교차검증: 확정봉 종가 + closed_bar RSI(전부 기본값).
-A_ENGINE_PARAMS = ConfluenceParams()
+#: A안 교차검증: 확정봉 종가 + closed_bar RSI. WAN-95로 저장소 기본값이 B안(지정가)로
+#: 바뀐 뒤로는 기본값이 아니라 **명시 고정**이다.
+A_ENGINE_PARAMS = ConfluenceParams(entry_mode="close", rsi_mode="closed_bar")
 
 _BOOTSTRAP_ITERATIONS = 100
 

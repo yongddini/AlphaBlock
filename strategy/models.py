@@ -485,18 +485,32 @@ class ConfluenceParams(BaseModel):
     """동일 봉에서 손절·익절 동시 충족 시 손절 우선(보수적)."""
 
     # --- 진입 방식 전환 (WAN-41) ---
-    entry_mode: Literal["close", "zone_limit"] = "close"
-    """진입 방식. **기본 `close`(A안, 현행 보존)**: 탭 봉 종가에 시장가 진입.
+    entry_mode: Literal["close", "zone_limit"] = "zone_limit"
+    """진입 방식. **기본 `zone_limit`(B안, WAN-95 채택)**: 활성 오더블록 존 근단
+    (proximal)에 지정가를 걸어 두고 가격이 닿는 순간 체결한다(`backtest.substep`가
+    1분봉 서브스텝으로 시뮬레이션). 사용자의 실제 매매(존에 지정가를 걸어두고 닿는
+    순간 체결)를 재현한다 — WAN-95 이전 기본값이던 `close`(탭 봉 종가 시장가 진입)는
+    사용자가 하지 않는 매매였고, 그 손익표는 전부 무효다.
 
-    `zone_limit`(B안): 활성 오더블록 존 근단(proximal)에 지정가를 걸어 두고 가격이
-    닿는 순간 체결한다(`backtest.substep`가 1분봉 서브스텝으로 시뮬레이션). 실제
-    트레이딩뷰 매매(존에 닿는 순간 진입)를 재현한다.
+    `close`(A안): 탭 봉 종가에 시장가 진입. 1분봉이 없어 지정가 체결을 시뮬레이션할 수
+    없는 경로(대시보드·스윕 등)가 명시적으로 선택할 때만 쓴다.
+
+    ⚠️ **이 필드는 라벨이 아니라 스위치다**(WAN-95). `close`는 A안 경로
+    (`backtest.sweep.evaluate` → `BacktestEngine`), `zone_limit`은 B안 경로
+    (`backtest.zone_limit_backtest.run_zone_limit_backtest`)에서만 유효하며, 각
+    진입점이 불일치를 `ValueError`로 거부한다. 예전에는 이 값이 리포트에 찍히는
+    라벨일 뿐이라 `zone_limit`으로 두고 A안 엔진을 돌려도 아무 소리 없이 "종가 진입
+    결과에 zone_limit 라벨"이 붙었다.
     """
-    rsi_mode: Literal["closed_bar", "realtime"] = "closed_bar"
-    """RSI 판정 기준. **기본 `closed_bar`(A안, 현행 보존)**: 확정봉 RSI로 판정.
+    rsi_mode: Literal["closed_bar", "realtime"] = "realtime"
+    """RSI 판정 기준. **기본 `realtime`(B안, WAN-95 채택)**: 체결 순간의 실시간(봉내)
+    RSI로 판정한다(`strategy.realtime_rsi`). 라이브·백테스트가 동일 상태 머신을 공유한다.
 
-    `realtime`(B안): 체결 순간의 실시간(봉내) RSI로 판정한다(`strategy.realtime_rsi`).
-    라이브·백테스트가 동일 상태 머신을 공유한다.
+    지정가는 봉 중간에 체결되므로 확정봉 RSI로 판정하면 **체결 시점과 판정 시점이
+    어긋난다** — `entry_mode="zone_limit"`과 한 세트로 묶어야 한다(WAN-41 B안 설계,
+    WAN-70/WAN-84 검정이 쓴 조합).
+
+    `closed_bar`(A안): 확정봉 RSI로 판정. `entry_mode="close"`와 짝이다.
     """
     zone_limit_ref: Literal["proximal", "mid", "distal"] = "proximal"
     """`entry_mode=zone_limit`일 때 지정가를 걸 존 내 기준선.

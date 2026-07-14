@@ -71,7 +71,9 @@ def test_run_pipeline_shares_cli_evaluate_path() -> None:
     """
     df = _synth_df()
     ob_params = OrderBlockParams()
-    conf_params = ConfluenceParams()
+    # 대시보드/CLI(evaluate)는 A안(종가 진입) 경로 — WAN-95 기본값은 zone_limit이라
+    # 명시적으로 A안을 선언해야 한다.
+    conf_params = ConfluenceParams(entry_mode="close", rsi_mode="closed_bar")
     bt_config = default_backtest_config(_SYNTH_TF)
 
     result = run_pipeline(df, ob_params, conf_params, bt_config)
@@ -155,7 +157,9 @@ def test_confluence_path_fixes_raw_signal_pathology() -> None:
 def test_run_pipeline_forwards_custom_configs() -> None:
     """사용자 지정 컨플루언스·백테스트 설정이 그대로 전달된다."""
     df = _make_df(_BARS)
-    conf_params = ConfluenceParams(rsi_overbought=60.0, rsi_oversold=40.0)
+    conf_params = ConfluenceParams(
+        rsi_overbought=60.0, rsi_oversold=40.0, entry_mode="close", rsi_mode="closed_bar"
+    )
     config = BacktestConfig(initial_capital=5_000.0)
 
     result = run_pipeline(df, confluence_params=conf_params, backtest_config=config)

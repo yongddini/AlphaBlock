@@ -441,7 +441,10 @@ def run_a_engine_crosscheck(
     ob_result = OrderBlockDetector().run(htf_df)
     rows: list[AEngineRow] = []
     for variant, filter_params in REAL_VARIANTS.items():
-        params = ConfluenceParams(deviation_filter=filter_params)
+        # A안(종가 진입) 교차검증 경로임을 명시(WAN-95).
+        params = ConfluenceParams(
+            deviation_filter=filter_params, entry_mode="close", rsi_mode="closed_bar"
+        )
         result = evaluate(
             htf_df, confluence_params=params, backtest_config=cfg, order_block_result=ob_result
         )

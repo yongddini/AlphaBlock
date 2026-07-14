@@ -38,6 +38,7 @@ from backtest.report import (
     write_trades_csv,
 )
 from backtest.sweep import (
+    CLOSE_ENTRY_DEFAULTS,
     MultiSweepReport,
     ParamGrid,
     SweepPoint,
@@ -243,7 +244,9 @@ def _report_combo(
     없으므로 호출부에서 `funding_enabled=False`로 넘긴다.
     """
     grid = ParamGrid()
-    base_confluence = ConfluenceParams()
+    # A안(종가 진입) 전용 CLI 경로 — 채택 기본값(지정가)은 1분봉이 필요해 여기서 돌릴 수
+    # 없다. 자기가 A안임을 명시적으로 선언한다(WAN-95).
+    base_confluence = CLOSE_ENTRY_DEFAULTS
     base_backtest = _funding_config(
         timeframe,
         seed=seed,

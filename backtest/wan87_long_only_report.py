@@ -35,11 +35,16 @@ from data.storage import OhlcvStore
 from strategy.models import ConfluenceParams
 from strategy.order_blocks import OrderBlockDetector
 
-#: WAN-87 기본값(현재) — 롱 온리. `ConfluenceParams()`의 기본값 자체와 같다.
-SHORT_DISABLED_PARAMS = ConfluenceParams()
+#: WAN-87 롱 온리 프리셋. **A안(종가 진입) 고정** — 이 리포트는 WAN-95(지정가 채택)
+#: 이전에 산출됐으므로, 재현 시에도 당시 엔진(`entry_mode="close"`)을 명시적으로
+#: 고정한다. WAN-95 이후 `ConfluenceParams()` 기본값은 `zone_limit`이라 이 값과 다르다
+#: — 즉 이 리포트의 수치는 더 이상 "채택 기본값 성과"가 아니다.
+SHORT_DISABLED_PARAMS = ConfluenceParams(entry_mode="close", rsi_mode="closed_bar")
 
 #: WAN-81/WAN-84가 검증했던 이전 기본값 — 숏 활성화. 비교 기준선으로 명시 고정한다.
-SHORT_ENABLED_PARAMS = ConfluenceParams(short_enabled=True)
+SHORT_ENABLED_PARAMS = ConfluenceParams(
+    short_enabled=True, entry_mode="close", rsi_mode="closed_bar"
+)
 
 ENGINE_PRESETS: dict[str, ConfluenceParams] = {
     "long_only": SHORT_DISABLED_PARAMS,

@@ -133,6 +133,40 @@ def default_backtest_config(
 # --------------------------------------------------------------------------- #
 
 
+#: A안(종가 진입) 전용 도구의 기본 파라미터(WAN-95).
+#:
+#: 채택 기본값(`ConfluenceParams()`)은 지정가 진입(`entry_mode="zone_limit"`)이지만,
+#: 지정가 체결은 1분봉 서브스텝이 필요해 A안 엔진(`evaluate` → `BacktestEngine`)이
+#: 시뮬레이션할 수 없다. 그래서 A안 전용 도구(스윕·워크포워드·CLI 리포트)는 파라미터를
+#: 명시적으로 받지 않았을 때 이 상수를 기본으로 삼아 **자기가 A안이라는 사실을 선언**한다.
+#: 호출부가 `zone_limit` 파라미터를 명시적으로 넘기면 `evaluate()`가 거부한다 —
+#: 조용히 종가 진입으로 되돌리지 않는다.
+CLOSE_ENTRY_DEFAULTS = ConfluenceParams(entry_mode="close", rsi_mode="closed_bar")
+
+
+def _require_close_entry(confluence_params: ConfluenceParams | None) -> None:
+    """A안(종가 진입) 경로에 지정가 파라미터가 들어오면 거부한다(WAN-95).
+
+    `entry_mode`는 리포트 라벨이 아니라 **경로 스위치**다. 이 검사가 없으면
+    `entry_mode="zone_limit"`(WAN-95 기본값)을 준 호출부가 종가 진입 엔진을 돌리고도
+    "지정가 결과"라는 라벨이 붙은 리포트를 받는다 — `funding_enabled`만 켜고 펀딩을
+    안 넘기던 조용한 실패(WAN-91)와 같은 종류의 버그다.
+
+    `None`(파라미터 미지정)은 "A안 기본값(`CLOSE_ENTRY_DEFAULTS`)에 맡긴다"는 뜻이라
+    통과시킨다 — 어긋난 주장이 없으므로 라벨이 거짓말을 할 여지가 없다.
+    """
+    if confluence_params is None:
+        return
+    params = confluence_params
+    if params.entry_mode != "close":
+        raise ValueError(
+            f'evaluate()는 종가 진입(A안) 전용인데 entry_mode="{params.entry_mode}"가 '
+            "들어왔습니다. 지정가 진입은 1분봉 서브스텝이 필요하므로 "
+            "backtest.zone_limit_backtest.run_zone_limit_backtest()를 쓰세요. "
+            '이 경로를 의도했다면 entry_mode="close"를 명시하세요(WAN-95).'
+        )
+
+
 def evaluate(
     df: pd.DataFrame,
     *,
@@ -156,8 +190,16 @@ def evaluate(
     `funding_rates`(WAN-20)를 주고 `backtest_config.funding_enabled=True`이면 엔진이
     보유 구간의 펀딩비를 손익에 반영한다. 그래야 스윕/워크포워드의 파라미터 선택과
     성과 평가가 실거래(WAN-9) 손익 모델(수수료·슬리피지·펀딩비)과 일관된다.
+
+    ⚠️ 이 경로는 **종가 진입(A안) 전용**이다. `confluence_params.entry_mode`가
+    `"zone_limit"`이면(WAN-95 이후 **기본값**) `ValueError`로 거부한다 — 지정가 체결은
+    1분봉 서브스텝이 필요해 이 엔진이 시뮬레이션할 수 없기 때문이다. 거부하지 않으면
+    종가 진입으로 돌린 결과에 `entry_mode=zone_limit` 라벨만 붙어 리포트가 조용히
+    거짓말을 한다(WAN-95). 지정가 백테스트는
+    `backtest.zone_limit_backtest.run_zone_limit_backtest`를 쓴다.
     """
-    strategy = ConfluenceStrategy(confluence_params, order_block_params)
+    _require_close_entry(confluence_params)
+    strategy = ConfluenceStrategy(confluence_params or CLOSE_ENTRY_DEFAULTS, order_block_params)
     confluence = strategy.run(df, order_block_result)
     engine = BacktestEngine(backtest_config)
     return engine.run(df, confluence.order_block_signals, funding_rates)
@@ -392,7 +434,7 @@ def run_sweep(
         raise ValueError(f"sort_by는 {_SORTABLE_METRICS} 중 하나여야 합니다: {sort_by!r}")
 
     grid = grid or ParamGrid()
-    base_conf = base_confluence or ConfluenceParams()
+    base_conf = base_confluence or CLOSE_ENTRY_DEFAULTS
     base_bt = base_backtest or default_backtest_config(timeframe)
 
     num_bars = len(df)

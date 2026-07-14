@@ -308,7 +308,12 @@ def _render_analysis(settings: Settings) -> None:
         return
 
     ob_params = OrderBlockParams()
-    conf_params = ConfluenceParams()
+    # 대시보드는 상위TF OHLCV만 로드하므로 지정가 체결(채택 기본값 `zone_limit`)에
+    # 필요한 1분봉 서브스텝을 돌릴 수 없다 → **종가 진입(A안)으로 명시적으로 내린다**
+    # (WAN-95). 이 차트/성과는 사용자의 실매매(존 지정가)가 아니라 근사치이며, 화면
+    # 배지가 "A안(봉 마감 종가)"로 그 사실을 항상 드러낸다. 대시보드를 채택 기본값과
+    # 일치시키려면 1분봉 로딩 + `run_zone_limit_backtest` 배선이 필요하다(WAN-45 계열).
+    conf_params = ConfluenceParams(entry_mode="close", rsi_mode="closed_bar")
     # CLI 리포트와 동일한 설정 소스(`default_backtest_config`)에서 백테스트 설정을
     # 가져온다 — 대시보드와 CLI가 서로 다른 설정을 들고 갈라지지 않게 한다(WAN-59).
     bt_config = default_backtest_config(timeframe)

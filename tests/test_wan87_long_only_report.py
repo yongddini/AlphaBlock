@@ -22,12 +22,25 @@ from strategy.models import ConfluenceParams
 from strategy.order_blocks import OrderBlockDetector
 
 
-def test_short_disabled_params_matches_current_default() -> None:
-    """`SHORT_DISABLED_PARAMS`(현재 WAN-87 기본값)는 `ConfluenceParams()` 기본값과
-    완전히 같아야 한다 — 롱 온리 전환이 다른 필드에 영향을 주지 않았음을 보장한다."""
+def test_short_disabled_params_pins_pre_wan95_close_entry_engine() -> None:
+    """`SHORT_DISABLED_PARAMS`는 WAN-95 이전 A안(종가 진입) 엔진을 명시 고정한다.
+
+    WAN-95로 채택 기본값이 지정가(`zone_limit`)로 바뀌면서, 이 리포트의 수치는 더 이상
+    "채택 기본값 성과"가 아니다 — 종가 진입 기준의 **역사적 산출물**이다. 재현 가능하도록
+    당시 엔진을 고정하되, 진입 방식/RSI 모드를 뺀 나머지 전략 규칙은 현재 기본값과
+    같아야 한다(롱 온리 전환이 다른 필드를 건드리지 않았다는 원래 보장은 유지).
+    """
     defaults = ConfluenceParams()
-    assert defaults == SHORT_DISABLED_PARAMS
     assert SHORT_DISABLED_PARAMS.short_enabled is False
+    assert SHORT_DISABLED_PARAMS.entry_mode == "close"
+    assert SHORT_DISABLED_PARAMS.rsi_mode == "closed_bar"
+    # 현재 기본값과 다른 필드는 진입 방식·RSI 모드 **둘뿐**이어야 한다.
+    assert (
+        defaults.model_copy(update={"entry_mode": "close", "rsi_mode": "closed_bar"})
+        == SHORT_DISABLED_PARAMS
+    )
+    # 그리고 그 두 필드 때문에 현재 기본값과는 확실히 다르다(= 채택 성과가 아니다).
+    assert defaults != SHORT_DISABLED_PARAMS
 
 
 def test_short_enabled_params_pins_true_independent_of_default() -> None:

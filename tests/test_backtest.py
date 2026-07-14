@@ -750,9 +750,12 @@ def test_reports_carry_entry_mode_rsi_mode_combine_obs() -> None:
     assert (trades_df["entry_mode"] == "zone_limit").all()
     assert (trades_df["combine_obs"] == False).all()  # noqa: E712
 
-    # 명시하지 않으면 기본값(A안·병합 ON)으로 채워지되 컬럼 자체는 항상 존재한다.
+    # WAN-95: 명시하지 않으면 "unknown"이다. 예전처럼 ConfluenceParams() 기본값으로
+    # 채우면 채택 기본값이 바뀐 순간(close → zone_limit) A안 결과에 zone_limit 라벨이
+    # 붙는다 — 모르면 모른다고 적는다. 컬럼 자체는 항상 존재한다.
     default_summary = summary_dict(result)
-    assert default_summary["entry_mode"] == "close"
+    assert default_summary["entry_mode"] == "unknown"
+    assert default_summary["rsi_mode"] == "unknown"
     assert default_summary["combine_obs"] is True
 
 
