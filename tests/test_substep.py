@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Literal
 
 import pandas as pd
+import pytest
 
 from backtest.substep import (
     SubStep,
@@ -51,6 +52,7 @@ def _simulate_long(
     take_profit_price: float | None = _TP,
     rsi_gate_mode: Literal["extreme", "neutral", "none"] = "extreme",
     rsi_neutral_band: tuple[float, float] = (40.0, 60.0),
+    penetration_bps: float = 0.0,
 ) -> ZoneLimitOutcome:
     return simulate_zone_limit_trade(
         direction=OrderBlockDirection.BULLISH,
@@ -66,6 +68,7 @@ def _simulate_long(
         cancel_on_condition_fail=cancel_on_condition_fail,
         rsi_gate_mode=rsi_gate_mode,
         rsi_neutral_band=rsi_neutral_band,
+        penetration_bps=penetration_bps,
     )
 
 
@@ -192,6 +195,76 @@ def test_short_fill_then_take_profit() -> None:
     assert out.status is ZoneLimitStatus.FILLED_EXITED
     assert out.entry_price == 100.0
     assert out.exit_reason is SignalExitReason.TAKE_PROFIT
+
+
+# ---------------------------------------------------- 관통 요구(WAN-96 체결 보수화)
+
+# 지정가 100 · 50bp(0.5%) 관통 요구 → 체결 문턱은 롱 99.5, 숏 100.5.
+_PENETRATION_BPS = 50.0
+
+
+def test_penetration_requirement_rejects_bare_touch() -> None:
+    """지정가에 '닿기만' 한 스텝은 관통 요구가 있으면 체결되지 않는다.
+
+    이 규칙이 WAN-96의 핵심이다 — 실거래에서는 큐 우선순위 때문에 가격이 스치듯 찍고
+    되돌아가면 체결되지 않는데, 기본 시뮬레이터는 이를 체결로 본다.
+    """
+    steps = [
+        # low=99.8은 지정가 100을 지나쳤지만 문턱 99.5까지는 못 갔다.
+        _step(0, high=101, low=99.8, close=99.9),
+    ]
+    out = _simulate_long(steps, penetration_bps=_PENETRATION_BPS, take_profit_price=None)
+    assert out.status is ZoneLimitStatus.NO_TOUCH
+    # 같은 스텝이 기본(터치 체결)에서는 체결된다 — 차이를 만드는 건 관통 요구뿐이다.
+    assert _simulate_long(steps, take_profit_price=None).filled
+
+
+def test_penetration_requirement_fills_when_price_goes_through() -> None:
+    """문턱을 넘어 관통한 스텝은 체결되며, 체결가는 여전히 지정가 그대로다."""
+    steps = [
+        _step(0, high=101, low=99.4, close=99.4),  # 99.4 <= 99.5 문턱
+        _step(60_000, high=111, low=100, close=110),
+    ]
+    out = _simulate_long(steps, penetration_bps=_PENETRATION_BPS)
+    assert out.status is ZoneLimitStatus.FILLED_EXITED
+    # 관통은 체결 여부의 대리 변수일 뿐 — 더 유리한 가격을 받는 게 아니다.
+    assert out.entry_price == _LIMIT
+    assert out.exit_reason is SignalExitReason.TAKE_PROFIT
+
+
+def test_penetration_zero_is_touch_fill_unchanged() -> None:
+    """기본값 0.0은 현행 '닿으면 체결'과 동일하다(WAN-95 결과 재현 보장)."""
+    steps = [
+        _step(0, high=101, low=100, close=100),  # 지정가에 정확히 닿기만 함
+        _step(60_000, high=111, low=100, close=110),
+    ]
+    assert _simulate_long(steps, penetration_bps=0.0) == _simulate_long(steps)
+
+
+def test_short_penetration_requires_price_above_limit() -> None:
+    """숏은 반대 방향으로 관통해야 한다(high >= 지정가×(1+bps))."""
+
+    def _short(high: float) -> ZoneLimitOutcome:
+        return simulate_zone_limit_trade(
+            direction=OrderBlockDirection.BEARISH,
+            limit_price=100.0,
+            stop_price=110.0,
+            substeps=[_step(0, high=high, low=99, close=99.5)],
+            rsi_state=RealtimeRsi.seed_from_closed([70.0, 80.0, 90.0, 100.0], length=3),
+            rsi_oversold=30.0,
+            rsi_overbought=70.0,
+            take_profit_price=None,
+            penetration_bps=_PENETRATION_BPS,
+        )
+
+    assert _short(100.2).status is ZoneLimitStatus.NO_TOUCH  # 터치했지만 문턱 100.5 미달
+    assert _short(100.6).filled  # 문턱 관통 → 체결
+
+
+def test_negative_penetration_bps_is_rejected() -> None:
+    """음수 관통 폭은 '지정가에 닿기 전에 체결'이라는 뜻이라 거부한다."""
+    with pytest.raises(ValueError, match="penetration_bps"):
+        _simulate_long([_step(0, high=101, low=99, close=99)], penetration_bps=-1.0)
 
 
 # ---------------------------------------------------- build_substeps

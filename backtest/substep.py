@@ -9,7 +9,9 @@
 
 1. 활성 오더블록 존 근단(proximal, `ConfluenceParams.zone_limit_price`)에 지정가를
    걸어 둔다. 각 1분 스텝에서 가격이 지정가에 **닿으면**(롱 `low <= 지정가`, 숏
-   `high >= 지정가`) 체결 후보가 된다.
+   `high >= 지정가`) 체결 후보가 된다. 이 "닿으면 체결"은 **낙관적 가정**이다 —
+   실거래에는 큐 우선순위가 있어 닿아도 체결되지 않을 수 있다. `penetration_bps`
+   (WAN-96)로 일정 폭 관통을 요구해 이 가정을 보수화할 수 있다(기본은 현행 유지).
 2. 체결 후보 스텝에서 **실시간 RSI**(`strategy.realtime_rsi`, 진행 중 상위TF 봉의
    임시 종가 = 그 1분봉 종가)를 계산해 조건을 판정한다 — 롱: `RSI <= rsi_oversold`,
    숏: `RSI >= rsi_overbought`. 충족하면 그 시점·지정가로 진입, 아니면 주문을
@@ -135,6 +137,7 @@ def simulate_zone_limit_trade(
     stop_before_tp: bool = True,
     rsi_gate_mode: RsiGateMode = "extreme",
     rsi_neutral_band: tuple[float, float] = (40.0, 60.0),
+    penetration_bps: float = 0.0,
 ) -> ZoneLimitOutcome:
     """한 오더블록 셋업의 존-지정가 진입·청산을 1분 서브스텝으로 시뮬레이션한다.
 
@@ -146,11 +149,20 @@ def simulate_zone_limit_trade(
     반환값은 체결·취소·청산 여부와 진입/청산 시각·가격·사유를 담는다. 수수료·슬리피지
     등 비용 모델은 이 시뮬레이터의 관심사가 아니며, 집계 계층에서 A·B 동일하게
     적용한다.
+
+    `penetration_bps`(WAN-96)를 0보다 크게 주면 가격이 지정가를 그만큼(bp) **관통해야**
+    체결로 인정한다 — 기본값 0.0은 현행 "닿으면 체결"이다. 체결가는 관통 여부와 무관하게
+    항상 `limit_price`다(관통은 체결 여부의 대리 변수일 뿐 더 유리한 체결가가 아니다).
     """
     if not substeps:
         return ZoneLimitOutcome(status=ZoneLimitStatus.NO_TOUCH)
+    if penetration_bps < 0.0:
+        raise ValueError(f"penetration_bps는 음수일 수 없습니다: {penetration_bps}")
 
     is_long = direction is OrderBlockDirection.BULLISH
+    # 관통 요구: 체결로 인정할 가격 문턱. 롱은 지정가 아래로, 숏은 위로 그만큼 지나가야 한다.
+    penetration = limit_price * (penetration_bps / 10_000.0)
+    fill_trigger = limit_price - penetration if is_long else limit_price + penetration
 
     current_htf = substeps[0].htf_bar_time
     htf_elapsed = 0  # 주문 이후 마감된 상위TF 봉 수
@@ -176,7 +188,7 @@ def simulate_zone_limit_trade(
             if limit_valid_bars is not None and htf_elapsed >= limit_valid_bars:
                 return ZoneLimitOutcome(status=ZoneLimitStatus.CANCELLED_EXPIRED)
 
-            touched = step.low <= limit_price if is_long else step.high >= limit_price
+            touched = step.low <= fill_trigger if is_long else step.high >= fill_trigger
             if touched:
                 live_rsi = rsi_state.value(step.close)
                 condition = live_rsi is not None and rsi_gate_passes(

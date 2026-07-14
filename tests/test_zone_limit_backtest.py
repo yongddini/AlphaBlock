@@ -16,6 +16,7 @@ from backtest.models import BacktestConfig, ExitReason, PositionSide, Trade
 from backtest.sweep import timeframe_to_ms
 from backtest.synthetic import make_synthetic_ohlcv
 from backtest.zone_limit_backtest import (
+    SetupDiagnostic,
     _Candidate,
     _IncrementalRsiSeeder,
     _line_snapshots,
@@ -119,6 +120,110 @@ def test_default_gates_off_preserve_zone_limit_behavior() -> None:
     )
     a = run_zone_limit_backtest(htf, one_min, "1h", confluence_params=default_params)
     b = run_zone_limit_backtest(htf, one_min, "1h", confluence_params=explicit_off)
+    assert [t.realized_pnl for t in a.trades] == [t.realized_pnl for t in b.trades]
+
+
+# ---------------------------------------------------- 체결 가정 보수화 (WAN-96)
+
+
+def _conservatism_params(**overrides: object) -> ConfluenceParams:
+    """보수화 테스트 기준 파라미터.
+
+    이 합성 시드는 숏 셋업만 내므로 숏을 켜고, 볼린저 필터는 작은 데이터셋에서 후보를
+    모두 걸러낼 수 있어 꺼 둔다 — 검증 대상은 **체결 가정**뿐이다.
+    """
+    base = ConfluenceParams(
+        entry_mode="zone_limit", rsi_mode="realtime", short_enabled=True, deviation_filter=None
+    )
+    return base.model_copy(update=overrides)
+
+
+def _fills(**overrides: object) -> tuple[int, list[float]]:
+    """(체결 수, 거래 손익 목록)."""
+    htf, one_min = _synthetic_pair()
+    result, stats = run_zone_limit_backtest_verbose(
+        htf, one_min, "1h", confluence_params=_conservatism_params(**overrides)
+    )
+    return stats.filled, [t.realized_pnl for t in result.trades]
+
+
+def test_conservatism_defaults_reproduce_baseline_exactly() -> None:
+    """기본값(관통 0 · 탈락 0)은 WAN-95 동작 그대로다 — 시드가 달라도 동일하다.
+
+    완료기준의 '기본값은 바꾸지 않는다'를 지키는 테스트다: 탈락률 0이면 난수를 아예
+    뽑지 않으므로 `fill_dropout_seed`는 결과에 영향이 없어야 한다.
+    """
+    baseline = _fills()
+    assert baseline == _fills(fill_penetration_bps=0.0, fill_dropout_rate=0.0)
+    assert baseline == _fills(fill_dropout_seed=12345)
+
+
+def test_penetration_requirement_never_increases_fills() -> None:
+    """관통 요구를 세게 걸수록 체결은 줄기만 한다(늘어날 수 없다)."""
+    baseline, _ = _fills()
+    assert baseline > 0  # 전제: 기본 가정에서는 체결이 있다
+    loose, _ = _fills(fill_penetration_bps=5.0)
+    strict, _ = _fills(fill_penetration_bps=200.0)
+    assert strict <= loose <= baseline
+
+
+def test_fill_dropout_removes_all_fills_at_rate_one() -> None:
+    """탈락률 100%면 체결이 0이 되고, 그만큼 `dropped`에 잡힌다."""
+    htf, one_min = _synthetic_pair()
+    result, stats = run_zone_limit_backtest_verbose(
+        htf, one_min, "1h", confluence_params=_conservatism_params(fill_dropout_rate=1.0)
+    )
+    assert stats.filled == 0
+    assert result.metrics.num_trades == 0
+    # 낙관 모델이 체결이라 본 건수가 전부 탈락으로 옮겨갔다.
+    assert stats.dropped == _fills()[0]
+    assert stats.eligible > 0  # 셋업 자체는 여전히 평가됐다
+
+
+def test_fill_dropout_is_deterministic_per_seed() -> None:
+    """같은 시드 → 같은 탈락 집합(재현 가능), 부분 탈락은 기본과 100% 사이에 놓인다."""
+    half_a = _fills(fill_dropout_rate=0.5, fill_dropout_seed=7)
+    half_b = _fills(fill_dropout_rate=0.5, fill_dropout_seed=7)
+    assert half_a == half_b
+    assert 0 <= half_a[0] <= _fills()[0]
+
+
+def test_fill_dropout_seed_changes_which_setups_drop() -> None:
+    """시드가 다르면 탈락 집합이 달라진다 — 결과 분포를 볼 수 있어야 하기 때문이다."""
+    seeds = {_fills(fill_dropout_rate=0.5, fill_dropout_seed=s)[0] for s in range(8)}
+    assert len(seeds) > 1
+
+
+def test_setup_sink_records_every_eligible_setup() -> None:
+    """진단 sink는 eligible 셋업을 빠짐없이 기록하고 통계와 정합적이다."""
+    htf, one_min = _synthetic_pair()
+    sink: list[SetupDiagnostic] = []
+    _, stats = run_zone_limit_backtest_verbose(
+        htf,
+        one_min,
+        "1h",
+        confluence_params=_conservatism_params(fill_dropout_rate=0.5, fill_dropout_seed=3),
+        setup_sink=sink,
+    )
+    assert len(sink) == stats.eligible
+    assert sum(1 for s in sink if s.filled) == stats.filled
+    assert sum(1 for s in sink if s.dropped) == stats.dropped
+    # 탈락한 셋업은 결코 체결로 잡히지 않는다(둘은 배타적이다).
+    assert not any(s.filled and s.dropped for s in sink)
+    # 미체결 셋업도 사후 비교가 가능하도록 원본 조건을 남긴다(체결 편향 진단의 전제).
+    unfilled = [s for s in sink if not s.filled]
+    assert unfilled and all(s.tap_close > 0 and s.stop_price > 0 for s in unfilled)
+
+
+def test_setup_sink_does_not_change_results() -> None:
+    """sink는 순수 진단이다 — 넘기든 말든 거래 결과가 같아야 한다."""
+    htf, one_min = _synthetic_pair()
+    params = _conservatism_params()
+    with_sink: list[SetupDiagnostic] = []
+    a, _ = run_zone_limit_backtest_verbose(
+        htf, one_min, "1h", confluence_params=params, setup_sink=with_sink
+    )
+    b, _ = run_zone_limit_backtest_verbose(htf, one_min, "1h", confluence_params=params)
     assert [t.realized_pnl for t in a.trades] == [t.realized_pnl for t in b.trades]
 
 
