@@ -59,6 +59,7 @@ from strategy.confluence import ConfluenceStrategy, entry_candidate_signals
 from strategy.indicators import emas, vwma
 from strategy.models import (
     ConfluenceParams,
+    OrderBlock,
     OrderBlockDirection,
     OrderBlockParams,
     OrderBlockResult,
@@ -97,6 +98,9 @@ class _Candidate:
     참이면 가격이 존 근단을 지나 손절선까지 관통한 봉에서 체결됐다는 뜻으로, "좋은
     진입가만 챙기고 손실은 피한" 결과가 아님을 드러낸다.
     """
+    order_block: OrderBlock | None = None
+    """이 셋업의 근거 오더블록(WAN-77). 체결·청산 로직에는 쓰이지 않고, 사후 분석
+    (예: `ob_volume` 기반 성과 분해)이 거래를 원본 존에 조인할 때만 참조한다."""
 
 
 @dataclass(frozen=True)
@@ -406,6 +410,7 @@ def build_zone_limit_candidates(
                 reason=reason,
                 stop_price=stop_price,
                 penetration=penetration,
+                order_block=ob,
             )
         )
 
