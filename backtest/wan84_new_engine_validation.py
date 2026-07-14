@@ -22,8 +22,11 @@
 
 WAN-70/71의 `GATE_PRESETS`("off"/"on")는 구 엔진 게이트(`min_rr`, `long_max_deviation`,
 `short_enabled=False`) 조합이라 신 엔진과 무관하다. 이 모듈은 게이트를 하나만 둔다:
-`NEW_ENGINE_PARAMS = ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime")` —
-나머지 필드는 전부 `ConfluenceParams()` 기본값이며, 이는 곧 WAN-81 신 엔진 기본값이다
+`NEW_ENGINE_PARAMS = ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime",
+short_enabled=True)` — `short_enabled`를 제외한 나머지 필드는 전부
+`ConfluenceParams()` 기본값이다. `short_enabled=True`는 WAN-87(WAN-86 결정 1) 이후
+기본값(`False`)과 달라졌으므로 이 리포트가 검증하는 "숏 활성화 신 엔진" 정의를
+보존하기 위해 명시적으로 고정한 값이다
 (`backtest.wan81_engine_replacement_report.NEW_ENGINE_PARAMS`와 동일한 정의 방식).
 
 ## 롱/숏 분해 (작업범위 4번째 항목)
@@ -96,10 +99,14 @@ _BOOTSTRAP_ITERATIONS = 200
 _YEAR_MS = int(365.25 * 24 * 60 * 60 * 1000)
 _DEFAULT_SEED = 84
 
-#: WAN-81 신 엔진 기본값(B안 배선). 다른 필드는 전부 `ConfluenceParams()` 기본값(=신
-#: 엔진: 볼린저 진입가, `retap_mode="every_tap"`, `rsi_gate_mode="first_tap_free"`,
-#: `take_profit_mode="fixed_r"`(1.5R), `short_enabled=True`).
-NEW_ENGINE_PARAMS = ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime")
+#: WAN-81 신 엔진 정의(B안 배선). 다른 필드는 `ConfluenceParams()` 기본값(볼린저
+#: 진입가, `retap_mode="every_tap"`, `rsi_gate_mode="first_tap_free"`,
+#: `take_profit_mode="fixed_r"`(1.5R))과 같지만, `short_enabled`만은 WAN-87(WAN-86
+#: 결정 1)로 기본값이 `False`로 바뀐 뒤에도 이 리포트가 검증하는 "숏 활성화 신
+#: 엔진" 정의를 보존하기 위해 명시적으로 `True`로 고정한다.
+NEW_ENGINE_PARAMS = ConfluenceParams(
+    entry_mode="zone_limit", rsi_mode="realtime", short_enabled=True
+)
 
 #: 매칭 널 게이트. 신 엔진 하나뿐이다(모듈 docstring "신 엔진 게이트 정의" 참고).
 GATES: dict[str, ConfluenceParams] = {"new_engine": NEW_ENGINE_PARAMS}

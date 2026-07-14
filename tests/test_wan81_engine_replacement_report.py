@@ -25,7 +25,9 @@ from strategy.order_blocks import OrderBlockDetector
 
 
 def test_engine_presets_match_expected_defaults() -> None:
-    """구 엔진 프리셋은 WAN-81 이전 기본값, 신 엔진 프리셋은 `ConfluenceParams()` 기본값이다."""
+    """구 엔진 프리셋은 WAN-81 이전 기본값. 신 엔진 프리셋은 `ConfluenceParams()`
+    기본값을 따르되, `short_enabled`만은 WAN-87(WAN-86 결정 1)로 기본값이 `False`가
+    된 뒤에도 "숏 활성화 신 엔진" 정의를 보존하기 위해 `True`로 명시 고정한다."""
     assert OLD_ENGINE_PARAMS.retap_mode == "once"
     assert OLD_ENGINE_PARAMS.rsi_gate_mode == "extreme"
     assert OLD_ENGINE_PARAMS.take_profit_mode == "line"
