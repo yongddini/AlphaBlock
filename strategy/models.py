@@ -518,6 +518,23 @@ class ConfluenceParams(BaseModel):
     `proximal`(기본): 존 근단(롱=존 상단, 숏=존 하단) — 가장 먼저 닿는 경계.
     `mid`: 존 중앙. `distal`: 존 원단(무효화 경계에 가장 가까움 — 더 깊은 진입).
     """
+    zone_limit_offset_bps: float = 0.0
+    """지정가를 존 근단에서 **얼마나 옮겨 걸 것인가**(bp, 1bp = 0.01%). **기본 0.0(현행)**.
+
+    부호 규약: **양수 = 체결이 쉬워지는 방향**(롱은 위로, 숏은 아래로 — 가격이 오는
+    방향으로 마중 나간다). 음수는 반대로 더 깊은 진입(체결은 어려워지고 진입가는
+    유리해진다). 롱/숏 대칭이다.
+
+    이 값은 **체결 확실성을 사고 진입가를 파는 거래**다(WAN-99). 롱을 존 근단보다 위에
+    걸면 가격이 내 레벨을 관통해 지나가므로 체결이 사실상 보장되지만, 손절(오더블록
+    무효화 경계)까지 거리가 늘어 **1R이 커지고 고정 1.5R 익절 목표도 그만큼 멀어진다**.
+    `fill_penetration_bps`(WAN-96)가 "얼마나 관통해야 체결로 쳐줄 것인가"를 요구 조건으로
+    다룬다면, 이쪽은 **같은 요구를 주문 가격으로 미리 만족시키는** 반대편 수단이다.
+
+    ⚠️ **적용 순서**: `deviation_filter`(볼린저)가 진입가를 재산정한 **다음**에 얹는다
+    (`build_zone_limit_candidates`). WAN-95의 "볼린저가 이긴다" 규칙을 깨지 않으며,
+    볼린저가 "진입 없음"으로 판정한 셋업을 오프셋으로 되살리지도 않는다.
+    """
     limit_valid_bars: int | None = Field(default=24, ge=1)
     """미체결 지정가 주문이 유효한 상위TF 봉 수. 경과하면 취소한다(`zone_limit`).
 
@@ -680,6 +697,26 @@ class ConfluenceParams(BaseModel):
         is_long = order_block.direction is OrderBlockDirection.BULLISH
         proximal, distal = (top, bottom) if is_long else (bottom, top)
         return proximal if self.zone_limit_ref == "proximal" else distal
+
+    def apply_zone_limit_offset(self, price: float, *, is_long: bool) -> float:
+        """지정가에 `zone_limit_offset_bps`를 얹는다 (WAN-99).
+
+        양수 오프셋은 체결이 쉬워지는 방향(롱=위, 숏=아래)으로 가격을 민다. 손절 참조가
+        (존 원단)는 건드리지 않으므로 1R이 그만큼 늘고, 1R에서 파생되는 고정 R 익절
+        목표도 함께 멀어진다 — 그게 이 오프셋이 지불하는 대가다.
+
+        **`zone_limit_price`와 합치지 않고 따로 두는 이유**: 오프셋은 `deviation_filter`
+        (볼린저)가 진입가를 재산정한 **뒤에** 얹혀야 하는데, 존 근단 계산은 그 **전에**
+        일어난다. 한 메서드로 묶으면 순서가 강제되지 않아 볼린저 재산정 가격에 오프셋이
+        빠지거나 두 번 얹힐 수 있다.
+
+        오프셋이 0이면 입력을 그대로 돌려준다 — 기본값 실행이 WAN-95/96과 비트 단위로
+        동일함을 부동소수점 연산 없이 보장한다.
+        """
+        if self.zone_limit_offset_bps == 0.0:
+            return price
+        sign = 1.0 if is_long else -1.0
+        return price * (1.0 + sign * self.zone_limit_offset_bps / 10_000.0)
 
     @property
     def tp_vwma_key(self) -> str | None:
