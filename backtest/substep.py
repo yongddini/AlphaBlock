@@ -34,11 +34,10 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Literal
 
 import pandas as pd
 
-from strategy.models import OrderBlockDirection, SignalExitReason, rsi_gate_passes
+from strategy.models import OrderBlockDirection, RsiGateMode, SignalExitReason, rsi_gate_passes
 from strategy.realtime_rsi import RealtimeRsi
 
 _SUBSTEP_COLUMNS = ("open_time", "high", "low", "close")
@@ -134,7 +133,7 @@ def simulate_zone_limit_trade(
     invalidation_time: int | None = None,
     cancel_on_condition_fail: bool = False,
     stop_before_tp: bool = True,
-    rsi_gate_mode: Literal["extreme", "neutral", "none"] = "extreme",
+    rsi_gate_mode: RsiGateMode = "extreme",
     rsi_neutral_band: tuple[float, float] = (40.0, 60.0),
 ) -> ZoneLimitOutcome:
     """한 오더블록 셋업의 존-지정가 진입·청산을 1분 서브스텝으로 시뮬레이션한다.

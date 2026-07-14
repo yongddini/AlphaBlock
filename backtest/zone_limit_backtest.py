@@ -37,7 +37,6 @@ import copy
 import logging
 import math
 from dataclasses import dataclass
-from typing import Literal
 
 import pandas as pd
 
@@ -63,6 +62,7 @@ from strategy.models import (
     OrderBlockDirection,
     OrderBlockParams,
     OrderBlockResult,
+    RsiGateMode,
     SignalExitReason,
     deviation_entry_price,
 )
@@ -266,7 +266,7 @@ def build_zone_limit_candidates(
     order_block_result: OrderBlockResult | None = None,
     rsi_oversold: float | None = None,
     rsi_overbought: float | None = None,
-    rsi_gate_mode: Literal["extreme", "neutral", "none"] | None = None,
+    rsi_gate_mode: RsiGateMode | None = None,
 ) -> tuple[list[_Candidate], ZoneLimitStats]:
     """B안 셋업 순회 → 1분 서브스텝 시뮬레이션까지(비용 반영 전 원가 후보 목록).
 

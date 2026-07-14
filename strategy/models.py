@@ -150,6 +150,13 @@ class OrderBlockSignal(BaseModel):
     status: Literal["active", "cancelled"] = "active"
     planned_exit: PlannedExit | None = None
     """컨플루언스 전략이 계획한 청산(WAN-23). 없으면 백테스트의 고정 %TP/SL 경로를 따른다."""
+    tap_index: int = 0
+    """이 존(개별 존 또는 병합 존, `combine_obs` 기준)의 몇 번째 탭인지(0-based, WAN-81).
+
+    `0`은 존(병합 존 포함) 확정 이후 **첫 탭**. `ConfluenceParams.rsi_gate_mode=
+    "first_tap_free"`가 이 값으로 첫 탭은 RSI 게이트를 면제하고 재탭(`>=1`)부터
+    적용한다. 병합 존은 구성 존이 개별적으로 각자 첫 탭을 셀 수 있으므로(WAN-82
+    흡수), 같은 병합 클러스터 안에서도 신규로 편입된 존은 다시 `0`을 받을 수 있다."""
 
 
 def _merge_max_optional(a: int | None, b: int | None) -> int | None:
@@ -302,6 +309,13 @@ class OrderBlockResult(BaseModel):
     order_blocks: list[OrderBlock]
     """생성된 모든 존의 전체 아카이브(생애주기 필드 포함, 병합 전)."""
     signals: list[OrderBlockSignal]
+    """존(또는 병합 존, `combine_obs` 기준)당 **첫 탭 1회**만 담은 시그널(`tap_index=0`
+    고정). `ConfluenceParams.retap_mode="once"`가 그대로 소비한다."""
+    retap_signals: list[OrderBlockSignal] = Field(default_factory=list)
+    """존이 무효화되기 전까지의 **모든** 탭(재탭 포함, `tap_index` 부착)을 담은 시그널
+    (WAN-81). `combine_obs=True`면 병합 존 경계·병합 상태 기준으로 생성해 재탭
+    경로도 병합을 반영한다(WAN-56 패리티, WAN-81 갭B). `retap_mode="every_tap"`이
+    소비한다."""
     rendered_order_blocks: list[OrderBlock] = Field(default_factory=list)
     """마지막 봉 시점의 렌더링 뷰(트레이딩뷰 패리티: 방향별 `zone_limit`개, 병합 적용)."""
 
@@ -312,11 +326,14 @@ class OrderBlockResult(BaseModel):
         return select_active(self.order_blocks, time_ms, limit=limit, combine=combine)
 
 
+RsiGateMode = Literal["extreme", "neutral", "none", "first_tap_free"]
+
+
 def rsi_gate_passes(
     rsi: float,
     *,
     is_long: bool,
-    mode: Literal["extreme", "neutral", "none"] = "extreme",
+    mode: RsiGateMode = "extreme",
     rsi_oversold: float = 30.0,
     rsi_overbought: float = 70.0,
     rsi_neutral_band: tuple[float, float] = (40.0, 60.0),
@@ -327,7 +344,10 @@ def rsi_gate_passes(
     `mode="extreme"`(기본): 롱은 `rsi <= rsi_oversold`, 숏은 `rsi >= rsi_overbought`
     (과매도/과매수 극단). `"neutral"`: 방향과 무관하게 `rsi_neutral_band` 안이면 통과
     (존이 조용히 지켜지는 국면). `"none"`: 항상 통과 — 호출부가 이미 RSI 워밍업
-    (NaN) 여부는 걸러내고 유효값만 넘겨야 한다.
+    (NaN) 여부는 걸러내고 유효값만 넘겨야 한다. `"first_tap_free"`(WAN-81): 첫 탭
+    면제는 `tap_index`를 아는 호출부(`ConfluenceStrategy._evaluate_entry`)가 이
+    함수를 호출하기 전에 직접 처리하므로, 이 함수에 도달했다는 것은 이미 재탭
+    (첫 탭이 아님)이라는 뜻이다 — `extreme`과 동일한 극단 규칙을 적용한다.
     """
     if mode == "none":
         return True
@@ -440,8 +460,10 @@ class ConfluenceParams(BaseModel):
     rsi_oversold: float = Field(default=30.0, gt=0, lt=100)
 
     # --- 익절: EMA/VWMA 목표선 ---
-    use_line_take_profit: bool = True
-    """익절(선 도달) 규칙 on/off. False면 손절/강제청산에만 의존."""
+    use_line_take_profit: bool = False
+    """익절(선 도달) 규칙 on/off. **기본 `False`(WAN-81)** — 익절은 `take_profit_mode=
+    "fixed_r"`(고정 1.5R)만 쓰고 EMA·VWMA는 익절 판정에서 완전히 뺀다. `True`로
+    켜면(구 엔진) `take_profit_mode="line"`과 함께 선 도달 익절을 쓴다."""
     tp_ema_lengths: tuple[int, ...] = DEFAULT_TP_EMA_LENGTHS
     """**익절 판정**에 쓸 EMA 길이들(WAN-66, 기본 EMA 60뿐). 비우면 EMA 목표선 없음.
     차트에 그리기만 하는 선은 여기가 아니라 `display_ema_lengths`에 둔다."""
@@ -514,8 +536,8 @@ class ConfluenceParams(BaseModel):
     벌어졌으면) 기각한다. EMA가 워밍업 중(NaN)이면 판정 불가로 간주해 기각한다.
     숏에는 적용하지 않는다.
     """
-    short_enabled: bool = False
-    """숏(약세 오더블록) 진입 허용 여부. **기본 `False`(롱 온리, WAN-69)**.
+    short_enabled: bool = True
+    """숏(약세 오더블록) 진입 허용 여부. **기본 `True`(WAN-81, WAN-69 롱 온리 결정 번복)**.
     `False`면 숏 신호는 항상 미확정(`confirmed=False`) 처리한다.
 
     WAN-68 OOS 비교(`backtest/reports/wan68_short_variant_comparison.csv`)에서 BTC 일봉
@@ -524,36 +546,53 @@ class ConfluenceParams(BaseModel):
     도입이 거래 수만 줄일 뿐 통계적으로 유의한 진입 엣지를 만들지 못함을 이미 확인했다.
     작은 표본(다수 셀 n<10)에서 나온 근소한 차이를 신뢰하기보다, 라이브/페이퍼 경로에
     BTC 일봉 데이터 상시 조회 배선을 새로 추가할 필요가 없는 단순한 쪽(롱 온리)을
-    채택했다(이슈 본문의 "차이가 유의하지 않으면 단순성 우선" 기준)."""
+    채택했었다(이슈 본문의 "차이가 유의하지 않으면 단순성 우선" 기준).
+
+    **WAN-81이 이 결정을 뒤집는다**: 사용자 확정 규칙으로 숏을 기본 활성화한다
+    (약세 오더블록에도 동일 진입/익절/손절 규칙 적용)."""
 
     # --- 진입/익절 재현 (WAN-73) ---
-    retap_mode: Literal["once", "every_tap"] = "once"
-    """존당 재진입 허용 여부. **기본 `once`(현행 동작 보존)**: 존 확정 후 첫 탭만 진입
-    후보로 삼는다. `every_tap`: 존이 무효화되기 전까지 매 탭(재진입)마다 진입을
-    평가한다(RSI 게이트 등 다른 조건은 그대로 적용). 동시 포지션은 여전히 1개로
-    제한되므로(백테스트 엔진이 플랫일 때만 진입) 청산 후에만 다음 탭이 진입으로
-    이어진다."""
-    rsi_gate_mode: Literal["extreme", "neutral", "none"] = "extreme"
-    """RSI 게이트 방향. **기본 `extreme`(현행 동작 보존)**: 롱은 `RSI <= rsi_oversold`,
-    숏은 `RSI >= rsi_overbought`(과매도/과매수 극단).
+    retap_mode: Literal["once", "every_tap"] = "every_tap"
+    """존당 재진입 허용 여부. **기본 `every_tap`(WAN-81 메인 엔진)**: 존이 무효화되기
+    전까지 매 탭(재진입)마다 진입을 평가한다(RSI 게이트 등 다른 조건은 그대로
+    적용). `combine_obs=True`면 병합 존 경계·병합 상태 기준으로 재탭 후보를
+    생성한다(WAN-56 패리티 유지, WAN-81 갭B — 과거엔 재탭 경로가 병합을 무시하고
+    원본 존으로 돌아갔다). `once`: 존(병합 포함) 확정 후 첫 탭만 진입 후보로
+    삼는다(구 엔진 동작). 동시 포지션은 여전히 1개로 제한되므로(백테스트 엔진이
+    플랫일 때만 진입) 청산 후에만 다음 탭이 진입으로 이어진다."""
+    rsi_gate_mode: RsiGateMode = "first_tap_free"
+    """RSI 게이트 방향. **기본 `first_tap_free`(WAN-81 메인 엔진)**: 존(병합 존 포함)
+    확정 후 **첫 탭**(`tap_index=0`)은 RSI 무관하게(워밍업 NaN이어도) 무조건
+    진입하고, **재탭**(`tap_index>=1`)부터 `extreme` 규칙(롱 `RSI<=rsi_oversold`,
+    숏 `RSI>=rsi_overbought`)을 적용한다. 미충족 탭은 기각하되 존을 소각하지
+    않는다 — 무효화 전까지 다음 탭에서 다시 평가한다.
 
-    `neutral`: RSI가 `rsi_neutral_band` 안(방향 무관, 존이 조용히 지켜지는 국면)이면
-    진입. `none`: RSI가 워밍업만 끝나면(NaN 아니면) 항상 통과(게이트 없음)."""
+    `extreme`(구 엔진 기본): 모든 탭에 항상 극단 규칙 적용. `neutral`: RSI가
+    `rsi_neutral_band` 안(방향 무관)이면 진입. `none`: RSI가 워밍업만 끝나면
+    항상 통과(게이트 없음)."""
     rsi_neutral_band: tuple[float, float] = (40.0, 60.0)
     """`rsi_gate_mode="neutral"`일 때의 RSI 허용 밴드 `(하한, 상한)`."""
-    take_profit_mode: Literal["line", "fixed_r"] = "line"
-    """익절 목표 산정 방식. **기본 `line`(현행 동작 보존)**: `tp_ema_lengths`·
-    `tp_vwma_length` 선 중 진입가 너머 가장 가까운 선(`use_line_take_profit`로 on/off).
+    take_profit_mode: Literal["line", "fixed_r"] = "fixed_r"
+    """익절 목표 산정 방식. **기본 `fixed_r`(WAN-81 메인 엔진, 고정 1:1.5R)**: 진입가로부터
+    진입 근거 오더블록 무효화 경계까지의 거리(위험 R 1개)의 `take_profit_r`배
+    지점에 고정 익절선을 둔다(선 재평가 없이 진입 시점에 확정). 볼린저 진입가
+    재산정으로 1R이 줄면 익절 목표도 그만큼 가까워진다.
 
-    `fixed_r`: 진입가로부터 진입 근거 오더블록 무효화 경계까지의 거리(위험 R 1개)의
-    `take_profit_r`배 지점에 고정 익절선을 둔다(선 재평가 없이 진입 시점에 확정)."""
-    take_profit_r: float = Field(default=2.0, gt=0)
-    """`take_profit_mode="fixed_r"`일 때의 목표 손익비(R 배수)."""
+    `line`(구 엔진): `tp_ema_lengths`·`tp_vwma_length` 선 중 진입가 너머 가장
+    가까운 선(`use_line_take_profit`로 on/off)."""
+    take_profit_r: float = Field(default=1.5, gt=0)
+    """`take_profit_mode="fixed_r"`일 때의 목표 손익비(R 배수). 기본 `1.5`(WAN-81)."""
 
     # --- 진입가 재산정: SMA/종가 대비 이격 필터 (WAN-75) ---
-    deviation_filter: DeviationFilterParams | None = None
-    """이격 필터. **기본 `None`(꺼짐, 현행 동작 보존)**. 켜면 `deviation_entry_price`
-    규칙에 따라 오더블록 진입가를 밴드 값으로 재산정하거나 진입을 기각한다."""
+    deviation_filter: DeviationFilterParams | None = Field(
+        default_factory=lambda: DeviationFilterParams(
+            anchor="sma", sma_length=20, width_kind="stdev", width_value=2.0
+        )
+    )
+    """이격 필터. **기본 볼린저밴드(SMA 20 ± 2σ, WAN-81 메인 엔진)**. 켜져 있으면
+    `deviation_entry_price` 규칙에 따라 오더블록 진입가를 밴드 값으로 재산정하거나
+    진입을 기각한다(볼린저 하단선이 존 위/겹침/아래에 있을 때 각각 근단 진입/밴드
+    진입/진입 없음). `None`으로 두면 꺼짐(구 엔진 동작)."""
 
     source: str = "close"
 

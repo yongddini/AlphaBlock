@@ -334,7 +334,12 @@ class ConfluenceStrategy:
         rsi_val = rsi_vals[pos]
         rsi_opt = None if math.isnan(rsi_val) else rsi_val
 
-        confirmed = rsi_opt is not None and params.rsi_gate_passes(d > 0, rsi_opt)
+        if params.rsi_gate_mode == "first_tap_free" and signal.tap_index == 0:
+            # WAN-81 갭A: 존(병합 존 포함) 확정 후 첫 탭은 RSI 무관(워밍업 NaN
+            # 포함)하게 무조건 통과한다. 재탭(tap_index>=1)부터 extreme 규칙 적용.
+            confirmed = True
+        else:
+            confirmed = rsi_opt is not None and params.rsi_gate_passes(d > 0, rsi_opt)
 
         if confirmed and d < 0 and not params.short_enabled:
             confirmed = False
@@ -572,35 +577,22 @@ def entry_candidate_signals(
     closes: list[float],
     time_to_pos: dict[int, int],
 ) -> list[OrderBlockSignal]:
-    """진입 후보 시그널(WAN-73). A안(`ConfluenceStrategy`)·B안(`backtest.zone_limit_backtest`)
-    이 공유한다.
+    """진입 후보 시그널(WAN-73/81). A안(`ConfluenceStrategy`)·B안
+    (`backtest.zone_limit_backtest`)이 공유한다.
 
-    `retap_mode="once"`(기본, 현행 동작 보존)면 오더블록 탐지기가 이미 존당 첫 탭
-    하나로 제한해 낸 `ob_result.signals`를 그대로 쓴다. `retap_mode="every_tap"`이면
-    존이 무효화되기 전까지의 **모든** 탭(`OrderBlock.tapped_times`, 병합
-    (`combine_obs`) 여부와 무관하게 원본 존 단위로 기록됨)을 후보로 낸다 — 병합은
-    렌더링·`once` 시그널 생성에만 영향을 주고, 재탭 후보는 원본 존 경계를 그대로
-    쓴다. 동시 포지션 1개 제약은 백테스트 엔진(플랫일 때만 진입)이 이미 강제하므로
+    `retap_mode="once"`면 오더블록 탐지기가 존(병합 존 포함)당 첫 탭 하나로 제한해
+    낸 `ob_result.signals`를 그대로 쓴다. `retap_mode="every_tap"`(기본, WAN-81)이면
+    존이 무효화되기 전까지의 **모든** 탭(재탭 포함, `tap_index` 부착)을 담은
+    `ob_result.retap_signals`를 쓴다 — `combine_obs=True`면 이 시그널도 병합 존
+    경계·병합 상태 기준으로 생성돼 있다(WAN-81 갭B: 과거엔 재탭 경로가 병합을
+    무시하고 원본 존 단위로 되돌아갔다). 각 시그널의 `tap_index`는
+    `rsi_gate_mode="first_tap_free"`가 첫 탭 면제를 판정하는 데 쓰인다(갭A).
+    동시 포지션 1개 제약은 백테스트 엔진(플랫일 때만 진입)이 이미 강제하므로
     별도 상태 추적 없이 후보를 그대로 늘어놓아도 "청산 후 재진입"이 자연히 성립한다.
     """
     if params.retap_mode == "once":
         return ob_result.signals
-    candidates: list[OrderBlockSignal] = []
-    for ob in ob_result.order_blocks:
-        for tap_time in ob.tapped_times:
-            pos = time_to_pos.get(tap_time)
-            if pos is None:
-                continue
-            candidates.append(
-                OrderBlockSignal(
-                    direction=ob.direction,
-                    trigger_time=tap_time,
-                    price=closes[pos],
-                    order_block=ob,
-                    status="active",
-                )
-            )
-    return candidates
+    return ob_result.retap_signals
 
 
 def generate_confluence_signals(

@@ -69,19 +69,43 @@ AlphaBlock/
 └── pyproject.toml
 ```
 
-## 전략 규칙 요약 (WAN-23 / WAN-66)
+## 전략 규칙 요약 (WAN-81 메인 엔진)
 
-컨플루언스 전략(`strategy/confluence.py`)의 확정 규칙:
+컨플루언스 전략(`strategy/confluence.py`)의 확정 규칙. **WAN-23/WAN-66 규칙(EMA 60 +
+VWMA 100 익절, 롱 온리, 존당 첫 탭 1회)은 WAN-81로 전면 교체됐다** — 아래가 현재
+기본값(`ConfluenceParams()`)이다.
 
-- **진입** = 활성 오더블록 첫 탭 + RSI 게이트(롱=과매도, 숏=과매수).
-- **익절** = 진입가 너머 가장 가까운 **익절선** 도달 → 전량 청산. **익절선은 EMA 60 +
-  VWMA 100 두 개뿐이다**(`ConfluenceParams.tp_ema_lengths=(60,)`, `tp_vwma_length=100`).
+- **진입가** = 활성(병합) 오더블록 탭 시 **볼린저밴드(SMA 20 ± 2σ)** 로 재산정
+  (`deviation_filter` 기본 켜짐). 밴드가 존 위/겹침/아래에 있으면 각각 존 경계 진입/
+  밴드가 진입/진입 없음(롱·숏 대칭, `deviation_entry_price` 참고).
+- **진입 조건** = 존 확정 후 **첫 탭은 RSI 무관 무조건 진입**(워밍업 NaN이어도),
+  **재탭부터 RSI 게이트**(롱 `RSI<=30`, 숏 `RSI>=70`) 적용 — 미충족이어도 존은
+  소각되지 않고 다음 탭에서 재평가한다(`rsi_gate_mode="first_tap_free"`,
+  `retap_mode="every_tap"`). 병합 존(`combine_obs=True`)은 구성 존이 개별적으로 자신의
+  첫 탭을 셀 수 있다(WAN-81 §5, 구 WAN-82 버그 흡수 — 이미 진입한 클러스터에 새로
+  편입된 존도 자기 몫의 첫 탭에서 진입한다).
+- **숏 활성화**(`short_enabled=True`, WAN-69의 롱 온리 결정을 사용자 규칙으로 번복) —
+  약세 오더블록에도 동일 진입/익절/손절 규칙 적용.
+- **익절** = **고정 1:1.5R**(`take_profit_mode="fixed_r"`, `take_profit_r=1.5`).
+  1R = 진입가 → 진입 근거 오더블록 무효화 경계까지 거리. 볼린저로 진입가가
+  유리해지면(롱=더 낮게) 1R이 줄어 익절 목표도 그만큼 가까워진다. **EMA·VWMA는
+  익절 판정에서 완전히 빠졌다**(`use_line_take_profit=False`) — 옛 선 도달 익절은
+  `take_profit_mode="line"`으로 켤 수 있지만 기본이 아니다.
 - **손절** = 진입 근거 오더블록의 무효화(breaker). 이 규칙은 변경 없음.
+- **재탭 경로도 병합 존 경계를 쓴다**(WAN-81 갭B) — `retap_mode="every_tap"`을 켜도
+  `combine_obs`의 병합 존 기준이 유지된다(과거엔 재탭 경로가 병합을 무시하고 원본
+  존 단위로 되돌아가는 버그가 있었다).
 
 ⚠️ **차트 표시선 ≠ 익절선**: 대시보드는 EMA 20/60/120/240/365를 그리지만
-(`ConfluenceParams.display_ema_lengths`) 익절 판정에는 EMA 60만 쓴다. WAN-23 명세가
-두 선 집합을 한 배열로 뒤섞어 적어 EMA 20에서 조기 익절하던 버그(WAN-66)를 낳았으니,
-표시선과 익절선을 절대 다시 한 필드로 합치지 말 것.
+(`ConfluenceParams.display_ema_lengths`) `take_profit_mode="line"`으로 켤 때만 쓰는
+익절 판정선은 EMA 60 + VWMA 100 뿐이다(`tp_ema_lengths=(60,)`, `tp_vwma_length=100`,
+WAN-66). WAN-23 명세가 두 선 집합을 한 배열로 뒤섞어 적어 EMA 20에서 조기 익절하던
+버그(WAN-66)를 낳았으니, 표시선과 익절선을 절대 다시 한 필드로 합치지 말 것.
+
+⚠️ **기존 성과 수치 무효**: WAN-19/22/46/50/58/68/70/71/73/74/75/76 등의 백테스트
+결과는 모두 WAN-81 이전 구 엔진 기준이다. 재산출은
+`backtest/reports/wan81_summary.md`(재현: `python -m
+backtest.wan81_engine_replacement_report`) 참고.
 
 ## 기술 스택
 
