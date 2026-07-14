@@ -36,6 +36,7 @@ import bisect
 import copy
 import logging
 import math
+import random
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -119,11 +120,43 @@ class ZoneLimitStats:
     eligible: int = 0
     filled: int = 0
     penetrations: int = 0
+    dropped: int = 0
+    """`fill_dropout_rate`(WAN-96)로 탈락시킨 체결 건수. 기본 실행에서는 항상 0이다.
+
+    `filled`에는 포함되지 않는다 — `filled`는 보수화를 **적용한 뒤** 실제로 거래가 된
+    셋업 수이므로, `fill_rate`가 곧 보수화된 체결률이다.
+    """
 
     @property
     def fill_rate(self) -> float | None:
         """지정가 체결률 = filled / eligible. 대상 셋업이 없으면 None."""
         return self.filled / self.eligible if self.eligible else None
+
+
+@dataclass(frozen=True)
+class SetupDiagnostic:
+    """eligible 셋업 하나의 체결 여부 기록 (WAN-96 체결 편향 진단).
+
+    체결률이 28%라면 **나머지 72%는 어떤 셋업이었나**를 물어야 한다. 체결된 것만 성과가
+    좋은 방향으로 골라졌다면 수익률이 통째로 착시이기 때문이다. 이 레코드는 체결/미체결
+    양쪽에 동일한 사후 분석(가상 진입가 부여 → 기대 손익)을 적용할 수 있도록 셋업의
+    원본 조건을 남긴다. 체결·청산 로직에는 전혀 쓰이지 않는 순수 진단용이다.
+    """
+
+    trigger_time: int
+    """탭이 발생한 상위TF 봉의 `open_time`(ms)."""
+    tap_bar_time: int
+    """탭 봉의 상위TF 슬롯 시각(ms). 가상 진입은 이 봉이 마감된 뒤부터 평가한다."""
+    tap_close: float
+    """탭 봉 종가 = 가상 진입가(= A안이 실제로 지불했을 가격)."""
+    side: PositionSide
+    limit_price: float
+    stop_price: float
+    filled: bool
+    """보수화를 적용한 뒤 최종적으로 체결됐는지."""
+    dropped: bool
+    """`fill_dropout_rate`로 탈락했는지(탈락했다면 `filled`는 False)."""
+    status: ZoneLimitStatus
 
 
 def _prepare_htf(df: pd.DataFrame) -> pd.DataFrame:
@@ -238,11 +271,13 @@ def run_zone_limit_backtest_verbose(
     backtest_config: BacktestConfig | None = None,
     order_block_result: OrderBlockResult | None = None,
     funding_rates: Sequence[FundingRate] | None = None,
+    setup_sink: list[SetupDiagnostic] | None = None,
 ) -> tuple[BacktestResult, ZoneLimitStats]:
     """`run_zone_limit_backtest`와 동일하되 진단 통계도 함께 반환한다(WAN-46).
 
     반환 통계 `ZoneLimitStats`는 지정가 체결률(체결/대상)과 관통(같은 스텝 진입+손절)
-    건수를 담아 낙관 편향 감사에 쓴다.
+    건수를 담아 낙관 편향 감사에 쓴다. `setup_sink`(WAN-96)를 주면 eligible 셋업별
+    체결 여부 레코드를 채워 체결 편향 진단에 쓸 수 있다.
     """
     params = confluence_params or ConfluenceParams()
     if params.entry_mode != "zone_limit":
@@ -273,6 +308,7 @@ def run_zone_limit_backtest_verbose(
         cfg=cfg,
         order_block_params=order_block_params,
         order_block_result=order_block_result,
+        setup_sink=setup_sink,
     )
     trades = _sequence_and_cost(candidates, cfg, rates)
     coverage = _check_funding_coverage(htf_df, rates, cfg)
@@ -327,6 +363,7 @@ def build_zone_limit_candidates(
     rsi_oversold: float | None = None,
     rsi_overbought: float | None = None,
     rsi_gate_mode: RsiGateMode | None = None,
+    setup_sink: list[SetupDiagnostic] | None = None,
 ) -> tuple[list[_Candidate], ZoneLimitStats]:
     """B안 셋업 순회 → 1분 서브스텝 시뮬레이션까지(비용 반영 전 원가 후보 목록).
 
@@ -335,6 +372,9 @@ def build_zone_limit_candidates(
     게이트 값을 덮어쓴다 — 오더블록 존·손절·익절·비용·1분 서브스텝은 동일하게 두고
     RSI 진입 조건만 무력화(예: `rsi_gate_mode="none"`은 RSI가 유효하기만 하면 항상
     통과)한 "무작위 대조군" 풀을 만들 때 쓴다(WAN-70).
+
+    `setup_sink`(WAN-96)를 주면 eligible 셋업마다 `SetupDiagnostic`을 append한다 —
+    체결/미체결을 같은 기준으로 사후 비교하는 편향 진단용이며, 체결 로직에는 영향이 없다.
     """
     frame = _prepare_htf(htf_df)
     if len(frame) == 0:
@@ -365,11 +405,15 @@ def build_zone_limit_candidates(
     effective_overbought = params.rsi_overbought if rsi_overbought is None else rsi_overbought
     effective_gate_mode = params.rsi_gate_mode if rsi_gate_mode is None else rsi_gate_mode
     rsi_seeder = _IncrementalRsiSeeder(closes, params.rsi_length)
+    # 체결률 하향 민감도(WAN-96). rate=0이면 난수를 아예 뽑지 않아 기본 실행은 WAN-95와
+    # 비트 단위로 동일하다.
+    dropout_rng = random.Random(params.fill_dropout_seed) if params.fill_dropout_rate > 0 else None
 
     candidates: list[_Candidate] = []
     eligible = 0
     filled = 0
     penetrations = 0
+    dropped = 0
     for signal in entry_candidate_signals(ob_result, params, times, closes, time_to_pos):
         if signal.status != "active":
             continue
@@ -440,8 +484,38 @@ def build_zone_limit_candidates(
             stop_before_tp=params.stop_before_take_profit,
             rsi_gate_mode=effective_gate_mode,
             rsi_neutral_band=params.rsi_neutral_band,
+            penetration_bps=params.fill_penetration_bps,
         )
-        if not outcome.filled or outcome.entry_time is None or outcome.entry_price is None:
+
+        is_filled = (
+            outcome.filled and outcome.entry_time is not None and outcome.entry_price is not None
+        )
+        # 큐 근사(WAN-96): 낙관적 모델이 "체결"이라 본 셋업을 일정 비율로 탈락시킨다.
+        # 탈락한 셋업은 거래가 되지 않으므로 단일 포지션 슬롯이 비어 다른 셋업이 그
+        # 자리를 채울 수 있다 — 실거래에서 미체결이 다음 기회를 여는 것과 같다.
+        is_dropped = (
+            is_filled
+            and dropout_rng is not None
+            and dropout_rng.random() < params.fill_dropout_rate
+        )
+        if is_dropped:
+            is_filled = False
+            dropped += 1
+        if setup_sink is not None:
+            setup_sink.append(
+                SetupDiagnostic(
+                    trigger_time=signal.trigger_time,
+                    tap_bar_time=tap_htf,
+                    tap_close=closes[pos],
+                    side=side,
+                    limit_price=limit_price,
+                    stop_price=stop_price,
+                    filled=is_filled,
+                    dropped=is_dropped,
+                    status=outcome.status,
+                )
+            )
+        if not is_filled or outcome.entry_time is None or outcome.entry_price is None:
             continue
 
         filled += 1
@@ -474,7 +548,9 @@ def build_zone_limit_candidates(
             )
         )
 
-    stats = ZoneLimitStats(eligible=eligible, filled=filled, penetrations=penetrations)
+    stats = ZoneLimitStats(
+        eligible=eligible, filled=filled, penetrations=penetrations, dropped=dropped
+    )
     return candidates, stats
 
 
