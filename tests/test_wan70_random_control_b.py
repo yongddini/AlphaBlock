@@ -8,6 +8,8 @@ backtest.wan70_random_control_b`)로 별도 확인한다.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pandas as pd
 import pytest
 
@@ -17,12 +19,16 @@ from backtest.wan70_random_control_b import (
     GATE_PRESETS,
     RandomControlBResult,
     _hour_bucket,
+    run_experiment,
     run_random_control_b_segment,
     run_symbol_timeframe,
     summarize_verdict,
 )
 from backtest.zone_limit_backtest import build_zone_limit_candidates
+from data.models import Candle
+from data.storage import OhlcvStore
 from strategy.models import ConfluenceParams
+from strategy.order_blocks import OrderBlockDetector
 
 pytestmark = pytest.mark.filterwarnings("ignore::RuntimeWarning")
 
@@ -171,6 +177,134 @@ def test_run_symbol_timeframe_too_few_bars_returns_empty() -> None:
     htf = make_synthetic_ohlcv(timeframe="1h", bars=10, seed=1)
     one_min = make_synthetic_ohlcv(timeframe="1m", bars=50, seed=2)
     assert run_symbol_timeframe(htf, one_min, symbol="BTC/USDT:USDT", timeframe="1h") == []
+
+
+def test_run_symbol_timeframe_detects_order_blocks_once_per_segment_not_per_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """게이트 수와 무관하게 오더블록 탐지는 세그먼트(IS/OOS)당 1회만 실행돼야 한다.
+
+    회귀 방지(WAN-78): 예전엔 게이트 루프 **안**에서 매번 재탐지해 게이트 수만큼
+    똑같은 탐지를 중복 실행했다(`order_block_params`가 게이트와 무관하므로 낭비).
+    """
+    htf, one_min = _synthetic_pair(bars=1200, span=500)
+    call_count = 0
+    original_run = OrderBlockDetector.run
+
+    def counting_run(self: OrderBlockDetector, df: pd.DataFrame) -> object:
+        nonlocal call_count
+        call_count += 1
+        return original_run(self, df)
+
+    monkeypatch.setattr(OrderBlockDetector, "run", counting_run)
+    three_gates = {"off": GATE_PRESETS["off"], "on": GATE_PRESETS["on"], "on2": GATE_PRESETS["on"]}
+    run_symbol_timeframe(
+        htf, one_min, symbol="BTC/USDT:USDT", timeframe="1h", gates=three_gates, iterations=5
+    )
+    assert call_count == 2  # IS 1회 + OOS 1회 — 게이트 3개와 무관.
+
+
+# ------------------------------------------------------------------ run_experiment 병렬·캐시
+
+
+def _populate_synthetic_store(db_path: Path, symbols: tuple[str, ...]) -> None:
+    """`run_experiment`가 읽을 수 있도록 심볼별 1h/1m 합성 데이터를 저장소에 채운다."""
+    with OhlcvStore(db_path) as store:
+        for i, symbol in enumerate(symbols):
+            htf = make_synthetic_ohlcv(timeframe="1h", bars=1200, seed=7 + i)
+            htf_ms = timeframe_to_ms("1h")
+            start = int(htf["open_time"].iloc[-500])
+            minutes = 500 * (htf_ms // 60_000)
+            one_min = make_synthetic_ohlcv(
+                timeframe="1m", bars=minutes, seed=11 + i, start_time_ms=start, swing_period=180
+            )
+            candles = [
+                Candle(
+                    symbol,
+                    "1h",
+                    int(row.open_time),
+                    float(row.open),
+                    float(row.high),
+                    float(row.low),
+                    float(row.close),
+                    float(row.volume),
+                    bool(row.closed),
+                )
+                for row in htf.itertuples(index=False)
+            ]
+            candles += [
+                Candle(
+                    symbol,
+                    "1m",
+                    int(row.open_time),
+                    float(row.open),
+                    float(row.high),
+                    float(row.low),
+                    float(row.close),
+                    float(row.volume),
+                    bool(row.closed),
+                )
+                for row in one_min.itertuples(index=False)
+            ]
+            store.upsert_candles(candles)
+
+
+def test_run_experiment_parallel_jobs_matches_sequential(tmp_path: Path) -> None:
+    """`--jobs`(ProcessPoolExecutor 심볼 단위 병렬화)를 켜도 순차 실행과 결과가 완전히
+    같아야 한다(WAN-78 완료 기준: 워커 수와 무관한 결과 동일성)."""
+    db_path = tmp_path / "ohlcv.db"
+    symbols = ("BTC/USDT:USDT", "ETH/USDT:USDT")
+    _populate_synthetic_store(db_path, symbols)
+
+    sequential = run_experiment(
+        db_path=db_path,
+        symbols=symbols,
+        timeframes=("1h",),
+        years=1.0,
+        iterations=15,
+        jobs=1,
+        cache_dir=None,
+    )
+    parallel = run_experiment(
+        db_path=db_path,
+        symbols=symbols,
+        timeframes=("1h",),
+        years=1.0,
+        iterations=15,
+        jobs=2,
+        cache_dir=None,
+    )
+    assert len(sequential) > 0
+    assert [r.model_dump() for r in sequential] == [r.model_dump() for r in parallel]
+
+
+def test_run_experiment_cache_matches_no_cache(tmp_path: Path) -> None:
+    """parquet 캐시를 켜도(cache_dir 지정) 결과가 캐시 없이 돌린 것과 완전히 같다."""
+    db_path = tmp_path / "ohlcv.db"
+    cache_dir = tmp_path / "cache"
+    symbols = ("BTC/USDT:USDT",)
+    _populate_synthetic_store(db_path, symbols)
+
+    no_cache = run_experiment(
+        db_path=db_path,
+        symbols=symbols,
+        timeframes=("1h",),
+        years=1.0,
+        iterations=15,
+        jobs=1,
+        cache_dir=None,
+    )
+    with_cache = run_experiment(
+        db_path=db_path,
+        symbols=symbols,
+        timeframes=("1h",),
+        years=1.0,
+        iterations=15,
+        jobs=1,
+        cache_dir=cache_dir,
+    )
+    assert len(no_cache) > 0
+    assert [r.model_dump() for r in no_cache] == [r.model_dump() for r in with_cache]
 
 
 # --------------------------------------------------------------------------- 판정 문단

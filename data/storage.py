@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import sqlite3
 import threading
 from collections.abc import Iterable
@@ -16,6 +18,8 @@ import pandas as pd
 
 from data.models import Candle, timeframe_to_ms
 from data.resample import resample_ohlcv
+
+logger = logging.getLogger(__name__)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS ohlcv (
@@ -76,7 +80,7 @@ class OhlcvStore:
             store.upsert_candles(candles)
     """
 
-    def __init__(self, db_path: str | Path) -> None:
+    def __init__(self, db_path: str | Path, *, cache_dir: str | Path | None = None) -> None:
         self._path = str(db_path)
         # ":memory:"가 아니면 상위 디렉터리를 보장한다.
         if self._path != ":memory:":
@@ -87,6 +91,9 @@ class OhlcvStore:
         self._conn = sqlite3.connect(self._path, check_same_thread=False)
         self._conn.execute(_SCHEMA)
         self._conn.commit()
+        # 심볼×TF 전체(start_ms/end_ms 없는) `load()`용 parquet 캐시(WAN-78 성능).
+        # None(기본)이면 캐시를 쓰지 않는다 — 기존 동작·테스트 격리 보존.
+        self._cache_dir = Path(cache_dir) if cache_dir is not None else None
 
     def __enter__(self) -> OhlcvStore:
         return self
@@ -210,6 +217,48 @@ class OhlcvStore:
             out = out[out["open_time"] < end_ms]
         return out.reset_index(drop=True)
 
+    def _cache_paths(self, symbol: str, timeframe: str) -> tuple[Path, Path]:
+        safe_symbol = symbol.replace("/", "-").replace(":", "-")
+        assert self._cache_dir is not None
+        base = self._cache_dir / f"{safe_symbol}__{timeframe}"
+        return base.with_suffix(".parquet"), base.with_suffix(".meta.json")
+
+    def _read_cache(self, symbol: str, timeframe: str) -> pd.DataFrame | None:
+        """캐시가 있고 DB의 MAX(open_time)·행 수와 일치하면 캐시 DataFrame을 반환.
+
+        불일치·손상·부재 시 None을 반환해 호출부가 DB에서 다시 읽게 한다(무효화).
+        """
+        parquet_path, meta_path = self._cache_paths(symbol, timeframe)
+        if not parquet_path.exists() or not meta_path.exists():
+            return None
+        try:
+            meta = json.loads(meta_path.read_text())
+        except (OSError, json.JSONDecodeError):
+            return None
+        fresh_max = self.last_open_time(symbol, timeframe)
+        fresh_count = self.count(symbol=symbol, timeframe=timeframe)
+        if meta.get("max_open_time") != fresh_max or meta.get("count") != fresh_count:
+            return None
+        try:
+            return pd.read_parquet(parquet_path)
+        except Exception:  # pragma: no cover - 손상된 캐시 파일 방어
+            logger.warning("parquet 캐시 손상, DB에서 재조회: %s", parquet_path)
+            return None
+
+    def _write_cache(self, symbol: str, timeframe: str, df: pd.DataFrame) -> None:
+        """전체 로드 결과를 parquet + 메타(max_open_time, count)로 캐시한다."""
+        parquet_path, meta_path = self._cache_paths(symbol, timeframe)
+        try:
+            parquet_path.parent.mkdir(parents=True, exist_ok=True)
+            df.to_parquet(parquet_path, index=False)
+            meta = {
+                "max_open_time": self.last_open_time(symbol, timeframe),
+                "count": self.count(symbol=symbol, timeframe=timeframe),
+            }
+            meta_path.write_text(json.dumps(meta))
+        except OSError:  # pragma: no cover - 캐시 쓰기 실패는 치명적이지 않음
+            logger.warning("parquet 캐시 쓰기 실패(무시하고 계속): %s", parquet_path)
+
     def _load_native(
         self,
         symbol: str,
@@ -218,7 +267,19 @@ class OhlcvStore:
         start_ms: int | None,
         end_ms: int | None,
     ) -> pd.DataFrame:
-        """저장소에 직접 저장된 TF를 조회한다."""
+        """저장소에 직접 저장된 TF를 조회한다.
+
+        `cache_dir`가 설정돼 있고 전체 로드(`start_ms`/`end_ms` 모두 None)면 심볼×TF
+        parquet 캐시를 먼저 확인한다 — 실험 스크립트가 같은 전체 히스토리를 반복 로드할
+        때 매번 SQLite 전체 스캔을 피한다(WAN-78 성능). 부분 범위 로드는 캐시하지
+        않는다.
+        """
+        cacheable = self._cache_dir is not None and start_ms is None and end_ms is None
+        if cacheable:
+            cached = self._read_cache(symbol, timeframe)
+            if cached is not None:
+                return cached
+
         query = "SELECT " + ", ".join(_COLUMNS) + " FROM ohlcv WHERE symbol = ? AND timeframe = ?"
         params: list[object] = [symbol, timeframe]
         if start_ms is not None:
@@ -235,6 +296,8 @@ class OhlcvStore:
             df = pd.DataFrame(columns=_COLUMNS)
         df["closed"] = df["closed"].astype(bool)
         df["open_datetime"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
+        if cacheable and not df.empty:
+            self._write_cache(symbol, timeframe, df)
         return df
 
     def close(self) -> None:
