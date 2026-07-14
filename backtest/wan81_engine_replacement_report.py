@@ -59,9 +59,12 @@ OLD_ENGINE_PARAMS = ConfluenceParams(
     short_enabled=False,
 )
 
-#: WAN-81 신 엔진 기본값. `ConfluenceParams()`의 기본값 자체와 같다 — 상수는 리포트
-#: 표에서 "이 값들이 신 엔진이다"를 명시적으로 드러내기 위함이다.
-NEW_ENGINE_PARAMS = ConfluenceParams()
+#: WAN-81 신 엔진 정의. WAN-87 이전에는 `ConfluenceParams()`의 기본값 자체와 같았으나,
+#: WAN-87(WAN-86 결정 1)이 `short_enabled` 기본값을 `False`로 되돌리면서 이 리포트가
+#: 검증하는 "WAN-81 신 엔진"(숏 활성화 포함) 정의를 보존하기 위해 명시적으로
+#: `short_enabled=True`를 고정한다 — 그 외 필드는 여전히 `ConfluenceParams()` 기본값과
+#: 같다.
+NEW_ENGINE_PARAMS = ConfluenceParams(short_enabled=True)
 
 ENGINE_PRESETS: dict[str, ConfluenceParams] = {
     "old": OLD_ENGINE_PARAMS,

@@ -684,14 +684,14 @@ def test_display_ema_lengths_rejects_duplicates_and_nonpositive() -> None:
 def test_wan68_gate_defaults_preserve_current_behavior() -> None:
     """min_rr·이격도 게이트는 기본값이 꺼짐(현행 동작 보존).
 
-    `short_enabled`는 WAN-69에서 한때 `False`(롱 온리)였으나, WAN-81 사용자 확정
-    규칙이 그 결정을 뒤집어 기본값을 다시 `True`로 바꿨다(약세 오더블록에도 동일
-    규칙 적용)."""
+    `short_enabled`는 WAN-69에서 한때 `False`(롱 온리)였다가 WAN-81이 `True`로
+    뒤집었으나, WAN-87(WAN-86 결정 1 반영)이 WAN-84 OOS 분해(롱 +3.07% vs 숏
+    −3.82%) 근거로 다시 `False`(롱 온리)로 되돌렸다."""
     params = ConfluenceParams()
     assert params.min_rr is None
     assert params.long_max_deviation is None
     assert params.long_deviation_gate_ema_length == 240
-    assert params.short_enabled is True
+    assert params.short_enabled is False
 
 
 def test_min_rr_gate_rejects_low_reward_to_risk_ratio() -> None:

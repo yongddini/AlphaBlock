@@ -348,7 +348,7 @@ backtest_report.py`는 조합 디렉터리마다 `run_config.json`(전체 설정
 전체 비교표·재현 커맨드는 [`reports/wan65_recompute.md`](reports/wan65_recompute.md),
 권위 있는 CSV는 `backtest/reports/wan65_*.csv` 참고.
 
-## 메인 엔진 규칙 (WAN-81, 현재 기본값)
+## 메인 엔진 규칙 (WAN-81, WAN-87로 숏 비활성화 반영 — 현재 기본값)
 
 `ConfluenceParams()` 기본값이 정의하는 **현재** 메인 엔진 규칙. 아래 "백테스트 성과
 리포트(WAN-19)"·"숏 처리 기본값(WAN-69)" 절과 그 아래 이어지는 여러 절이 서술하는
@@ -362,7 +362,9 @@ WAN-66/WAN-69)은 **이 이슈로 전면 교체됐다** — 이 섹션이 현재
   **재탭부터 RSI 게이트**(롱 과매도/숏 과매수) 적용 — 미충족이어도 존은 소각되지
   않고 무효화 전까지 다음 탭에서 재평가한다. 병합 존은 구성 존이 개별적으로 자기
   몫의 첫 탭을 셀 수 있다(WAN-81 §5, 구 WAN-82 버그 흡수).
-- **숏 활성화**(기본) — 약세 오더블록에도 동일 규칙 적용.
+- **숏 비활성화**(기본, WAN-87 — [WAN-86 결정 1](docs/decisions/wan86.md)로 WAN-81의
+  숏 활성화를 사용자가 데이터에 근거해 재번복). 숏 경로 코드는 남아 있어
+  `short_enabled=True`로 재검증할 수 있다.
 - **익절** = **고정 1:1.5R**(진입가 → 오더블록 무효화 경계 거리의 1.5배). 볼린저로
   진입가가 유리해지면 1R이 줄어 익절 목표도 함께 가까워진다. EMA·VWMA는 익절
   판정에서 완전히 빠졌다.
@@ -371,10 +373,14 @@ WAN-66/WAN-69)은 **이 이슈로 전면 교체됐다** — 이 섹션이 현재
 
 재산출 성과(3심볼×4TF×3년, 구 엔진 대비 비교, §5 되살아난 진입 수, 갭D 기각 수)는
 [`backtest/reports/wan81_summary.md`](backtest/reports/wan81_summary.md) 참고(재현:
-`uv run python -m backtest.wan81_engine_replacement_report`).
+`uv run python -m backtest.wan81_engine_replacement_report`) — 단, 이 리포트는
+**숏 활성화 신 엔진**(`NEW_ENGINE_PARAMS`에 `short_enabled=True` 고정) 기준이라
+현재 기본값(롱 온리)과는 다르다. 현재 기본값(롱 온리) 재산출은 아래 WAN-87 절 참고.
 
 ⚠️ **기존 성과 수치 무효**: 아래 절들을 포함해 WAN-19/22/46/50/58/68/70/71/73/74/75/76
 등 이 이슈 이전의 모든 백테스트 리포트는 구 엔진 기준이라 더 이상 유효하지 않다.
+WAN-81/WAN-84 리포트(아래 두 절)도 **숏 활성화 전제**라 WAN-87 이후 기본값과는 달라
+현재 기본값 성과로는 무효다 — 숏 활성화 자체의 검증 기록으로만 유효하다.
 
 ## 신 엔진 엣지 재검정 — 매칭 널·OOS·비용·롱숏 (WAN-84, 현재 기준)
 
@@ -401,11 +407,14 @@ WAN-81 엔진 교체 **이후 처음으로** 신 엔진 기본값(`ConfluencePar
 (신 기본값으로 갱신). 이 "엣지 없음" 결론은 라이브/포트폴리오/종목 확장에 자원을 더
 넣기 전에 진입 로직을 재검토해야 함을 시사한다(WAN-70 결론의 신 엔진 재확인).
 
-⚠️ **다음 갈림길 결정 완료(WAN-86)**: 숏 유지 여부·실거래 보류·다음 방향
-3개 항목을 [`docs/decisions/wan86.md`](docs/decisions/wan86.md)에 사용자 결정으로
-기록했다(2026-07-14). 요약: ① 숏 **비활성화**(`short_enabled=False`, 데이터
-우선 — 실제 코드 반영은 WAN-87), ② 실거래 계속 보류(`ALPHABLOCK_LIVE_TRADING=false`),
-③ 규칙 개선 **지속**(단 이후 규칙 변경은 매칭 널 + 비용 민감도 관문을 통과해야 채택).
+⚠️ **다음 갈림길 결정 완료(WAN-86) → 코드 반영 완료(WAN-87)**: 숏 유지 여부·실거래
+보류·다음 방향 3개 항목을 [`docs/decisions/wan86.md`](docs/decisions/wan86.md)에
+사용자 결정으로 기록했다(2026-07-14). 요약: ① 숏 **비활성화**(`short_enabled=False`,
+데이터 우선 — WAN-87에서 `ConfluenceParams()` 기본값에 반영 완료), ② 실거래 계속
+보류(`ALPHABLOCK_LIVE_TRADING=false`), ③ 규칙 개선 **지속**(단 이후 규칙 변경은
+매칭 널 + 비용 민감도 관문을 통과해야 채택). 롱 온리 기본값 재산출은
+[`backtest/reports/wan87_long_only_summary.md`](backtest/reports/wan87_long_only_summary.md)
+참고(재현: `uv run python -m backtest.wan87_long_only_report`).
 
 ## 백테스트 성과 리포트 & 파라미터 스윕 (WAN-19, 구 엔진 — 이력)
 
@@ -476,11 +485,12 @@ RSI 임계값 한 축만 스윕하므로 비교표는 각 TF에서 진입 게이
 (RSI 14, 과매수 70/과매도 30, 익절선 EMA 60 + VWMA 100, 오더블록 무효화 손절)은 재설계
 확정 규칙 그대로 유지한다(WAN-66 이후 익절선은 EMA 60 + VWMA 100 두 개).
 
-## 숏 처리 기본값 — 롱 온리 채택 (WAN-69, WAN-81로 번복됨 — 이력)
+## 숏 처리 기본값 — 롱 온리 채택 (WAN-69, WAN-81로 번복 → WAN-87로 재번복 — 이력)
 
-⚠️ **이 결정은 WAN-81 사용자 확정 규칙으로 뒤집혔다.** `short_enabled` 기본값은
-다시 `True`다(위 "메인 엔진 규칙(WAN-81)" 참고). 아래는 WAN-69 당시의 의사결정
-기록으로 남겨둔다.
+⚠️ **WAN-69의 롱 온리 결정은 WAN-81 사용자 확정 규칙으로 한 차례 뒤집혔다가,
+WAN-87([WAN-86 결정 1](docs/decisions/wan86.md))에서 다시 롱 온리로 되돌아왔다.**
+`short_enabled` 기본값은 현재 `False`다(위 "메인 엔진 규칙" 참고). 아래는 WAN-69
+당시의 의사결정 기록으로 남겨둔다.
 
 `ConfluenceParams.short_enabled` 기본값이 `True`(숏 허용)에서 **`False`(롱 온리)**
 로 바뀌었다. WAN-68 OOS 비교(`backtest/reports/wan68_short_variant_comparison.csv`,
@@ -501,9 +511,8 @@ WAN-70·WAN-74가 매칭 널(실제 거래의 방향·시각대 분포를 맞춘
 경로에 BTC 일봉 데이터 상시 조회 배선이 새로 필요하다. 차이가 유의하지 않으면
 단순한 쪽을 택한다는 기준(이슈 본문)에 따라 **롱 온리를 기본값으로 채택**했다.
 
-(WAN-81 당시 안내: 숏을 다시 켜려면 `ALPHABLOCK_CONFLUENCE__SHORT_ENABLED=true` —
-이제는 기본값이 `true`이므로 대신 **끄려면** `ALPHABLOCK_CONFLUENCE__SHORT_ENABLED=false`
-또는 `ConfluenceParams(short_enabled=False)`.)
+(WAN-87 현재 안내: 기본값이 다시 `false`(롱 온리)다. 숏을 켜려면(재검증 목적)
+`ALPHABLOCK_CONFLUENCE__SHORT_ENABLED=true` 또는 `ConfluenceParams(short_enabled=True)`.)
 
 ## 워크포워드/아웃오브샘플(OOS) 검증 (WAN-22)
 

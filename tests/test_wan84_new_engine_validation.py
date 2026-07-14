@@ -50,8 +50,11 @@ def _synthetic_pair(bars: int = 1200, span: int = 500) -> tuple[pd.DataFrame, pd
 
 
 def test_new_engine_params_match_confluence_params_defaults_except_wiring() -> None:
-    """`NEW_ENGINE_PARAMS`는 B안 배선(entry_mode/rsi_mode)만 지정하고 나머지는 신 엔진
-    기본값(`ConfluenceParams()`)을 그대로 물려받아야 한다(모듈 docstring 핵심 주장)."""
+    """`NEW_ENGINE_PARAMS`는 B안 배선(entry_mode/rsi_mode)과 `short_enabled=True`만
+    명시적으로 지정하고 나머지는 신 엔진 기본값(`ConfluenceParams()`)을 그대로
+    물려받아야 한다(모듈 docstring 핵심 주장). `short_enabled`는 WAN-87(WAN-86 결정
+    1)로 기본값이 `False`로 바뀐 뒤에도 이 리포트가 검증하는 "숏 활성화 신 엔진"
+    정의를 보존하기 위해 기본값과 무관하게 `True`로 고정되어 있다."""
     defaults = ConfluenceParams()
     assert NEW_ENGINE_PARAMS.entry_mode == "zone_limit"
     assert NEW_ENGINE_PARAMS.rsi_mode == "realtime"
@@ -59,7 +62,8 @@ def test_new_engine_params_match_confluence_params_defaults_except_wiring() -> N
     assert NEW_ENGINE_PARAMS.rsi_gate_mode == defaults.rsi_gate_mode == "first_tap_free"
     assert NEW_ENGINE_PARAMS.take_profit_mode == defaults.take_profit_mode == "fixed_r"
     assert NEW_ENGINE_PARAMS.take_profit_r == defaults.take_profit_r == 1.5
-    assert NEW_ENGINE_PARAMS.short_enabled == defaults.short_enabled is True
+    assert defaults.short_enabled is False
+    assert NEW_ENGINE_PARAMS.short_enabled is True
     assert NEW_ENGINE_PARAMS.deviation_filter == defaults.deviation_filter is not None
 
 
