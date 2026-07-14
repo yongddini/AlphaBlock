@@ -29,7 +29,14 @@ from backtest.zone_limit_backtest import (
 from common.costs import Liquidity
 from data.models import FundingRate
 from strategy.indicators import emas, vwma
-from strategy.models import ConfluenceParams, DeviationFilterParams
+from strategy.models import (
+    ConfluenceParams,
+    DeviationFilterParams,
+    OrderBlock,
+    OrderBlockDirection,
+    OrderBlockResult,
+    OrderBlockSignal,
+)
 from strategy.realtime_rsi import RealtimeRsi
 
 
@@ -428,6 +435,197 @@ def test_rsi_gate_mode_override_disables_gate_for_pool_construction() -> None:
         htf, one_min, "1h", params=params, cfg=BacktestConfig(), rsi_gate_mode="none"
     )
     assert len(ungated) >= len(gated)
+
+
+# ---------------------------------------------------- 지정가 오프셋 (WAN-99)
+
+
+def _offset_setups(**overrides: object) -> list[SetupDiagnostic]:
+    """볼린저 필터를 **켠 채**(WAN-81 기본값) eligible 셋업의 지정가 기록을 받는다.
+
+    체결 여부와 무관하게 모든 eligible 셋업의 `limit_price`가 남으므로, 오프셋이 어느
+    가격 위에 얹혔는지를 체결 운에 기대지 않고 직접 볼 수 있다.
+    """
+    htf, one_min = _synthetic_pair()
+    params = ConfluenceParams(
+        entry_mode="zone_limit", rsi_mode="realtime", short_enabled=True
+    ).model_copy(update=overrides)
+    sink: list[SetupDiagnostic] = []
+    run_zone_limit_backtest_verbose(htf, one_min, "1h", confluence_params=params, setup_sink=sink)
+    return sink
+
+
+def test_zone_limit_offset_defaults_to_zero_and_reproduces_baseline() -> None:
+    """기본값 0.0은 WAN-95/96 동작 그대로다 — 명시적 0.0과도 동일하다.
+
+    완료기준의 '기본값에서 WAN-95/96 결과가 비트 단위 재현'을 지키는 테스트다.
+    """
+    assert ConfluenceParams().zone_limit_offset_bps == 0.0
+    assert _fills() == _fills(zone_limit_offset_bps=0.0)
+
+
+def test_zone_limit_offset_applies_on_top_of_deviation_filter_price() -> None:
+    """오프셋은 **볼린저가 재산정한 진입가** 위에 얹힌다(WAN-95 "볼린저가 이긴다" 유지).
+
+    이 합성 셋업들은 볼린저가 실제로 존 근단을 덮어쓰는(규칙 2) 케이스라, 오프셋이
+    존 근단 위에 얹혔다면 비율이 어긋난다 — 적용 순서가 뒤집히면 실패한다.
+    """
+    offset_bps = 20.0
+    base = _offset_setups()
+    shifted = _offset_setups(zone_limit_offset_bps=offset_bps)
+    unfiltered = {s.trigger_time: s.limit_price for s in _offset_setups(deviation_filter=None)}
+    assert base  # 전제: 판정할 셋업이 있다
+
+    for before, after in zip(base, shifted, strict=True):
+        assert before.trigger_time == after.trigger_time
+        # 전제: 이 셋업은 볼린저가 존 근단을 실제로 덮어쓴 케이스다. 그렇지 않으면
+        # "볼린저 가격 위에 얹혔다"와 "존 근단 위에 얹혔다"를 구분할 수 없다.
+        assert before.limit_price != unfiltered[before.trigger_time]
+        sign = 1.0 if before.side is PositionSide.LONG else -1.0
+        expected = before.limit_price * (1.0 + sign * offset_bps / 10_000.0)
+        assert after.limit_price == pytest.approx(expected, rel=1e-12)
+
+
+def test_zone_limit_offset_does_not_revive_setups_rejected_by_deviation_filter() -> None:
+    """볼린저가 '진입 없음'으로 기각한 셋업을 오프셋이 되살리지 않는다(WAN-75 규칙 3)."""
+    base = _offset_setups()
+    shifted = _offset_setups(zone_limit_offset_bps=50.0)
+    unfiltered = _offset_setups(deviation_filter=None)
+    # 전제: 볼린저가 실제로 일부 셋업을 기각하고 있다(아니면 이 테스트는 공허하다).
+    assert len(base) < len(unfiltered)
+    assert [s.trigger_time for s in shifted] == [s.trigger_time for s in base]
+
+
+def test_zone_limit_offset_sign_convention_is_symmetric() -> None:
+    """양수 = 체결이 쉬워지는 방향(롱은 위·숏은 아래), 음수는 그 반대. 0은 항등."""
+    params = ConfluenceParams(zone_limit_offset_bps=10.0)
+    assert params.apply_zone_limit_offset(100.0, is_long=True) == pytest.approx(100.1)
+    assert params.apply_zone_limit_offset(100.0, is_long=False) == pytest.approx(99.9)
+
+    negative = ConfluenceParams(zone_limit_offset_bps=-10.0)
+    assert negative.apply_zone_limit_offset(100.0, is_long=True) == pytest.approx(99.9)
+    assert negative.apply_zone_limit_offset(100.0, is_long=False) == pytest.approx(100.1)
+
+    zero = ConfluenceParams()
+    for price in (0.5, 100.0, 31_337.75):
+        # 항등이어야 한다 — 곱셈 오차조차 끼면 기본값 재현이 비트 단위로 깨진다.
+        assert zero.apply_zone_limit_offset(price, is_long=True) is price
+        assert zero.apply_zone_limit_offset(price, is_long=False) is price
+
+
+def _staged_long_setup(offset_bps: float) -> list[_Candidate]:
+    """존 근단 100 / 무효화 90인 롱 오더블록 하나를 심고 후보를 만든다.
+
+    합성 시드는 익절까지 가는 셋업을 내주지 않아(전부 손절) 오프셋이 익절 목표를
+    옮기는지 볼 수 없다. 그래서 오더블록과 1분봉 경로를 직접 심어 **가격을 아는
+    상태에서** 1R·익절 목표를 검산한다: 존에 닿은 뒤 손절선(90)을 건드리지 않고
+    익절까지 상승하는 경로다.
+    """
+    htf_ms = timeframe_to_ms("1h")
+    bars = 40
+    htf = pd.DataFrame(
+        {
+            "open_time": [i * htf_ms for i in range(bars)],
+            "open": [105.0 for _ in range(bars)],
+            # RSI가 워밍업을 벗어나도록 종가를 흔든다(서브스텝은 RSI가 NaN이면 체결하지 않는다).
+            "close": [105.0 + (1.0 if i % 2 else -1.0) for i in range(bars)],
+            "high": [107.0 for _ in range(bars)],
+            "low": [103.0 for _ in range(bars)],
+            "volume": [1_000.0 for _ in range(bars)],
+        }
+    )
+    tap_time = int(htf["open_time"].iloc[-1])
+    ob = OrderBlock(
+        direction=OrderBlockDirection.BULLISH,
+        top=100.0,
+        bottom=90.0,
+        start_time=0,
+        confirmed_time=htf_ms,
+        ob_volume=1_000.0,
+        ob_low_volume=400.0,
+        ob_high_volume=600.0,
+    )
+    signal = OrderBlockSignal(
+        direction=OrderBlockDirection.BULLISH,
+        trigger_time=tap_time,
+        price=100.0,
+        order_block=ob,
+    )
+    # 탭 봉 안에서 99.5까지 내려가 지정가(100 또는 오프셋 적용가)를 채운 뒤, 손절선 90은
+    # 건드리지 않고 120까지 상승한다.
+    minute = 60_000
+    lows = [99.5] + [100.0 + i * 0.35 for i in range(60)]
+    one_min = pd.DataFrame(
+        {
+            "open_time": [tap_time + i * minute for i in range(len(lows))],
+            "open": [105.0] + [lo for lo in lows[:-1]],
+            "high": [105.0] + [lo + 1.0 for lo in lows[1:]],
+            "low": lows,
+            "close": [100.0] + [lo + 0.5 for lo in lows[1:]],
+            "volume": [10.0 for _ in lows],
+        }
+    )
+    params = ConfluenceParams(
+        entry_mode="zone_limit",
+        rsi_mode="realtime",
+        deviation_filter=None,
+        take_profit_mode="fixed_r",
+        take_profit_r=1.5,
+        rsi_gate_mode="none",  # 검증 대상은 진입가·1R·익절이지 RSI 게이트가 아니다.
+        zone_limit_offset_bps=offset_bps,
+    )
+    candidates, _ = build_zone_limit_candidates(
+        htf,
+        one_min,
+        "1h",
+        params=params,
+        cfg=BacktestConfig(),
+        order_block_result=OrderBlockResult(
+            order_blocks=[ob], signals=[signal], retap_signals=[signal]
+        ),
+    )
+    return candidates
+
+
+def test_zone_limit_offset_widens_risk_and_pushes_take_profit_target() -> None:
+    """오프셋이 반영된 진입가로 1R과 고정 R 익절 목표가 **재계산**된다(WAN-99 핵심 대가).
+
+    존 근단 100 · 무효화 90 · 1:1.5R에서 오프셋 100bp(1%)를 걸면 진입가는 101로
+    올라가고 1R은 10 → 11로 늘어, 익절 목표는 115 → 117.5로 **멀어진다**. 익절이
+    오프셋 이전 진입가로 계산되면(= 115에서 익절) 이 테스트가 잡는다 — 그 버그는
+    오프셋의 대가를 지우고 결과를 통째로 무의미하게 만든다.
+    """
+    (base,) = _staged_long_setup(0.0)
+    assert base.reason is ExitReason.TAKE_PROFIT
+    assert base.entry_price == pytest.approx(100.0)
+    assert base.stop_price == pytest.approx(90.0)
+    assert base.exit_price == pytest.approx(115.0)  # 100 + 1.5 × (100 − 90)
+
+    (shifted,) = _staged_long_setup(100.0)
+    assert shifted.reason is ExitReason.TAKE_PROFIT
+    assert shifted.entry_price == pytest.approx(101.0)  # 100 × (1 + 100bp)
+    assert shifted.stop_price == pytest.approx(90.0)  # 손절 참조가는 존 원단 그대로다
+    assert shifted.exit_price == pytest.approx(117.5)  # 101 + 1.5 × (101 − 90)
+
+    # 대가의 본체: 같은 존인데 1R이 커졌다 → 익절이 멀어졌다.
+    base_risk = base.entry_price - base.stop_price
+    shifted_risk = shifted.entry_price - shifted.stop_price
+    assert shifted_risk > base_risk
+    for cand in (base, shifted):
+        risk = cand.entry_price - cand.stop_price
+        assert cand.exit_price - cand.entry_price == pytest.approx(1.5 * risk)
+
+
+def test_zone_limit_offset_makes_fills_easier_for_longs() -> None:
+    """오프셋을 키우면 체결이 쉬워진다(줄지 않는다) — 오프셋의 존재 이유.
+
+    가격이 오는 방향으로 마중 나가므로, 같은 경로에서 체결이 늘거나 같아야 한다.
+    """
+    counts = [
+        sum(1 for s in _offset_setups(zone_limit_offset_bps=bps) if s.filled)
+        for bps in (0.0, 20.0, 100.0)
+    ]
+    assert counts == sorted(counts)
 
 
 # --------------------------------------------------------------------------- #

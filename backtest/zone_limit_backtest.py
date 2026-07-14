@@ -439,6 +439,11 @@ def build_zone_limit_candidates(
             if new_price is None:
                 continue  # WAN-75: 밴드가 존 전체보다 불리한 쪽 — 진입하지 않음(규칙 3).
             limit_price = new_price
+        # WAN-99: 체결 오프셋은 **볼린저 재산정 뒤에** 얹는다 — WAN-95의 "볼린저가 이긴다"
+        # 규칙을 깨지 않기 위해서다. 위 `continue`(밴드가 "진입 없음" 판정)를 지나온
+        # 셋업에만 적용되므로 오프셋이 진입 자체를 되살리는 일도 없다. 여기서 확정된
+        # 가격이 아래 min_rr 게이트·손절 거리(1R)·익절 목표의 기준이 된다.
+        limit_price = params.apply_zone_limit_offset(limit_price, is_long=is_long)
         lines = line_snapshots[pos] if line_snapshots is not None else []
         lines_by_key = {str(i): v for i, v in enumerate(lines)}
         if params.min_rr is not None and not ConfluenceStrategy._passes_min_rr(
