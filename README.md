@@ -416,6 +416,91 @@ WAN-81 엔진 교체 **이후 처음으로** 신 엔진 기본값(`ConfluencePar
 [`backtest/reports/wan87_long_only_summary.md`](backtest/reports/wan87_long_only_summary.md)
 참고(재현: `uv run python -m backtest.wan87_long_only_report`).
 
+## 범용 백테스트 CLI — `python -m backtest.run` (WAN-101)
+
+**파라미터를 바꿔 다시 돌려보는 일에 더는 티켓·개발·PR이 필요 없다.** 값에 콤마를 주면
+데카르트 곱으로 격자를 돌고 조합별 1행을 낸다.
+
+```bash
+# 1. 익절 R 스윕 — 1.5R이 맞는 값인가
+uv run python -m backtest.run --tp-r 1.0,1.5,2.0,3.0
+
+# 2. 체결 가정 비교 — "닿으면 체결"이 얼마나 낙관인가 (WAN-96 축)
+uv run python -m backtest.run --tf 15m --fill baseline,pen_5bp,pen_5bp_drop_50
+
+# 3. TF 비교
+uv run python -m backtest.run --tf 15m,1h,4h,1d
+
+# 4. 심볼 비교 + CSV 저장
+uv run python -m backtest.run --symbol BTCUSDT,ETHUSDT,SOLUSDT --format csv --out out/sweep.csv
+
+# 5. OOS 검증 — IS에서 좋았던 게 OOS로 넘어오는가 (과최적화 방어)
+uv run python -m backtest.run --tp-r 1.0,1.5,2.0,3.0 --oos
+```
+
+출력 예(1h · 3년 · 최근 실데이터):
+
+```
+[고정] tf=1h · segment=full · entry=zone_limit · off_bp=0 · fill=pen_5bp · seed=0
+       symbol  tp_r  return%   win%   mdd%  trades  fill%  meanR  sharpe
+------------------------------------------------------------------------
+BTC/USDT:USDT   1.5     0.99  46.88  14.59     128  29.60   0.16    1.16
+ETH/USDT:USDT   1.5    11.43  48.53  11.80     136  30.26   0.21    6.81
+```
+
+값이 하나뿐인 축은 `[고정]` 줄로 접고 실제로 스윕한 축만 열로 펼친다. `--format
+csv|json`은 접힌 축까지 전 열을 남긴다(진행 로그는 stderr로 나가므로 `--format csv |
+...` 파이프가 안전하다).
+
+### 기본값 = 채택 기본값 (회귀 고정)
+
+인자를 아무것도 주지 않으면 `ConfluenceParams()`(WAN-95/87 채택 기본값: 존 지정가 +
+실시간 RSI + 롱 온리 + 볼린저 + 고정 1.5R) 그대로 돈다. **CLI는 자기만의 기본값을 갖지
+않는다** — 그러면 기존 리포트와 다른 엔진을 돌리게 되고 두 숫자를 비교하는 논의가
+통째로 무의미해지기 때문이다. 이 성질은 테스트로 고정돼 있다:
+
+- `tests/test_harness.py` — CLI 파라미터 == WAN-95/96/99 리포트의 기준선 파라미터,
+  그리고 CLI가 리포트와 **같은 엔진 함수**를 같은 인자로 호출함(CI에서 항상 실행).
+- `tests/test_run_regression_real_data.py` — 실데이터 산출 숫자가 리포트 셀과 일치함
+  (`data/ohlcv.db`가 있을 때만 실행, CI에서는 skip).
+
+실제로 기본값 실행은 WAN-95 재산출표(3심볼 × 15m/1h)와 WAN-99 `pen_5bp` 표(3심볼 × 1h)의
+해당 셀을 **1e-9 이내로 재현**한다.
+
+### 주요 인자
+
+| 인자 | 설명 |
+| -- | -- |
+| `--symbol` | 콤마 복수. 축약형(`BTCUSDT`)·정식(`BTC/USDT:USDT`) 모두 허용 |
+| `--tf` | 콤마 복수 (`15m,1h,4h,1d`) |
+| `--years` / `--start` `--end` | 최근 N년 또는 명시 구간(`YYYY-MM-DD`) |
+| `--entry-mode` | `close`(A안) / `zone_limit`(B안, 기본). 콤마로 둘 다 주면 한 표에서 비교 |
+| `--tp-r` | 고정 R 익절 배수 |
+| `--offset-bps` | 지정가 오프셋(WAN-99). 지정가 전용 |
+| `--fill` | `baseline` `pen_1bp` `pen_5bp` `drop_25` `drop_50` `pen_5bp_drop_50` (WAN-96 축) |
+| `--fill-penetration-bps` / `--fill-dropout-rate` | 프리셋 대신 직접 지정 |
+| `--long-only` / `--short-enabled` | 숏 게이트 |
+| `--funding` / `--no-funding` | 펀딩비 반영(기본 반영) |
+| `--fee` / `--maker-fee` / `--slippage` | 비용 가정 오버라이드 |
+| `--oos` / `--walkforward N` | IS(앞 2/3)/OOS(뒤 1/3) 분할, 또는 N개 롤링 창 |
+| `--format` / `--out` | `table`(기본) / `csv` / `json`, 파일 저장 |
+
+### 진입 경로는 라벨이 아니라 스위치다
+
+`--entry-mode close`는 A안(`backtest.sweep.evaluate` → `BacktestEngine`),
+`zone_limit`은 B안(`run_zone_limit_backtest_verbose`)을 탄다(WAN-95). 지정가 전용 노브를
+종가 진입에 주면 **조용히 무시하지 않고 거부한다** — 무시하면 "오프셋 5bp로 돌렸다"고
+믿는 사용자에게 오프셋이 없는 결과에 `off_bp=5` 라벨만 붙여 주게 된다. 두 방식을 한 표에
+같이 올리면 종가 성과를 1분봉 커버 창으로 한정해 기간을 맞춘다(`--fair-window`, 기본 자동).
+
+### 공통 골격 (`backtest/harness.py`)
+
+데이터 로딩 · 파라미터 조립 · 경로 스위치 · 구간 분할 · 렌더를 모아 둔 모듈이다. CLI와
+리포트 스크립트(`wanNN_*.py`)가 같은 골격을 공유해야 두 결과를 나란히 놓고 읽을 수
+있다. 일회성 리포트 스크립트의 아카이브·래퍼화는 후속 이슈(WAN-94)에서 다룬다 — 각
+리포트의 재현 커맨드(`python -m backtest.wanNN_*`)가 CLAUDE.md·README·리포트 md에
+문서화돼 있어, 옮기는 일 자체가 별도 결정이기 때문이다.
+
 ## 백테스트 성과 리포트 & 파라미터 스윕 (WAN-19, 구 엔진 — 이력)
 
 WAN-23 재설계 컨플루언스 전략을 WAN-8 백테스트 엔진에 태워 **재현 가능한 성과

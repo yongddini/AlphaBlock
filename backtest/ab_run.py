@@ -28,13 +28,10 @@ from pathlib import Path
 import pandas as pd
 
 from backtest.ab_report import ABEntry, build_ab_report
-from backtest.metrics import build_metrics
+from backtest.harness import coverage_window, windowed_result
 from backtest.models import BacktestConfig, BacktestResult, Trade
-from backtest.sweep import bars_per_year, default_backtest_config, evaluate
-from backtest.zone_limit_backtest import (
-    build_result_from_trades,
-    run_zone_limit_backtest_verbose,
-)
+from backtest.sweep import default_backtest_config, evaluate
+from backtest.zone_limit_backtest import run_zone_limit_backtest_verbose
 from strategy.models import ConfluenceParams, OrderBlockParams, OrderBlockResult
 from strategy.order_blocks import OrderBlockDetector
 
@@ -82,9 +79,8 @@ def cost_config(args: argparse.Namespace) -> BacktestConfig:
 
 
 def _window(df_1m: pd.DataFrame) -> tuple[int, int]:
-    """1분봉이 커버하는 시간창 `[start, end]`(ms)."""
-    times = df_1m["open_time"].astype("int64")
-    return int(times.min()), int(times.max())
+    """1분봉이 커버하는 시간창 `[start, end]`(ms). 공용 골격(WAN-101) 위임."""
+    return coverage_window(df_1m)
 
 
 def _trades_in_window(trades: list[Trade], start: int, end: int) -> list[Trade]:
@@ -167,23 +163,10 @@ def _windowed_result(
 ) -> BacktestResult:
     """A안 엔진 거래를 창으로 한정해 B안과 동일한 방식으로 재집계한 결과.
 
-    `funding_coverage`는 원본 결과(`evaluate`)의 값을 그대로 물려준다 — 창으로 자르는
-    건 거래 집계일 뿐 펀딩 데이터 커버리지를 바꾸지 않는데, 넘기지 않으면 재집계 과정에서
-    커버리지가 `None`으로 사라져 "펀딩을 반영했는지" 알 수 없게 된다(WAN-95).
+    공용 골격(`backtest.harness.windowed_result`, WAN-101) 위임 — 같은 창 규칙을 CLI와
+    리포트가 공유해야 두 결과를 나란히 놓고 비교할 수 있다.
     """
-    in_window = _trades_in_window(trades, start, end)
-    if not in_window:
-        metrics = build_metrics(
-            initial_capital=cfg.initial_capital,
-            equities=[cfg.initial_capital],
-            trades=[],
-            annualization_factor=bars_per_year(timeframe),
-            funding_coverage=funding_coverage,
-        )
-        return BacktestResult(config=cfg, trades=[], equity_curve=[], metrics=metrics)
-    return build_result_from_trades(
-        in_window, cfg, timeframe, funding_coverage_value=funding_coverage
-    )
+    return windowed_result(trades, cfg, timeframe, start, end, funding_coverage=funding_coverage)
 
 
 def build_ab_csv(

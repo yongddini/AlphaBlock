@@ -1,0 +1,504 @@
+"""backtest.harness 단위 테스트 (WAN-101).
+
+하네스는 CLI(`backtest.run`)와 리포트 스크립트가 공유하는 골격이다. 여기서는 파라미터
+조립·경로 스위치·구간 분할·렌더를 검증하고, **하네스가 기존 리포트(WAN-95/96/99)와
+같은 엔진 정의를 쓰는지**를 고정한다 — 그 고정이 깨지면 CLI가 낸 숫자를 기존 리포트와
+나란히 놓고 읽을 수 없다.
+"""
+
+from __future__ import annotations
+
+import json
+
+import pandas as pd
+import pytest
+
+from backtest.harness import (
+    BASELINE_FILL,
+    FILL_PRESETS,
+    IS_FRACTION,
+    SEGMENT_FULL,
+    SEGMENT_IS,
+    SEGMENT_OOS,
+    FillPreset,
+    MarketData,
+    RunRow,
+    Segment,
+    build_config,
+    build_params,
+    build_row,
+    detect_order_blocks,
+    fill_preset,
+    iter_seeds,
+    mean_r,
+    normalize_symbol,
+    render,
+    render_csv,
+    render_json,
+    render_table,
+    run_once,
+    segments_for,
+    slice_market,
+)
+from backtest.metrics import build_metrics
+from backtest.models import (
+    BacktestConfig,
+    BacktestResult,
+    ExitReason,
+    PositionSide,
+    Trade,
+    TradeFill,
+)
+from backtest.sweep import timeframe_to_ms
+from backtest.synthetic import make_synthetic_ohlcv
+from data.models import FundingRate
+from strategy.models import ConfluenceParams
+
+_SYMBOL = "TEST/USDT:USDT"
+_TIMEFRAME = "1h"
+
+
+def _market(bars: int = 200, span: int = 200) -> MarketData:
+    """상위TF 전 구간을 1분봉이 덮는 합성 시장 데이터."""
+    htf = make_synthetic_ohlcv(timeframe=_TIMEFRAME, bars=bars, seed=7)
+    htf_ms = timeframe_to_ms(_TIMEFRAME)
+    start = int(htf["open_time"].iloc[-span])
+    minutes = span * (htf_ms // 60_000)
+    one_min = make_synthetic_ohlcv(
+        timeframe="1m", bars=minutes, seed=11, start_time_ms=start, swing_period=180
+    )
+    interval = 8 * 60 * 60_000
+    rates = [
+        FundingRate(symbol=_SYMBOL, funding_time=t, rate=0.0001)
+        for t in range(int(htf["open_time"].iloc[0]), int(htf["open_time"].iloc[-1]), interval)
+    ]
+    return MarketData(_SYMBOL, _TIMEFRAME, htf, one_min, rates)
+
+
+# ---------------------------------------------------- 심볼 정규화
+
+
+@pytest.mark.parametrize(
+    ("given", "expected"),
+    [
+        ("BTCUSDT", "BTC/USDT:USDT"),
+        ("btcusdt", "BTC/USDT:USDT"),
+        ("ETHUSDC", "ETH/USDC:USDC"),
+        ("BTC/USDT:USDT", "BTC/USDT:USDT"),
+        ("BTC/USDT", "BTC/USDT:USDT"),
+        ("  SOLUSDT  ", "SOL/USDT:USDT"),
+    ],
+)
+def test_normalize_symbol_accepts_shorthand_and_canonical(given: str, expected: str) -> None:
+    """축약형이든 정식이든 저장소 표기 하나로 모인다 — 완료기준의 `--symbol BTCUSDT` 형태."""
+    assert normalize_symbol(given) == expected
+
+
+def test_normalize_symbol_rejects_unknown_notation() -> None:
+    """모르는 표기를 조용히 넘기면 사용자는 '데이터 없음'과 '오타'를 구분할 수 없다."""
+    with pytest.raises(ValueError, match="심볼 표기"):
+        normalize_symbol("BTCXYZ")
+    with pytest.raises(ValueError):
+        normalize_symbol("")
+
+
+# ---------------------------------------------------- 파라미터 조립 (회귀 고정)
+
+
+def test_default_params_are_the_adopted_defaults_untouched() -> None:
+    """인자 없는 `build_params()`는 채택 기본값 그 자체다(완료기준: 회귀 검증).
+
+    CLI가 자기만의 기본값을 갖는 순간 기존 리포트와 다른 엔진을 돌리게 되고, 두 숫자를
+    비교하는 모든 논의가 무의미해진다.
+    """
+    assert build_params() == ConfluenceParams()
+
+
+def test_default_params_match_wan95_zone_limit_baseline() -> None:
+    """WAN-95 리포트의 채택 기준선 파라미터와 동일해야 한다."""
+    from backtest.wan95_zone_limit_report import ZONE_LIMIT_PARAMS
+
+    assert build_params() == ZONE_LIMIT_PARAMS
+
+
+def test_default_params_match_wan99_zero_offset_baseline() -> None:
+    """WAN-99의 오프셋 0 × baseline 셀과 동일해야 한다."""
+    from backtest.wan99_zone_limit_offset_report import FILL_ASSUMPTIONS
+
+    assert build_params() == FILL_ASSUMPTIONS[0].params(offset_bps=0.0, seed=0)
+
+
+def test_fill_presets_match_wan96_conservatism_levels() -> None:
+    """`--fill` 프리셋이 WAN-96 보수화 레벨과 **같은 파라미터**를 만든다.
+
+    이름만 같고 값이 다르면 `--fill pen_5bp` 결과를 WAN-96 표의 `pen_5bp` 행과 나란히
+    읽을 수 없다 — 이 테스트가 그 조용한 갈라짐을 막는다.
+    """
+    from backtest.wan96_fill_conservatism_report import CONSERVATISM_LEVELS
+
+    for level in CONSERVATISM_LEVELS:
+        preset = fill_preset(level.name)
+        assert preset.penetration_bps == level.penetration_bps
+        assert preset.dropout_rate == level.dropout_rate
+        assert preset.seeds == level.seeds
+        for seed in level.seeds:
+            assert build_params(fill=preset, seed=seed) == level.params(seed)
+
+
+def test_fill_presets_match_wan99_fill_assumptions() -> None:
+    """WAN-99가 쓴 가정(오프셋 축 포함)도 같은 프리셋으로 재현된다."""
+    from backtest.wan99_zone_limit_offset_report import FILL_ASSUMPTIONS
+
+    for assumption in FILL_ASSUMPTIONS:
+        preset = fill_preset(assumption.name)
+        assert preset.penetration_bps == assumption.penetration_bps
+        assert preset.dropout_rate == assumption.dropout_rate
+        for offset in (0.0, 5.0, 20.0):
+            for seed in assumption.seeds:
+                assert build_params(fill=preset, seed=seed, offset_bps=offset) == assumption.params(
+                    offset, seed
+                )
+
+
+def test_build_params_pairs_rsi_mode_with_entry_mode() -> None:
+    """`entry_mode`와 `rsi_mode`는 한 세트다(WAN-41) — 어긋나면 판정 시점이 체결과 갈린다."""
+    assert build_params(entry_mode="zone_limit").rsi_mode == "realtime"
+    assert build_params(entry_mode="close").rsi_mode == "closed_bar"
+
+
+def test_build_params_rejects_zone_limit_knobs_on_close_entry() -> None:
+    """종가 진입에 지정가 노브를 주면 거부한다 — 조용히 무시하면 라벨이 거짓말을 한다."""
+    with pytest.raises(ValueError, match="오프셋"):
+        build_params(entry_mode="close", offset_bps=5.0)
+    with pytest.raises(ValueError, match="체결 가정"):
+        build_params(entry_mode="close", fill=fill_preset("pen_5bp"))
+
+
+def test_build_params_rejects_unknown_entry_mode() -> None:
+    with pytest.raises(ValueError, match="진입 방식"):
+        build_params(entry_mode="market")
+
+
+def test_build_params_only_touches_requested_axes() -> None:
+    """격자 축 밖의 전략 파라미터는 건드리지 않는다 — 무엇이 성과를 냈는지 귀속하려면."""
+    tunable = {
+        "entry_mode",
+        "rsi_mode",
+        "zone_limit_offset_bps",
+        "fill_penetration_bps",
+        "fill_dropout_rate",
+        "fill_dropout_seed",
+        "take_profit_r",
+        "short_enabled",
+    }
+    default = ConfluenceParams().model_dump()
+    params = build_params(entry_mode="close", take_profit_r=3.0, short_enabled=True).model_dump()
+    diff = {k for k, v in params.items() if v != default[k]}
+    assert diff <= tunable
+
+
+def test_fill_preset_rejects_unknown_name() -> None:
+    with pytest.raises(ValueError, match="알 수 없는 체결 가정"):
+        fill_preset("nope")
+
+
+def test_iter_seeds_runs_one_seed_when_no_dropout() -> None:
+    """탈락이 없으면 시드가 결과를 안 바꾼다 — 여러 개 도는 건 같은 숫자를 N번 계산하는 낭비."""
+    assert list(iter_seeds(BASELINE_FILL)) == [0]
+    assert list(iter_seeds(BASELINE_FILL, [1, 2, 3])) == [0]
+    drop = fill_preset("drop_50")
+    assert list(iter_seeds(drop)) == list(drop.seeds)
+    assert list(iter_seeds(drop, [7, 8])) == [7, 8]
+
+
+# ---------------------------------------------------- 비용 설정
+
+
+def test_build_config_keeps_risk_sizing_from_shared_factory() -> None:
+    """공용 팩토리를 거쳐야 `risk_sizing`이 붙는다 — 빠지면 전 거래가 자본 100%를 쓴다(WAN-65)."""
+    cfg = build_config(_TIMEFRAME)
+    assert cfg.risk_sizing is not None
+    assert cfg.annualization_factor is not None
+
+
+def test_build_config_applies_cost_overrides_only_when_given() -> None:
+    base = build_config(_TIMEFRAME)
+    cfg = build_config(_TIMEFRAME, fee_rate=0.0, maker_fee_rate=0.0, slippage=0.0)
+    assert (cfg.fee_rate, cfg.maker_fee_rate, cfg.slippage) == (0.0, 0.0, 0.0)
+    assert cfg.risk_sizing == base.risk_sizing
+    assert build_config(_TIMEFRAME, funding_enabled=False).funding_enabled is False
+
+
+# ---------------------------------------------------- 구간 분할
+
+
+def test_segments_default_to_full_window_only() -> None:
+    assert segments_for() == (Segment(SEGMENT_FULL, 0, 0.0, 1.0),)
+
+
+def test_segments_for_oos_splits_two_thirds_and_keeps_full_baseline() -> None:
+    """IS/OOS는 앞 2/3 · 뒤 1/3이고, 전 구간도 함께 낸다(비교 기준선)."""
+    segments = segments_for(oos=True)
+    assert [s.name for s in segments] == [SEGMENT_FULL, SEGMENT_IS, SEGMENT_OOS]
+    is_seg, oos_seg = segments[1], segments[2]
+    assert is_seg.end_fraction == pytest.approx(IS_FRACTION)
+    assert oos_seg.start_fraction == pytest.approx(IS_FRACTION)
+    assert oos_seg.end_fraction == 1.0
+
+
+def test_walkforward_windows_are_consecutive_and_do_not_overlap() -> None:
+    """롤링 창은 겹치지 않는다 — 겹치면 OOS가 다른 창의 IS를 다시 보는 셈이다."""
+    segments = segments_for(walkforward=3)
+    assert len(segments) == 6
+    assert {s.window for s in segments} == {0, 1, 2}
+    for window in (0, 1, 2):
+        pair = [s for s in segments if s.window == window]
+        assert [s.name for s in pair] == [SEGMENT_IS, SEGMENT_OOS]
+        assert pair[0].end_fraction == pytest.approx(pair[1].start_fraction)
+    # 창 사이도 이어붙는다(빈틈 없음).
+    ordered = sorted(segments, key=lambda s: s.start_fraction)
+    for prev, nxt in zip(ordered, ordered[1:], strict=False):
+        assert prev.end_fraction == pytest.approx(nxt.start_fraction)
+
+
+def test_segments_for_rejects_negative_walkforward() -> None:
+    with pytest.raises(ValueError):
+        segments_for(walkforward=-1)
+
+
+def test_segment_rejects_inverted_bounds() -> None:
+    with pytest.raises(ValueError, match="구간 비율"):
+        Segment(name="bad", window=0, start_fraction=0.6, end_fraction=0.4)
+
+
+def test_slice_market_splits_htf_and_1m_and_funding_by_time() -> None:
+    """구간 분할은 상위TF뿐 아니라 1분봉·펀딩비도 같이 잘라야 한다."""
+    market = _market()
+    is_part = slice_market(market, Segment(SEGMENT_IS, 0, 0.0, IS_FRACTION))
+    oos_part = slice_market(market, Segment(SEGMENT_OOS, 0, IS_FRACTION, 1.0))
+
+    # 합치면 전체다 — 어느 봉도 두 구간 사이로 사라지지 않는다.
+    assert len(is_part.htf_df) + len(oos_part.htf_df) == len(market.htf_df)
+    assert is_part.start_ms == market.start_ms
+    assert oos_part.end_ms == market.end_ms
+    assert is_part.end_ms < oos_part.start_ms
+    assert len(is_part.df_1m) + len(oos_part.df_1m) <= len(market.df_1m)
+    assert all(r.funding_time < oos_part.start_ms for r in is_part.funding_rates)
+    assert not set(is_part.funding_rates) & set(oos_part.funding_rates)
+
+
+def test_slice_market_full_segment_is_identity() -> None:
+    market = _market()
+    assert slice_market(market, Segment(SEGMENT_FULL, 0, 0.0, 1.0)) is market
+
+
+# ---------------------------------------------------- 경로 스위치
+
+
+def test_run_once_zone_limit_matches_report_engine_call() -> None:
+    """하네스의 지정가 경로 == 리포트가 직접 부르는 엔진 호출(엔진이 조용히 갈라지지 않음).
+
+    완료기준의 '회귀 검증'을 합성 데이터로 고정한다: CLI가 다른 함수를 타거나 인자를
+    빠뜨리면 여기서 숫자가 갈린다.
+    """
+    from backtest.zone_limit_backtest import run_zone_limit_backtest_verbose
+
+    market = _market()
+    cfg = build_config(_TIMEFRAME)
+    params = build_params()
+    ob_result = detect_order_blocks(market)
+
+    outcome = run_once(market, params=params, cfg=cfg, order_block_result=ob_result)
+    expected, expected_stats = run_zone_limit_backtest_verbose(
+        market.htf_df,
+        market.df_1m,
+        _TIMEFRAME,
+        confluence_params=params,
+        backtest_config=cfg,
+        order_block_result=ob_result,
+        funding_rates=market.funding_rates,
+    )
+    assert outcome.result.metrics == expected.metrics
+    assert outcome.stats == expected_stats
+
+
+def test_run_once_close_entry_matches_sweep_evaluate() -> None:
+    """종가 경로 == `backtest.sweep.evaluate` 그대로(A안 엔진)."""
+    from backtest.sweep import evaluate
+
+    market = _market()
+    cfg = build_config(_TIMEFRAME)
+    params = build_params(entry_mode="close")
+    ob_result = detect_order_blocks(market)
+
+    outcome = run_once(market, params=params, cfg=cfg, order_block_result=ob_result)
+    expected = evaluate(
+        market.htf_df,
+        confluence_params=params,
+        backtest_config=cfg,
+        order_block_result=ob_result,
+        funding_rates=market.funding_rates,
+    )
+    assert outcome.result.metrics == expected.metrics
+    assert outcome.stats is None  # 종가 진입은 체결률 축이 없다.
+
+
+def test_run_once_close_entry_fair_window_limits_to_1m_coverage() -> None:
+    """공정 창을 켜면 종가 거래가 1분봉 커버 구간으로 한정된다(WAN-41/95)."""
+    market = _market(bars=400, span=100)
+    cfg = build_config(_TIMEFRAME)
+    params = build_params(entry_mode="close")
+    ob_result = detect_order_blocks(market)
+
+    full = run_once(market, params=params, cfg=cfg, order_block_result=ob_result)
+    windowed = run_once(
+        market, params=params, cfg=cfg, order_block_result=ob_result, fair_window=True
+    )
+    start = int(market.df_1m["open_time"].iloc[0])
+    assert windowed.result.metrics.num_trades <= full.result.metrics.num_trades
+    assert all(t.entry_time >= start for t in windowed.result.trades)
+
+
+def test_run_once_zone_limit_without_1m_data_fails_loudly() -> None:
+    """1분봉 없이 지정가를 돌리라는 요구는 조용히 종가로 되돌리지 않고 거부한다."""
+    market = _market()
+    dry = MarketData(_SYMBOL, _TIMEFRAME, market.htf_df, pd.DataFrame(), [])
+    with pytest.raises(ValueError, match="1분봉"):
+        run_once(dry, params=build_params(), cfg=build_config(_TIMEFRAME))
+
+
+# ---------------------------------------------------- 평균 R
+
+
+def _trade(reason: ExitReason) -> Trade:
+    return Trade(
+        side=PositionSide.LONG,
+        entry_time=0,
+        entry_price=100.0,
+        quantity=1.0,
+        entry_fee=0.0,
+        exits=[TradeFill(time=1, price=101.0, quantity=1.0, fee=0.0, reason=reason)],
+        realized_pnl=1.0,
+        return_pct=0.01,
+    )
+
+
+def _result(reasons: list[ExitReason]) -> BacktestResult:
+    trades = [_trade(r) for r in reasons]
+    return BacktestResult(
+        config=BacktestConfig(),
+        trades=trades,
+        equity_curve=[],
+        metrics=build_metrics(initial_capital=1.0, equities=[1.0], trades=trades),
+    )
+
+
+def test_mean_r_scores_by_exit_reason_and_skips_unresolved() -> None:
+    """손절 = −1R, 고정 R 익절 = +take_profit_r. 미청산은 R이 확정되지 않아 분모에서 빠진다."""
+    assert mean_r(_result([ExitReason.STOP_LOSS, ExitReason.TAKE_PROFIT]), 1.5) == 0.25
+    assert mean_r(_result([ExitReason.STOP_LOSS, ExitReason.END_OF_DATA]), 1.5) == -1.0
+    assert mean_r(_result([]), 1.5) is None
+
+
+def test_mean_r_matches_wan99_definition() -> None:
+    """WAN-99가 쓰던 정의와 동일하다(그 리포트가 이 구현으로 위임됐다)."""
+    from backtest.wan99_zone_limit_offset_report import mean_r as wan99_mean_r
+
+    assert wan99_mean_r is mean_r
+
+
+# ---------------------------------------------------- 렌더
+
+
+def _rows() -> list[RunRow]:
+    market = _market()
+    cfg = build_config(_TIMEFRAME)
+    ob_result = detect_order_blocks(market)
+    rows: list[RunRow] = []
+    for tp_r in (1.5, 2.0):
+        params = build_params(take_profit_r=tp_r)
+        outcome = run_once(market, params=params, cfg=cfg, order_block_result=ob_result)
+        rows.append(
+            build_row(
+                outcome,
+                market,
+                segment=Segment(SEGMENT_FULL, 0, 0.0, 1.0),
+                params=params,
+                fill_name="baseline",
+            )
+        )
+    return rows
+
+
+def test_build_row_records_axes_next_to_metrics() -> None:
+    """행에 좌표가 같이 남아야 CSV만 봐도 어떤 설정의 숫자인지 안다(WAN-65)."""
+    row = _rows()[0]
+    assert row.symbol == _SYMBOL
+    assert row.timeframe == _TIMEFRAME
+    assert row.entry_mode == "zone_limit"
+    assert row.take_profit_r == 1.5
+    assert row.offset_bps == 0.0
+    assert row.fill == "baseline"
+    assert row.eligible_setups is not None  # 지정가는 체결률 축이 있다.
+    assert row.num_bars > 0
+
+
+def test_render_table_shows_metrics_required_by_the_issue() -> None:
+    """표에 완료기준의 성과 열이 모두 있어야 한다."""
+    table = render_table(_rows())
+    for header in ("return%", "win%", "mdd%", "trades", "fill%", "meanR", "sharpe"):
+        assert header in table
+
+
+def test_render_table_folds_constant_axes_and_shows_varying_ones() -> None:
+    """값이 하나뿐인 축은 접고, 실제로 스윕한 축만 열로 펼친다(줄이 좁아야 읽힌다)."""
+    table = render_table(_rows())
+    assert "tp_r" in table  # 1.5 vs 2.0으로 갈리는 축은 열로.
+    assert "[고정]" in table
+    assert f"symbol={_SYMBOL}" in table
+
+
+def test_render_table_handles_empty_rows() -> None:
+    assert "실행 결과가 없습니다" in render_table([])
+
+
+def test_render_csv_keeps_every_column_including_folded_axes() -> None:
+    """CSV는 표에서 접힌 축까지 전부 남긴다 — 사후 분석의 입력이므로."""
+    text = render_csv(_rows())
+    frame = pd.read_csv(pd.io.common.StringIO(text))
+    assert len(frame) == 2
+    for column in ("symbol", "timeframe", "entry_mode", "take_profit_r", "fill", "total_return"):
+        assert column in frame.columns
+
+
+def test_render_json_round_trips_to_records() -> None:
+    payload = json.loads(render_json(_rows()))
+    assert len(payload) == 2
+    assert payload[0]["take_profit_r"] == 1.5
+    assert "total_return" in payload[0]
+
+
+def test_render_dispatches_by_format_name() -> None:
+    rows = _rows()
+    assert render(rows, "table") == render_table(rows)
+    assert render(rows, "csv") == render_csv(rows)
+    assert render(rows, "json") == render_json(rows)
+    with pytest.raises(ValueError, match="출력 형식"):
+        render(rows, "yaml")
+
+
+def test_fill_presets_are_uniquely_named_and_start_at_baseline() -> None:
+    names = [p.name for p in FILL_PRESETS]
+    assert len(names) == len(set(names))
+    assert names[0] == "baseline"
+    assert BASELINE_FILL.penetration_bps == 0.0
+    assert BASELINE_FILL.dropout_rate == 0.0
+
+
+def test_custom_fill_preset_is_usable_without_registration() -> None:
+    """`--fill-penetration-bps`가 만드는 즉석 프리셋도 파라미터로 조립된다."""
+    custom = FillPreset(name="custom", penetration_bps=3.0, dropout_rate=0.1)
+    params = build_params(fill=custom, seed=2)
+    assert params.fill_penetration_bps == 3.0
+    assert params.fill_dropout_rate == 0.1
+    assert params.fill_dropout_seed == 2

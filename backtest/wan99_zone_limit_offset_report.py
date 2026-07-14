@@ -56,7 +56,10 @@ from pathlib import Path
 import pandas as pd
 from pydantic import BaseModel, ConfigDict
 
-from backtest.models import BacktestConfig, BacktestResult, ExitReason
+# 평균 R 산식은 공용 골격(WAN-101)으로 옮겼다. 이 모듈의 이름으로도 계속 쓸 수 있게
+# 명시적으로 재수출한다 — 리포트 재현 커맨드와 기존 참조가 그대로 살아 있어야 한다.
+from backtest.harness import mean_r as mean_r
+from backtest.models import BacktestConfig
 from backtest.sweep import default_backtest_config
 from backtest.wan81_engine_replacement_report import (
     _CACHE_DIR,
@@ -162,30 +165,6 @@ class OffsetRow(BaseModel):
     fill_rate: float | None
     num_dropped: int
     num_penetrations: int
-
-
-def mean_r(result: BacktestResult, take_profit_r: float) -> float | None:
-    """청산 사유로 매긴 거래당 평균 R(비용 반영 전).
-
-    이 엔진에서 손절은 손절가 그대로, 고정 R 익절은 진입가 + `take_profit_r`×1R에서
-    청산되므로, 청산 사유만으로 R이 **정확히** 정해진다(−1.0R 또는 +`take_profit_r`).
-    WAN-96 `_virtual_r`이 쓴 것과 같은 정의다.
-
-    데이터 종료까지 미청산(`END_OF_DATA`)인 거래는 R이 확정되지 않아 제외한다. 확정된
-    거래가 하나도 없으면 None.
-
-    ⚠️ 오프셋의 대가는 **1R 자체가 커지는 것**이라 이 지표에는 잡히지 않는다 — R로
-    정규화하면 "1R이 얼마짜리인가"가 나눠져 사라지기 때문이다. 오프셋이 지불한 값은
-    total_return에서 봐야 한다. 이 지표는 그 옆에서 승/패 구성만 보여준다.
-    """
-    values: list[float] = []
-    for trade in result.trades:
-        reason = trade.exits[-1].reason if trade.exits else None
-        if reason is ExitReason.STOP_LOSS:
-            values.append(-1.0)
-        elif reason is ExitReason.TAKE_PROFIT:
-            values.append(take_profit_r)
-    return sum(values) / len(values) if values else None
 
 
 def _slice_segment(htf_df: pd.DataFrame, segment: str) -> pd.DataFrame:
