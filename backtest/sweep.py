@@ -108,6 +108,14 @@ def default_backtest_config(
     (`backtest.walkforward`)·A/B 러너(`backtest.ab_run`)·대시보드(`dashboard.app`)가
     모두 이 함수(또는 이 함수의 결과를 `model_copy`로 덮어쓴 설정)를 거쳐
     `BacktestConfig`를 만든다 — `BacktestConfig()`를 진입점에서 직접 생성하지 않는다.
+
+    `settings.backtest_funding_enabled`(WAN-91)를 `BacktestConfig.funding_enabled`에
+    같은 패턴으로 싣는다. 이 플래그만으로는 손익이 바뀌지 않는다 — 호출부가
+    `data.FundingRateStore.get_rates(symbol, ...)`로 조회한 `funding_rates`를
+    `evaluate()`/`run_backtest()`에 별도로 넘겨야 실제 펀딩비가 반영된다(심볼별
+    데이터라 이 함수는 심볼을 모른다). 넘기지 않으면 `funding_missing_policy`에 따라
+    커버리지 0%가 결과에 명시적으로 드러난다 — 예전처럼 `funding_enabled=False`로
+    비용을 조용히 0 취급하는 대신, "펀딩을 안 썼다"는 사실 자체가 보이게 한다(WAN-63).
     """
     settings = settings or get_settings()
     annualization_factor = bars_per_year(timeframe) if timeframe is not None else None
@@ -115,6 +123,8 @@ def default_backtest_config(
         annualization_factor=annualization_factor,
         seed=seed,
         risk_sizing=settings.effective_risk_sizing,
+        funding_enabled=settings.backtest_funding_enabled,
+        funding_missing_policy=settings.backtest_funding_missing_policy,
     )
 
 

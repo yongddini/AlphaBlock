@@ -91,6 +91,21 @@ class Settings(BaseSettings):
     # None이면 기존 룩백(30일) 동작을 유지한다.
     funding_backfill_start: str | None = Field(default=None)
 
+    # 백테스트 손익에 펀딩비를 반영할지(WAN-91). 위 `funding_enabled`(수집 on/off)와
+    # 별개 개념이다 — 이 값은 `BacktestConfig.funding_enabled`에 실린다
+    # (`risk_sizing_enabled`와 동일 패턴, `default_backtest_config`가 배선).
+    # 기본 True: 무기한선물은 보통 펀딩비가 손익에 실제로 걸리므로, 반영을 기본으로
+    # 켜서 호출부가 깜빡 빠뜨려도 조용히 비용이 누락되지 않게 한다(WAN-65의 risk_sizing
+    # 조용한 실패와 같은 유형). 단, 이 플래그만으로는 아무 것도 바뀌지 않는다 — 실제
+    # 펀딩비 반영에는 호출부가 `data.FundingRateStore.get_rates(symbol, ...)`로 조회한
+    # `funding_rates`를 `evaluate`/`run_backtest`에 별도로 전달해야 한다(심볼별 데이터라
+    # `default_backtest_config`가 알 수 없다). 전달하지 않으면 `funding_missing_policy`에
+    # 따라 커버리지 0%로 명시적으로 드러난다(비용을 0으로 채우고 "반영했다"고 하지 않음).
+    backtest_funding_enabled: bool = Field(default=True)
+    # 펀딩비 데이터가 없는 구간의 정책. "zero"=0으로 채우고 진행(커버리지는 낮게
+    # 보고됨), "error"=중단. 기본은 기존 리포트들을 깨지 않도록 "zero".
+    backtest_funding_missing_policy: Literal["zero", "error"] = Field(default="zero")
+
     # 전략 규칙(WAN-23): 진입=오더블록+RSI, 익절=EMA/VWMA 선 도달, 손절=오더블록 무효화.
     # 기본값은 트레이딩뷰 설정과 일치. 개별 필드는 ALPHABLOCK_CONFLUENCE__<필드명>로 덮어쓴다.
     # 예: ALPHABLOCK_CONFLUENCE__RSI_OVERSOLD=25

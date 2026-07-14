@@ -111,6 +111,21 @@ WAN-87 이후에는 **채택 기본값과 다른 설정**이므로 현재 기본
 `backtest/reports/wan87_long_only_summary.md`(재현: `python -m
 backtest.wan87_long_only_report`) 참고.
 
+⚠️ **펀딩비 배선(WAN-91)**: `default_backtest_config`(`backtest/sweep.py`)가
+`settings.backtest_funding_enabled`(기본 `True`)을 `BacktestConfig.funding_enabled`에
+싣는다(`risk_sizing`과 동일 패턴). 이 플래그만으로는 손익이 바뀌지 않는다 — 호출부가
+`data.FundingRateStore.get_rates(symbol, ...)`로 조회한 `funding_rates`를
+`evaluate()`/`run_backtest()`에 **별도로** 넘겨야 실제 펀딩비가 반영된다. 위
+WAN-19~87 리포트들은 전부 이 배선 이전(또는 배선 이후에도 `funding_rates`를 넘기지
+않은 채로) 산출됐으므로 펀딩비 미반영 상태다 — 크립토 무기한선물은 보통 롱이 펀딩을
+지불하므로 롱 온리 채택 기본값(WAN-87) 수익률은 실제보다 소폭 부풀려져 있을 수
+있다. `backtest/reports/wan91_funding_cost_summary.md`(재현: `python -m
+backtest.wan91_funding_cost_report`)의 펀딩 on/off 델타 재산출로는 그 영향이
+대체로 total_return 기준 ±0.1~2%p 수준으로 작아, 위 문단의 무효 판정 자체를
+뒤집지는 않는다 — 단, 15m은 이 리포트의 그로스/넷 분해로 "비용(수수료·슬리피지)이
+신호를 잠식"함이 원칙적으로 확인돼 채택 대상에서 제외를 권고한다(과최적화가
+아니라 비용 근거). 1h는 비용 가정에 민감하니 모니터링 대상으로 남긴다.
+
 ## 기술 스택
 
 Python 3.11+ · uv · ccxt · pandas · asyncio · pydantic-settings
