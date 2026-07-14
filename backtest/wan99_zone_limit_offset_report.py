@@ -251,8 +251,12 @@ def run_cell(
             window_1m = window_1m[window_1m["open_time"] <= end_ms]
         if window_1m.empty:
             continue
-        # 오더블록은 구간마다 그 창에서 새로 탐지한다 — OOS가 IS의 존을 물려받으면
-        # 미래 정보가 새는 셈이라 OOS라 부를 수 없다.
+        # 오더블록은 구간마다 그 창에서 새로 탐지한다 — 각 구간을 완전히 독립된
+        # 백테스트로 만들기 위해서다(초기자본·존 이력·지표 워밍업 모두 새로 시작).
+        # IS 존을 OOS로 물려주는 게 룩어헤드라서가 아니다(IS는 OOS보다 **과거**이므로
+        # 물려줘도 미래 정보가 새지 않는다). 대가는 OOS 앞머리의 워밍업 공백인데,
+        # 오프셋들이 구간 안에서 **동일한 존**을 공유하므로 이 리포트가 실제로 재는
+        # 오프셋 간 상대 비교는 그 공백에 영향받지 않는다.
         ob_result = OrderBlockDetector().run(window)
         segment_rates = [r for r in funding_rates if start_ms <= r.funding_time <= end_ms]
         for offset_bps in offsets_bps:
@@ -602,6 +606,14 @@ def _answer_lines(sensitivity: pd.DataFrame) -> list[str]:
                     else "이지만, 심볼별로 고르지 않다(일부 심볼 마이너스)."
                 ),
             ]
+    if not decision[decision["mean_return"] > 0].empty:
+        lines += [
+            "",
+            "⚠️ **'존재한다'와 '채택한다'는 다르다.** 위 플러스는 3년 전체를 다 보고 뒤에서 "
+            "고른 값이라, 미리 고를 수 있었는지는 아직 답하지 않았다. 아래 과최적화 방어 "
+            "두 관문(IS→OOS 검증, 고원 여부)을 통과해야 채택 근거가 된다 — 최종 결론은 "
+            "**오프셋 채택/미채택 권고** 절에 있다.",
+        ]
     lines += [""]
     return lines
 
@@ -625,11 +637,28 @@ def _tradeoff_lines(sensitivity: pd.DataFrame) -> list[str]:
             f"승률 {_fmt_pct(low['mean_win_rate'])} → {_fmt_pct(high['mean_win_rate'])}, "
             f"평균 수익률 {_fmt_pct(low['mean_return'])} → {_fmt_pct(high['mean_return'])}."
         )
+    lines += ["", "**교환 자체가 지독하게 불리하다.**", ""]
+    for timeframe, group in decision.groupby("timeframe", sort=False):
+        ordered = group.sort_values("offset_bps")
+        low, high = ordered.iloc[0], ordered.iloc[-1]
+        fill_gain = high["mean_fill_rate"] - low["mean_fill_rate"]
+        win_drop = low["mean_win_rate"] - high["mean_win_rate"]
+        lines.append(
+            f"- **{timeframe}**: 오프셋을 0 → {high['offset_bps']:.0f}bp까지 밀어도 체결률은 "
+            f"**{fill_gain * 100:+.2f}%p**밖에 못 산다. 그 대가로 승률이 "
+            f"**{win_drop * 100:.2f}%p** 무너진다."
+        )
     lines += [
         "",
-        "체결률·거래 수가 오르는데 수익률이 따라 오르지 않으면, 늘어난 체결이 **1R 확대의 "
-        "대가를 갚지 못했다**는 뜻이다 — 지정가를 마중 내보내 얻은 체결은 그만큼 나쁜 "
-        "가격에 잡힌 체결이기 때문이다.",
+        "왜 이렇게 적게 사는가: **가격은 존에 닿을 때 대개 20bp쯤은 우습게 지나쳐 버린다.** "
+        "지정가를 20bp 마중 내보내서 새로 잡히는 체결은 '존 근단에 20bp 이내로 다가왔다가 "
+        "되돌아선' 셋업뿐인데, 그런 셋업은 애초에 드물다. 즉 오프셋이 **버는 쪽**은 얇은 "
+        "꼬리에만 걸려 있다.",
+        "",
+        "반면 **내는 쪽은 모든 거래에 걸린다.** 오프셋은 이미 체결됐을 거래의 진입가까지 "
+        "전부 나쁘게 만든다 — 1R이 커지고, 고정 1.5R 익절이 그만큼 멀어지고, 그래서 승률이 "
+        "떨어진다(위 숫자가 정확히 그 경로다). 소수의 한계 체결을 사려고 **전 거래에 "
+        "세금을 매기는 셈**이라, 교환이 성립할 여지 자체가 좁다.",
         "",
     ]
     return lines
@@ -765,7 +794,9 @@ def build_markdown(sensitivity: pd.DataFrame, plateau: pd.DataFrame, oos: pd.Dat
         "앞 2/3(IS)에서 **평균 수익률이 가장 높은 오프셋을 고른 뒤**, 그 선택을 뒤 1/3(OOS)에 "
         "그대로 적용한다. 오프셋 0(현행 기본값)의 OOS 성적이 비교 기준이다 — 고른 오프셋이 "
         "OOS에서 플러스이고 **오프셋 0보다 나아야** 채택할 이유가 생긴다. 구간은 시간으로 "
-        "가르고 오더블록도 구간별로 새로 탐지해, OOS가 IS의 존을 물려받지 않게 했다.",
+        "가르고 각 구간을 독립 백테스트로 돌린다(초기자본·존 이력·지표 워밍업 모두 새로 "
+        "시작). 그래서 구간별 절대 수익률에는 워밍업 공백이 섞여 있지만, 오프셋들이 구간 "
+        "안에서 동일한 존을 공유하므로 **오프셋 간 비교**는 그 영향을 받지 않는다.",
         "",
     ]
     if oos.empty:
@@ -840,6 +871,10 @@ def build_markdown(sensitivity: pd.DataFrame, plateau: pd.DataFrame, oos: pd.Dat
         "4. **평균 R은 1R 확대를 못 본다.** R로 정규화하면 '1R이 얼마짜리인가'가 나눠져 "
         "사라지므로, 오프셋이 지불한 대가는 total_return에서 봐야 한다. 표의 평균 R은 "
         "승/패 구성만 보여주는 보조 지표다.",
+        "5. **IS/OOS 구간은 콜드 스타트다.** 구간마다 오더블록을 새로 탐지하므로 구간 "
+        "앞머리에는 존·지표 워밍업 공백이 있고, IS 끝에 열린 포지션은 OOS를 넘겨다보지 "
+        "않도록 강제 청산된다. 따라서 구간별 **절대** 수익률은 전 구간 수치와 직접 "
+        "비교할 수 없다 — 이 표가 재는 것은 같은 구간 안에서의 **오프셋 간 상대 비교**다.",
         "",
     ]
     return "\n".join(lines) + "\n"
