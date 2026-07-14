@@ -7,18 +7,24 @@
 
 from __future__ import annotations
 
+import math
+
 import pandas as pd
 
 from backtest.models import BacktestConfig, PositionSide, Trade
 from backtest.sweep import timeframe_to_ms
 from backtest.synthetic import make_synthetic_ohlcv
 from backtest.zone_limit_backtest import (
+    _IncrementalRsiSeeder,
+    _line_snapshots,
     build_result_from_trades,
     build_zone_limit_candidates,
     run_zone_limit_backtest,
     run_zone_limit_backtest_verbose,
 )
+from strategy.indicators import emas, vwma
 from strategy.models import ConfluenceParams, DeviationFilterParams
+from strategy.realtime_rsi import RealtimeRsi
 
 
 def _synthetic_pair(bars: int = 600, span: int = 120) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -297,3 +303,66 @@ def test_rsi_gate_mode_override_disables_gate_for_pool_construction() -> None:
         htf, one_min, "1h", params=params, cfg=BacktestConfig(), rsi_gate_mode="none"
     )
     assert len(ungated) >= len(gated)
+
+
+# --------------------------------------------------------------------------- #
+# 성능 호이스팅 회귀 테스트 (WAN-78)
+# --------------------------------------------------------------------------- #
+
+
+def test_incremental_rsi_seeder_matches_full_reseed_for_increasing_cuts() -> None:
+    closes = [100.0 + i * 0.3 - (i % 7) for i in range(500)]
+    seeder = _IncrementalRsiSeeder(closes, length=14)
+    for cut in (0, 1, 14, 15, 100, 100, 250, 499):
+        expected = RealtimeRsi.seed_from_closed(closes[:cut], length=14)
+        assert seeder.seed(cut) == expected
+
+
+def test_incremental_rsi_seeder_matches_full_reseed_for_out_of_order_cuts() -> None:
+    """오더블록 확정 순서와 첫 탭 순서가 어긋나 cut이 감소하는 드문 경우도 정확해야
+    한다(`entry_candidate_signals`가 전역적으로 시각 오름차순임을 보장하지 않음)."""
+    closes = [100.0 + i * 0.3 - (i % 7) for i in range(500)]
+    seeder = _IncrementalRsiSeeder(closes, length=14)
+    for cut in (200, 50, 300, 10, 400, 5):
+        expected = RealtimeRsi.seed_from_closed(closes[:cut], length=14)
+        assert seeder.seed(cut) == expected
+
+
+def test_incremental_rsi_seeder_returns_independent_copy() -> None:
+    """`seed()` 반환값을 호출자가 변형해도(시뮬레이션이 상태를 진행시킴) 다음 시딩에
+    영향이 없어야 한다 — 내부 상태를 그대로 공유하면 이후 시그널의 RSI가 오염된다."""
+    closes = [100.0 + i for i in range(50)]
+    seeder = _IncrementalRsiSeeder(closes, length=14)
+    state = seeder.seed(20)
+    state.commit(9999.0)
+    again = seeder.seed(20)
+    assert again == RealtimeRsi.seed_from_closed(closes[:20], length=14)
+
+
+def test_line_snapshots_matches_manual_ema_vwma_per_position() -> None:
+    """사전계산된 스냅샷이 시그널마다 재계산하던 이전 로직과 값이 같아야 한다."""
+    htf, _ = _synthetic_pair(bars=400)
+    params = ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime")
+    snapshots = _line_snapshots(params, htf)
+    assert snapshots is not None
+    assert params.tp_vwma_length is not None
+    ema_frame = emas(htf, lengths=params.sorted_tp_ema_lengths, source=params.source)
+    vwma_series = vwma(htf, length=params.tp_vwma_length, source=params.source)
+    for pos in (0, 50, 100, 200, 399):
+        expected: list[float] = []
+        for length in params.sorted_tp_ema_lengths:
+            v = float(ema_frame[f"ema_{length}"].iloc[pos])
+            if not math.isnan(v):
+                expected.append(v)
+        vv = float(vwma_series.iloc[pos])
+        if not math.isnan(vv):
+            expected.append(vv)
+        assert snapshots[pos] == expected
+
+
+def test_line_snapshots_none_when_line_take_profit_disabled() -> None:
+    htf, _ = _synthetic_pair()
+    params = ConfluenceParams(
+        entry_mode="zone_limit", rsi_mode="realtime", use_line_take_profit=False
+    )
+    assert _line_snapshots(params, htf) is None

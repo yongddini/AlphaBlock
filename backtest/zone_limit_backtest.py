@@ -33,6 +33,7 @@ RSI)를 오더블록 탐지(`strategy.order_blocks`)에 **배선**해, `entry_mo
 from __future__ import annotations
 
 import bisect
+import copy
 import logging
 import math
 from dataclasses import dataclass
@@ -128,23 +129,27 @@ def _prepare_htf(df: pd.DataFrame) -> pd.DataFrame:
     return frame.sort_values("open_time").reset_index(drop=True)
 
 
-def _line_snapshot(params: ConfluenceParams, df: pd.DataFrame, pos: int) -> list[float]:
-    """탭 봉(pos)에서의 익절 목표선(EMA/VWMA) 값들(NaN 제외)."""
+def _line_snapshots(params: ConfluenceParams, df: pd.DataFrame) -> list[list[float]] | None:
+    """전 구간의 익절 목표선(EMA/VWMA) 값 스냅샷을 위치(pos)별로 1회만 계산한다.
+
+    이전에는 시그널마다 `emas`/`vwma`를 다시 계산해 오더블록 셋업 수만큼 같은 EMA/VWMA
+    시리즈를 중복 산출했다(WAN-78 성능). `use_line_take_profit=False`면 애초에 필요
+    없으므로 None을 반환해 호출부가 빈 리스트를 쓰게 한다.
+    """
     if not params.use_line_take_profit:
-        return []
-    values: list[float] = []
+        return None
+    columns: list[list[float]] = []
     ema_lengths = params.sorted_tp_ema_lengths
     if ema_lengths:
         ema_frame = emas(df, lengths=ema_lengths, source=params.source)
         for length in ema_lengths:
-            v = float(ema_frame[f"ema_{length}"].iloc[pos])
-            if not math.isnan(v):
-                values.append(v)
+            columns.append(ema_frame[f"ema_{length}"].astype(float).tolist())
     if params.tp_vwma_length is not None:
-        v = float(vwma(df, length=params.tp_vwma_length, source=params.source).iloc[pos])
-        if not math.isnan(v):
-            values.append(v)
-    return values
+        vwma_series = vwma(df, length=params.tp_vwma_length, source=params.source)
+        columns.append(vwma_series.astype(float).tolist())
+    if not columns:
+        return [[] for _ in range(len(df))]
+    return [[col[pos] for col in columns if not math.isnan(col[pos])] for pos in range(len(df))]
 
 
 def _take_profit_price(is_long: bool, entry_price: float, lines: list[float]) -> float | None:
@@ -290,10 +295,12 @@ def build_zone_limit_candidates(
         filter_components = ConfluenceStrategy.deviation_filter_components(
             htf_df, params.deviation_filter, params.source
         )
+    line_snapshots = _line_snapshots(params, htf_df)
 
     effective_oversold = params.rsi_oversold if rsi_oversold is None else rsi_oversold
     effective_overbought = params.rsi_overbought if rsi_overbought is None else rsi_overbought
     effective_gate_mode = params.rsi_gate_mode if rsi_gate_mode is None else rsi_gate_mode
+    rsi_seeder = _IncrementalRsiSeeder(closes, params.rsi_length)
 
     candidates: list[_Candidate] = []
     eligible = 0
@@ -324,7 +331,7 @@ def build_zone_limit_candidates(
             if new_price is None:
                 continue  # WAN-75: 밴드가 존 전체보다 불리한 쪽 — 진입하지 않음(규칙 3).
             limit_price = new_price
-        lines = _line_snapshot(params, htf_df, pos)
+        lines = line_snapshots[pos] if line_snapshots is not None else []
         lines_by_key = {str(i): v for i, v in enumerate(lines)}
         if params.min_rr is not None and not ConfluenceStrategy._passes_min_rr(
             1 if is_long else -1, limit_price, ob, lines_by_key, params.min_rr
@@ -352,7 +359,8 @@ def build_zone_limit_candidates(
         stop_price = ob.bottom if is_long else ob.top
         tp_price = _resolve_take_profit(params, is_long, limit_price, stop_price, lines)
 
-        rsi_state = _seed_rsi(params, times, closes, setup_substeps[0].htf_bar_time)
+        cut = bisect.bisect_left(times, setup_substeps[0].htf_bar_time)
+        rsi_state = rsi_seeder.seed(cut)
         outcome = simulate_zone_limit_trade(
             direction=ob.direction,
             limit_price=limit_price,
@@ -411,6 +419,37 @@ def _seed_rsi(
     """탭 봉(first_htf) **직전까지**의 확정봉 종가로 시딩한 실시간 RSI 상태."""
     cut = bisect.bisect_left(times, first_htf)
     return RealtimeRsi.seed_from_closed(closes[:cut], length=params.rsi_length)
+
+
+class _IncrementalRsiSeeder:
+    """시그널마다 `RealtimeRsi`를 처음부터 재시딩하던 것을 증분 커밋으로 줄인다(WAN-78).
+
+    프로파일링 결과 `_seed_rsi`(매 시그널마다 `closes[:cut]` 전체를 0부터 재커밋)가
+    셋업 많은 구간에서 전체 실행 시간의 절반 이상을 먹었다 — 신호 수만큼 O(n) 재계산이
+    반복되는 O(신호수×n) 병목. 시그널은 보통 시간 오름차순(`cut` 오름차순)이지만
+    보장되지는 않는다(오더블록 확정 순서 ≠ 첫 탭 순서일 수 있음). `cut`이 지금까지
+    커밋한 지점 이상이면 그 접두사 상태에서 증분 커밋만 하고(정확히 `_seed_rsi`와
+    동일한 최종 상태), 그 미만이면(드묾) 정확성을 위해 `_seed_rsi`로 처음부터 다시
+    시딩한다 — 어느 경우든 반환값은 항상 `_seed_rsi(params, times, closes, ...)`와
+    동일하다(`RealtimeRsi.commit`이 순서에 대해 결합법칙적이므로).
+
+    `seed()`는 내부 진행 상태의 **사본**을 반환한다 — 호출자(`simulate_zone_limit_trade`)가
+    반환값을 변형해도 다음 시그널의 시딩에 영향이 없어야 하기 때문이다.
+    """
+
+    def __init__(self, closes: list[float], length: int) -> None:
+        self._closes = closes
+        self._length = length
+        self._state = RealtimeRsi(length=length)
+        self._committed = 0
+
+    def seed(self, cut: int) -> RealtimeRsi:
+        if cut < self._committed:
+            return RealtimeRsi.seed_from_closed(self._closes[:cut], length=self._length)
+        for close in self._closes[self._committed : cut]:
+            self._state.commit(close)
+        self._committed = cut
+        return copy.copy(self._state)
 
 
 def _sequence_and_cost(candidates: list[_Candidate], cfg: BacktestConfig) -> list[Trade]:

@@ -17,6 +17,9 @@ data/*.db
 data/*.parquet
 data/*.json
 
+# 1분봉 등 전체 로드 parquet 캐시 (WAN-78) — data/*.parquet는 하위 디렉터리를 잡지 못함
+data/cache/
+
 # Report / analysis outputs (backtest·parity·walkforward)
 out/
 

@@ -60,8 +60,11 @@ WAN-68이 도입한 세 게이트(`min_rr`, `long_max_deviation`, `short_enabled
 from __future__ import annotations
 
 import argparse
+import os
 import random
 from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
@@ -355,10 +358,13 @@ def run_symbol_timeframe(
         seg_end=n,
     )
 
+    # 오더블록 탐지는 게이트와 무관(동일 order_block_params)하므로 게이트 루프 밖에서
+    # 1회만 계산한다 — 게이트마다 중복 실행하던 병목 제거(WAN-78).
+    is_ob = OrderBlockDetector(order_block_params).run(is_htf) if not is_htf.empty else None
+    oos_ob = OrderBlockDetector(order_block_params).run(oos_htf) if not oos_htf.empty else None
+
     results: list[RandomControlBResult] = []
     for gate_label, params in gate_configs.items():
-        is_ob = OrderBlockDetector(order_block_params).run(is_htf) if not is_htf.empty else None
-        oos_ob = OrderBlockDetector(order_block_params).run(oos_htf) if not oos_htf.empty else None
         for segment_label, seg_htf, seg_1m, ob_result in (
             ("IS", is_htf, is_1m, is_ob),
             ("OOS", oos_htf, oos_1m, oos_ob),
@@ -400,6 +406,67 @@ def write_csv(frame: pd.DataFrame, path: str | Path) -> Path:
     return out
 
 
+DEFAULT_CACHE_DIR = Path("data/cache")
+_DEFAULT_SEED = 70
+
+
+@dataclass(frozen=True)
+class _SymbolTask:
+    """한 심볼의 전체 요청 TF를 처리하는 병렬 작업 단위(WAN-78)."""
+
+    symbol: str
+    one_min_full: pd.DataFrame
+    htf_frames: dict[str, pd.DataFrame]
+    timeframes: tuple[str, ...]
+    years: float
+    iterations: int
+    seed: int
+
+
+def _run_symbol_task(task: _SymbolTask) -> list[RandomControlBResult]:
+    """`_SymbolTask` 하나(한 심볼 × 전체 TF)를 순차 처리한다.
+
+    **심볼 단위**로 작업을 나누는 이유(TF 단위가 아님): 1분봉(`one_min_full`)은 한
+    심볼의 모든 TF가 공유하는 대용량 DataFrame이다. TF 단위로 더 잘게 나누면
+    `ProcessPoolExecutor`가 같은 1분봉을 TF 개수만큼 중복 직렬화(pickle)해 프로세스 간
+    전송 비용이 병렬화로 얻는 이득을 상쇄할 수 있다. 심볼 단위 fan-out은 1분봉을
+    워커 프로세스당 1회만 전달한다.
+
+    시드는 심볼·TF와 무관하게 고정값(`seed`, 기본 70)을 그대로 쓴다 — 각 세그먼트가
+    `random.Random(seed)`로 매번 새 RNG 인스턴스를 만들어 쓰므로(전역 `random` 모듈
+    상태를 공유하지 않음) 워커 수·실행 순서가 달라져도 이미 결정적이다. 즉 셀별로
+    시드를 다시 유도할 필요가 없다(검증: `test_wan70_random_control_b.py`의
+    `--jobs 1` vs `--jobs 4` 동일성 테스트).
+    """
+    one_min_full = task.one_min_full
+    m_max = int(one_min_full["open_time"].max())
+    req_start = m_max - int(task.years * _YEAR_MS)
+    results: list[RandomControlBResult] = []
+    for timeframe in task.timeframes:
+        htf_df = task.htf_frames.get(timeframe)
+        if htf_df is None or htf_df.empty:
+            continue
+        start = max(req_start, int(htf_df["open_time"].min()))
+        htf_win = htf_df[htf_df["open_time"] >= start].reset_index(drop=True)
+        one_min_win = one_min_full[one_min_full["open_time"] >= start].reset_index(drop=True)
+        cell_results = run_symbol_timeframe(
+            htf_win,
+            one_min_win,
+            symbol=task.symbol,
+            timeframe=timeframe,
+            iterations=task.iterations,
+            seed=task.seed,
+        )
+        results.extend(cell_results)
+        for r in cell_results:
+            print(
+                f"[wan70] {task.symbol} {timeframe} {r.segment} gate={r.gate}: "
+                f"real={r.real_total_return:.4f} n={r.real_num_trades} "
+                f"p={r.random_p_value}"
+            )
+    return results
+
+
 def run_experiment(
     *,
     db_path: Path = DEFAULT_DB_PATH,
@@ -407,8 +474,17 @@ def run_experiment(
     timeframes: tuple[str, ...] = DEFAULT_TIMEFRAMES,
     years: float = DEFAULT_YEARS,
     iterations: int = _BOOTSTRAP_ITERATIONS,
+    jobs: int = 1,
+    cache_dir: Path | None = DEFAULT_CACHE_DIR,
+    seed: int = _DEFAULT_SEED,
 ) -> list[RandomControlBResult]:
-    """로컬 `data/ohlcv.db` 실데이터로 심볼×TF 전부에 대해 B안 무작위 대조군을 산출한다."""
+    """로컬 `data/ohlcv.db` 실데이터로 심볼×TF 전부에 대해 B안 무작위 대조군을 산출한다.
+
+    `jobs>1`이면 심볼 단위로 `ProcessPoolExecutor`에 fan-out한다(`_run_symbol_task`
+    docstring 참고). `executor.map`은 제출 순서로 결과를 반환하므로 워커 수와 무관하게
+    `results` 순서·내용이 순차 실행과 동일하다(WAN-78 완료 기준: `--jobs` 값에 무관한
+    결과 동일성).
+    """
     try:
         from data.storage import OhlcvStore
     except Exception:  # pragma: no cover - 저장소 미가용
@@ -416,37 +492,34 @@ def run_experiment(
     if not db_path.exists():
         return []
 
-    results: list[RandomControlBResult] = []
-    with OhlcvStore(db_path) as store:
+    tasks: list[_SymbolTask] = []
+    with OhlcvStore(db_path, cache_dir=cache_dir) as store:
         for symbol in symbols:
             one_min_full = store.load(symbol, "1m")
             if one_min_full.empty:
                 continue
-            m_max = int(one_min_full["open_time"].max())
-            req_start = m_max - int(years * _YEAR_MS)
-            for timeframe in timeframes:
-                htf_df = store.load(symbol, timeframe)
-                if htf_df.empty:
-                    continue
-                start = max(req_start, int(htf_df["open_time"].min()))
-                htf_win = htf_df[htf_df["open_time"] >= start].reset_index(drop=True)
-                one_min_win = one_min_full[one_min_full["open_time"] >= start].reset_index(
-                    drop=True
-                )
-                cell_results = run_symbol_timeframe(
-                    htf_win,
-                    one_min_win,
+            htf_frames = {tf: store.load(symbol, tf) for tf in timeframes}
+            tasks.append(
+                _SymbolTask(
                     symbol=symbol,
-                    timeframe=timeframe,
+                    one_min_full=one_min_full,
+                    htf_frames=htf_frames,
+                    timeframes=timeframes,
+                    years=years,
                     iterations=iterations,
+                    seed=seed,
                 )
-                results.extend(cell_results)
-                for r in cell_results:
-                    print(
-                        f"[wan70] {symbol} {timeframe} {r.segment} gate={r.gate}: "
-                        f"real={r.real_total_return:.4f} n={r.real_num_trades} "
-                        f"p={r.random_p_value}"
-                    )
+            )
+
+    results: list[RandomControlBResult] = []
+    if jobs <= 1 or len(tasks) <= 1:
+        for task in tasks:
+            results.extend(_run_symbol_task(task))
+        return results
+
+    with ProcessPoolExecutor(max_workers=min(jobs, len(tasks))) as executor:
+        for cell_results in executor.map(_run_symbol_task, tasks):
+            results.extend(cell_results)
     return results
 
 
@@ -583,6 +656,11 @@ def build_summary_markdown(results: list[RandomControlBResult], *, report_path: 
     )
 
 
+def _default_jobs() -> int:
+    cpu = os.cpu_count() or 1
+    return max(1, cpu - 1)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="WAN-70 무작위 진입 대조군(B안 엔진 그대로)")
     parser.add_argument("--db", type=Path, default=DEFAULT_DB_PATH)
@@ -590,6 +668,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--timeframes", nargs="+", default=list(DEFAULT_TIMEFRAMES))
     parser.add_argument("--years", type=float, default=DEFAULT_YEARS)
     parser.add_argument("--iterations", type=int, default=_BOOTSTRAP_ITERATIONS)
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=_default_jobs(),
+        help="심볼 단위 병렬 워커 수(기본 cpu_count()-1). 1이면 순차 실행.",
+    )
+    parser.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="1분봉 parquet 캐시(data/cache/)를 쓰지 않는다.",
+    )
     parser.add_argument("--out", type=Path, default=DEFAULT_REPORT_PATH)
     parser.add_argument("--summary-out", type=Path, default=DEFAULT_SUMMARY_PATH)
     args = parser.parse_args(argv)
@@ -600,6 +689,8 @@ def main(argv: list[str] | None = None) -> int:
         timeframes=tuple(args.timeframes),
         years=args.years,
         iterations=args.iterations,
+        jobs=args.jobs,
+        cache_dir=None if args.no_cache else DEFAULT_CACHE_DIR,
     )
     write_csv(_results_to_frame(results), args.out)
     print(f"[wan70] rows={len(results)} → {args.out}")
