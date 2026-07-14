@@ -18,12 +18,14 @@ from backtest.sweep import (
     ParamGrid,
     apply_sweep_point,
     bars_per_year,
+    default_backtest_config,
     evaluate,
     run_sweep,
     timeframe_to_ms,
     write_sweep_csv,
 )
 from backtest.synthetic import make_synthetic_ohlcv
+from config.settings import Settings
 from data.models import FundingRate
 from strategy.models import (
     ConfluenceParams,
@@ -194,6 +196,23 @@ def test_sweep_row_reports_sizing_mode_from_default_config() -> None:
     assert "risk_per_trade" in frame.columns
 
 
+def test_default_backtest_config_wires_funding_enabled_from_settings() -> None:
+    """WAN-91: `default_backtest_config`가 `settings.backtest_funding_enabled`을
+    `BacktestConfig.funding_enabled`에 싣는다(`risk_sizing`과 동일 패턴, 드리프트 가드).
+
+    이 배선이 빠지면 funding_rates를 넘겨도 `funding_enabled=False`라 조용히
+    무시되므로(펀딩비 0 취급), `funding_missing_policy`가 다시 조용히 꺼진 채로
+    되돌아가지 않도록 여기서 고정한다.
+    """
+    cfg = default_backtest_config("1h")
+    assert cfg.funding_enabled is True
+    assert cfg.funding_missing_policy == "zero"
+
+    disabled_settings = Settings(backtest_funding_enabled=False)
+    cfg_disabled = default_backtest_config("1h", settings=disabled_settings)
+    assert cfg_disabled.funding_enabled is False
+
+
 def test_sweep_row_reports_full_position_when_risk_sizing_disabled() -> None:
     df = make_synthetic_ohlcv(bars=200, seed=3)
     unsized = BacktestConfig(annualization_factor=bars_per_year("1h"), risk_sizing=None)
@@ -227,7 +246,10 @@ def test_sweep_row_reports_entry_mode_rsi_mode_combine_obs() -> None:
         assert row.entry_mode == "zone_limit"
         assert row.rsi_mode == "realtime"
         assert row.combine_obs is False
-        assert row.funding_coverage is None  # 펀딩 미사용 시 None
+        # WAN-91: default_backtest_config가 funding_enabled=True를 기본으로 실은 뒤로는,
+        # funding_rates를 안 넘겨도 "펀딩 미사용"이 아니라 "커버리지 0%"로 명시적으로
+        # 드러난다(비용을 조용히 0으로 채우고 반영했다고 하지 않기 위해, WAN-63).
+        assert row.funding_coverage == pytest.approx(0.0)
 
 
 def test_empty_dataframe_yields_zero_trade_rows() -> None:

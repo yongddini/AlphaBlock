@@ -95,10 +95,12 @@ def test_app_renders_price_chart_and_metrics_when_data_available(seeded_db_path:
     # 시드 데이터로는 시그널이 없어 거래 0건 — 값도 의미 있게 검증한다.
     metrics_by_label = {m.label: m.value for m in at.metric}
     assert metrics_by_label["Trades"] == "0"
-    # 분석 탭 상단 실행 설정 배지(WAN-65)가 그려진다. 기본 설정(리스크 사이징 on,
-    # 펀딩비 대시보드 기본 off)이면 경고가 아니라 caption으로 렌더된다.
-    captions = [c.value for c in at.caption]
-    assert any("진입:" in c and "사이징:" in c for c in captions)
+    # 분석 탭 상단 실행 설정 배지(WAN-65)가 그려진다. WAN-91부터 `funding_enabled`
+    # 기본값이 True인데, 대시보드는 아직 실제 funding_rates를 조회해 넘기지 않으므로
+    # 커버리지가 0%로 나와 "비정상" 취급 — caption이 아니라 warning으로 렌더된다.
+    # (조용히 caption으로 숨기지 않는 것 자체가 WAN-91의 의도, `_render_run_config_badge` 참고.)
+    warnings = [w.value for w in at.warning]
+    assert any("진입:" in w and "사이징:" in w for w in warnings)
 
 
 def test_app_health_tab_renders_without_error(seeded_db_path: str) -> None:
