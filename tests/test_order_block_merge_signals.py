@@ -212,6 +212,45 @@ def test_retap_path_uses_merged_zone_boundary_for_new_member_tap() -> None:
     assert by_time[8].tap_index == 0
 
 
+def test_zone_key_shared_across_taps_of_same_non_merged_zone() -> None:
+    """WAN-83: 비병합 경로에서 `zone_key`는 같은 존의 모든 탭에서 동일하고, 다른
+    존과는 다르다 — 아카이브 인덱스가 안정적 그룹핑 식별자로 쓰인다."""
+    a = _bull(105.0, 100.0, confirmed=2)
+    a = a.model_copy(update={"tapped_times": (4, 6)})
+    b = _bull(85.0, 80.0, confirmed=2)
+    b = b.model_copy(update={"tapped_times": (5,)})
+    archive = [a, b]
+    times = [0, 1, 2, 3, 4, 5, 6, 7]
+    highs = [200.0] * len(times)
+    lows = [0.0] * len(times)
+    closes = [150.0] * len(times)
+
+    signals = _generate_signals(archive, times, highs, lows, closes, include_retaps=True)
+    by_time = {s.trigger_time: s for s in signals}
+
+    assert by_time[4].zone_key == frozenset({0})
+    assert by_time[6].zone_key == frozenset({0})
+    assert by_time[4].zone_key == by_time[6].zone_key
+    assert [by_time[4].tap_index, by_time[6].tap_index] == [0, 1]
+    assert by_time[5].zone_key == frozenset({1})
+    assert by_time[5].zone_key != by_time[4].zone_key
+
+
+def test_zone_key_reflects_merged_membership() -> None:
+    """WAN-83: 병합 경로의 `zone_key`는 그 순간의 구성 존 집합(아카이브 인덱스)이다.
+
+    §5 시나리오(A 단독 첫 탭 t4 → B가 편입돼 병합 클러스터 첫 탭 t8)에서, t4는 A만의
+    키(`{0}`)를, t8은 병합 멤버 전체의 키(`{0,1}`)를 가져야 한다."""
+    a = _bull(105.0, 100.0, confirmed=2)  # 아카이브 인덱스 0
+    b = _bull(103.0, 98.0, confirmed=6)  # 아카이브 인덱스 1
+    signals = _generate_merged_signals([a, b], _S5_TIMES, _S5_HIGHS, _S5_LOWS, _S5_CLOSES)
+    by_time = {s.trigger_time: s for s in signals}
+
+    assert by_time[4].zone_key == frozenset({0})
+    assert by_time[8].zone_key == frozenset({0, 1})
+    assert by_time[4].zone_key != by_time[8].zone_key
+
+
 def test_retap_signals_are_look_ahead_free_at_scale() -> None:
     """`retap_signals`(모든 탭 재생, WAN-81)도 look-ahead가 없다.
 
