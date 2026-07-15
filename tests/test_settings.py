@@ -23,7 +23,15 @@ def test_defaults_are_safe() -> None:
 def test_data_collection_defaults() -> None:
     """데이터 수집 대상 기본값(심볼·타임프레임·룩백·DB 경로)."""
     s = Settings.model_validate({})
-    assert s.symbols == ["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT"]
+    # WAN-111에서 6심볼로 확장. 수집 대상이지 실거래·실시간 시그널 대상이 아니다.
+    assert s.symbols == [
+        "BTC/USDT:USDT",
+        "ETH/USDT:USDT",
+        "SOL/USDT:USDT",
+        "BNB/USDT:USDT",
+        "XRP/USDT:USDT",
+        "TRX/USDT:USDT",
+    ]
     assert s.timeframes == ["1m", "5m", "15m", "1h", "4h", "1d"]
     assert s.db_path == "data/ohlcv.db"
     assert s.lookback_days_for("1m") == 3
