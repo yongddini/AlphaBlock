@@ -115,7 +115,9 @@ def test_cli_defaults_produce_the_adopted_engine() -> None:
     grid = _grid_from([])
     assert grid.entry_modes == ("zone_limit",)
     assert grid.take_profit_rs == (ConfluenceParams().take_profit_r,)
-    assert grid.offsets_bps == (0.0,)
+    # 채택 기본값을 그대로 물려받아야 한다 — 여기에 0.0을 하드코딩하면 CLI 기본 실행만
+    # 혼자 옛 엔진을 돌게 된다(WAN-112).
+    assert grid.offsets_bps == (ConfluenceParams().zone_limit_offset_bps,) == (2.0,)
     assert tuple(f.name for f in grid.fills) == ("baseline",)
     assert grid.short_enabled is None  # 기본값을 덮어쓰지 않는다.
     assert len(iter_combos(grid)) == 1

@@ -2,7 +2,7 @@
 
 재현: `uv run python -m backtest.wan103_portfolio_leverage_report`
 
-채택 기본값(`ConfluenceParams()` = 롱 온리·지정가·`first_tap_free`·고정 1.5R) 위에서 **포지션 제약만** 바꿔 돌린 결과다. 전략 파라미터는 하나도 건드리지 않았다. 설계 결정 5개와 결론은 [`docs/decisions/wan103.md`](../../docs/decisions/wan103.md).
+WAN-112 이전 채택 기본값(롱 온리·지정가·`first_tap_free`·고정 1.5R·**오프셋 0bp**) 위에서 **포지션 제약만** 바꿔 돌린 결과다. 전략 파라미터는 하나도 건드리지 않았다. 설계 결정 5개와 결론은 [`docs/decisions/wan103.md`](../../docs/decisions/wan103.md).
 
 > ⚠️ **`total_return`은 공식 렌즈 `baseline`(닿으면 체결) 기준**이라 상한으로 읽어야 한다(WAN-104). 체결 가정 민감도는 이 리포트의 축이 아니다 — 이 표가 묻는 건 *같은 체결 가정에서* 포지션 제약을 풀면 무엇이 달라지는가다.
 

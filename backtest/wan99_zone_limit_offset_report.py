@@ -703,7 +703,11 @@ def _verdict_lines(
             "**미채택 권고.** 최악 체결 가정에서 **어떤 오프셋도** 평균 수익률을 플러스로 "
             "돌리지 못한다. 체결 확실성을 사는 대가(진입가 악화 → 1R 확대 → 익절 목표 "
             "원거리화)가 늘어난 체결의 이득보다 크다는 뜻이다. WAN-96의 15m 제외 권고는 "
-            "오프셋으로 뒤집히지 않으며, 기본값 `zone_limit_offset_bps=0.0`을 유지한다."
+            "오프셋으로 뒤집히지 않으며, 기본값 `zone_limit_offset_bps=0.0`을 유지한다. "
+            "🔁 **이 권고는 [WAN-112](../../docs/decisions/wan112.md)가 번복했다 — 채택 "
+            "기본값은 이제 2bp다.** 여기서 근거로 쓴 「최악 체결 가정」(`pen_5bp_drop_50`)은 "
+            "공식 렌즈가 아니라 스트레스 축이고(WAN-104가 공식을 `baseline`으로 확정), "
+            "WAN-112는 그 축의 손익이 아니라 **체결 신뢰성**을 사려고 2bp를 얹었다."
         )
     lines += [verdict, ""]
     lines += _tradeoff_lines(sensitivity)
@@ -771,8 +775,12 @@ def build_markdown(sensitivity: pd.DataFrame, plateau: pd.DataFrame, oos: pd.Dat
     lines += [
         "",
         "오프셋 격자와 체결 가정은 **성과를 보기 전에** 고정했다(이슈가 지정한 값 그대로). "
-        "기본값은 바꾸지 않았다 — `zone_limit_offset_bps=0.0`이 `ConfluenceParams()` "
-        "그대로이며 WAN-95/96 결과를 비트 단위로 재현한다.",
+        "이 이슈는 기본값을 바꾸지 않았다 — 당시 `zone_limit_offset_bps=0.0`이 "
+        "`ConfluenceParams()` 그대로였고, 이 격자의 오프셋 0 행이 WAN-95/96 결과를 비트 "
+        "단위로 재현한다. 🔁 **그 뒤 [WAN-112](../../docs/decisions/wan112.md)가 채택 "
+        "기본값을 2bp로 올렸다**(사용자 판단). 이 격자는 오프셋을 **축으로 명시**해 돌므로 "
+        "아래 수치는 그 변경과 무관하게 그대로이나, **오프셋 0 행은 더 이상 「기본값」이 "
+        "아니라 「명시적 0bp」**로 읽어야 한다.",
         "",
     ]
 

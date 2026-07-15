@@ -497,13 +497,25 @@ def _offset_setups(**overrides: object) -> list[SetupDiagnostic]:
     return sink
 
 
-def test_zone_limit_offset_defaults_to_zero_and_reproduces_baseline() -> None:
-    """기본값 0.0은 WAN-95/96 동작 그대로다 — 명시적 0.0과도 동일하다.
+def test_zone_limit_offset_default_is_two_bps_and_moves_fills() -> None:
+    """채택 기본값은 **2bp**이고, 그 2bp는 실제로 체결을 움직인다(WAN-112).
 
-    완료기준의 '기본값에서 WAN-95/96 결과가 비트 단위 재현'을 지키는 테스트다.
+    기본값이 0bp이던 시절 이 테스트는 "기본 == 명시적 0.0"을 고정했다. 이제는 그 등식이
+    **깨져 있어야** 한다 — 같으면 오프셋이 어딘가에서 증발했다는 뜻이고, 그건 결정을
+    반영했다고 믿으면서 옛 엔진을 돌리는 조용한 실패다(WAN-112 이슈 본문의 `0.0002`를
+    그대로 넣었을 때 나는 증상이 정확히 이것이다).
     """
-    assert ConfluenceParams().zone_limit_offset_bps == 0.0
-    assert _fills() == _fills(zone_limit_offset_bps=0.0)
+    assert ConfluenceParams().zone_limit_offset_bps == 2.0
+    assert _fills() != _fills(zone_limit_offset_bps=0.0)
+
+
+def test_explicit_zero_offset_still_reproduces_the_pre_wan112_engine() -> None:
+    """명시적 0bp = WAN-112 이전 엔진. 0bp로 고정한 과거 리포트가 재현되는 근거다."""
+    zero = ConfluenceParams(zone_limit_offset_bps=0.0)
+    for price in (0.5, 100.0, 31_337.75):
+        # 항등이어야 한다 — 곱셈 오차조차 끼면 과거 리포트 재현이 비트 단위로 깨진다.
+        assert zero.apply_zone_limit_offset(price, is_long=True) is price
+        assert zero.apply_zone_limit_offset(price, is_long=False) is price
 
 
 def test_zone_limit_offset_applies_on_top_of_deviation_filter_price() -> None:
@@ -513,9 +525,14 @@ def test_zone_limit_offset_applies_on_top_of_deviation_filter_price() -> None:
     존 근단 위에 얹혔다면 비율이 어긋난다 — 적용 순서가 뒤집히면 실패한다.
     """
     offset_bps = 20.0
-    base = _offset_setups()
+    # 기준선은 **명시적 0bp**여야 한다 — 채택 기본값(2bp)을 기준으로 잡으면 아래 기대식이
+    # 2bp만큼 이미 밀린 가격에 20bp를 또 얹는 꼴이 된다(WAN-112).
+    base = _offset_setups(zone_limit_offset_bps=0.0)
     shifted = _offset_setups(zone_limit_offset_bps=offset_bps)
-    unfiltered = {s.trigger_time: s.limit_price for s in _offset_setups(deviation_filter=None)}
+    unfiltered = {
+        s.trigger_time: s.limit_price
+        for s in _offset_setups(zone_limit_offset_bps=0.0, deviation_filter=None)
+    }
     assert base  # 전제: 판정할 셋업이 있다
 
     for before, after in zip(base, shifted, strict=True):
@@ -547,12 +564,6 @@ def test_zone_limit_offset_sign_convention_is_symmetric() -> None:
     negative = ConfluenceParams(zone_limit_offset_bps=-10.0)
     assert negative.apply_zone_limit_offset(100.0, is_long=True) == pytest.approx(99.9)
     assert negative.apply_zone_limit_offset(100.0, is_long=False) == pytest.approx(100.1)
-
-    zero = ConfluenceParams()
-    for price in (0.5, 100.0, 31_337.75):
-        # 항등이어야 한다 — 곱셈 오차조차 끼면 기본값 재현이 비트 단위로 깨진다.
-        assert zero.apply_zone_limit_offset(price, is_long=True) is price
-        assert zero.apply_zone_limit_offset(price, is_long=False) is price
 
 
 def _staged_long_setup(offset_bps: float) -> list[_Candidate]:

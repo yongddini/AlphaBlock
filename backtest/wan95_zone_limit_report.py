@@ -76,7 +76,10 @@ ZONE_LIMIT_PARAMS = ConfluenceParams()
 
 #: 대조군: WAN-95 이전 채택 기본값(종가 진입 + 확정봉 RSI). 그 외 규칙은 동일하게 둔다
 #: — 이 리포트가 격리하려는 변수는 **진입 방식(+그에 따른 체결 비용)** 하나다.
-CLOSE_ENTRY_PARAMS = ConfluenceParams(entry_mode="close", rsi_mode="closed_bar")
+#: 오프셋 0은 A안엔 아무 영향이 없지만(호출부가 B안뿐) 라벨을 정직하게 두려고 명시한다.
+CLOSE_ENTRY_PARAMS = ConfluenceParams(
+    entry_mode="close", rsi_mode="closed_bar", zone_limit_offset_bps=0.0
+)
 
 
 class ZoneLimitRow(BaseModel):
@@ -373,6 +376,18 @@ def build_markdown(frame: pd.DataFrame, delta: pd.DataFrame) -> str:
         "걸려 명세보다 **빡빡한** 규칙으로 돌았다. 고친 결과 지정가 체결률이 약 29% → 약 "
         "50%로 오르고 수익률이 크게 늘었다(`zone_limit` 행만 해당). 종가(`close`) 행은 "
         "A안이라 원래부터 면제가 적용돼 있었으므로 이 수정의 영향을 받지 않는다.",
+        "",
+        "> 🔁 **WAN-112(오프셋 2bp 채택)로 `zone_limit` 행이 다시 전면 재산출됐다.** 채택 "
+        "기본 `zone_limit_offset_bps`가 0.0 → **2.0(2bp)** 이 되면서 지정가를 존 근단보다 "
+        "2bp 체결 쉬운 쪽(롱=위)에 건다 — 진입가가 밀리면 1R이 커지고 고정 1.5R 익절 목표도 "
+        "그만큼 멀어지므로 **모든 `zone_limit` 셀이 이동**했다. `close` 행은 A안이라 오프셋을 "
+        "읽지 않으므로(`apply_zone_limit_offset` 호출부가 B안뿐) 영향이 없다 — 실제로 12개 "
+        "`close` 행 중 11개가 **비트 단위로 동일**하고, 유일한 예외 `ETH 1d close`(return "
+        "1.43%→1.70%)는 거래 수가 13건으로 같은 채 펀딩 비용만 19.22→19.28로 움직인 "
+        "**아래 ℹ️ 문단과 같은 데이터 드리프트**다(오프셋과 무관). ⚠️ 2bp는 "
+        "**데이터가 고른 값이 아니라 사용자 판단**이다 — 순수 수익으로는 0bp가 이기고(WAN-104 "
+        "IS 심볼평균 −0.43%p), 2bp는 그 대가로 체결 신뢰성을 산다. 근거·트레이드오프는 "
+        "[`docs/decisions/wan112.md`](../../docs/decisions/wan112.md).",
         "",
         "> ℹ️ **WAN-100과 무관한 차이 한 건**: 재산출에서 `SOL 15m close` 행이 최초 "
         "커밋본과 다르다(거래 939→938, return −8.68%→−9.87%). 수정을 되돌리고 돌려도 "

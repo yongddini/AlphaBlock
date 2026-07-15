@@ -65,12 +65,17 @@ from backtest.harness import (
 )
 from backtest.models import BacktestConfig, Trade
 from backtest.portfolio import PortfolioStats
-from backtest.wan103_portfolio_leverage_report import _Cell, build_cell, run_scenario
+from backtest.wan103_portfolio_leverage_report import PARAMS, _Cell, build_cell, run_scenario
 from backtest.zone_limit_backtest import (
     _to_trade,
     build_result_from_trades,
     sequence_with_candidates,
 )
+
+#: 이 리포트가 고정한 오프셋(bp) — **WAN-103과 같은 셋업 풀**을 봐야 하므로 그쪽 엔진에서
+#: 그대로 가져온다(WAN-112 이후 채택 기본값 2bp를 따라가면 안 된다). 이 재검의 질문은
+#: "같은 풀에 렌즈만 조이면 다중 우위가 남는가"라, 풀이 움직이면 질문 자체가 성립하지 않는다.
+PINNED_OFFSET_BPS = PARAMS.zone_limit_offset_bps
 
 DEFAULT_SYMBOLS: tuple[str, ...] = ("BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT")
 
@@ -250,7 +255,9 @@ def run_report(
                             timeframe,
                             market,
                             segment,
-                            params=build_params(fill=preset, seed=seed),
+                            params=build_params(
+                                fill=preset, seed=seed, offset_bps=PINNED_OFFSET_BPS
+                            ),
                             order_blocks=order_blocks,
                         )
                         if cell is None:

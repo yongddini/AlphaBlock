@@ -61,9 +61,16 @@ def test_zone_limit_params_are_the_adopted_defaults() -> None:
 
 
 def test_close_preset_differs_only_in_entry_and_rsi_mode() -> None:
-    """대조군은 진입 방식·RSI 모드만 다르다 — 격리 변수는 진입 방식 하나여야 한다."""
+    """대조군은 진입 방식·RSI 모드만 다르다 — 격리 변수는 진입 방식 하나여야 한다.
+
+    오프셋도 함께 떨어뜨린다: A안은 오프셋을 읽지 않으므로(호출부가 B안뿐) 채택 기본값의
+    2bp를 대조군이 들고 있어 봐야 **라벨만 거짓**이 된다(WAN-112). 숫자는 어느 쪽이든
+    같으니 이건 정직성 계약이지 성능 계약이 아니다.
+    """
     assert (
-        ZONE_LIMIT_PARAMS.model_copy(update={"entry_mode": "close", "rsi_mode": "closed_bar"})
+        ZONE_LIMIT_PARAMS.model_copy(
+            update={"entry_mode": "close", "rsi_mode": "closed_bar", "zone_limit_offset_bps": 0.0}
+        )
         == CLOSE_ENTRY_PARAMS
     )
 

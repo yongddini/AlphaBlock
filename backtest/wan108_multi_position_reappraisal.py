@@ -593,7 +593,7 @@ def write_summary(rows: Sequence[ReappraisalRow], path: Path) -> None:
         "",
         "재현: `uv run python -m backtest.wan108_multi_position_reappraisal`",
         "",
-        "채택 기본값(`ConfluenceParams()` = 롱 온리·지정가·`first_tap_free`·고정 1.5R) 위에서 "
+        "WAN-112 이전 채택 기본값(롱 온리·지정가·`first_tap_free`·고정 1.5R·**오프셋 0bp**) 위에서 "
         "**포지션 제약과 사이징만** 바꿔 돌린 결과다. 전략 파라미터는 하나도 건드리지 않았다. "
         "결론과 판정은 [`docs/decisions/wan103.md`](../../docs/decisions/wan103.md) "
         "「WAN-108 재판정」 절.",

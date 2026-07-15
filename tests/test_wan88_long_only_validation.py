@@ -27,6 +27,7 @@ from backtest.wan71_edge_decomposition import COST_MULTIPLIERS
 from backtest.wan88_long_only_validation import (
     NULL_FILL_LEVELS,
     OFFICIAL_FILL,
+    PINNED_OFFSET_BPS,
     ContrastRow,
     CostRow,
     NullCellRow,
@@ -208,13 +209,17 @@ def _null_row(
 
 
 def test_adopted_params_changes_nothing_but_fill_knobs() -> None:
-    """이 리포트는 **검증 전용**이다 — 체결 가정 노브 말고는 채택 기본값 그대로여야 한다.
+    """이 리포트는 **검증 전용**이다 — 체결 가정 노브 말고는 고정 엔진 그대로여야 한다.
 
     이 테스트가 이슈 지침("전략 규칙·기본값은 바꾸지 않는다, 파라미터 탐색 금지")을
-    코드로 고정한다. 여기가 깨지면 리포트가 "채택 설정의 엣지"가 아니라 다른 무언가를
+    코드로 고정한다. 여기가 깨지면 리포트가 "그 설정의 엣지"가 아니라 다른 무언가를
     재고 있다는 뜻이다.
+
+    기준은 `ConfluenceParams()`(지금의 채택 기본값)가 아니라 **이 검정이 돌린 엔진**
+    (오프셋 0bp)이다 — WAN-112가 기본 오프셋을 2bp로 올렸고, 이 리포트의 결론은 그 전
+    엔진에서 나왔다.
     """
-    defaults = ConfluenceParams()
+    defaults = ConfluenceParams(zone_limit_offset_bps=PINNED_OFFSET_BPS)
     params = adopted_params(fill_preset(OFFICIAL_FILL))
 
     fill_knobs = {"fill_penetration_bps", "fill_dropout_rate", "fill_dropout_seed"}
@@ -233,9 +238,17 @@ def test_adopted_params_changes_nothing_but_fill_knobs() -> None:
     assert params.zone_limit_offset_bps == 0.0
 
 
-def test_baseline_fill_is_bit_identical_to_adopted_defaults() -> None:
-    """`baseline`은 채택 기본값 그 자체 — 널의 대조축이 성립하려면 한 톨도 달라선 안 된다."""
-    assert adopted_params(fill_preset("baseline")) == ConfluenceParams()
+def test_baseline_fill_is_bit_identical_to_the_pinned_engine() -> None:
+    """`baseline`은 이 검정이 실제로 돌린 엔진 그 자체 — 널의 대조축이 성립하려면 한 톨도
+    달라선 안 된다.
+
+    ⚠️ WAN-112로 채택 기본 오프셋이 2bp가 되면서 그 엔진은 더 이상 `ConfluenceParams()`가
+    아니다. WAN-88의 「유의 셀 0개」 판정은 **0bp에서 나온 결론**이므로 오프셋을 고정한다.
+    """
+    pinned = ConfluenceParams(zone_limit_offset_bps=PINNED_OFFSET_BPS)
+    assert adopted_params(fill_preset("baseline")) == pinned
+    assert PINNED_OFFSET_BPS == 0.0
+    assert ConfluenceParams().zone_limit_offset_bps == 2.0, "채택 기본값과 갈라졌음이 의도다"
 
 
 def test_official_fill_matches_wan97_decision() -> None:

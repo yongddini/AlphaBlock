@@ -168,7 +168,7 @@ def build_params(
     *,
     entry_mode: str = "zone_limit",
     take_profit_r: float | None = None,
-    offset_bps: float = 0.0,
+    offset_bps: float | None = None,
     fill: FillPreset = BASELINE_FILL,
     seed: int = 0,
     short_enabled: bool | None = None,
@@ -179,6 +179,11 @@ def build_params(
     아무것도 주지 않으면 **채택 기본값 그대로**(`ConfluenceParams()`)를 반환한다 —
     그래야 CLI 기본 실행이 WAN-95/96/99 리포트의 기준선 셀과 같은 엔진을 탄다.
 
+    ⚠️ `offset_bps=None`이 "채택 기본값에 맡긴다"는 뜻이고, 0.0은 **명시적 0bp 요청**이다.
+    둘을 가르지 않고 0.0을 기본 인자로 두면 이 함수가 `ConfluenceParams`의 기본 오프셋을
+    **말없이 덮어써서**, WAN-112가 기본값을 2bp로 올려도 CLI 기본 실행만 혼자 0bp로 도는
+    조용한 갈라짐이 생긴다(= 위 첫 문단의 약속이 깨진다).
+
     지정가 전용 노브(`offset_bps`·`fill`)를 종가 진입에 주면 **거부한다**. 조용히
     무시하면 "오프셋 5bp로 돌렸다"고 믿는 사용자에게 오프셋이 없는 결과를 주게 되는데,
     그것이 WAN-91(`funding_enabled`만 켜고 펀딩을 안 넘김)·WAN-95(`entry_mode`가 라벨일
@@ -188,7 +193,7 @@ def build_params(
         supported = ", ".join(_RSI_MODE_FOR_ENTRY)
         raise ValueError(f"알 수 없는 진입 방식: {entry_mode!r} (지원: {supported})")
     if entry_mode == "close":
-        if offset_bps != 0.0:
+        if offset_bps:
             raise ValueError(
                 "지정가 오프셋(--offset-bps)은 종가 진입(--entry-mode close)에 적용되지 "
                 "않습니다. 존에 거는 주문이 없으니 오프셋을 얹을 가격도 없습니다."
@@ -202,11 +207,17 @@ def build_params(
     update: dict[str, object] = {
         "entry_mode": entry_mode,
         "rsi_mode": _RSI_MODE_FOR_ENTRY[entry_mode],
-        "zone_limit_offset_bps": offset_bps,
         "fill_penetration_bps": fill.penetration_bps,
         "fill_dropout_rate": fill.dropout_rate,
         "fill_dropout_seed": seed,
     }
+    if entry_mode == "close":
+        # A안은 오프셋을 읽지 않는다(`apply_zone_limit_offset` 호출부가 B안뿐). 채택
+        # 기본값의 2bp를 그대로 들고 있으면 리포트에 "오프셋 2bp"라 찍히면서 실제로는
+        # 아무 데도 안 쓰이는 거짓 라벨이 된다 — WAN-95가 고친 그 병이다.
+        update["zone_limit_offset_bps"] = 0.0
+    elif offset_bps is not None:
+        update["zone_limit_offset_bps"] = offset_bps
     if take_profit_r is not None:
         update["take_profit_r"] = take_profit_r
     if short_enabled is not None:

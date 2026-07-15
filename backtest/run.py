@@ -437,15 +437,18 @@ def grid_from_args(args: argparse.Namespace) -> Grid:
         short_enabled = True
     elif args.long_only:
         short_enabled = False
+    entry_modes = split_list(args.entry_mode)
     return Grid(
         symbols=tuple(normalize_symbol(s) for s in split_list(args.symbol)),
         timeframes=split_list(args.tf),
-        entry_modes=split_list(args.entry_mode),
+        entry_modes=entry_modes,
         take_profit_rs=(
             split_floats(args.tp_r, label="--tp-r") if args.tp_r else (_default_tp_r(),)
         ),
         offsets_bps=(
-            split_floats(args.offset_bps, label="--offset-bps") if args.offset_bps else (0.0,)
+            split_floats(args.offset_bps, label="--offset-bps")
+            if args.offset_bps
+            else _default_offsets_bps(entry_modes)
         ),
         fills=_fills_from_args(args),
         seeds=split_ints(args.seeds, label="--seeds") if args.seeds else None,
@@ -456,6 +459,24 @@ def grid_from_args(args: argparse.Namespace) -> Grid:
 def _default_tp_r() -> float:
     """익절 R을 안 주면 채택 기본값 그대로."""
     return build_params().take_profit_r
+
+
+def _default_offsets_bps(entry_modes: tuple[str, ...]) -> tuple[float, ...]:
+    """오프셋을 안 주면 **채택 기본값 그대로**(WAN-112: 2bp).
+
+    여기에 `(0.0,)`을 하드코딩하면 CLI가 `ConfluenceParams`의 기본 오프셋을 말없이
+    덮어써서, 인자 없는 실행만 혼자 옛 엔진(0bp)을 도는 조용한 갈라짐이 생긴다 —
+    "인자 없이 돌리면 채택 기본값 그대로"라는 이 CLI의 약속(WAN-101)이 깨진다.
+
+    단 **종가 진입이 격자에 섞이면 0bp로 내린다**: A안은 오프셋을 읽지 않으므로
+    (`apply_zone_limit_offset` 호출부가 B안뿐) 종가 팔에 2bp를 얹을 방법이 없다. 그
+    상태로 지정가 팔만 2bp를 물리면 두 팔이 **진입 방식 말고도 오프셋까지 달라져**,
+    진입 방식을 격리하려던 대조표가 두 변수를 섞어 버린다(WAN-95 `CLOSE_ENTRY_PARAMS`가
+    같은 이유로 다른 필드를 전부 맞춘다). 오프셋을 명시로 주면 `Grid`가 이 조합을 거부한다.
+    """
+    if "close" in entry_modes:
+        return (0.0,)
+    return (build_params().zone_limit_offset_bps,)
 
 
 def options_from_args(args: argparse.Namespace) -> RunOptions:

@@ -141,7 +141,11 @@ def default_backtest_config(
 #: 명시적으로 받지 않았을 때 이 상수를 기본으로 삼아 **자기가 A안이라는 사실을 선언**한다.
 #: 호출부가 `zone_limit` 파라미터를 명시적으로 넘기면 `evaluate()`가 거부한다 —
 #: 조용히 종가 진입으로 되돌리지 않는다.
-CLOSE_ENTRY_DEFAULTS = ConfluenceParams(entry_mode="close", rsi_mode="closed_bar")
+#: 오프셋도 함께 0으로 못 박는다(WAN-112): A안은 `apply_zone_limit_offset`을 호출하지
+#: 않으므로 채택 기본값의 2bp를 들고 있어 봐야 **리포트 라벨만 거짓**이 된다.
+CLOSE_ENTRY_DEFAULTS = ConfluenceParams(
+    entry_mode="close", rsi_mode="closed_bar", zone_limit_offset_bps=0.0
+)
 
 
 def _require_close_entry(confluence_params: ConfluenceParams | None) -> None:

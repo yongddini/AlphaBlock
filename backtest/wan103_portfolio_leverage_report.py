@@ -63,9 +63,13 @@ from strategy.models import ConfluenceParams, OrderBlockResult
 
 DEFAULT_SYMBOLS: tuple[str, ...] = ("BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT")
 
-#: 채택 기본값 그대로. 이 리포트는 전략 파라미터를 하나도 바꾸지 않는다 — 묻는 건
-#: "지금 기본값에서 포지션 제약을 풀면 무엇이 달라지나"다.
-PARAMS = ConfluenceParams()
+#: WAN-103/108/110 당시 채택 기본값(오프셋 **0bp**) 그대로. 이 리포트는 전략 파라미터를
+#: 하나도 바꾸지 않는다 — 묻는 건 "그 기본값에서 포지션 제약을 풀면 무엇이 달라지나"다.
+#:
+#: ⚠️ 오프셋만 **명시 고정**한다(WAN-112): 채택 기본값은 이제 2bp지만 이 리포트의 발표
+#: 수치(단일 vs 다중 비교)는 0bp에서 나왔다. 기본값을 따라가게 두면 비교의 두 항이 함께
+#: 움직여 문서에 적힌 %p가 재현되지 않는다.
+PARAMS = ConfluenceParams(zone_limit_offset_bps=0.0)
 
 #: 고정 레버리지 스윕 축(이슈 완료기준). N배(= peak concurrency)는 여기 없고, 실행 중
 #: 계측한 값을 대입해 **별도 시나리오**로 돈다.
@@ -635,7 +639,7 @@ def write_summary(
         "",
         "재현: `uv run python -m backtest.wan103_portfolio_leverage_report`",
         "",
-        "채택 기본값(`ConfluenceParams()` = 롱 온리·지정가·`first_tap_free`·고정 1.5R) 위에서 "
+        "WAN-112 이전 채택 기본값(롱 온리·지정가·`first_tap_free`·고정 1.5R·**오프셋 0bp**) 위에서 "
         "**포지션 제약만** 바꿔 돌린 결과다. 전략 파라미터는 하나도 건드리지 않았다. "
         "설계 결정 5개와 결론은 [`docs/decisions/wan103.md`](../../docs/decisions/wan103.md).",
         "",

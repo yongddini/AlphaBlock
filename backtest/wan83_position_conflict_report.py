@@ -78,9 +78,13 @@ DEFAULT_SYMBOLS: tuple[str, ...] = ("BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:
 #: WAN-97 결정과 같은 4TF(15m/1h/4h/1d) — 채택 판단 대상 전체를 계측한다.
 DEFAULT_TIMEFRAMES: tuple[str, ...] = ("15m", "1h", "4h", "1d")
 
-#: 채택 기본값 그대로(WAN-81 롱 온리·지정가·first_tap_free·고정 1.5R). 이 리포트는
-#: 파라미터를 하나도 바꾸지 않는다 — 이슈가 묻는 건 "지금 기본값에서 얼마나 소각되는가"다.
-PARAMS = ConfluenceParams()
+#: WAN-112 이전 채택 기본값 그대로(WAN-81 롱 온리·지정가·first_tap_free·고정 1.5R +
+#: **오프셋 0bp**). 이 리포트는 파라미터를 하나도 바꾸지 않는다 — 이슈가 묻는 건
+#: "그 기본값에서 얼마나 소각되는가"다.
+#:
+#: ⚠️ 오프셋만 **명시 고정**한다(WAN-112): 채택 기본값은 이제 2bp지만 이 리포트의 발표
+#: 수치는 0bp에서 나왔다. 기본값을 따라가게 두면 숫자가 조용히 움직여 본문과 어긋난다.
+PARAMS = ConfluenceParams(zone_limit_offset_bps=0.0)
 
 SCOPE_SERIES = "series"
 SCOPE_GLOBAL = "global"
@@ -321,7 +325,7 @@ def write_summary(rows: list[ConflictRow], path: Path) -> None:
 
     lines = ["# WAN-83: 포지션 충돌로 인한 첫 탭 RSI 면제권 소각 계측", ""]
     lines.append(
-        "채택 기본값(`ConfluenceParams()` = 롱 온리·지정가·`first_tap_free`·고정 1.5R)에서, "
+        "WAN-112 이전 채택 기본값(롱 온리·지정가·`first_tap_free`·고정 1.5R·**오프셋 0bp**)에서, "
         "`tap_index=0`(무조건 진입)인데 포지션 보유로 스킵된 첫 탭이 존 무효화 전에 "
         "재탭됐는지, 재탭이 RSI 게이트를 통과했는지 분해한다. **이 이슈는 계측만 하며 "
         "진입 로직은 바꾸지 않는다.**"
