@@ -59,7 +59,7 @@ from backtest.zone_limit_backtest import (
     sequence_with_candidates,
 )
 from data.models import FundingRate
-from strategy.models import ConfluenceParams
+from strategy.models import ConfluenceParams, OrderBlockResult
 
 DEFAULT_SYMBOLS: tuple[str, ...] = ("BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT")
 
@@ -223,7 +223,25 @@ class _Cell:
     """
 
 
-def build_cell(symbol: str, timeframe: str, market: MarketData, segment: Segment) -> _Cell | None:
+def build_cell(
+    symbol: str,
+    timeframe: str,
+    market: MarketData,
+    segment: Segment,
+    *,
+    params: ConfluenceParams | None = None,
+    order_blocks: OrderBlockResult | None = None,
+) -> _Cell | None:
+    """한 (심볼, TF, 구간)의 후보 풀을 만든다.
+
+    `params`를 주면 그 전략 파라미터로 후보를 만든다(기본은 채택 기본값 `PARAMS`) —
+    WAN-110이 체결 가정 렌즈(`fill_penetration_bps`·`fill_dropout_rate`)를 갈아 끼우며
+    같은 셀을 여러 번 만드는 축이다. 기본값이 `PARAMS`라 WAN-103·WAN-108은 그대로 돈다.
+
+    `order_blocks`를 주면 탐지를 건너뛰고 그것을 쓴다. 오더블록 탐지는 컨플루언스
+    파라미터와 무관하므로(`harness.detect_order_blocks`) 렌즈가 달라도 같은 존이 나온다 —
+    렌즈마다 다시 탐지하면 같은 답을 15m 셀 하나당 7초씩 다시 계산하게 된다.
+    """
     window = slice_market(market, segment)
     if window.empty or window.df_1m.empty:
         return None
@@ -232,9 +250,11 @@ def build_cell(symbol: str, timeframe: str, market: MarketData, segment: Segment
         window.htf_df,
         window.df_1m,
         timeframe,
-        params=PARAMS,
+        params=params or PARAMS,
         cfg=cfg,
-        order_block_result=detect_order_blocks(window),
+        order_block_result=order_blocks
+        if order_blocks is not None
+        else detect_order_blocks(window),
     )
     return _Cell(
         symbol=symbol,
