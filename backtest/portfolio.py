@@ -214,12 +214,19 @@ def _notional_cap(cfg: BacktestConfig, equity: float, portfolio: PortfolioParams
 def _unclamped_notional(cand: CandidateLike, cfg: BacktestConfig, equity: float) -> float:
     """명목 상한이 없었다면 이 후보가 가졌을 명목가 — 축소 진입 판정용.
 
-    리스크 사이징이면 `리스크금액 / 손절거리 × 진입가`, 고정 비율이면 `자본 × 비율`이다.
+    사이징 모드마다 식이 다르다(WAN-108): `risk_pct`면 `리스크금액 / 손절거리 × 진입가`,
+    `fixed_notional`이면 `자본 × notional_fraction`, 리스크 사이징 자체가 없으면
+    `자본 × position_fraction`이다. **`position_size`와 같은 식이어야** 한다 — 갈라지면
+    축소되지 않은 진입이 `clamped_entries`로 잘못 세어진다(`fixed_notional`은 명목이
+    손절 거리와 무관해서, 리스크 식을 그대로 쓰면 손절이 먼 자리마다 오탐이 난다).
+
     진입가는 아직 비용 반영 전이라 근사지만(메이커 진입은 슬리피지가 0이라 오차는 수수료
     수준), 이 값은 **"상한에 걸렸는가"를 세는 진단**에만 쓰이고 손익에는 들어가지 않는다.
     """
     if cfg.risk_sizing is None:
         return equity * cfg.position_fraction
+    if cfg.risk_sizing.sizing_mode == "fixed_notional":
+        return equity * cfg.risk_sizing.notional_fraction
     stop_distance = abs(cand.entry_price - cand.stop_price)
     if stop_distance <= 0.0:
         return 0.0
