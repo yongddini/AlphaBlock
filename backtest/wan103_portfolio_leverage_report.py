@@ -50,6 +50,7 @@ from backtest.models import BacktestConfig, Trade
 from backtest.portfolio import C, PortfolioParams, PortfolioStats, ToTrade, sequence_portfolio
 from backtest.sweep import default_backtest_config
 from backtest.zone_limit_backtest import (
+    ZoneLimitStats,
     _Candidate,
     _to_trade,
     apply_portfolio_leverage,
@@ -216,6 +217,10 @@ class _Cell:
     candidates: list[_Candidate]
     rates: tuple[FundingRate, ...]
     cfg: BacktestConfig
+    stats: ZoneLimitStats
+    """체결 진단(eligible/filled). **후보 풀의 성질**이라 시나리오·사이징과 무관하다 —
+    체결 시뮬레이션은 사이징을 보지 않으므로 이 셀을 공유하는 모든 행의 체결률이 같다.
+    """
 
 
 def build_cell(symbol: str, timeframe: str, market: MarketData, segment: Segment) -> _Cell | None:
@@ -223,7 +228,7 @@ def build_cell(symbol: str, timeframe: str, market: MarketData, segment: Segment
     if window.empty or window.df_1m.empty:
         return None
     cfg = default_backtest_config(timeframe)
-    candidates, _stats = build_zone_limit_candidates(
+    candidates, stats = build_zone_limit_candidates(
         window.htf_df,
         window.df_1m,
         timeframe,
@@ -238,6 +243,7 @@ def build_cell(symbol: str, timeframe: str, market: MarketData, segment: Segment
         candidates=candidates,
         rates=tuple(window.funding_rates),
         cfg=cfg,
+        stats=stats,
     )
 
 

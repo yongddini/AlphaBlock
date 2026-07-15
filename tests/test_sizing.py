@@ -117,3 +117,90 @@ def test_params_validation_rejects_bad_values() -> None:
         PositionSizingParams(leverage=0.0)
     with pytest.raises(ValueError):
         PositionSizingParams(min_stop_distance_fraction=1.0)
+
+
+# --------------------------------------------------------------------------- #
+# 사이징 2안: 명목 고정 (WAN-108)
+# --------------------------------------------------------------------------- #
+
+
+def test_default_sizing_mode_is_risk_pct() -> None:
+    """기본값 불변 — 2안을 추가해도 채택 경로는 손절 역산 그대로다."""
+    assert PositionSizingParams().sizing_mode == "risk_pct"
+
+
+def test_fixed_notional_ignores_stop_distance() -> None:
+    """명목 고정: 손절이 멀든 가깝든 같은 명목 = 자본 × f (1안과 정반대 성질)."""
+    params = PositionSizingParams(
+        sizing_mode="fixed_notional",
+        notional_fraction=1.0,
+        leverage=5.0,
+        min_stop_distance_fraction=0.0,
+    )
+    far = position_size(equity=10_000.0, entry_price=100.0, stop_price=90.0, params=params)
+    near = position_size(equity=10_000.0, entry_price=100.0, stop_price=99.0, params=params)
+    # 명목 = 자본 전액(10_000) → 진입가 100에서 100주. 손절 거리와 무관하게 동일.
+    assert far == pytest.approx(100.0)
+    assert near == pytest.approx(100.0)
+
+
+def test_fixed_notional_loss_scales_with_stop_distance() -> None:
+    """2안의 핵심 위험: 손절 시 손실이 자리마다 다르고 **상한이 없다**.
+
+    1안은 어느 자리든 손절 손실이 자본의 1%지만, 2안은 손절 거리에 비례한다 —
+    `docs/decisions/wan103.md` §5가 말로만 남긴 경고가 이 산식이다.
+    """
+    params = PositionSizingParams(
+        sizing_mode="fixed_notional",
+        notional_fraction=1.0,
+        leverage=5.0,
+        min_stop_distance_fraction=0.0,
+    )
+    qty = position_size(equity=10_000.0, entry_price=100.0, stop_price=96.0, params=params)
+    loss = abs(100.0 - 96.0) * qty
+    assert loss == pytest.approx(400.0)  # 자본의 4% — 1%가 아니다.
+
+
+def test_fixed_notional_fraction_scales_quantity() -> None:
+    params = PositionSizingParams(sizing_mode="fixed_notional", notional_fraction=0.5, leverage=5.0)
+    qty = position_size(equity=10_000.0, entry_price=100.0, stop_price=90.0, params=params)
+    assert qty == pytest.approx(50.0)  # 명목 = 5_000.
+
+
+def test_fixed_notional_respects_portfolio_notional_cap() -> None:
+    """f=1 · 천장 5배면 5자리까지 차고 6번째는 여유가 없어 스킵된다(사용자 확정 규칙)."""
+    params = PositionSizingParams(sizing_mode="fixed_notional", notional_fraction=1.0, leverage=5.0)
+    fifth = position_size(
+        equity=10_000.0,
+        entry_price=100.0,
+        stop_price=90.0,
+        params=params,
+        open_notional=40_000.0,
+    )
+    assert fifth == pytest.approx(100.0)  # 남은 여유 10_000 → 온전한 한 자리.
+    sixth = position_size(
+        equity=10_000.0,
+        entry_price=100.0,
+        stop_price=90.0,
+        params=params,
+        open_notional=50_000.0,
+    )
+    assert sixth == 0.0  # 천장 소진.
+
+
+def test_fixed_notional_still_honors_min_stop_distance() -> None:
+    """손절 가드는 **셋업**을 거르는 것이라 두 모드에 똑같이 걸린다.
+
+    모드마다 다른 셋업을 받으면 WAN-108 사이징 대조표에서 두 열의 차이가
+    "사이징 효과 + 셋업 풀 차이"가 돼 축이 오염된다.
+    """
+    params = PositionSizingParams(sizing_mode="fixed_notional", notional_fraction=1.0, leverage=5.0)
+    # 손절 거리 0.1% < 기본 하한 0.3% → 두 모드 모두 스킵.
+    assert position_size(equity=10_000.0, entry_price=100.0, stop_price=99.9, params=params) == 0.0
+
+
+def test_fixed_notional_rejects_bad_fraction() -> None:
+    with pytest.raises(ValueError):
+        PositionSizingParams(notional_fraction=0.0)
+    with pytest.raises(ValueError):
+        PositionSizingParams(sizing_mode="nonsense")
