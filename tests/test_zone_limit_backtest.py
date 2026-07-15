@@ -20,11 +20,13 @@ from backtest.zone_limit_backtest import (
     _Candidate,
     _IncrementalRsiSeeder,
     _line_snapshots,
+    _sequence_and_cost,
     _to_trade,
     build_result_from_trades,
     build_zone_limit_candidates,
     run_zone_limit_backtest,
     run_zone_limit_backtest_verbose,
+    sequence_with_candidates,
 )
 from common.costs import Liquidity
 from data.models import FundingRate
@@ -331,6 +333,46 @@ def test_build_result_from_trades_single_position_sequencing() -> None:
     result = build_result_from_trades([trade], cfg, "1h")
     assert result.metrics.num_trades == 1
     assert result.equity_curve[-1].equity == cfg.initial_capital + 50.0
+
+
+def test_sequence_with_candidates_matches_sequence_and_cost() -> None:
+    """짝 반환판(WAN-104)이 시퀀싱의 유일한 구현이므로 기존 결과와 완전히 같아야 한다.
+
+    `_sequence_and_cost`가 이 함수에 위임하도록 바꿨다 — 거래 목록이 조금이라도 달라지면
+    WAN-95/99 리포트 수치가 통째로 흔들린다.
+    """
+    htf, one_min = _synthetic_pair()
+    params = ConfluenceParams()
+    cfg = BacktestConfig()
+    candidates, _ = build_zone_limit_candidates(htf, one_min, "1h", params=params, cfg=cfg)
+
+    paired = sequence_with_candidates(candidates, cfg)
+    trades = _sequence_and_cost(candidates, cfg)
+
+    assert [t.model_dump() for _, t in paired] == [t.model_dump() for t in trades]
+    # 짝지어진 셋업은 그 거래의 진입 시각을 그대로 들고 있어야 조인이 성립한다.
+    assert all(cand.entry_time == trade.entry_time for cand, trade in paired)
+
+
+def test_candidate_trigger_time_uniquely_joins_to_setup_diagnostic() -> None:
+    """`trigger_time`이 후보 ↔ 진단의 유일 키다 (WAN-104 분해의 전제).
+
+    `(zone_key, tap_index)`로는 이을 수 없다 — 병합 존은 새로 편입된 구성 존이 같은
+    클러스터 안에서 다시 `tap_index=0`을 받을 수 있어(WAN-81 §5) 그 조합이 유일하지
+    않고, dict 키로 쓰면 두 셋업이 조용히 하나로 합쳐진다.
+    """
+    htf, one_min = _synthetic_pair()
+    params = ConfluenceParams()
+    cfg = BacktestConfig()
+    sink: list[SetupDiagnostic] = []
+    candidates, _ = build_zone_limit_candidates(
+        htf, one_min, "1h", params=params, cfg=cfg, setup_sink=sink
+    )
+
+    trigger_times = [s.trigger_time for s in sink]
+    assert len(set(trigger_times)) == len(trigger_times), "진단의 trigger_time이 유일해야 한다"
+    # 체결된 후보는 전부 자기 진단 레코드로 이어져야 한다(하나도 떨어지면 손익이 샌다).
+    assert {c.trigger_time for c in candidates} <= set(trigger_times)
 
 
 # ------------------------------------------------------------------ WAN-73 신규 파라미터
