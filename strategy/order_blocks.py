@@ -161,7 +161,8 @@ def _generate_signals(
     # bisect_right(confirmed_time): 확정 시각을 **초과**하는 첫 봉(구버전 `<= ` 루프와 동일).
     # bisect_left(break_time): 무효화 시각 **이상**인 첫 봉(구버전 `< ` 루프와 동일).
     # break_time > confirmed_time 이 항상 성립하므로 break_pos >= start_pos 가 보장된다.
-    for ob in order_blocks:
+    for archive_idx, ob in enumerate(order_blocks):
+        zone_key = frozenset({archive_idx})
         break_pos: int | None = None
         if ob.break_time is not None:
             break_pos = bisect.bisect_left(times, ob.break_time)
@@ -185,6 +186,7 @@ def _generate_signals(
                             order_block=ob,
                             status="cancelled" if is_break_bar else "active",
                             tap_index=0,
+                            zone_key=zone_key,
                         )
                     )
                     break
@@ -206,6 +208,7 @@ def _generate_signals(
                     order_block=ob,
                     status="cancelled" if is_break_bar else "active",
                     tap_index=tap_index,
+                    zone_key=zone_key,
                 )
             )
     return signals
@@ -435,6 +438,7 @@ def _generate_merged_signals(
                             order_block=g.merged_ob,
                             status="cancelled" if is_break_bar else "active",
                             tap_index=tap_index,
+                            zone_key=g.member_indices,
                         )
                     )
             inside_state[g.member_indices] = is_inside

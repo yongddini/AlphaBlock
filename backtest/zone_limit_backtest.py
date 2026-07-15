@@ -105,6 +105,12 @@ class _Candidate:
     order_block: OrderBlock | None = None
     """이 셋업의 근거 오더블록(WAN-77). 체결·청산 로직에는 쓰이지 않고, 사후 분석
     (예: `ob_volume` 기반 성과 분해)이 거래를 원본 존에 조인할 때만 참조한다."""
+    tap_index: int = 0
+    """이 셋업의 탭 순번(`OrderBlockSignal.tap_index` 그대로, WAN-83). 진단 전용."""
+    zone_key: frozenset[int] | None = None
+    """이 셋업이 속한 존의 안정적 식별자(`OrderBlockSignal.zone_key` 그대로, WAN-83).
+    포지션 충돌로 스킵된 첫 탭이 같은 존에서 재탭됐는지 사후에 그룹핑할 때 쓴다.
+    진단 전용이며 체결·청산 로직에는 쓰이지 않는다."""
 
 
 @dataclass(frozen=True)
@@ -157,6 +163,11 @@ class SetupDiagnostic:
     dropped: bool
     """`fill_dropout_rate`로 탈락했는지(탈락했다면 `filled`는 False)."""
     status: ZoneLimitStatus
+    tap_index: int = 0
+    """이 셋업의 탭 순번(`OrderBlockSignal.tap_index` 그대로, WAN-83). 진단 전용."""
+    zone_key: frozenset[int] | None = None
+    """이 셋업이 속한 존의 안정적 식별자(`OrderBlockSignal.zone_key` 그대로, WAN-83).
+    진단 전용이며 체결·청산 로직에는 쓰이지 않는다."""
 
 
 def _prepare_htf(df: pd.DataFrame) -> pd.DataFrame:
@@ -524,6 +535,8 @@ def build_zone_limit_candidates(
                     filled=is_filled,
                     dropped=is_dropped,
                     status=outcome.status,
+                    tap_index=signal.tap_index,
+                    zone_key=signal.zone_key,
                 )
             )
         if not is_filled or outcome.entry_time is None or outcome.entry_price is None:
@@ -556,6 +569,8 @@ def build_zone_limit_candidates(
                 stop_price=stop_price,
                 penetration=penetration,
                 order_block=ob,
+                tap_index=signal.tap_index,
+                zone_key=signal.zone_key,
             )
         )
 

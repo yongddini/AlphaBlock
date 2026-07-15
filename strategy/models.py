@@ -157,6 +157,14 @@ class OrderBlockSignal(BaseModel):
     "first_tap_free"`가 이 값으로 첫 탭은 RSI 게이트를 면제하고 재탭(`>=1`)부터
     적용한다. 병합 존은 구성 존이 개별적으로 각자 첫 탭을 셀 수 있으므로(WAN-82
     흡수), 같은 병합 클러스터 안에서도 신규로 편입된 존은 다시 `0`을 받을 수 있다."""
+    zone_key: frozenset[int] | None = None
+    """이 시그널이 속한 존(병합 존 포함)의 안정적 식별자(탐지 아카이브 인덱스 집합,
+    WAN-83). 병합 존은 `merged_ob`(값 객체) 인스턴스가 `dirty` 재계산마다 새로
+    만들어져 `order_block` 객체 동일성으로는 "같은 병합 클러스터"를 추적할 수
+    없다(재계산은 무관한 클러스터도 함께 새 인스턴스를 만든다) — 반면 이 필드가 담는
+    구성 인덱스 집합(`_MergedGroup.member_indices`)은 멤버십이 그대로인 한 항상
+    동일하다. 같은 존의 여러 탭(`tap_index` 0, 1, 2…)을 이 값으로 그룹핑할 수
+    있다. 진입·손절·익절 로직에는 전혀 쓰이지 않는 순수 진단용 메타데이터다."""
 
 
 def _merge_max_optional(a: int | None, b: int | None) -> int | None:
