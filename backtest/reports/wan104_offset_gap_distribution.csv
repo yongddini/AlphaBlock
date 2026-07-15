@@ -1,0 +1,64 @@
+symbol,timeframe,segment,band,band_upper_bps,num_setups,num_resolved,num_wins,win_rate,mean_r
+BTC/USDT:USDT,1h,full,"(0, 1]",1.0,4,4,3,0.75,0.875
+BTC/USDT:USDT,1h,full,"(1, 2]",2.0,2,2,2,1.0,1.5
+BTC/USDT:USDT,1h,full,"(2, 3]",3.0,2,2,2,1.0,1.5
+BTC/USDT:USDT,1h,full,"(3, 5]",5.0,6,6,4,0.6666666666666666,0.6666666666666666
+BTC/USDT:USDT,1h,full,"(5, 8]",8.0,6,6,4,0.6666666666666666,0.6666666666666666
+BTC/USDT:USDT,1h,full,"(8, 10]",10.0,0,0,0,,
+BTC/USDT:USDT,1h,full,never,,278,0,0,,
+BTC/USDT:USDT,1h,is,"(0, 1]",1.0,1,1,0,0.0,-1.0
+BTC/USDT:USDT,1h,is,"(1, 2]",2.0,2,2,2,1.0,1.5
+BTC/USDT:USDT,1h,is,"(2, 3]",3.0,2,2,2,1.0,1.5
+BTC/USDT:USDT,1h,is,"(3, 5]",5.0,4,4,2,0.5,0.25
+BTC/USDT:USDT,1h,is,"(5, 8]",8.0,5,5,3,0.6,0.5
+BTC/USDT:USDT,1h,is,"(8, 10]",10.0,0,0,0,,
+BTC/USDT:USDT,1h,is,never,,154,0,0,,
+BTC/USDT:USDT,1h,oos,"(0, 1]",1.0,3,3,3,1.0,1.5
+BTC/USDT:USDT,1h,oos,"(1, 2]",2.0,0,0,0,,
+BTC/USDT:USDT,1h,oos,"(2, 3]",3.0,0,0,0,,
+BTC/USDT:USDT,1h,oos,"(3, 5]",5.0,2,2,2,1.0,1.5
+BTC/USDT:USDT,1h,oos,"(5, 8]",8.0,1,1,1,1.0,1.5
+BTC/USDT:USDT,1h,oos,"(8, 10]",10.0,0,0,0,,
+BTC/USDT:USDT,1h,oos,never,,119,0,0,,
+ETH/USDT:USDT,1h,full,"(0, 1]",1.0,1,1,1,1.0,1.5
+ETH/USDT:USDT,1h,full,"(1, 2]",2.0,2,2,2,1.0,1.5
+ETH/USDT:USDT,1h,full,"(2, 3]",3.0,0,0,0,,
+ETH/USDT:USDT,1h,full,"(3, 5]",5.0,4,4,3,0.75,0.875
+ETH/USDT:USDT,1h,full,"(5, 8]",8.0,3,3,2,0.6666666666666666,0.6666666666666666
+ETH/USDT:USDT,1h,full,"(8, 10]",10.0,4,4,2,0.5,0.25
+ETH/USDT:USDT,1h,full,never,,325,0,0,,
+ETH/USDT:USDT,1h,is,"(0, 1]",1.0,0,0,0,,
+ETH/USDT:USDT,1h,is,"(1, 2]",2.0,2,2,2,1.0,1.5
+ETH/USDT:USDT,1h,is,"(2, 3]",3.0,0,0,0,,
+ETH/USDT:USDT,1h,is,"(3, 5]",5.0,3,3,2,0.6666666666666666,0.6666666666666666
+ETH/USDT:USDT,1h,is,"(5, 8]",8.0,3,3,2,0.6666666666666666,0.6666666666666666
+ETH/USDT:USDT,1h,is,"(8, 10]",10.0,2,2,1,0.5,0.25
+ETH/USDT:USDT,1h,is,never,,215,0,0,,
+ETH/USDT:USDT,1h,oos,"(0, 1]",1.0,1,1,1,1.0,1.5
+ETH/USDT:USDT,1h,oos,"(1, 2]",2.0,0,0,0,,
+ETH/USDT:USDT,1h,oos,"(2, 3]",3.0,0,0,0,,
+ETH/USDT:USDT,1h,oos,"(3, 5]",5.0,1,1,1,1.0,1.5
+ETH/USDT:USDT,1h,oos,"(5, 8]",8.0,0,0,0,,
+ETH/USDT:USDT,1h,oos,"(8, 10]",10.0,2,2,1,0.5,0.25
+ETH/USDT:USDT,1h,oos,never,,105,0,0,,
+SOL/USDT:USDT,1h,full,"(0, 1]",1.0,1,1,1,1.0,1.5
+SOL/USDT:USDT,1h,full,"(1, 2]",2.0,3,3,2,0.6666666666666666,0.6666666666666666
+SOL/USDT:USDT,1h,full,"(2, 3]",3.0,1,1,0,0.0,-1.0
+SOL/USDT:USDT,1h,full,"(3, 5]",5.0,1,1,1,1.0,1.5
+SOL/USDT:USDT,1h,full,"(5, 8]",8.0,4,4,3,0.75,0.875
+SOL/USDT:USDT,1h,full,"(8, 10]",10.0,1,1,0,0.0,-1.0
+SOL/USDT:USDT,1h,full,never,,286,0,0,,
+SOL/USDT:USDT,1h,is,"(0, 1]",1.0,0,0,0,,
+SOL/USDT:USDT,1h,is,"(1, 2]",2.0,2,2,1,0.5,0.25
+SOL/USDT:USDT,1h,is,"(2, 3]",3.0,1,1,0,0.0,-1.0
+SOL/USDT:USDT,1h,is,"(3, 5]",5.0,1,1,1,1.0,1.5
+SOL/USDT:USDT,1h,is,"(5, 8]",8.0,1,1,1,1.0,1.5
+SOL/USDT:USDT,1h,is,"(8, 10]",10.0,0,0,0,,
+SOL/USDT:USDT,1h,is,never,,191,0,0,,
+SOL/USDT:USDT,1h,oos,"(0, 1]",1.0,1,1,1,1.0,1.5
+SOL/USDT:USDT,1h,oos,"(1, 2]",2.0,1,1,1,1.0,1.5
+SOL/USDT:USDT,1h,oos,"(2, 3]",3.0,0,0,0,,
+SOL/USDT:USDT,1h,oos,"(3, 5]",5.0,0,0,0,,
+SOL/USDT:USDT,1h,oos,"(5, 8]",8.0,3,3,2,0.6666666666666666,0.6666666666666666
+SOL/USDT:USDT,1h,oos,"(8, 10]",10.0,1,1,0,0.0,-1.0
+SOL/USDT:USDT,1h,oos,never,,92,0,0,,

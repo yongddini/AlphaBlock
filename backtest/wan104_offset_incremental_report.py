@@ -700,8 +700,6 @@ def _verdict_lines(agg: pd.DataFrame) -> list[str]:
 
 
 def build_markdown(
-    classes: pd.DataFrame,
-    gaps: pd.DataFrame,
     agg_classes: pd.DataFrame,
     agg_gaps: pd.DataFrame,
     *,
@@ -838,7 +836,7 @@ def main() -> None:
         out_dir / "wan104_offset_incremental.csv": classes.to_csv(index=False),
         out_dir / "wan104_offset_gap_distribution.csv": gaps.to_csv(index=False),
         out_dir / "wan104_offset_incremental_summary.md": build_markdown(
-            classes, gaps, agg_classes, agg_gaps, offsets=offsets
+            agg_classes, agg_gaps, offsets=offsets
         ),
     }
     for path, text in paths.items():
