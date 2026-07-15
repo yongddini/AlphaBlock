@@ -121,11 +121,39 @@ def test_default_params_match_wan95_zone_limit_baseline() -> None:
     assert build_params() == ZONE_LIMIT_PARAMS
 
 
-def test_default_params_match_wan99_zero_offset_baseline() -> None:
-    """WAN-99의 오프셋 0 × baseline 셀과 동일해야 한다."""
+def test_default_offset_is_two_bps_not_the_fraction() -> None:
+    """채택 기본 오프셋 = **2bp**(WAN-112). 단위는 bp지 분수가 아니다.
+
+    WAN-112 이슈 본문이 "0.0 → 0.0002"로 적었는데 그건 분수 표기다. 그 값을 그대로 넣으면
+    0.0002bp = 진입가를 2e-8만큼 미는 **사실상 무효과**라, 결정은 반영했다고 믿으면서
+    실제로는 0bp를 돌리게 된다 — 그 조용한 실패를 이 테스트가 막는다.
+    """
+    assert build_params().zone_limit_offset_bps == 2.0
+    price = 100.0
+    shifted = ConfluenceParams().apply_zone_limit_offset(price, is_long=True)
+    assert shifted == pytest.approx(100.02), "2bp = 0.02% — 롱은 위로 민다"
+
+
+def test_explicit_zero_offset_matches_wan99_zero_offset_baseline() -> None:
+    """`offset_bps=0.0`을 **명시**하면 WAN-99의 오프셋 0 × baseline 셀과 동일하다.
+
+    WAN-112 전에는 `build_params()` 기본이 이 셀이었다. 이제 기본은 2bp이므로 그 등식은
+    깨졌고, 대신 **명시적 0bp가 옛 셀을 계속 재현**한다 — 0bp로 고정한 과거 리포트
+    (WAN-88/96/103/110)가 재현되는 근거가 이 등식이다.
+    """
     from backtest.wan99_zone_limit_offset_report import FILL_ASSUMPTIONS
 
-    assert build_params() == FILL_ASSUMPTIONS[0].params(offset_bps=0.0, seed=0)
+    assert build_params(offset_bps=0.0) == FILL_ASSUMPTIONS[0].params(offset_bps=0.0, seed=0)
+
+
+def test_offset_none_defers_to_adopted_default() -> None:
+    """`offset_bps=None`은 "채택 기본값에 맡긴다", 0.0은 "0bp를 달라"다.
+
+    둘을 가르지 않으면 CLI가 `ConfluenceParams`의 기본 오프셋을 말없이 덮어써서, 기본값이
+    2bp로 올라가도 CLI 기본 실행만 혼자 0bp로 도는 갈라짐이 생긴다.
+    """
+    assert build_params(offset_bps=None).zone_limit_offset_bps == 2.0
+    assert build_params(offset_bps=0.0).zone_limit_offset_bps == 0.0
 
 
 def test_fill_presets_match_wan96_conservatism_levels() -> None:
@@ -142,7 +170,9 @@ def test_fill_presets_match_wan96_conservatism_levels() -> None:
         assert preset.dropout_rate == level.dropout_rate
         assert preset.seeds == level.seeds
         for seed in level.seeds:
-            assert build_params(fill=preset, seed=seed) == level.params(seed)
+            # WAN-96은 오프셋 0bp에 고정돼 있다(당시 엔진 기록). CLI 기본은 이제 2bp이므로
+            # 나란히 읽으려면 오프셋을 그쪽에 맞춰야 한다 — 이 인자가 그 사실을 드러낸다.
+            assert build_params(fill=preset, seed=seed, offset_bps=0.0) == level.params(seed)
 
 
 def test_fill_presets_match_wan99_fill_assumptions() -> None:
@@ -437,7 +467,7 @@ def test_build_row_records_axes_next_to_metrics() -> None:
     assert row.timeframe == _TIMEFRAME
     assert row.entry_mode == "zone_limit"
     assert row.take_profit_r == 1.5
-    assert row.offset_bps == 0.0
+    assert row.offset_bps == 2.0  # 채택 기본값(WAN-112)
     assert row.fill == "baseline"
     assert row.eligible_setups is not None  # 지정가는 체결률 축이 있다.
     assert row.num_bars > 0

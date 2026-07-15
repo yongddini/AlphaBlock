@@ -91,12 +91,18 @@ def test_cli_defaults_reproduce_wan95_zone_limit_cell() -> None:
 
 @pytest.mark.skipif(not _WAN99_CSV.exists(), reason="WAN-99 리포트 CSV 없음")
 def test_cli_reproduces_wan99_pen_5bp_cell() -> None:
-    """`--fill pen_5bp` == WAN-99의 (full, 오프셋 0, pen_5bp) 셀.
+    """`--fill pen_5bp --offset-bps 0` == WAN-99의 (full, 오프셋 0, pen_5bp) 셀.
 
     `mean_r`·`fill_rate`까지 맞아야 한다 — 거래 수만 같고 손익이 다르면 비용·사이징
     배선이 갈린 것이고, 그건 표를 나란히 읽는 순간 드러나지 않는 종류의 오차다.
+
+    ⚠️ `--offset-bps 0`을 **명시**해야 한다(WAN-112): 채택 기본 오프셋이 2bp가 되면서
+    CLI 기본 실행은 더 이상 WAN-99의 오프셋 0 셀이 아니다. 이 인자가 "옛 셀과 대조하려고
+    옛 엔진을 요청한다"는 사실을 드러낸다 — 빼면 다른 엔진의 숫자를 같은 셀로 착각한다.
     """
-    row = _run(["--symbol", "BTCUSDT", "--tf", _TIMEFRAME, "--fill", "pen_5bp"])
+    row = _run(
+        ["--symbol", "BTCUSDT", "--tf", _TIMEFRAME, "--fill", "pen_5bp", "--offset-bps", "0"]
+    )
     cell = _report_cell(
         _WAN99_CSV,
         symbol=_SYMBOL,

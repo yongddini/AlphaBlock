@@ -83,8 +83,14 @@ from strategy.order_blocks import OrderBlockDetector
 #: 대상"으로 남긴 TF라 같은 잣대를 댄다. 4h·1d는 체결률이 높아 이 축의 쟁점이 작다.
 DEFAULT_TIMEFRAMES: tuple[str, ...] = ("15m", "1h")
 
-#: 채택 기본값(WAN-95) = 지정가 + 실시간 RSI + 롱 온리. 보수화는 여기서만 덧붙인다.
-BASE_PARAMS = ConfluenceParams()
+#: WAN-95 당시 채택 기본값 = 지정가 + 실시간 RSI + 롱 온리 + **오프셋 0bp**. 보수화는
+#: 여기서만 덧붙인다.
+#:
+#: ⚠️ 오프셋을 **명시 고정**하는 이유(WAN-112): 채택 기본값이 2bp로 바뀌었지만 이 리포트의
+#: 발표 수치는 0bp에서 나왔다. `ConfluenceParams()`를 그대로 두면 기본값을 따라 숫자가
+#: 조용히 움직여 리포트 본문과 어긋난다 — WAN-95가 `SHORT_DISABLED_PARAMS`에 `entry_mode`를
+#: 못 박은 것과 같은 이유다. 이 리포트는 **당시 엔진의 기록**이다.
+BASE_PARAMS = ConfluenceParams(zone_limit_offset_bps=0.0)
 
 
 @dataclass(frozen=True)
@@ -591,8 +597,12 @@ def build_markdown(
         )
     lines += [
         "",
-        "기본값은 바꾸지 않았다 — `baseline`이 `ConfluenceParams()` 그대로이며 WAN-95 결과를 "
-        "재현한다. 보수화 값은 성과를 보기 전에 고정했다(파라미터 최적화 금지, 이슈 비고).",
+        "이 이슈는 기본값을 바꾸지 않았다 — 당시 `baseline`이 `ConfluenceParams()` "
+        "그대로였고 WAN-95 결과를 재현했다. 보수화 값은 성과를 보기 전에 고정했다"
+        "(파라미터 최적화 금지, 이슈 비고). 🔁 **그 뒤 "
+        "[WAN-112](../../docs/decisions/wan112.md)가 채택 기본 오프셋을 2bp로 올렸고, 이 "
+        "리포트는 발표 수치를 지키려고 `BASE_PARAMS`에 오프셋 0bp를 명시 고정했다** — "
+        "즉 `baseline`은 이제 「채택 기본값」이 아니라 **「WAN-112 이전 엔진」**이다.",
         "",
         "## TF × 레벨 민감도표",
         "",

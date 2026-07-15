@@ -23,7 +23,6 @@ from backtest.models import (
 from backtest.sweep import timeframe_to_ms
 from backtest.synthetic import make_synthetic_ohlcv
 from backtest.wan99_zone_limit_offset_report import (
-    BASE_PARAMS,
     DECISION_ASSUMPTION,
     DEFAULT_OFFSETS_BPS,
     FILL_ASSUMPTIONS,
@@ -81,17 +80,20 @@ def _funding_rates(df: pd.DataFrame) -> list[FundingRate]:
 # ---------------------------------------------------- 격자 정의
 
 
-def test_zero_offset_baseline_is_the_adopted_defaults_unchanged() -> None:
-    """오프셋 0 × `baseline`은 채택 기본값 그 자체 — WAN-95/96이 재현돼야 한다(완료기준).
+def test_zero_offset_baseline_is_the_pre_wan112_engine_unchanged() -> None:
+    """오프셋 0 × `baseline`은 WAN-112 이전 채택 기본값 그 자체 — WAN-95/96이 재현돼야 한다.
 
-    오프셋이 기본값에 스며들면 이 리포트의 기준선이 WAN-95/96과 달라져 비교 자체가
+    체결 가정이 기준선에 스며들면 이 리포트의 기준선이 WAN-95/96과 달라져 비교 자체가
     무의미해진다.
+
+    ⚠️ 이 격자는 **오프셋을 축으로 명시해 돌리므로**(`params(offset_bps=...)`) 채택
+    기본값이 2bp로 바뀌어도 발표 수치가 움직이지 않는다 — 기준선 셀이 "기본값"에서
+    "명시적 0bp"로 이름만 바뀐 것이다.
     """
-    assert ConfluenceParams() == BASE_PARAMS
     baseline = FILL_ASSUMPTIONS[0]
     assert baseline.name == "baseline"
-    assert baseline.params(offset_bps=0.0, seed=0) == ConfluenceParams()
-    assert ConfluenceParams().zone_limit_offset_bps == 0.0
+    assert baseline.params(offset_bps=0.0, seed=0) == ConfluenceParams(zone_limit_offset_bps=0.0)
+    assert ConfluenceParams().zone_limit_offset_bps == 2.0, "채택 기본값과 갈라졌음이 의도다"
 
 
 def test_grid_only_varies_offset_and_fill_assumptions() -> None:

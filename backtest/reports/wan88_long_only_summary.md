@@ -5,8 +5,13 @@
 
 ## 이 리포트가 검정한 엔진
 
-**채택 기본값 `ConfluenceParams()` 그대로** — `entry_mode=zone_limit, rsi_mode=realtime, short_enabled=False, take_profit_mode=fixed_r, take_profit_r=1.5, rsi_gate_mode=first_tap_free, retap_mode=every_tap, zone_limit_offset_bps=0.0` + 펀딩비 반영.
+**WAN-88 당시 채택 기본값 그대로** — `entry_mode=zone_limit, rsi_mode=realtime, short_enabled=False, take_profit_mode=fixed_r, take_profit_r=1.5, rsi_gate_mode=first_tap_free, retap_mode=every_tap, zone_limit_offset_bps=0.0` + 펀딩비 반영.
 전략 파라미터는 하나도 바꾸지 않았다(이 이슈는 검증 전용, 파라미터 탐색 금지).
+
+> 🔁 **지금은 채택 기본값과 오프셋 하나가 다르다** — [WAN-112](../../docs/decisions/wan112.md)가 `zone_limit_offset_bps`를 0.0 → 2.0(2bp)
+> 으로 올렸다. 이 검정의 **「유의 셀 0개」 판정은 0bp에서 나온 결론**이라, 숫자가
+> 기본값을 따라 조용히 움직이면 결론 문장과 어긋난다 — 그래서 `PINNED_OFFSET_BPS`로
+> 당시 엔진을 명시 고정했다. **이 리포트는 그 엔진의 기록이다.**
 
 > **공식 체결 기준선은 `pen_5bp`**([WAN-97](../../docs/decisions/wan97.md) 결정 1).
 > `baseline`(닿으면 체결)은 WAN-84와 같은 가정이라 **대조표의 축으로만** 싣는다 —

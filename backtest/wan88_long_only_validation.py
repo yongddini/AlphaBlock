@@ -125,19 +125,30 @@ _MIN_TRADES_FOR_VERDICT = 20
 WAN84_NULL_CSV = Path("backtest/reports/wan84_random_entry_new_engine.csv")
 
 
+#: WAN-88 발표 수치가 나온 오프셋(bp). 채택 기본값은 WAN-112부터 2bp지만 이 엔트로피
+#: 검정(실제 vs 무작위 널)은 0bp에서 돌았고, 그 「유의 셀 0개」 판정이 문서의 결론이다.
+#: 기본값을 따라가게 두면 결론 문장과 재현 숫자가 어긋난다 — 이 리포트는 당시 엔진의 기록이다.
+PINNED_OFFSET_BPS = 0.0
+
+
 def adopted_params(fill: FillPreset) -> ConfluenceParams:
-    """채택 기본값 + 체결 가정만 얹은 파라미터.
+    """WAN-88 당시 채택 기본값 + 체결 가정만 얹은 파라미터.
 
     `harness.build_params`를 거치는 이유는 `entry_mode`/`rsi_mode`를 한 세트로 묶는
     규칙(WAN-41/95)을 이 모듈이 따로 재구현하지 않기 위해서다. 전략 필드는 하나도
-    바꾸지 않는다 — 이 이슈는 검증 전용이고 파라미터 탐색은 금지다.
+    바꾸지 않는다 — 이 이슈는 검증 전용이고 파라미터 탐색은 금지다. 오프셋만 당시 값으로
+    명시 고정한다(`PINNED_OFFSET_BPS`).
     """
-    return build_params(fill=fill)
+    return build_params(fill=fill, offset_bps=PINNED_OFFSET_BPS)
 
 
 def describe_engine() -> str:
-    """실행 시점의 채택 기본값 핵심 필드 — 리포트에 박아 두는 엔진 지문."""
-    p = ConfluenceParams()
+    """이 리포트가 실제로 돌린 엔진의 핵심 필드 — 리포트에 박아 두는 엔진 지문.
+
+    `ConfluenceParams()`(= 지금의 채택 기본값)가 아니라 **고정한 엔진**을 찍는다. 지문이
+    실행과 어긋나면 지문이 아니라 장식이다.
+    """
+    p = ConfluenceParams(zone_limit_offset_bps=PINNED_OFFSET_BPS)
     return (
         f"entry_mode={p.entry_mode}, rsi_mode={p.rsi_mode}, short_enabled={p.short_enabled}, "
         f"take_profit_mode={p.take_profit_mode}, take_profit_r={p.take_profit_r}, "
@@ -995,8 +1006,13 @@ def build_summary_markdown(
         f"원자료: `{null_report_path}`(매칭 널), `{cost_report_path}`(비용 민감도), "
         f"`{buy_hold_report_path}`(바이앤홀드), `{contrast_report_path}`(WAN-84 대조).\n\n"
         "## 이 리포트가 검정한 엔진\n\n"
-        f"**채택 기본값 `ConfluenceParams()` 그대로** — `{describe_engine()}` + 펀딩비 반영.\n"
+        f"**WAN-88 당시 채택 기본값 그대로** — `{describe_engine()}` + 펀딩비 반영.\n"
         "전략 파라미터는 하나도 바꾸지 않았다(이 이슈는 검증 전용, 파라미터 탐색 금지).\n\n"
+        "> 🔁 **지금은 채택 기본값과 오프셋 하나가 다르다** — "
+        "[WAN-112](../../docs/decisions/wan112.md)가 `zone_limit_offset_bps`를 0.0 → 2.0(2bp)\n"
+        "> 으로 올렸다. 이 검정의 **「유의 셀 0개」 판정은 0bp에서 나온 결론**이라, 숫자가\n"
+        "> 기본값을 따라 조용히 움직이면 결론 문장과 어긋난다 — 그래서 `PINNED_OFFSET_BPS`로\n"
+        "> 당시 엔진을 명시 고정했다. **이 리포트는 그 엔진의 기록이다.**\n\n"
         "> **공식 체결 기준선은 `pen_5bp`**([WAN-97](../../docs/decisions/wan97.md) 결정 1).\n"
         "> `baseline`(닿으면 체결)은 WAN-84와 같은 가정이라 **대조표의 축으로만** 싣는다 —\n"
         "> 단독 인용 금지. 최악 가정(`pen_5bp_drop_50`)은 널에서 뺐다: 탈락 추첨의 시드\n"

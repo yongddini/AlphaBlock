@@ -75,18 +75,24 @@ def _run_cell(levels: tuple[ConservatismLevel, ...]) -> tuple[list[object], obje
 # ---------------------------------------------------- 레벨 정의
 
 
-def test_baseline_level_is_the_adopted_defaults_unchanged() -> None:
-    """`baseline`은 채택 기본값 그 자체 — WAN-95 결과가 재현돼야 한다(완료기준).
+def test_baseline_level_is_the_pinned_pre_wan112_engine() -> None:
+    """`baseline`은 이 리포트가 발표한 엔진 그 자체 — WAN-95 당시 결과가 재현돼야 한다.
 
-    보수화 필드가 기본값에 스며들면 이 리포트의 기준선이 WAN-95와 달라져 비교 자체가
+    보수화 필드가 기준선에 스며들면 이 리포트의 기준선이 WAN-95와 달라져 비교 자체가
     무의미해진다.
+
+    ⚠️ WAN-112로 채택 기본 오프셋이 0bp→2bp가 되면서 이 기준선은 더 이상
+    `ConfluenceParams()`가 아니다. 이 리포트의 발표 수치는 **0bp에서 나왔고**, 그 엔진을
+    `BASE_PARAMS`가 명시 고정한다 — 즉 이 리포트는 이제 **당시 엔진의 기록**이다.
     """
-    assert ConfluenceParams() == BASE_PARAMS
+    assert ConfluenceParams(zone_limit_offset_bps=0.0) == BASE_PARAMS
+    assert BASE_PARAMS.zone_limit_offset_bps == 0.0
+    assert ConfluenceParams().zone_limit_offset_bps == 2.0, "채택 기본값과 갈라졌음이 의도다"
     baseline = CONSERVATISM_LEVELS[0]
     assert baseline.name == "baseline"
-    assert baseline.params(seed=0) == ConfluenceParams()
-    assert ConfluenceParams().fill_penetration_bps == 0.0
-    assert ConfluenceParams().fill_dropout_rate == 0.0
+    assert baseline.params(seed=0) == BASE_PARAMS
+    assert BASE_PARAMS.fill_penetration_bps == 0.0
+    assert BASE_PARAMS.fill_dropout_rate == 0.0
 
 
 def test_levels_only_vary_fill_assumptions() -> None:
@@ -95,7 +101,7 @@ def test_levels_only_vary_fill_assumptions() -> None:
     이슈 비고의 '파라미터 최적화 금지'를 코드로 못 박는다.
     """
     fill_fields = {"fill_penetration_bps", "fill_dropout_rate", "fill_dropout_seed"}
-    default = ConfluenceParams().model_dump()
+    default = BASE_PARAMS.model_dump()
     for level in CONSERVATISM_LEVELS:
         for seed in level.seeds:
             diff = {k for k, v in level.params(seed).model_dump().items() if v != default[k]}
