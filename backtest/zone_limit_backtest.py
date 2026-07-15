@@ -22,6 +22,9 @@ RSI)를 오더블록 탐지(`strategy.order_blocks`)에 **배선**해, `entry_mo
    청산(같은 스텝 관통 손절 포함)을 1분 해상도로 시뮬레이션한다.
 4. 체결·청산된 셋업을 A안과 동일한 비용 모델로 `Trade`로 변환하고, **동시 1포지션**
    제약(WAN-23) 아래 시간순으로 배치해 `BacktestResult`를 만든다.
+   `run_zone_limit_portfolio_backtest`로 들어오면 이 4단계만 동시 다중 포지션 회계
+   (`backtest.portfolio`, WAN-103)로 바뀐다 — 1~3단계(셋업·체결 판정)는 같으므로 두
+   실행의 차이는 **오직 포지션 제약**이다. 기본 진입점은 여전히 동시 1포지션이다.
 
 ## 1분봉이 없는 구간
 
@@ -52,6 +55,7 @@ from backtest.models import (
     Trade,
     TradeFill,
 )
+from backtest.portfolio import PortfolioParams, PortfolioStats, sequence_portfolio
 from backtest.substep import ZoneLimitStatus, build_substeps, simulate_zone_limit_trade
 from backtest.sweep import bars_per_year, default_backtest_config, timeframe_to_ms
 from common.costs import Liquidity
@@ -333,6 +337,77 @@ def run_zone_limit_backtest_verbose(
     coverage = _check_funding_coverage(htf_df, rates, cfg)
     result = build_result_from_trades(trades, cfg, timeframe, funding_coverage_value=coverage)
     return result, stats
+
+
+def apply_portfolio_leverage(cfg: BacktestConfig, portfolio: PortfolioParams) -> BacktestConfig:
+    """`portfolio.leverage`를 사이징 파라미터에 싣는다 (WAN-103).
+
+    레버리지 축이 `PortfolioParams` 한 곳에만 있어야 "어느 레버리지로 돈 결과인가"가
+    한 곳에서 읽힌다 — `cfg.risk_sizing.leverage`와 `portfolio.leverage`가 각각 값을
+    들면 둘이 조용히 갈라지고, 그때 실제로 쓰인 값이 무엇인지 CSV만 봐서는 알 수 없다.
+    """
+    if cfg.risk_sizing is None:
+        return cfg
+    sizing = cfg.risk_sizing.model_copy(update={"leverage": portfolio.leverage})
+    return cfg.model_copy(update={"risk_sizing": sizing})
+
+
+def run_zone_limit_portfolio_backtest(
+    htf_df: pd.DataFrame,
+    df_1m: pd.DataFrame,
+    timeframe: str,
+    *,
+    portfolio: PortfolioParams,
+    confluence_params: ConfluenceParams | None = None,
+    order_block_params: OrderBlockParams | None = None,
+    backtest_config: BacktestConfig | None = None,
+    order_block_result: OrderBlockResult | None = None,
+    funding_rates: Sequence[FundingRate] | None = None,
+) -> tuple[BacktestResult, ZoneLimitStats, PortfolioStats]:
+    """동시 다중 포지션(WAN-103)으로 B안 백테스트를 실행한다.
+
+    셋업 탐색·체결 시뮬레이션은 `run_zone_limit_backtest_verbose`와 **완전히 동일**하고
+    (같은 `build_zone_limit_candidates`를 탄다), 다른 것은 그 후보를 배치하는 회계뿐이다:
+    동시 1포지션 시퀀서 대신 `backtest.portfolio.sequence_portfolio`가 여러 포지션을
+    동시에 굴린다. 그래서 이 함수와 단일 포지션 실행의 차이는 **오직 포지션 제약**이며,
+    대조표의 두 열이 같은 셋업 풀에서 나온다.
+
+    `PortfolioParams(leverage=1.0, max_concurrent=1)`은 동시 1포지션 규칙과 **같은 거래를
+    낸다**(`tests/test_portfolio.py`가 채택 엔진과의 일치를 고정한다) — 슬롯이 하나뿐이면
+    존 제약은 어차피 걸릴 일이 없고, 명목 상한도 플랫 상태의 per-trade clamp와 같아지기
+    때문이다. 그래서 pooled 대조군은 이 경로로 낼 수 있다. 다만 series 대조군은 여전히
+    `sequence_with_candidates`(채택 엔진 그 자체)로 내는 게 안전하다 — 시퀀서에 버그가
+    생기면 대조군과 실험군이 **함께** 틀어져 차이가 0으로 보일 수 있다.
+    """
+    params = confluence_params or ConfluenceParams()
+    if params.entry_mode != "zone_limit":
+        raise ValueError(
+            f'run_zone_limit_portfolio_backtest()는 지정가 진입(B안) 전용인데 entry_mode="'
+            f'{params.entry_mode}"가 들어왔습니다(WAN-95).'
+        )
+    cfg = apply_portfolio_leverage(backtest_config or default_backtest_config(timeframe), portfolio)
+    rates = list(funding_rates) if funding_rates else []
+    candidates, stats = build_zone_limit_candidates(
+        htf_df,
+        df_1m,
+        timeframe,
+        params=params,
+        cfg=cfg,
+        order_block_params=order_block_params,
+        order_block_result=order_block_result,
+    )
+    paired, portfolio_stats = sequence_portfolio(
+        candidates,
+        cfg,
+        _to_trade,
+        portfolio=portfolio,
+        funding_rates=rates,
+    )
+    coverage = _check_funding_coverage(htf_df, rates, cfg)
+    result = build_result_from_trades(
+        [trade for _, trade in paired], cfg, timeframe, funding_coverage_value=coverage
+    )
+    return result, stats, portfolio_stats
 
 
 def _check_funding_coverage(
@@ -680,6 +755,7 @@ def _to_trade(
     equity: float,
     cfg: BacktestConfig,
     funding_rates: Sequence[FundingRate] | None = None,
+    open_notional: float = 0.0,
 ) -> Trade | None:
     """공용 비용 모델로 셋업을 `Trade`로 변환한다(WAN-37).
 
@@ -690,6 +766,10 @@ def _to_trade(
     보유 구간 `[진입시각, 청산시각)`의 펀딩비는 A안 엔진(`BacktestEngine._funding_cost`)
     과 동일하게 진입 명목가 기준으로 산출해 실현손익에서 뺀다(WAN-95). B안은 부분청산이
     없어 구간 분할이 필요 없다.
+
+    `open_notional`(WAN-103)은 이미 열린 포지션들의 명목 합이다. 명목 상한이 포트폴리오
+    전체에 걸리므로 사이징이 그 여유분만 새 포지션에 배정한다 — 동시 1포지션 경로는
+    항상 0을 넘기므로 예전과 동일하다.
     """
     side = cand.side
     is_long = side is PositionSide.LONG
@@ -701,10 +781,15 @@ def _to_trade(
             entry_price=entry_fill,
             stop_price=cand.stop_price,
             params=cfg.risk_sizing,
+            open_notional=open_notional,
         )
         if qty <= 0.0:
             return None
     else:
+        # 고정 비율 사이징에는 레버리지가 없다(`position_size`를 타지 않으므로 clamp도 없다).
+        # 포트폴리오 실행에서 명목 상한을 거는 건 시퀀서 쪽 `_notional_cap`이며, 여기서
+        # 또 다른 규칙으로 clamp하면 두 상한이 갈라진다 — 그래서 이 경로는 `open_notional`을
+        # 보지 않는다(WAN-65가 경고하는 대로 이 모드 자체가 리스크 정규화되지 않은 경로다).
         qty = (equity * cfg.position_fraction) / entry_fill
     entry_notional = entry_fill * qty
     entry_fee = costs.fee(entry_notional, Liquidity.MAKER)
