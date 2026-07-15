@@ -111,6 +111,14 @@ class _Candidate:
     """이 셋업이 속한 존의 안정적 식별자(`OrderBlockSignal.zone_key` 그대로, WAN-83).
     포지션 충돌로 스킵된 첫 탭이 같은 존에서 재탭됐는지 사후에 그룹핑할 때 쓴다.
     진단 전용이며 체결·청산 로직에는 쓰이지 않는다."""
+    trigger_time: int = 0
+    """이 셋업의 탭이 발생한 상위TF 봉 시각(`OrderBlockSignal.trigger_time` 그대로).
+
+    `SetupDiagnostic.trigger_time`과 같은 값이라, 거래를 그 셋업의 진단 레코드에 **정확히**
+    조인하는 키다(WAN-104). `entry_time`은 탭 봉 *내부*의 체결 시각이라 이 값과 다르고,
+    `(zone_key, tap_index)`는 유일하지 않다 — 병합 존은 새로 편입된 구성 존이 같은
+    클러스터 안에서 다시 `tap_index=0`을 받을 수 있기 때문이다(WAN-81 §5). 진단 전용이며
+    체결·청산 로직에는 쓰이지 않는다."""
 
 
 @dataclass(frozen=True)
@@ -571,6 +579,7 @@ def build_zone_limit_candidates(
                 order_block=ob,
                 tap_index=signal.tap_index,
                 zone_key=signal.zone_key,
+                trigger_time=signal.trigger_time,
             )
         )
 
@@ -619,6 +628,38 @@ class _IncrementalRsiSeeder:
         return copy.copy(self._state)
 
 
+def sequence_with_candidates(
+    candidates: list[_Candidate],
+    cfg: BacktestConfig,
+    funding_rates: Sequence[FundingRate] | None = None,
+) -> list[tuple[_Candidate, Trade]]:
+    """시퀀싱 + 비용 반영 결과를 **원본 셋업과 짝지어** 반환한다.
+
+    본체는 `_sequence_and_cost`와 같고, 거래를 낸 셋업이 무엇이었는지를 함께 돌려준다 —
+    사후 분석(예: WAN-104의 오프셋 증분 거래 분해)이 `Trade`를 원본 셋업·오더블록에
+    조인해야 하는데, `Trade`에는 그 링크가 없기 때문이다. 진입 시각으로 역매칭하면
+    같은 시각에 두 셋업이 있을 때 조용히 어긋나므로 시퀀서가 직접 짝을 알려준다.
+
+    분해용 함수를 따로 두지 않고 시퀀싱을 **여기 한 곳에만** 두는 이유: 리포트가 같은
+    규칙을 복제하면 그 복제본이 본체와 갈라진다(WAN-77의 사본은 실제로 `funding_rates`를
+    빠뜨린 채 남아 있다 — 펀딩 배선이 WAN-91에서 뒤늦게 들어왔기 때문이다).
+    """
+    ordered = sorted(candidates, key=lambda c: (c.entry_time, c.exit_time))
+    cash = cfg.initial_capital
+    busy_until = -1
+    paired: list[tuple[_Candidate, Trade]] = []
+    for cand in ordered:
+        if cand.entry_time < busy_until:
+            continue
+        trade = _to_trade(cand, cash, cfg, funding_rates)
+        if trade is None:
+            continue
+        cash += trade.realized_pnl
+        busy_until = cand.exit_time
+        paired.append((cand, trade))
+    return paired
+
+
 def _sequence_and_cost(
     candidates: list[_Candidate],
     cfg: BacktestConfig,
@@ -631,20 +672,7 @@ def _sequence_and_cost(
     동일하게 진행 중 현금을 쓴다. `funding_rates`를 주면 보유 구간 펀딩비를 A안
     엔진과 같은 산식으로 손익에서 차감한다(WAN-95).
     """
-    ordered = sorted(candidates, key=lambda c: (c.entry_time, c.exit_time))
-    cash = cfg.initial_capital
-    busy_until = -1
-    trades: list[Trade] = []
-    for cand in ordered:
-        if cand.entry_time < busy_until:
-            continue
-        trade = _to_trade(cand, cash, cfg, funding_rates)
-        if trade is None:
-            continue
-        cash += trade.realized_pnl
-        busy_until = cand.exit_time
-        trades.append(trade)
-    return trades
+    return [trade for _, trade in sequence_with_candidates(candidates, cfg, funding_rates)]
 
 
 def _to_trade(
