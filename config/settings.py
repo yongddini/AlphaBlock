@@ -19,8 +19,23 @@ from strategy.models import ConfluenceParams
 
 
 def _default_symbols() -> list[str]:
-    """수집 대상 기본 심볼 (USDT 무기한 선물)."""
-    return ["BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT"]
+    """수집 대상 기본 심볼 (USDT 무기한 선물).
+
+    WAN-111에서 BNB·XRP·TRX를 더해 6심볼이 됐다. **수집 대상**일 뿐 실거래·실시간 시그널
+    대상이 아니다(그쪽은 `live_signal_symbols`, 기본 BTC 단독).
+
+    신규 3심볼을 여기에 올리지 않으면 수집기가 기존 3심볼만 갱신해 **신규 심볼만 낡는다** —
+    그러면 WAN-111 격자를 다시 돌릴 때 6심볼이 서로 다른 창을 보게 되고, 심볼 편중을
+    가르려던 표에 기간 차이가 섞인다.
+    """
+    return [
+        "BTC/USDT:USDT",
+        "ETH/USDT:USDT",
+        "SOL/USDT:USDT",
+        "BNB/USDT:USDT",
+        "XRP/USDT:USDT",
+        "TRX/USDT:USDT",
+    ]
 
 
 def _default_timeframes() -> list[str]:
