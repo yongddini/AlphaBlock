@@ -345,9 +345,17 @@ def rsi_gate_passes(
     (과매도/과매수 극단). `"neutral"`: 방향과 무관하게 `rsi_neutral_band` 안이면 통과
     (존이 조용히 지켜지는 국면). `"none"`: 항상 통과 — 호출부가 이미 RSI 워밍업
     (NaN) 여부는 걸러내고 유효값만 넘겨야 한다. `"first_tap_free"`(WAN-81): 첫 탭
-    면제는 `tap_index`를 아는 호출부(`ConfluenceStrategy._evaluate_entry`)가 이
-    함수를 호출하기 전에 직접 처리하므로, 이 함수에 도달했다는 것은 이미 재탭
-    (첫 탭이 아님)이라는 뜻이다 — `extreme`과 동일한 극단 규칙을 적용한다.
+    면제는 `tap_index`를 아는 호출부가 이 함수를 호출하기 전에 직접 처리하므로, 이
+    함수에 도달했다는 것은 이미 재탭(첫 탭이 아님)이라는 뜻이다 — `extreme`과 동일한
+    극단 규칙을 적용한다.
+
+    ⚠️ 그 "호출부가 처리한다"는 계약은 **두 경로 모두**의 책임이다: A안은
+    `ConfluenceStrategy._evaluate_entry`, B안은 `backtest.zone_limit_backtest.
+    build_zone_limit_candidates`가 `signal.tap_index == 0`을 보고
+    `simulate_zone_limit_trade(first_tap_free=...)`로 넘긴다. B안이 이 계약을 지키지
+    않아 채택 경로에서 첫 탭 면제가 통째로 빠져 있었다(WAN-100) — 이 함수는 모드만
+    보고는 첫 탭인지 알 수 없으므로 누락이 조용히 지나갔다. 새 진입 경로를 붙일 때
+    `tap_index` 배선을 빠뜨리지 말 것.
     """
     if mode == "none":
         return True

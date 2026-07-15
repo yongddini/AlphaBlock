@@ -42,6 +42,19 @@ python -m backtest.wan99_zone_limit_offset_report
 전 심볼×TF×오프셋×가정을 다 도는 데 시간이 걸린다(15m 한 셀이 수십 분). 기본은 셀 단위
 병렬 실행이며, 좁히려면 `--symbols BTC/USDT:USDT --timeframes 15m`처럼 인자를 준다.
 셀은 서로 독립이고 시드가 고정돼 있어 `--jobs`를 바꿔도 결과는 동일하다.
+
+## ⚠️ 커밋된 산출물은 WAN-100 이전 엔진 기준 (WAN-97이 재산출)
+
+WAN-100이 지정가 경로의 첫 탭 면제 누락을 고쳐 이 리포트의 입력 엔진이 바뀌었다. 재산출이
+위 비용 때문에 무거워 커밋된 `wan99_*` 표는 교정 **전** 수치로 남아 있고, 그 사실을
+`wan99_zone_limit_offset_summary.md` 헤더에 경고로 적어 뒀다 — **이 모듈이 생성하는
+마크다운에는 그 경고가 없다**(전체 재산출을 하면 수치가 최신이 되어 경고가 거짓이 되므로
+일부러 넣지 않았다). 따라서 WAN-97이 전체 재산출을 하면 그 헤더 경고는 자연히 사라진다.
+
+예외로 `wan99_zone_limit_offset.csv`의 (BTC 1h, full, offset 0, `pen_5bp`) 한 셀만 이
+모듈의 `run_cell`로 재산출해 교체했다 — `tests/test_run_regression_real_data.py`가 CLI
+대조로 고정한 셀이기 때문이다. **그래서 그 CSV는 엔진이 섞여 있다**(1셀 교정 후, 389셀
+교정 전). 셀 간 비교는 WAN-97 재산출 이후에 할 것.
 """
 
 from __future__ import annotations

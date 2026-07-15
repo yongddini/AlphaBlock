@@ -291,9 +291,27 @@ def build_tf_verdict_frame(frame: pd.DataFrame) -> pd.DataFrame:
     return grouped.sort_values(["_tf", "entry_mode"]).drop(columns=["_tf"]).reset_index(drop=True)
 
 
+def _tf_mean(frame: pd.DataFrame, timeframe: str, entry_mode: str, column: str) -> float | None:
+    """한 (TF, 진입 방식)의 열 평균. 해당 셀이 없으면 None.
+
+    한계 서술의 숫자를 본문에 **하드코딩하지 않기 위한** 헬퍼다(WAN-100). 예전엔
+    "체결률 약 28%"·"승률 55% → 49%"가 문장에 박혀 있었는데, WAN-100이 엔진을 고쳐
+    체결률이 50%대로 바뀌자 표는 갱신되고 그 옆 문장만 옛 숫자를 주장하는 상태가 됐다
+    — 이 리포트가 고발하는 "문서와 실제가 갈라진다"를 리포트 자신이 저지른 셈이다.
+    """
+    cell = frame[(frame["timeframe"] == timeframe) & (frame["entry_mode"] == entry_mode)]
+    if cell.empty:
+        return None
+    value = cell[column].mean()
+    return None if pd.isna(value) else float(value)
+
+
 def _verdict_lines(frame: pd.DataFrame) -> list[str]:
     """TF 채택 판단 섹션. 수치는 표에서 읽고, 결론·한계는 명시적으로 적는다."""
     verdict = build_tf_verdict_frame(frame)
+    zl_fill = _tf_mean(frame, "15m", "zone_limit", "fill_rate")
+    zl_win = _tf_mean(frame, "15m", "zone_limit", "win_rate")
+    close_win = _tf_mean(frame, "15m", "close", "win_rate")
     lines = [
         "## TF 채택 판단 (메이커 비용 기준 재산출)",
         "",
@@ -322,11 +340,12 @@ def _verdict_lines(frame: pd.DataFrame) -> list[str]:
         "",
         "1. **체결 가정이 낙관적이다.** 시뮬레이터는 가격이 지정가에 **닿으면 체결**로 "
         "본다(`backtest/substep.py`). 실제 지정가는 큐 우선순위가 있어, 가격이 스치기만 "
-        "하면 체결되지 않을 수 있다. 즉 실제 체결률은 이 표(15m 기준 약 28%)보다 낮고, "
-        "**체결된 거래만 골라 담는 편향**이 남는다.",
-        "2. **승률은 오히려 떨어졌다**(15m 기준 약 55% → 49%). 수익 개선은 승률이 아니라 "
-        "진입가·비용에서 나온 것이다 — 지정가는 더 유리한 가격에 들어가므로 1R이 줄고 "
-        "익절 목표가 가까워진다(고정 1:1.5R 규칙과의 상호작용).",
+        f"하면 체결되지 않을 수 있다. 즉 실제 체결률은 이 표(15m 기준 {_fmt_pct(zl_fill)})"
+        "보다 낮고, **체결된 거래만 골라 담는 편향**이 남는다. WAN-96이 이 가정을 보수화해 "
+        "재검정했다.",
+        f"2. **승률은 오히려 떨어졌다**(15m 기준 {_fmt_pct(close_win)} → {_fmt_pct(zl_win)}). "
+        "수익 개선은 승률이 아니라 진입가·비용에서 나온 것이다 — 지정가는 더 유리한 "
+        "가격에 들어가므로 1R이 줄고 익절 목표가 가까워진다(고정 1:1.5R 규칙과의 상호작용).",
         "3. **4h·1d는 반대로 나빠졌다**(체결률이 높아 기회 손실은 작지만 표본이 작다: "
         "1d는 심볼당 4~12거래). 이 TF들의 델타는 표본이 작아 신뢰구간이 넓다.",
         "4. **룩어헤드 잔존**: 볼린저 진입가가 탭 봉 SMA20(그 봉 종가 포함)으로 계산되는데 "
@@ -347,6 +366,19 @@ def build_markdown(frame: pd.DataFrame, delta: pd.DataFrame) -> str:
         "# WAN-95: 지정가(zone_limit) 채택 재산출",
         "",
         "**재현**: `python -m backtest.wan95_zone_limit_report`",
+        "",
+        "> ⚠️ **이 표는 WAN-100(첫 탭 면제 배선)으로 전면 재산출됐다.** 최초 WAN-95 산출 "
+        "당시 지정가(B안) 경로는 `tap_index`를 읽지 않아 「첫 탭은 RSI 무관 무조건 진입」"
+        "(WAN-81)이 통째로 빠져 있었다 — 첫 탭에도 재탭용 RSI 게이트(롱 `RSI<=30`)가 "
+        "걸려 명세보다 **빡빡한** 규칙으로 돌았다. 고친 결과 지정가 체결률이 약 29% → 약 "
+        "50%로 오르고 수익률이 크게 늘었다(`zone_limit` 행만 해당). 종가(`close`) 행은 "
+        "A안이라 원래부터 면제가 적용돼 있었으므로 이 수정의 영향을 받지 않는다.",
+        "",
+        "> ℹ️ **WAN-100과 무관한 차이 한 건**: 재산출에서 `SOL 15m close` 행이 최초 "
+        "커밋본과 다르다(거래 939→938, return −8.68%→−9.87%). 수정을 되돌리고 돌려도 "
+        "동일하게 재현되므로 원인은 엔진이 아니라 **데이터 드리프트**다 — 펀딩비 조회가 "
+        "`include_predicted=True`라 예측 펀딩률이 사후 확정되며 값이 갱신된다(해당 행 펀딩 "
+        "73.38→71.75). 나머지 11개 `close` 행은 비트 단위로 동일하다.",
         "",
         "## 무엇이 바뀌었나",
         "",
