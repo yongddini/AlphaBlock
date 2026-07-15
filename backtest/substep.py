@@ -138,6 +138,7 @@ def simulate_zone_limit_trade(
     rsi_gate_mode: RsiGateMode = "extreme",
     rsi_neutral_band: tuple[float, float] = (40.0, 60.0),
     penetration_bps: float = 0.0,
+    first_tap_free: bool = False,
 ) -> ZoneLimitOutcome:
     """한 오더블록 셋업의 존-지정가 진입·청산을 1분 서브스텝으로 시뮬레이션한다.
 
@@ -153,6 +154,12 @@ def simulate_zone_limit_trade(
     `penetration_bps`(WAN-96)를 0보다 크게 주면 가격이 지정가를 그만큼(bp) **관통해야**
     체결로 인정한다 — 기본값 0.0은 현행 "닿으면 체결"이다. 체결가는 관통 여부와 무관하게
     항상 `limit_price`다(관통은 체결 여부의 대리 변수일 뿐 더 유리한 체결가가 아니다).
+
+    `first_tap_free`(WAN-100)는 이 셋업이 존(병합 존 포함) 확정 후 **첫 탭**이라는
+    호출부의 통보다 — `rsi_gate_mode="first_tap_free"`(WAN-81 기본값)의 첫 탭 면제는
+    `tap_index`를 아는 호출부만 판정할 수 있고, 이 시뮬레이터는 셋업 하나만 보므로
+    스스로 알 수 없다. 참이면 RSI 게이트를 건너뛰고 **워밍업(RSI None)이어도** 지정가
+    터치 즉시 체결한다(따라서 `cancel_on_condition_fail`의 조건 실패 취소도 타지 않는다).
     """
     if not substeps:
         return ZoneLimitOutcome(status=ZoneLimitStatus.NO_TOUCH)
@@ -191,13 +198,18 @@ def simulate_zone_limit_trade(
             touched = step.low <= fill_trigger if is_long else step.high >= fill_trigger
             if touched:
                 live_rsi = rsi_state.value(step.close)
-                condition = live_rsi is not None and rsi_gate_passes(
-                    live_rsi,
-                    is_long=is_long,
-                    mode=rsi_gate_mode,
-                    rsi_oversold=rsi_oversold,
-                    rsi_overbought=rsi_overbought,
-                    rsi_neutral_band=rsi_neutral_band,
+                # WAN-100: 첫 탭 면제는 RSI 값 자체를 보지 않는다 — 워밍업(None)이어도
+                # 통과다. A안 `ConfluenceStrategy._evaluate_entry`와 같은 규칙이다.
+                condition = first_tap_free or (
+                    live_rsi is not None
+                    and rsi_gate_passes(
+                        live_rsi,
+                        is_long=is_long,
+                        mode=rsi_gate_mode,
+                        rsi_oversold=rsi_oversold,
+                        rsi_overbought=rsi_overbought,
+                        rsi_neutral_band=rsi_neutral_band,
+                    )
                 )
                 if condition:
                     position_open = True

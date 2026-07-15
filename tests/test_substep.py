@@ -8,8 +8,6 @@
 
 from __future__ import annotations
 
-from typing import Literal
-
 import pandas as pd
 import pytest
 
@@ -20,7 +18,7 @@ from backtest.substep import (
     build_substeps,
     simulate_zone_limit_trade,
 )
-from strategy.models import OrderBlockDirection, SignalExitReason
+from strategy.models import OrderBlockDirection, RsiGateMode, SignalExitReason
 from strategy.realtime_rsi import RealtimeRsi
 
 # 롱 셋업 공통: 존 상단(=proximal 지정가)=100, 존 하단(=distal 손절)=90, 익절=110.
@@ -50,9 +48,10 @@ def _simulate_long(
     invalidation_time: int | None = None,
     cancel_on_condition_fail: bool = False,
     take_profit_price: float | None = _TP,
-    rsi_gate_mode: Literal["extreme", "neutral", "none"] = "extreme",
+    rsi_gate_mode: RsiGateMode = "extreme",
     rsi_neutral_band: tuple[float, float] = (40.0, 60.0),
     penetration_bps: float = 0.0,
+    first_tap_free: bool = False,
 ) -> ZoneLimitOutcome:
     return simulate_zone_limit_trade(
         direction=OrderBlockDirection.BULLISH,
@@ -69,6 +68,7 @@ def _simulate_long(
         rsi_gate_mode=rsi_gate_mode,
         rsi_neutral_band=rsi_neutral_band,
         penetration_bps=penetration_bps,
+        first_tap_free=first_tap_free,
     )
 
 
@@ -349,5 +349,83 @@ def test_rsi_gate_mode_none_always_passes() -> None:
         state=RealtimeRsi.seed_from_closed(_OVERBOUGHT_SEED, length=3),
         rsi_gate_mode="none",
         take_profit_price=None,
+    )
+    assert out.status is ZoneLimitStatus.FILLED_OPEN
+
+
+# ------------------------------------- WAN-100: 첫 탭 면제(first_tap_free)가 B안에도 적용된다
+#
+# 채택 진입 경로(B안 zone_limit)가 `tap_index`를 읽지 않아 CLAUDE.md의 「첫 탭은 RSI
+# 무관 무조건 진입」(WAN-81)이 통째로 빠져 있었다. 아래 3종이 그 회귀를 고정한다.
+# `first_tap_free`는 호출부(`build_zone_limit_backtest`)가 `tap_index==0`을 보고 넘긴다.
+
+
+def test_first_tap_free_fills_despite_failing_rsi_gate() -> None:
+    """첫 탭이면 게이트 미충족 RSI(롱인데 과매수)여도 무조건 체결한다.
+
+    수정 전에는 `rsi_gate_passes`가 `first_tap_free`를 `extreme`으로 폴백해 롱
+    `RSI<=30`을 요구했고, 과매수 시딩이라 첫 탭이 통째로 누락됐다.
+    """
+    steps = [_step(0, high=116, low=99, close=115)]  # 지정가 100 터치 + 극단 과매수(롱 조건 미충족)
+    out = _simulate_long(
+        steps,
+        state=RealtimeRsi.seed_from_closed(_OVERBOUGHT_SEED, length=3),
+        rsi_gate_mode="first_tap_free",
+        take_profit_price=None,
+        first_tap_free=True,
+    )
+    assert out.status is ZoneLimitStatus.FILLED_OPEN
+    assert out.entry_price == _LIMIT
+
+
+def test_first_tap_free_fills_during_rsi_warmup() -> None:
+    """첫 탭이면 RSI 워밍업(값 없음)이어도 체결한다.
+
+    수정 전에는 `live_rsi is not None` 조건이 워밍업 구간의 첫 탭을 막았다 —
+    CLAUDE.md의 "첫 탭은 워밍업 NaN이어도 무조건 진입"과 정반대였다.
+    """
+    warmup = RealtimeRsi.seed_from_closed([100.0], length=3)  # 시드 미형성 → value()가 None
+    steps = [_step(0, high=101, low=99, close=99)]
+    assert warmup.value(99.0) is None  # 전제 확인: 정말 워밍업이다.
+    out = _simulate_long(
+        steps,
+        state=warmup,
+        rsi_gate_mode="first_tap_free",
+        take_profit_price=None,
+        first_tap_free=True,
+    )
+    assert out.status is ZoneLimitStatus.FILLED_OPEN
+
+
+def test_retap_still_applies_rsi_gate_under_first_tap_free_mode() -> None:
+    """재탭(`first_tap_free=False`)은 같은 모드에서도 기존 극단 게이트를 그대로 받는다.
+
+    면제가 모드 전체가 아니라 **첫 탭에만** 걸린다는 뜻 — 재탭은 롱 `RSI<=30`이 필요하다.
+    """
+    steps = [_step(0, high=116, low=99, close=115)]  # 터치하지만 과매수 → 재탭이면 미체결
+    out = _simulate_long(
+        steps,
+        state=RealtimeRsi.seed_from_closed(_OVERBOUGHT_SEED, length=3),
+        rsi_gate_mode="first_tap_free",
+        take_profit_price=None,
+        first_tap_free=False,
+    )
+    assert out.status is ZoneLimitStatus.NO_TOUCH  # 조건 미충족 → 대기 유지 → 미체결
+
+
+def test_first_tap_free_does_not_trigger_condition_fail_cancel() -> None:
+    """첫 탭 면제는 조건 실패 취소(`cancel_on_condition_fail`) 경로를 타지 않는다.
+
+    면제가 "조건 통과"로 판정되므로 취소 분기(elif)에 도달하지 않는다 — 면제와
+    취소 옵션을 함께 켠 조합에서 첫 탭이 취소돼 사라지면 안 된다.
+    """
+    steps = [_step(0, high=116, low=99, close=115)]  # 게이트만 보면 조건 실패할 터치
+    out = _simulate_long(
+        steps,
+        state=RealtimeRsi.seed_from_closed(_OVERBOUGHT_SEED, length=3),
+        rsi_gate_mode="first_tap_free",
+        cancel_on_condition_fail=True,
+        take_profit_price=None,
+        first_tap_free=True,
     )
     assert out.status is ZoneLimitStatus.FILLED_OPEN

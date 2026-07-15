@@ -474,6 +474,11 @@ def build_zone_limit_candidates(
 
         cut = bisect.bisect_left(times, setup_substeps[0].htf_bar_time)
         rsi_state = rsi_seeder.seed(cut)
+        # WAN-100 갭A: 첫 탭 면제는 `tap_index`를 아는 여기서만 판정할 수 있다 —
+        # 시뮬레이터는 셋업 하나만 보므로 몇 번째 탭인지 모른다. A안
+        # (`ConfluenceStrategy._evaluate_entry`)과 같은 조건이며, 병합 존이면
+        # `signal.tap_index`가 이미 병합 존 기준으로 매겨져 있다(WAN-81 §5).
+        first_tap_free = effective_gate_mode == "first_tap_free" and signal.tap_index == 0
         outcome = simulate_zone_limit_trade(
             direction=ob.direction,
             limit_price=limit_price,
@@ -490,6 +495,7 @@ def build_zone_limit_candidates(
             rsi_gate_mode=effective_gate_mode,
             rsi_neutral_band=params.rsi_neutral_band,
             penetration_bps=params.fill_penetration_bps,
+            first_tap_free=first_tap_free,
         )
 
         is_filled = (
