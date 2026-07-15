@@ -10,7 +10,8 @@
 * 거래당 리스크 금액 = `equity × risk_per_trade`.
 * 손절 거리 = ``|entry_price − stop_price|`` (오더블록 distal 경계 기준, WAN-23 규칙).
 * 수량 = 리스크 금액 / 손절 거리 → 손절 거리에 **반비례**.
-* 상한: 명목가치(수량 × 진입가)를 레버리지·정책 한도로 clamp.
+* 상한: 명목가치(수량 × 진입가)를 레버리지·정책 한도로 clamp. 여러 포지션을 동시에
+  들면 그 한도는 **포트폴리오 전체**의 것이다(`open_notional`, WAN-103).
 * 최소 주문 단위(`qty_step`)로 내림하고, `min_qty` 미만이면 진입하지 않는다(0 반환).
 * 손절 거리가 0에 가깝거나(`min_stop_distance_fraction` 미만) 자본이 없으면 진입
   스킵(0 반환).
@@ -34,7 +35,13 @@ class PositionSizingParams(BaseModel):
     risk_per_trade: float = Field(default=0.01, gt=0, le=1)
     """거래당 리스크 = 자본 × 이 비율. 예: 0.01 = 1%."""
     leverage: float = Field(default=1.0, gt=0)
-    """레버리지 상한. 명목가치는 `자본 × leverage`를 넘지 못한다."""
+    """레버리지 상한. **열린 포지션 전체의** 명목가치 합이 `자본 × leverage`를 넘지 못한다.
+
+    동시 1포지션이던 시절(WAN-26~102)엔 "이 거래 하나의 명목 ≤ 자본 × leverage"와 같은
+    뜻이었다. WAN-103이 동시 다중 포지션을 열면서 이 한도는 **포트폴리오 전체**의 것으로
+    승격됐다 — `position_size(open_notional=...)`에 이미 열린 명목을 넘기면 남은 여유분만
+    새 포지션에 배정한다. `open_notional=0.0`(기본)이면 정확히 예전 per-trade clamp다.
+    """
     max_notional_fraction: float | None = Field(default=None, gt=0)
     """추가 명목가치 상한 = `자본 × 이 값`. None이면 `leverage`만 상한으로 쓴다.
     설정 시 `leverage`와 함께 더 작은 쪽이 실제 상한이 된다."""
@@ -57,6 +64,7 @@ def position_size(
     entry_price: float,
     stop_price: float,
     params: PositionSizingParams,
+    open_notional: float = 0.0,
 ) -> float:
     """손절 거리에 반비례하는 진입 수량을 산출한다.
 
@@ -65,15 +73,22 @@ def position_size(
         entry_price: 진입(체결) 가격. 반드시 양수.
         stop_price: 손절 참조가(오더블록 distal 경계). 진입가와의 절대 거리를 리스크로 본다.
         params: 사이징 파라미터.
+        open_notional: 이미 열려 있는 포지션들의 명목가치 합(WAN-103). 명목 상한은
+            포트폴리오 전체에 걸리므로, 이 값을 뺀 **남은 여유분**만 새 포지션에
+            배정한다. 여유가 없으면(상한 소진) 0을 반환해 진입을 스킵한다. 기본
+            `0.0`이면 동시 1포지션 시절과 동일한 per-trade clamp가 된다.
 
     Returns:
-        진입 수량. 진입을 스킵해야 하면(손절 거리 과소·자본 없음·최소 수량 미달) 0.0.
+        진입 수량. 진입을 스킵해야 하면(손절 거리 과소·자본 없음·명목 상한 소진·
+        최소 수량 미달) 0.0.
 
     Raises:
-        ValueError: `entry_price`가 양수가 아닐 때.
+        ValueError: `entry_price`가 양수가 아니거나 `open_notional`이 음수일 때.
     """
     if entry_price <= 0:
         raise ValueError("entry_price는 양수여야 합니다.")
+    if open_notional < 0:
+        raise ValueError("open_notional은 음수일 수 없습니다.")
     if equity <= 0:
         return 0.0
 
@@ -85,11 +100,15 @@ def position_size(
     risk_amount = equity * params.risk_per_trade
     qty = risk_amount / stop_distance
 
-    # 명목가치 상한(레버리지·정책)으로 clamp.
+    # 명목가치 상한(레버리지·정책)으로 clamp. 상한은 포트폴리오 전체에 걸리므로 이미 열린
+    # 명목을 빼고 남은 여유분이 이 진입의 천장이다(WAN-103).
     max_notional = equity * params.leverage
     if params.max_notional_fraction is not None:
         max_notional = min(max_notional, equity * params.max_notional_fraction)
-    max_qty = max_notional / entry_price
+    remaining = max_notional - open_notional
+    if remaining <= 0.0:
+        return 0.0
+    max_qty = remaining / entry_price
     qty = min(qty, max_qty)
 
     # 최소 주문 단위로 내림.
