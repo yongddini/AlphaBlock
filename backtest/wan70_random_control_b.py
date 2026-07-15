@@ -63,6 +63,7 @@ import argparse
 import os
 import random
 from collections import defaultdict
+from collections.abc import Sequence
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -81,6 +82,7 @@ from backtest.zone_limit_backtest import (
     build_result_from_trades,
     build_zone_limit_candidates,
 )
+from data.models import FundingRate
 from strategy.models import ConfluenceParams, OrderBlockParams, OrderBlockResult
 from strategy.order_blocks import OrderBlockDetector
 
@@ -172,12 +174,17 @@ def run_random_control_b_segment(
     order_block_result: OrderBlockResult | None = None,
     iterations: int = _BOOTSTRAP_ITERATIONS,
     seed: int = 70,
+    funding_rates: Sequence[FundingRate] | None = None,
 ) -> RandomControlBResult:
     """한 구간에서 실제(RSI 게이트) 결과와 매칭 널 부트스트랩을 비교한다.
 
     `htf_seg`/`one_min_seg`는 이미 구간·워밍업 창으로 잘려 있어야 한다(IS/OOS 분할은
     `run_experiment`가 담당). `order_block_result`를 주면 실제 경로와 무력화 풀
     경로가 같은 오더블록 유니버스를 공유한다.
+
+    `funding_rates`(WAN-88)를 주면 실제·널 **양쪽 시퀀싱에 똑같이** 펀딩비가 붙는다.
+    안 넘기면(기본) 펀딩 0으로 계산된다 — `cfg.funding_enabled`가 True여도 그렇다.
+    이 모듈의 `main()`은 넘기지 않으므로 WAN-70 CSV는 그대로 재현된다.
     """
     cfg = backtest_config or default_backtest_config(timeframe)
     ob_result = order_block_result or OrderBlockDetector(order_block_params).run(htf_seg)
@@ -191,7 +198,7 @@ def run_random_control_b_segment(
         order_block_params=order_block_params,
         order_block_result=ob_result,
     )
-    real_trades = _sequence_and_cost(real_candidates, cfg)
+    real_trades = _sequence_and_cost(real_candidates, cfg, funding_rates)
     real_result = build_result_from_trades(real_trades, cfg, timeframe)
     real_long = sum(1 for t in real_trades if t.side is PositionSide.LONG)
     real_short = len(real_trades) - real_long
@@ -260,7 +267,7 @@ def run_random_control_b_segment(
                 fill_picks = rng.sample(remaining, fill_k) if fill_k else []
                 sampled.extend(fill_picks)
                 used_by_side[side].update(id(c) for c in fill_picks)
-        sampled_trades = _sequence_and_cost(sampled, cfg)
+        sampled_trades = _sequence_and_cost(sampled, cfg, funding_rates)
         sampled_result = build_result_from_trades(sampled_trades, cfg, timeframe)
         random_returns.append(sampled_result.metrics.total_return)
 
