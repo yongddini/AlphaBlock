@@ -27,6 +27,7 @@ import pandas as pd
 from pydantic import BaseModel, ConfigDict
 
 from backtest.engine import run_backtest
+from backtest.harness import LEGACY_RSI_GATE_MODE
 from backtest.models import BacktestConfig, PositionSide, Trade
 from backtest.sweep import default_backtest_config
 from data.storage import OhlcvStore
@@ -60,11 +61,11 @@ OLD_ENGINE_PARAMS = ConfluenceParams(
 )
 
 #: WAN-81 신 엔진 정의. WAN-87 이전에는 `ConfluenceParams()`의 기본값 자체와 같았으나,
-#: WAN-87(WAN-86 결정 1)이 `short_enabled` 기본값을 `False`로 되돌리면서 이 리포트가
-#: 검증하는 "WAN-81 신 엔진"(숏 활성화 포함) 정의를 보존하기 위해 명시적으로
-#: `short_enabled=True`를 고정한다 — 그 외 필드는 여전히 `ConfluenceParams()` 기본값과
-#: 같다.
-NEW_ENGINE_PARAMS = ConfluenceParams(short_enabled=True)
+#: 기본값이 그 뒤로 두 번 이 정의에서 멀어져 **바뀐 필드마다 명시 고정**이 쌓였다:
+#: `short_enabled`는 WAN-87(WAN-86 결정 1)이 `False`로 되돌렸고, `rsi_gate_mode`는
+#: WAN-123(WAN-116 결정 B)이 `unconditional`(게이트 제거)로 옮겼다. 이 리포트가 검증하는
+#: "WAN-81 신 엔진"은 **숏 활성화 + 재탭 RSI 게이트**가 그 정의의 일부이므로 둘 다 고정한다.
+NEW_ENGINE_PARAMS = ConfluenceParams(short_enabled=True, rsi_gate_mode=LEGACY_RSI_GATE_MODE)
 
 ENGINE_PRESETS: dict[str, ConfluenceParams] = {
     "old": OLD_ENGINE_PARAMS,

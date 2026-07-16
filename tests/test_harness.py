@@ -17,6 +17,7 @@ from backtest.harness import (
     BASELINE_FILL,
     FILL_PRESETS,
     IS_FRACTION,
+    LEGACY_RSI_GATE_MODE,
     SEGMENT_FULL,
     SEGMENT_IS,
     SEGMENT_OOS,
@@ -140,10 +141,46 @@ def test_explicit_zero_offset_matches_wan99_zero_offset_baseline() -> None:
     WAN-112 전에는 `build_params()` 기본이 이 셀이었다. 이제 기본은 2bp이므로 그 등식은
     깨졌고, 대신 **명시적 0bp가 옛 셀을 계속 재현**한다 — 0bp로 고정한 과거 리포트
     (WAN-88/96/103/110)가 재현되는 근거가 이 등식이다.
+
+    ⚠️ WAN-123부터 되돌릴 것이 **둘**이다: 오프셋(0bp) + RSI 게이트(`first_tap_free`).
+    옛 셀을 재현하려면 그 리포트가 고정한 엔진을 통째로 요청해야 한다.
     """
     from backtest.wan99_zone_limit_offset_report import FILL_ASSUMPTIONS
 
-    assert build_params(offset_bps=0.0) == FILL_ASSUMPTIONS[0].params(offset_bps=0.0, seed=0)
+    assert build_params(
+        offset_bps=0.0, base=ConfluenceParams(rsi_gate_mode=LEGACY_RSI_GATE_MODE)
+    ) == FILL_ASSUMPTIONS[0].params(offset_bps=0.0, seed=0)
+
+
+def test_default_gate_is_off_and_legacy_pin_differs() -> None:
+    """채택 기본값 = 게이트 없음(WAN-123), 그리고 `LEGACY_RSI_GATE_MODE`는 그것과 **다르다**.
+
+    두 번째 단언이 핵심이다: 핀이 기본값과 같아지는 순간 옛 리포트들의 "명시 고정"이
+    전부 무의미한 no-op이 되면서, 그 사실이 아무 데서도 드러나지 않는다.
+    """
+    assert build_params().rsi_gate_mode == "unconditional"
+    assert LEGACY_RSI_GATE_MODE == "first_tap_free" != build_params().rsi_gate_mode
+
+
+def test_legacy_gate_pin_flows_through_base() -> None:
+    """`base=`로 준 게이트가 조립을 통과해 살아남는다 — 옛 리포트 고정의 배선 검사.
+
+    `build_params`가 `update` 딕셔너리로 필드를 덮어쓰므로, 거기에 `rsi_gate_mode`가
+    끼어들면 base의 핀이 조용히 지워진다. 그러면 "고정했다"고 적힌 리포트가 새 게이트로
+    돈다 — WAN-95(라벨과 실행이 갈라짐)의 재발이다.
+    """
+    pinned = build_params(base=ConfluenceParams(rsi_gate_mode=LEGACY_RSI_GATE_MODE))
+    assert pinned.rsi_gate_mode == LEGACY_RSI_GATE_MODE
+    # 다른 축을 같이 줘도 핀이 살아남아야 한다.
+    with_axes = build_params(
+        offset_bps=0.0,
+        take_profit_r=2.0,
+        fill=fill_preset("pen_5bp"),
+        base=ConfluenceParams(rsi_gate_mode=LEGACY_RSI_GATE_MODE),
+    )
+    assert with_axes.rsi_gate_mode == LEGACY_RSI_GATE_MODE
+    assert with_axes.zone_limit_offset_bps == 0.0
+    assert with_axes.take_profit_r == 2.0
 
 
 def test_offset_none_defers_to_adopted_default() -> None:
@@ -170,24 +207,35 @@ def test_fill_presets_match_wan96_conservatism_levels() -> None:
         assert preset.dropout_rate == level.dropout_rate
         assert preset.seeds == level.seeds
         for seed in level.seeds:
-            # WAN-96은 오프셋 0bp에 고정돼 있다(당시 엔진 기록). CLI 기본은 이제 2bp이므로
-            # 나란히 읽으려면 오프셋을 그쪽에 맞춰야 한다 — 이 인자가 그 사실을 드러낸다.
-            assert build_params(fill=preset, seed=seed, offset_bps=0.0) == level.params(seed)
+            # WAN-96은 오프셋 0bp + 게이트 `first_tap_free`에 고정돼 있다(당시 엔진 기록).
+            # CLI 기본은 이제 2bp · 게이트 없음이므로 나란히 읽으려면 둘 다 그쪽에 맞춰야
+            # 한다 — 이 인자들이 "옛 엔진을 요청한다"는 사실을 드러낸다(WAN-112/123).
+            assert build_params(
+                fill=preset,
+                seed=seed,
+                offset_bps=0.0,
+                base=ConfluenceParams(rsi_gate_mode=LEGACY_RSI_GATE_MODE),
+            ) == level.params(seed)
 
 
 def test_fill_presets_match_wan99_fill_assumptions() -> None:
-    """WAN-99가 쓴 가정(오프셋 축 포함)도 같은 프리셋으로 재현된다."""
+    """WAN-99가 쓴 가정(오프셋 축 포함)도 같은 프리셋으로 재현된다.
+
+    WAN-123 이후 게이트를 그쪽 고정값으로 되돌려야 한다 — 오프셋은 WAN-99가 **축으로
+    명시**해 돌리므로 여기서 그대로 주지만, 게이트는 그 리포트가 **핀**으로 잡은 값이다.
+    """
     from backtest.wan99_zone_limit_offset_report import FILL_ASSUMPTIONS
 
+    legacy = ConfluenceParams(rsi_gate_mode=LEGACY_RSI_GATE_MODE)
     for assumption in FILL_ASSUMPTIONS:
         preset = fill_preset(assumption.name)
         assert preset.penetration_bps == assumption.penetration_bps
         assert preset.dropout_rate == assumption.dropout_rate
         for offset in (0.0, 5.0, 20.0):
             for seed in assumption.seeds:
-                assert build_params(fill=preset, seed=seed, offset_bps=offset) == assumption.params(
-                    offset, seed
-                )
+                assert build_params(
+                    fill=preset, seed=seed, offset_bps=offset, base=legacy
+                ) == assumption.params(offset, seed)
 
 
 def test_build_params_pairs_rsi_mode_with_entry_mode() -> None:

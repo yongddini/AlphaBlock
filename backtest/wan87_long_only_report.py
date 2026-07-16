@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from backtest.harness import LEGACY_RSI_GATE_MODE
 from backtest.sweep import default_backtest_config
 from backtest.wan81_engine_replacement_report import (
     _CACHE_DIR,
@@ -39,11 +40,18 @@ from strategy.order_blocks import OrderBlockDetector
 #: 이전에 산출됐으므로, 재현 시에도 당시 엔진(`entry_mode="close"`)을 명시적으로
 #: 고정한다. WAN-95 이후 `ConfluenceParams()` 기본값은 `zone_limit`이라 이 값과 다르다
 #: — 즉 이 리포트의 수치는 더 이상 "채택 기본값 성과"가 아니다.
-SHORT_DISABLED_PARAMS = ConfluenceParams(entry_mode="close", rsi_mode="closed_bar")
+#: **RSI 게이트도 같은 이유로 고정한다**(WAN-123이 기본값을 `unconditional`로 옮겼다) —
+#: 이 표의 롱/숏 대조는 게이트가 켜진 거래 집합에서 잰 값이다.
+SHORT_DISABLED_PARAMS = ConfluenceParams(
+    entry_mode="close", rsi_mode="closed_bar", rsi_gate_mode=LEGACY_RSI_GATE_MODE
+)
 
 #: WAN-81/WAN-84가 검증했던 이전 기본값 — 숏 활성화. 비교 기준선으로 명시 고정한다.
 SHORT_ENABLED_PARAMS = ConfluenceParams(
-    short_enabled=True, entry_mode="close", rsi_mode="closed_bar"
+    short_enabled=True,
+    entry_mode="close",
+    rsi_mode="closed_bar",
+    rsi_gate_mode=LEGACY_RSI_GATE_MODE,
 )
 
 ENGINE_PRESETS: dict[str, ConfluenceParams] = {

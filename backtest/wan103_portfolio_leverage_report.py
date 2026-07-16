@@ -39,6 +39,7 @@ from pydantic import BaseModel, ConfigDict
 
 from backtest.harness import (
     DEFAULT_YEARS,
+    LEGACY_RSI_GATE_MODE,
     MarketData,
     Segment,
     detect_order_blocks,
@@ -66,10 +67,11 @@ DEFAULT_SYMBOLS: tuple[str, ...] = ("BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:
 #: WAN-103/108/110 당시 채택 기본값(오프셋 **0bp**) 그대로. 이 리포트는 전략 파라미터를
 #: 하나도 바꾸지 않는다 — 묻는 건 "그 기본값에서 포지션 제약을 풀면 무엇이 달라지나"다.
 #:
-#: ⚠️ 오프셋만 **명시 고정**한다(WAN-112): 채택 기본값은 이제 2bp지만 이 리포트의 발표
-#: 수치(단일 vs 다중 비교)는 0bp에서 나왔다. 기본값을 따라가게 두면 비교의 두 항이 함께
-#: 움직여 문서에 적힌 %p가 재현되지 않는다.
-PARAMS = ConfluenceParams(zone_limit_offset_bps=0.0)
+#: ⚠️ 오프셋·RSI 게이트를 **명시 고정**한다(WAN-112 / WAN-123): 채택 기본값은 이제 오프셋
+#: 2bp · 게이트 없음(`unconditional`)이지만 이 리포트의 발표 수치(단일 vs 다중 비교)는
+#: 0bp · 게이트 on에서 나왔다. 기본값을 따라가게 두면 비교의 두 항이 함께 움직여 문서에
+#: 적힌 %p가 재현되지 않는다.
+PARAMS = ConfluenceParams(zone_limit_offset_bps=0.0, rsi_gate_mode=LEGACY_RSI_GATE_MODE)
 
 #: 고정 레버리지 스윕 축(이슈 완료기준). N배(= peak concurrency)는 여기 없고, 실행 중
 #: 계측한 값을 대입해 **별도 시나리오**로 돈다.

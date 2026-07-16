@@ -66,6 +66,7 @@ import pandas as pd
 from pydantic import BaseModel, ConfigDict
 
 from backtest import ab_walkforward
+from backtest.harness import LEGACY_RSI_GATE_MODE
 from backtest.models import BacktestConfig, PositionSide
 from backtest.sweep import default_backtest_config
 from backtest.wan68_short_gate_analysis import _split_bars
@@ -100,12 +101,17 @@ _YEAR_MS = int(365.25 * 24 * 60 * 60 * 1000)
 _DEFAULT_SEED = 84
 
 #: WAN-81 신 엔진 정의(B안 배선). 다른 필드는 `ConfluenceParams()` 기본값(볼린저
-#: 진입가, `retap_mode="every_tap"`, `rsi_gate_mode="first_tap_free"`,
-#: `take_profit_mode="fixed_r"`(1.5R))과 같지만, `short_enabled`만은 WAN-87(WAN-86
-#: 결정 1)로 기본값이 `False`로 바뀐 뒤에도 이 리포트가 검증하는 "숏 활성화 신
-#: 엔진" 정의를 보존하기 위해 명시적으로 `True`로 고정한다.
+#: 진입가, `retap_mode="every_tap"`, `take_profit_mode="fixed_r"`(1.5R))과 같지만,
+#: 기본값이 이 정의에서 멀어진 **두 필드는 명시 고정**한다: `short_enabled`는 WAN-87
+#: (WAN-86 결정 1)이 `False`로 되돌렸고, `rsi_gate_mode`는 WAN-123(WAN-116 결정 B)이
+#: `unconditional`(게이트 제거)로 옮겼다. 이 리포트가 검증하는 "숏 활성화 신 엔진"은
+#: **재탭 RSI 게이트**를 포함하는 정의이고, 그 위에서 낸 「엣지 없음」 판정이 문서의
+#: 결론이다 — 게이트를 빼면 거래 집합이 달라져 같은 검정이 아니다.
 NEW_ENGINE_PARAMS = ConfluenceParams(
-    entry_mode="zone_limit", rsi_mode="realtime", short_enabled=True
+    entry_mode="zone_limit",
+    rsi_mode="realtime",
+    short_enabled=True,
+    rsi_gate_mode=LEGACY_RSI_GATE_MODE,
 )
 
 #: 매칭 널 게이트. 신 엔진 하나뿐이다(모듈 docstring "신 엔진 게이트 정의" 참고).

@@ -84,6 +84,7 @@ from backtest.harness import (
     DB_PATH,
     DEFAULT_SYMBOLS,
     DEFAULT_YEARS,
+    LEGACY_RSI_GATE_MODE,
     MarketData,
     build_config,
     build_params,
@@ -164,8 +165,16 @@ def run_offset(
     엔진 호출은 채택 경로(B안) 그대로다 — `build_zone_limit_candidates` +
     `sequence_with_candidates`는 `run_zone_limit_backtest_verbose`가 내부에서 쓰는 바로
     그 두 단계이고, 여기서는 중간 산출물(셋업↔거래 링크)이 필요해 나눠 부를 뿐이다.
+
+    ⚠️ RSI 게이트는 **명시 고정**한다(WAN-123이 기본값을 `unconditional`로 옮겼다). 이
+    리포트의 증분 분해(「2bp가 사는 셋업은 13건인데 세금은 917건 전부에 매겨진다」)는
+    게이트가 켜진 셋업 풀에서 센 값이라, 기본값을 따라가면 그 건수가 재현되지 않는다.
     """
-    params = build_params(offset_bps=offset_bps, fill=BASELINE_FILL)
+    params = build_params(
+        offset_bps=offset_bps,
+        fill=BASELINE_FILL,
+        base=ConfluenceParams(rsi_gate_mode=LEGACY_RSI_GATE_MODE),
+    )
     setup_sink: list[SetupDiagnostic] = []
     candidates, _stats = build_zone_limit_candidates(
         market.htf_df,

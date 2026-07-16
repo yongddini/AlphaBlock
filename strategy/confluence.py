@@ -365,7 +365,11 @@ class ConfluenceStrategy:
         rsi_val = rsi_vals[pos]
         rsi_opt = None if math.isnan(rsi_val) else rsi_val
 
-        if params.rsi_gate_mode == "first_tap_free" and signal.tap_index == 0:
+        if params.rsi_gate_mode == "unconditional":
+            # WAN-123: 게이트 자체가 없다 — 탭 순서·워밍업(NaN)을 가리지 않고 통과.
+            # `none`과 달리 `rsi_opt is not None`을 요구하지 않는 것이 핵심이다.
+            confirmed = True
+        elif params.rsi_gate_mode == "first_tap_free" and signal.tap_index == 0:
             # WAN-81 갭A: 존(병합 존 포함) 확정 후 첫 탭은 RSI 무관(워밍업 NaN
             # 포함)하게 무조건 통과한다. 재탭(tap_index>=1)부터 extreme 규칙 적용.
             confirmed = True

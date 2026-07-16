@@ -92,6 +92,7 @@ from backtest.harness import (
     slice_market,
     write_output,
 )
+from strategy.models import ConfluenceParams, RsiGateMode
 
 # --------------------------------------------------------------------------- #
 # 인자 파싱 헬퍼
@@ -189,6 +190,15 @@ class Grid:
     seeds: tuple[int, ...] | None = None
     """탈락 시드 오버라이드. None이면 프리셋의 시드를 쓴다."""
     short_enabled: bool | None = None
+    rsi_gate_mode: RsiGateMode | None = None
+    """RSI 게이트 **고정**. None이면 채택 기본값(WAN-123: `unconditional` = 게이트 없음).
+
+    격자 **축이 아니라 핀**이다(`short_enabled`와 같은 자리) — CLI 플래그로 열지 않으므로
+    기본 실행은 언제나 채택 기본값을 돈다. WAN-123이 게이트를 뺀 뒤, **게이트가 켜진
+    거래 집합에서 낸 수치를 결론에 박아 둔 리포트**(wan111 등)가 자기 엔진을 고정하는
+    용도다(`harness.LEGACY_RSI_GATE_MODE`). 없으면 그런 리포트는 `run_grid`를 통과하는
+    순간 새 게이트로 조용히 다시 돈다.
+    """
 
     def __post_init__(self) -> None:
         for mode in self.entry_modes:
@@ -365,6 +375,11 @@ def _run_cell(task: _CellTask) -> _CellOutcome:
                 fill=combo.fill,
                 seed=combo.seed,
                 short_enabled=grid.short_enabled,
+                base=(
+                    None
+                    if grid.rsi_gate_mode is None
+                    else ConfluenceParams(rsi_gate_mode=grid.rsi_gate_mode)
+                ),
             )
             outcome = run_once(
                 window,

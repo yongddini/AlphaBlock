@@ -76,6 +76,7 @@ import pandas as pd
 from pydantic import BaseModel, ConfigDict
 
 from backtest.harness import (
+    LEGACY_RSI_GATE_MODE,
     FillPreset,
     build_config,
     build_params,
@@ -130,16 +131,28 @@ WAN84_NULL_CSV = Path("backtest/reports/wan84_random_entry_new_engine.csv")
 #: 기본값을 따라가게 두면 결론 문장과 재현 숫자가 어긋난다 — 이 리포트는 당시 엔진의 기록이다.
 PINNED_OFFSET_BPS = 0.0
 
+#: 같은 이유로 RSI 게이트도 당시 값으로 고정한다(WAN-123이 기본값을 `unconditional`로
+#: 옮겼다). 이 모듈의 「유효 16셀 중 유의 0개」는 **게이트가 켜진 거래 집합**의 판정이다 —
+#: 게이트를 빼면 거래가 13~14% 늘어 표본 자체가 달라지므로 같은 표가 아니다.
+#: ⚠️ 위 docstring의 "기본값을 고정하지 않는다"는 원칙은 **WAN-123 이전 서술**이다. 게이트
+#: 제거 뒤의 널 재검은 이 모듈을 다시 돌리는 게 아니라 `wan123_*`이 새로 낸다(같은 이슈가
+#: 두 엔진의 표를 하나의 md에 섞지 않도록).
+PINNED_RSI_GATE_MODE = LEGACY_RSI_GATE_MODE
+
 
 def adopted_params(fill: FillPreset) -> ConfluenceParams:
     """WAN-88 당시 채택 기본값 + 체결 가정만 얹은 파라미터.
 
     `harness.build_params`를 거치는 이유는 `entry_mode`/`rsi_mode`를 한 세트로 묶는
     규칙(WAN-41/95)을 이 모듈이 따로 재구현하지 않기 위해서다. 전략 필드는 하나도
-    바꾸지 않는다 — 이 이슈는 검증 전용이고 파라미터 탐색은 금지다. 오프셋만 당시 값으로
-    명시 고정한다(`PINNED_OFFSET_BPS`).
+    바꾸지 않는다 — 이 이슈는 검증 전용이고 파라미터 탐색은 금지다. 당시 값으로 명시
+    고정하는 것은 오프셋(`PINNED_OFFSET_BPS`)과 RSI 게이트(`PINNED_RSI_GATE_MODE`) 둘이다.
     """
-    return build_params(fill=fill, offset_bps=PINNED_OFFSET_BPS)
+    return build_params(
+        fill=fill,
+        offset_bps=PINNED_OFFSET_BPS,
+        base=ConfluenceParams(rsi_gate_mode=PINNED_RSI_GATE_MODE),
+    )
 
 
 def describe_engine() -> str:
@@ -148,7 +161,9 @@ def describe_engine() -> str:
     `ConfluenceParams()`(= 지금의 채택 기본값)가 아니라 **고정한 엔진**을 찍는다. 지문이
     실행과 어긋나면 지문이 아니라 장식이다.
     """
-    p = ConfluenceParams(zone_limit_offset_bps=PINNED_OFFSET_BPS)
+    p = ConfluenceParams(
+        zone_limit_offset_bps=PINNED_OFFSET_BPS, rsi_gate_mode=PINNED_RSI_GATE_MODE
+    )
     return (
         f"entry_mode={p.entry_mode}, rsi_mode={p.rsi_mode}, short_enabled={p.short_enabled}, "
         f"take_profit_mode={p.take_profit_mode}, take_profit_r={p.take_profit_r}, "

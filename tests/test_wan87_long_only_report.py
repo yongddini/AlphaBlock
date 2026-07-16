@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from backtest.harness import LEGACY_RSI_GATE_MODE
 from backtest.models import BacktestConfig
 from backtest.sweep import default_backtest_config
 from backtest.synthetic import make_synthetic_ohlcv
@@ -27,16 +28,25 @@ def test_short_disabled_params_pins_pre_wan95_close_entry_engine() -> None:
 
     WAN-95로 채택 기본값이 지정가(`zone_limit`)로 바뀌면서, 이 리포트의 수치는 더 이상
     "채택 기본값 성과"가 아니다 — 종가 진입 기준의 **역사적 산출물**이다. 재현 가능하도록
-    당시 엔진을 고정하되, 진입 방식/RSI 모드를 뺀 나머지 전략 규칙은 현재 기본값과
-    같아야 한다(롱 온리 전환이 다른 필드를 건드리지 않았다는 원래 보장은 유지).
+    당시 엔진을 고정하되, 명시 고정한 필드를 뺀 나머지 전략 규칙은 현재 기본값과 같아야
+    한다(롱 온리 전환이 다른 필드를 건드리지 않았다는 원래 보장은 유지).
+
+    고정 필드가 WAN-123부터 **셋**이다: 진입 방식·RSI 모드(WAN-95) + RSI 게이트(WAN-123).
     """
     defaults = ConfluenceParams()
     assert SHORT_DISABLED_PARAMS.short_enabled is False
     assert SHORT_DISABLED_PARAMS.entry_mode == "close"
     assert SHORT_DISABLED_PARAMS.rsi_mode == "closed_bar"
-    # 현재 기본값과 다른 필드는 진입 방식·RSI 모드 **둘뿐**이어야 한다.
+    assert SHORT_DISABLED_PARAMS.rsi_gate_mode == "first_tap_free"
+    # 현재 기본값과 다른 필드는 그 **셋뿐**이어야 한다.
     assert (
-        defaults.model_copy(update={"entry_mode": "close", "rsi_mode": "closed_bar"})
+        defaults.model_copy(
+            update={
+                "entry_mode": "close",
+                "rsi_mode": "closed_bar",
+                "rsi_gate_mode": LEGACY_RSI_GATE_MODE,
+            }
+        )
         == SHORT_DISABLED_PARAMS
     )
     # 그리고 그 두 필드 때문에 현재 기본값과는 확실히 다르다(= 채택 성과가 아니다).

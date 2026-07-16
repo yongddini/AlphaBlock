@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from backtest.harness import fill_preset
+from backtest.harness import LEGACY_RSI_GATE_MODE, fill_preset
 from backtest.wan114_entry_rule_ablation import RUNGS_BY_NAME as WAN114_RUNGS
 from backtest.wan114_entry_rule_ablation import rung_params as wan114_rung_params
 from backtest.wan115_bollinger_lookahead_recheck import (
@@ -90,15 +90,21 @@ def test_ladder_is_the_three_rungs_in_order() -> None:
 
 
 def test_tap_rung_is_exactly_the_adopted_default() -> None:
-    """`L2`가 채택 기본값이라는 표의 라벨이 참이어야 한다.
+    """`L2`가 **WAN-122까지의** 채택 기본값이라는 표의 라벨이 참이어야 한다.
 
-    거짓이면 "룩어헤드 포함 현행"이라는 기준선 자체가 현행이 아니게 된다.
+    ⚠️ WAN-123(RSI 게이트 제거)이 이 동일성을 **한 필드만큼** 깼다: 사다리는
+    `rsi_gate_mode="first_tap_free"`를 고정하는데 현재 기본값은 `unconditional`이다.
+    그 고정은 의도적이다 — 풀어 두면 이 표가 WAN-114/115와 비트 단위로 맞물리지 않게
+    되고, `L1→L2` 증분이 "볼린저의 기여"가 아니라 "볼린저 + 게이트 제거"가 된다.
+    나머지 필드는 여전히 기본값을 물려받아야 하므로 그것을 확인한다.
     """
     adopted = ConfluenceParams()
     tap = rung_params(RUNGS_BY_NAME[TAP_RUNG], fill=_BASELINE)
     assert tap.deviation_filter == adopted.deviation_filter
     assert tap.retap_mode == adopted.retap_mode
-    assert tap.rsi_gate_mode == adopted.rsi_gate_mode
+    # WAN-123: 고정한 게이트 ≠ 현재 기본값. 이 부등호가 깨지면 사다리가 조용히
+    # 새 엔진으로 옮겨 갔다는 뜻이다.
+    assert tap.rsi_gate_mode == LEGACY_RSI_GATE_MODE != adopted.rsi_gate_mode
     # 토대: 오프셋 2bp(WAN-112) · 고정 1.5R(WAN-81)를 기본값에서 물려받는다.
     assert tap.zone_limit_offset_bps == adopted.zone_limit_offset_bps == pytest.approx(2.0)
     assert tap.take_profit_r == adopted.take_profit_r == pytest.approx(1.5)

@@ -45,6 +45,7 @@ import pandas as pd
 from pydantic import BaseModel, ConfigDict
 
 from backtest.engine import run_backtest
+from backtest.harness import LEGACY_RSI_GATE_MODE
 from backtest.models import BacktestConfig, Trade
 from backtest.sweep import default_backtest_config, timeframe_to_ms
 from backtest.wan68_short_gate_analysis import _split_bars
@@ -75,10 +76,17 @@ FundingMode = Literal["off", "on"]
 #: **A안(종가 진입) 고정**(WAN-95): 이 리포트는 지정가 채택 이전 산출물이라, 재현 시
 #: 당시 엔진을 명시적으로 고정한다. WAN-95 이후 `ConfluenceParams()` 기본값은
 #: `zone_limit`이므로 이 프리셋은 더 이상 채택 기본값이 아니다.
+#: **RSI 게이트도 같은 이유로 고정한다**(WAN-123이 기본값을 `unconditional`로 옮겼다) —
+#: 펀딩 on/off 델타는 거래 집합이 고정돼야 뜻이 있다.
 ENGINE_PRESETS: dict[str, ConfluenceParams] = {
-    "long_only": ConfluenceParams(entry_mode="close", rsi_mode="closed_bar"),
+    "long_only": ConfluenceParams(
+        entry_mode="close", rsi_mode="closed_bar", rsi_gate_mode=LEGACY_RSI_GATE_MODE
+    ),
     "short_enabled": ConfluenceParams(
-        short_enabled=True, entry_mode="close", rsi_mode="closed_bar"
+        short_enabled=True,
+        entry_mode="close",
+        rsi_mode="closed_bar",
+        rsi_gate_mode=LEGACY_RSI_GATE_MODE,
     ),
 }
 

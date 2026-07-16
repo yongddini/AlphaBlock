@@ -22,13 +22,15 @@ python -m backtest.run --symbol BTCUSDT,ETHUSDT,SOLUSDT --tf 1h --fill pen_5bp -
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
-from backtest.harness import RunRow, load_market_data
+from backtest.harness import LEGACY_RSI_GATE_MODE, RunRow, load_market_data
 from backtest.run import JOBS_AUTO, RunOptions, build_parser, grid_from_args, run_grid
+from strategy.models import RsiGateMode
 
 _WAN95_CSV = Path("backtest/reports/wan95_zone_limit_recompute.csv")
 _WAN99_CSV = Path("backtest/reports/wan99_zone_limit_offset.csv")
@@ -57,12 +59,17 @@ def _require_real_data() -> None:
         pytest.skip(f"{_SYMBOL} {_TIMEFRAME} 실데이터가 없어 회귀 대조를 건너뜁니다(CI 기본).")
 
 
-def _run(argv: list[str]) -> RunRow:
+def _run(argv: list[str], *, rsi_gate_mode: RsiGateMode | None = None) -> RunRow:
     """CLI 인자로 한 셀을 돌려 그 행을 낸다.
 
     데이터 유무는 픽스처가 이미 확인했으므로, 여기서 0행이 나오면 그건 진짜 배선 버그다.
+
+    `rsi_gate_mode`는 CLI 축이 아니라 핀이라 인자로 못 준다(WAN-123) — 옛 리포트 셀과
+    대조할 때만 여기서 되돌려 요청한다.
     """
     grid = grid_from_args(build_parser().parse_args(argv))
+    if rsi_gate_mode is not None:
+        grid = replace(grid, rsi_gate_mode=rsi_gate_mode)
     rows = run_grid(grid, RunOptions(years=_YEARS), log=False)
     assert len(rows) == 1, f"대조는 한 셀이어야 합니다: {len(rows)}행"
     return rows[0]
@@ -106,9 +113,15 @@ def test_cli_reproduces_wan99_pen_5bp_cell() -> None:
     ⚠️ `--offset-bps 0`을 **명시**해야 한다(WAN-112): 채택 기본 오프셋이 2bp가 되면서
     CLI 기본 실행은 더 이상 WAN-99의 오프셋 0 셀이 아니다. 이 인자가 "옛 셀과 대조하려고
     옛 엔진을 요청한다"는 사실을 드러낸다 — 빼면 다른 엔진의 숫자를 같은 셀로 착각한다.
+
+    ⚠️ 같은 이유로 **RSI 게이트도 옛 값으로 되돌려 요청한다**(WAN-123): 채택 기본값이
+    `unconditional`(게이트 제거)이 되면서 CLI 기본 실행의 거래 집합이 13~14% 넓어졌다.
+    게이트는 격자 축이 아니라 핀이므로 CLI 플래그가 없다 — `Grid.rsi_gate_mode`로 직접
+    요청한다(그쪽 필드가 존재하는 이유가 이것이다).
     """
     row = _run(
-        ["--symbol", "BTCUSDT", "--tf", _TIMEFRAME, "--fill", "pen_5bp", "--offset-bps", "0"]
+        ["--symbol", "BTCUSDT", "--tf", _TIMEFRAME, "--fill", "pen_5bp", "--offset-bps", "0"],
+        rsi_gate_mode=LEGACY_RSI_GATE_MODE,
     )
     cell = _report_cell(
         _WAN99_CSV,

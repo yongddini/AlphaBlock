@@ -48,7 +48,7 @@ from backtest.zone_limit_backtest import (
 from data.funding import FundingRateStore
 from data.models import FundingRate
 from data.storage import OhlcvStore
-from strategy.models import ConfluenceParams, OrderBlockResult
+from strategy.models import ConfluenceParams, OrderBlockResult, RsiGateMode
 from strategy.order_blocks import OrderBlockDetector
 
 # --------------------------------------------------------------------------- #
@@ -162,6 +162,18 @@ def fill_preset(name: str) -> FillPreset:
 _RSI_MODE_FOR_ENTRY: dict[str, str] = {"close": "closed_bar", "zone_limit": "realtime"}
 
 ENTRY_MODES: tuple[str, ...] = tuple(_RSI_MODE_FOR_ENTRY)
+
+#: WAN-81~WAN-122 채택 엔진의 RSI 게이트 — 첫 탭 면제 + 재탭 `extreme`(롱 `RSI<=30`).
+#:
+#: **WAN-123이 기본값을 `"unconditional"`(게이트 제거)로 옮겼다.** 그 이전 수치를 결론
+#: 문장에 박아 둔 리포트는 이 값을 **명시 고정**해 당시 엔진의 기록으로 보존한다 —
+#: 고정하지 않으면 기본값을 따라 새 게이트(거래 +13~14%)로 조용히 다시 돌아 본문과
+#: 어긋난다. WAN-112가 `zone_limit_offset_bps=0.0`을 고정한 것과 같은 패턴이고, 고정
+#: 대상 목록은 [`docs/decisions/wan123.md`](../docs/decisions/wan123.md) §파급이다.
+#:
+#: ⚠️ 반대로 **"지금 채택된 것"을 재는 리포트는 고정하지 않는다**(wan88·wan95) — 기본값이
+#: 움직이면 그 수치는 낡은 것이 되어야 맞다.
+LEGACY_RSI_GATE_MODE: RsiGateMode = "first_tap_free"
 
 
 def build_params(
