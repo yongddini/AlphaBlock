@@ -16,6 +16,7 @@ import pytest
 
 from backtest.harness import MarketData, RunRow
 from backtest.run import (
+    JOBS_AUTO,
     Combo,
     Grid,
     RunOptions,
@@ -25,6 +26,8 @@ from backtest.run import (
     main,
     options_from_args,
     parse_date_ms,
+    parse_jobs,
+    resolve_jobs,
     run_grid,
     split_floats,
     split_ints,
@@ -32,7 +35,8 @@ from backtest.run import (
 )
 from backtest.sweep import timeframe_to_ms
 from backtest.synthetic import make_synthetic_ohlcv
-from data.models import FundingRate
+from data.models import Candle, FundingRate
+from data.storage import OhlcvStore
 from strategy.models import ConfluenceParams
 
 _TIMEFRAME = "1h"
@@ -101,6 +105,36 @@ def test_parse_date_ms_reads_utc_dates() -> None:
     assert parse_date_ms("2024-01-01") == 1_704_067_200_000
     with pytest.raises(ValueError, match="YYYY-MM-DD"):
         parse_date_ms("2024/01/01")
+
+
+def test_parse_jobs_reads_counts_and_auto() -> None:
+    assert parse_jobs("1") == 1
+    assert parse_jobs("6") == 6
+    assert parse_jobs("auto") == JOBS_AUTO == 0
+    assert parse_jobs("AUTO") == JOBS_AUTO
+
+
+def test_parse_jobs_rejects_negative_and_non_numeric() -> None:
+    """`--jobs -1`을 조용히 직렬로 접지 않는다 — 느린 이유를 모르게 되기 때문."""
+    with pytest.raises(ValueError, match="--jobs"):
+        parse_jobs("-1")
+    with pytest.raises(ValueError, match="정수 또는 auto"):
+        parse_jobs("many")
+
+
+def test_resolve_jobs_auto_uses_cpu_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("backtest.run.os.cpu_count", lambda: 8)
+    assert resolve_jobs(JOBS_AUTO, task_count=100) == 8
+    # cpu_count()가 None을 줄 수 있다(문서화된 반환값) — 그때도 직렬로 산다.
+    monkeypatch.setattr("backtest.run.os.cpu_count", lambda: None)
+    assert resolve_jobs(JOBS_AUTO, task_count=100) == 1
+
+
+def test_resolve_jobs_never_exceeds_task_count() -> None:
+    """작업보다 많은 워커는 프로세스만 띄우고 논다."""
+    assert resolve_jobs(8, task_count=3) == 3
+    assert resolve_jobs(1, task_count=100) == 1
+    assert resolve_jobs(8, task_count=0) == 1  # 빈 격자도 죽지 않는다.
 
 
 # ---------------------------------------------------- 격자 전개
@@ -257,6 +291,155 @@ def test_run_grid_skips_zone_limit_when_1m_missing(monkeypatch: pytest.MonkeyPat
 
     monkeypatch.setattr("backtest.run.load_market_data", _load)
     assert run_grid(_grid_from(["--symbol", "BTCUSDT"]), RunOptions(), log=False) == []
+
+
+# ---------------------------------------------------- 병렬 실행 (WAN-121)
+
+
+_PARALLEL_SYMBOLS: tuple[tuple[str, str, int], ...] = (
+    ("BTCUSDT", "BTC/USDT:USDT", 7),
+    ("ETHUSDT", "ETH/USDT:USDT", 17),
+)
+"""(CLI 축약형, 저장소 표기, 시드). 시드를 심볼마다 달리해 두 셀이 **실제로 다른 숫자**를
+내게 한다 — 같은 데이터면 행이 뒤바뀌어도 리스트 비교가 통과해 순서 보장을 못 잰다."""
+
+_PARALLEL_BARS = 600
+"""상위TF 봉 수. 시드 7이 이 길이에서 종가 진입 거래를 실제로 낸다(0행끼리 비교하는
+테스트를 피하려고 고른 값)."""
+
+
+def _candles(frame: pd.DataFrame, symbol: str, timeframe: str) -> list[Candle]:
+    return [
+        Candle(
+            symbol=symbol,
+            timeframe=timeframe,
+            open_time=int(row.open_time),
+            open=float(row.open),
+            high=float(row.high),
+            low=float(row.low),
+            close=float(row.close),
+            volume=float(row.volume),
+            closed=bool(row.closed),
+        )
+        for row in frame.itertuples()
+    ]
+
+
+@pytest.fixture(scope="module")
+def synthetic_db(tmp_path_factory: pytest.TempPathFactory) -> tuple[str, str]:
+    """합성 봉을 **실제 sqlite**에 넣고 (db_path, cache_dir)를 준다.
+
+    다른 테스트처럼 `monkeypatch`로 로더를 갈아끼울 수 없다 — 워커는 별도 프로세스라
+    부모의 몽키패치를 보지 못하고(spawn이면 모듈을 새로 임포트한다), 패치된 로더를
+    믿고 짠 테스트는 병렬 경로에서 조용히 실 저장소를 읽는다. 병렬-직렬 동일성을 진짜로
+    재려면 워커가 자기 힘으로 읽을 수 있는 데이터가 있어야 하므로 여기서만 DB를 만든다.
+    """
+    root = tmp_path_factory.mktemp("wan121")
+    db_path, cache_dir = root / "ohlcv.db", root / "cache"
+    minutes = _PARALLEL_BARS * (timeframe_to_ms(_TIMEFRAME) // 60_000)
+    with OhlcvStore(db_path, cache_dir=cache_dir) as store:
+        for _, symbol, seed in _PARALLEL_SYMBOLS:
+            htf = make_synthetic_ohlcv(timeframe=_TIMEFRAME, bars=_PARALLEL_BARS, seed=seed)
+            one_min = make_synthetic_ohlcv(
+                timeframe="1m",
+                bars=minutes,
+                seed=seed + 4,
+                start_time_ms=int(htf["open_time"].iloc[0]),
+                swing_period=180,
+            )
+            store.upsert_candles(_candles(htf, symbol, _TIMEFRAME))
+            store.upsert_candles(_candles(one_min, symbol, "1m"))
+    return str(db_path), str(cache_dir)
+
+
+_PARALLEL_ARGV: tuple[str, ...] = (
+    "--symbol",
+    "BTCUSDT,ETHUSDT",
+    "--entry-mode",
+    "close,zone_limit",
+    "--tp-r",
+    "1.5,2.0",
+)
+"""대조 격자: 2심볼 × 2진입방식 × 2익절R = 8행, fan-out 단위((심볼,TF))는 2개.
+
+진입 방식을 **둘 다** 넣는 이유는 A안 팔이 이 합성 데이터에서 실제 거래를 내기
+때문이다 — 지정가(B안) 팔은 볼린저 기본 필터가 합성 데이터의 후보를 모두 걸러
+0거래가 되고(`tests/test_zone_limit_backtest.py`가 같은 성질을 기록한다), 0행끼리
+비교하면 병렬이 숫자를 바꿔도 통과한다. 손익이 실제로 흐르는 팔을 한쪽에 둔다."""
+
+
+def _parallel_options(synthetic_db: tuple[str, str]) -> RunOptions:
+    db_path, cache_dir = synthetic_db
+    return RunOptions(funding=False, db_path=db_path, cache_dir=cache_dir)
+
+
+def test_run_grid_is_serial_by_default() -> None:
+    """기본값은 직렬 — 병렬은 옵트인이다(회귀 보존)."""
+    assert build_parser().parse_args([]).jobs == "1"
+    assert parse_jobs(build_parser().parse_args([]).jobs) == 1
+
+
+def test_run_grid_jobs_produces_identical_rows_to_serial(synthetic_db: tuple[str, str]) -> None:
+    """완료기준: `N>1`의 결과 행이 직렬과 **순서까지** 완전히 동일하다.
+
+    병렬화는 일을 나눠 맡길 뿐 계산을 바꾸지 않으므로, `--jobs`가 숫자를 움직이면
+    그건 최적화가 아니라 버그다.
+    """
+    grid = _grid_from(list(_PARALLEL_ARGV))
+    options = _parallel_options(synthetic_db)
+    serial = run_grid(grid, options, log=False, jobs=1)
+    parallel = run_grid(grid, options, log=False, jobs=2)
+
+    # 0행·0거래끼리 같은 건 아무것도 증명하지 않는다 — 손익이 실제로 흘렀는지 먼저 본다.
+    assert len(serial) == 2 * 2 * 2
+    assert any(row.num_trades > 0 and row.total_return != 0.0 for row in serial), (
+        "합성 데이터가 거래를 내지 않았다 — 이 대조는 0끼리 비교하는 중이다"
+    )
+    assert [r.model_dump() for r in parallel] == [r.model_dump() for r in serial]
+
+
+def test_run_grid_jobs_auto_matches_serial(synthetic_db: tuple[str, str]) -> None:
+    """`--jobs auto`도 같은 결과 — 코어 수가 결과를 바꾸면 안 된다."""
+    grid = _grid_from(list(_PARALLEL_ARGV))
+    options = _parallel_options(synthetic_db)
+    serial = run_grid(grid, options, log=False, jobs=1)
+    auto = run_grid(grid, options, log=False, jobs=JOBS_AUTO)
+    assert [r.model_dump() for r in auto] == [r.model_dump() for r in serial]
+
+
+def test_main_jobs_keeps_stdout_and_stderr_identical(
+    synthetic_db: tuple[str, str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """완료기준: stdout(CSV)·stderr(진행 로그) 모두 직렬 실행과 비트 단위 동일.
+
+    stderr까지 보는 이유: 워커가 stderr에 직접 쓰면 줄이 섞여 순서가 실행마다 달라진다.
+    `_CellOutcome`이 로그를 값으로 들고 나와 부모가 제출 순서로 찍는 설계가 지켜지는지를
+    여기서 잡는다.
+    """
+    db_path, cache_dir = synthetic_db
+    argv = [
+        *_PARALLEL_ARGV,
+        "--format",
+        "csv",
+        "--no-funding",
+        "--db-path",
+        db_path,
+        "--cache-dir",
+        cache_dir,
+    ]
+    assert main([*argv, "--jobs", "1"]) == 0
+    serial = capsys.readouterr()
+    assert main([*argv, "--jobs", "2"]) == 0
+    parallel = capsys.readouterr()
+
+    assert parallel.out == serial.out
+    assert parallel.err == serial.err
+    assert "[run]" in serial.err
+
+
+def test_main_rejects_bad_jobs_value(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["--jobs", "-1"]) == 2
+    assert "--jobs" in capsys.readouterr().err
 
 
 def test_options_from_args_maps_costs_and_window() -> None:

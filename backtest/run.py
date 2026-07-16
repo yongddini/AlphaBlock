@@ -34,7 +34,18 @@ python -m backtest.run --symbol BTCUSDT,ETHUSDT,SOLUSDT --format csv --out /tmp/
 
 # 5. OOS 검증 — IS에서 좋았던 게 OOS로 넘어오는가
 python -m backtest.run --tp-r 1.0,1.5,2.0 --oos
+
+# 6. 병렬 실행 — 6심볼 격자를 코어에 나눠 돌린다(결과는 직렬과 동일)
+python -m backtest.run --symbol BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,TRXUSDT --jobs auto
 ```
+
+## 병렬 실행 (`--jobs`, WAN-121)
+
+기본 `1`은 직렬이고, `N>1`/`auto`는 **(심볼, TF) 단위**로 `ProcessPoolExecutor`에
+fan-out한다. 병렬화는 일을 나눠 맡길 뿐 계산 로직을 건드리지 않으므로 **행의 내용도
+순서도 `--jobs` 값과 무관하게 같다** — 셀은 서로 상태를 공유하지 않고, 결과·로그는
+제출 순서로 모은다. 그래서 채택 수치가 `--jobs`에 따라 흔들리지 않는다
+(`tests/test_run_cli.py`·`tests/test_run_regression_real_data.py`가 그 동일성을 고정한다).
 
 ## 진입 경로
 
@@ -48,8 +59,10 @@ python -m backtest.run --tp-r 1.0,1.5,2.0 --oos
 from __future__ import annotations
 
 import argparse
+import os
 import sys
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -117,6 +130,37 @@ def split_ints(text: str, *, label: str) -> tuple[int, ...]:
     if not values:
         raise ValueError(f"{label}이 비어 있습니다.")
     return tuple(values)
+
+
+JOBS_AUTO = 0
+"""`--jobs auto`의 내부 표현. `resolve_jobs`가 `os.cpu_count()`로 푼다."""
+
+
+def parse_jobs(text: str) -> int:
+    """`--jobs` 값을 정수로. `auto` → `JOBS_AUTO`(0).
+
+    음수를 조용히 1로 접지 않고 거부한다 — `--jobs -1`을 "코어 하나 빼고"로 기대한
+    사용자에게 아무 말 없이 직렬 실행을 돌려주면, 느린 이유를 영영 모른다.
+    """
+    if text.strip().lower() == "auto":
+        return JOBS_AUTO
+    try:
+        value = int(text)
+    except ValueError as exc:
+        raise ValueError(f"--jobs는 정수 또는 auto여야 합니다: {text!r}") from exc
+    if value < 0:
+        raise ValueError(f"--jobs는 0(=auto) 이상이어야 합니다: {value}")
+    return value
+
+
+def resolve_jobs(jobs: int, task_count: int) -> int:
+    """요청한 `--jobs`와 실제 작업 수로 워커 수를 정한다.
+
+    작업 수보다 많은 워커는 프로세스를 띄우고 놀 뿐이라 `task_count`로 자른다(기존
+    wan70/71/88/104 fan-out과 같은 `min(jobs, len(tasks))` 규칙).
+    """
+    requested = (os.cpu_count() or 1) if jobs == JOBS_AUTO else jobs
+    return max(1, min(requested, task_count))
 
 
 def parse_date_ms(text: str) -> int:
@@ -229,90 +273,174 @@ class RunOptions:
     cache_dir: str = CACHE_DIR
 
 
+@dataclass(frozen=True)
+class _CellTask:
+    """fan-out 한 단위 = (심볼, TF).
+
+    격자 축(`grid`)·실행 설정(`options`)을 통째로 들고 다니는 이유는 **워커가 자기
+    데이터를 자기가 로드**하게 하기 위해서다(wan104 `CellSpec`과 같은 패턴). 부모가
+    로드해서 넘기면 심볼당 수백 MB의 1분봉을 프로세스 경계로 pickle해야 하는데
+    (wan70이 주석으로 남긴 그 비용), 경계를 (심볼, TF)로 잡으면 워커는 **자기 심볼만**
+    읽으므로 그 직렬화가 통째로 사라진다. 대가는 같은 심볼을 TF 수만큼 중복 로드하는
+    것인데, 그건 원래 직렬 실행도 하던 일이라 새로 생기는 손해가 아니다.
+
+    이 경계는 parquet 캐시와도 맞물린다: `OhlcvStore`의 캐시 키가 (심볼, TF)이고
+    (`_cache_paths`) 작업 단위가 그 키와 같으므로 **두 워커가 같은 캐시 파일에 쓰는 일이
+    없다**. 조합(익절 R 등)으로 잘랐다면 같은 (심볼, TF)를 맡은 워커 여러 개가 한 파일에
+    동시에 써 캐시가 깨진다 — 경계를 여기 두는 이유 중 하나다.
+    """
+
+    symbol: str
+    timeframe: str
+    grid: Grid
+    options: RunOptions
+    fair_window: bool
+
+
+@dataclass(frozen=True)
+class _CellOutcome:
+    """한 셀의 산출물. 로그를 **값으로** 들고 나오는 게 핵심이다.
+
+    워커가 stderr에 직접 쓰면 여러 프로세스의 줄이 섞여 순서가 실행마다 달라진다.
+    부모가 제출 순서대로 받아 찍으면 stderr도 직렬 실행과 같은 순서가 된다.
+    """
+
+    rows: list[RunRow]
+    logs: tuple[str, ...]
+
+
+def _run_cell(task: _CellTask) -> _CellOutcome:
+    """(심볼, TF) 하나를 돌아 그 셀의 모든 조합·구간 행을 낸다.
+
+    구간마다 오더블록을 한 번만 탐지해 그 구간의 조합들이 공유한다 — 탐지는 컨플루언스
+    파라미터와 무관하므로 결과는 같고 실행 시간만 줄어든다.
+
+    직렬·병렬이 **같은 이 함수**를 부른다. 두 경로에 각자의 루프를 두면 언젠가 한쪽만
+    고쳐져 `--jobs`가 숫자를 바꾸는 축이 된다 — 도구 개선이 채택 수치를 흔드는 그 사고를
+    막으려고 경로를 하나로 유지한다.
+    """
+    grid, options = task.grid, task.options
+    symbol, timeframe = task.symbol, task.timeframe
+    combos = iter_combos(grid)
+    segments = segments_for(oos=options.oos, walkforward=options.walkforward)
+
+    market = load_market_data(
+        symbol,
+        timeframe,
+        years=options.years,
+        start_ms=options.start_ms,
+        end_ms=options.end_ms,
+        need_1m=grid.needs_1m or task.fair_window,
+        funding=options.funding,
+        db_path=options.db_path,
+        cache_dir=options.cache_dir,
+    )
+    if market.empty:
+        return _CellOutcome([], (f"[run] {symbol} {timeframe}: 상위TF 데이터 없음 — 건너뜀",))
+    if grid.needs_1m and market.df_1m.empty:
+        return _CellOutcome(
+            [], (f"[run] {symbol} {timeframe}: 1분봉 없음 — 지정가 평가 불가, 건너뜀",)
+        )
+
+    cfg = build_config(
+        timeframe,
+        fee_rate=options.fee_rate,
+        maker_fee_rate=options.maker_fee_rate,
+        slippage=options.slippage,
+        funding_enabled=options.funding,
+    )
+    rows: list[RunRow] = []
+    for segment in segments:
+        window = slice_market(market, segment)
+        if window.empty:
+            continue
+        ob_result = detect_order_blocks(window)
+        for combo in combos:
+            if combo.entry_mode == "zone_limit" and window.df_1m.empty:
+                continue
+            params = build_params(
+                entry_mode=combo.entry_mode,
+                take_profit_r=combo.take_profit_r,
+                offset_bps=combo.offset_bps,
+                fill=combo.fill,
+                seed=combo.seed,
+                short_enabled=grid.short_enabled,
+            )
+            outcome = run_once(
+                window,
+                params=params,
+                cfg=cfg,
+                order_block_result=ob_result,
+                fair_window=task.fair_window,
+            )
+            rows.append(
+                build_row(
+                    outcome,
+                    window,
+                    segment=segment,
+                    params=params,
+                    fill_name=combo.fill.name,
+                )
+            )
+    return _CellOutcome(
+        rows,
+        (
+            f"[run] {symbol} {timeframe}: {len(market.htf_df)}봉, "
+            f"1분봉 {len(market.df_1m)}행, 펀딩 {len(market.funding_rates)}건 "
+            f"→ {len(combos) * len(segments)}조합",
+        ),
+    )
+
+
+def _iter_outcomes(tasks: Sequence[_CellTask], workers: int) -> Iterator[_CellOutcome]:
+    """셀 결과를 **제출 순서대로** 흘린다(워커 수와 무관).
+
+    `Executor.map`은 완료 순서가 아니라 제출 순서로 내주므로, 워커 수가 몇이든 부모가
+    보는 순서는 직렬 실행과 같다(wan70/71/84가 `--jobs` 무관 결과 동일성에 기대는 그
+    성질). 지연 반복이라 직렬 경로의 로그는 지금처럼 셀이 끝날 때마다 흐른다.
+    """
+    if workers <= 1:
+        yield from map(_run_cell, tasks)
+        return
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        yield from pool.map(_run_cell, tasks)
+
+
 def run_grid(
     grid: Grid,
     options: RunOptions,
     *,
     log: bool = True,
+    jobs: int = 1,
 ) -> list[RunRow]:
     """격자를 돌아 조합별 1행을 낸다.
 
     (심볼, TF)마다 데이터를 한 번만 로드하고, 구간마다 오더블록을 한 번만 탐지해 그
     구간의 조합들이 공유한다 — 탐지는 컨플루언스 파라미터와 무관하므로 결과는 같고
     실행 시간만 줄어든다.
-    """
-    combos = iter_combos(grid)
-    segments = segments_for(oos=options.oos, walkforward=options.walkforward)
-    fair_window = grid.mixes_entry_modes if options.fair_window is None else options.fair_window
-    rows: list[RunRow] = []
 
-    for symbol in grid.symbols:
-        for timeframe in grid.timeframes:
-            market = load_market_data(
-                symbol,
-                timeframe,
-                years=options.years,
-                start_ms=options.start_ms,
-                end_ms=options.end_ms,
-                need_1m=grid.needs_1m or fair_window,
-                funding=options.funding,
-                db_path=options.db_path,
-                cache_dir=options.cache_dir,
-            )
-            if market.empty:
-                _log(log, f"[run] {symbol} {timeframe}: 상위TF 데이터 없음 — 건너뜀")
-                continue
-            if grid.needs_1m and market.df_1m.empty:
-                _log(
-                    log,
-                    f"[run] {symbol} {timeframe}: 1분봉 없음 — 지정가 평가 불가, 건너뜀",
-                )
-                continue
-            cfg = build_config(
-                timeframe,
-                fee_rate=options.fee_rate,
-                maker_fee_rate=options.maker_fee_rate,
-                slippage=options.slippage,
-                funding_enabled=options.funding,
-            )
-            for segment in segments:
-                window = slice_market(market, segment)
-                if window.empty:
-                    continue
-                ob_result = detect_order_blocks(window)
-                for combo in combos:
-                    if combo.entry_mode == "zone_limit" and window.df_1m.empty:
-                        continue
-                    params = build_params(
-                        entry_mode=combo.entry_mode,
-                        take_profit_r=combo.take_profit_r,
-                        offset_bps=combo.offset_bps,
-                        fill=combo.fill,
-                        seed=combo.seed,
-                        short_enabled=grid.short_enabled,
-                    )
-                    outcome = run_once(
-                        window,
-                        params=params,
-                        cfg=cfg,
-                        order_block_result=ob_result,
-                        fair_window=fair_window,
-                    )
-                    rows.append(
-                        build_row(
-                            outcome,
-                            window,
-                            segment=segment,
-                            params=params,
-                            fill_name=combo.fill.name,
-                        )
-                    )
-            _log(
-                log,
-                f"[run] {symbol} {timeframe}: {len(market.htf_df)}봉, "
-                f"1분봉 {len(market.df_1m)}행, 펀딩 {len(market.funding_rates)}건 "
-                f"→ {len(combos) * len(segments)}조합",
-            )
+    `jobs>1`(또는 `JOBS_AUTO`)이면 그 (심볼, TF) 단위로 `ProcessPoolExecutor`에 fan-out
+    한다(WAN-121). 병렬화는 **일을 나눠 맡길 뿐 계산을 바꾸지 않으므로** 행의 내용도
+    순서도 직렬과 같다 — 셀끼리 상태를 공유하지 않고(각자 자기 데이터를 로드한다),
+    결과는 제출 순서로 모은다.
+    """
+    fair_window = grid.mixes_entry_modes if options.fair_window is None else options.fair_window
+    tasks = [
+        _CellTask(
+            symbol=symbol,
+            timeframe=timeframe,
+            grid=grid,
+            options=options,
+            fair_window=fair_window,
+        )
+        for symbol in grid.symbols
+        for timeframe in grid.timeframes
+    ]
+    rows: list[RunRow] = []
+    for outcome in _iter_outcomes(tasks, resolve_jobs(jobs, len(tasks))):
+        rows.extend(outcome.rows)
+        for message in outcome.logs:
+            _log(log, message)
     return rows
 
 
@@ -399,6 +527,17 @@ def build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=None,
         help="종가 성과를 1분봉 커버 창으로 한정(기본: 진입 방식이 섞일 때만 자동)",
+    )
+
+    execution = parser.add_argument_group("실행")
+    execution.add_argument(
+        "--jobs",
+        default="1",
+        metavar="N",
+        help=(
+            "(심볼, TF) 단위 병렬 워커 수(기본 1 = 직렬). auto 또는 0이면 CPU 코어 수. "
+            "결과는 --jobs 값과 무관하게 동일하다"
+        ),
     )
 
     output = parser.add_argument_group("출력")
@@ -501,6 +640,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         grid = grid_from_args(args)
         options = options_from_args(args)
+        jobs = parse_jobs(args.jobs)
     except ValueError as exc:
         print(f"오류: {exc}", file=sys.stderr)
         return 2
@@ -509,7 +649,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("오류: --oos와 --walkforward는 함께 쓸 수 없습니다.", file=sys.stderr)
         return 2
 
-    rows = run_grid(grid, options, log=not args.quiet)
+    rows = run_grid(grid, options, log=not args.quiet, jobs=jobs)
     text = render(rows, args.format)
     if args.out:
         path = write_output(text, args.out)

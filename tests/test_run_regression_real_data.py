@@ -28,7 +28,7 @@ import pandas as pd
 import pytest
 
 from backtest.harness import RunRow, load_market_data
-from backtest.run import RunOptions, build_parser, grid_from_args, run_grid
+from backtest.run import JOBS_AUTO, RunOptions, build_parser, grid_from_args, run_grid
 
 _WAN95_CSV = Path("backtest/reports/wan95_zone_limit_recompute.csv")
 _WAN99_CSV = Path("backtest/reports/wan99_zone_limit_offset.csv")
@@ -37,6 +37,13 @@ _WAN99_CSV = Path("backtest/reports/wan99_zone_limit_offset.csv")
 _SYMBOL = "BTC/USDT:USDT"
 _TIMEFRAME = "1h"
 _YEARS = 3.0
+
+#: `--jobs` 대조용(WAN-121). fan-out 단위가 (심볼, TF)라 **심볼이 2개는 돼야** 워커가
+#: 실제로 둘로 갈린다(1셀이면 `resolve_jobs`가 1로 접어 직렬과 같은 경로를 탄다 —
+#: 그러면 "병렬이 같다"를 증명한 게 아니라 병렬을 안 돈 것이다).
+_JOBS_SYMBOLS = "BTCUSDT,ETHUSDT"
+#: 병렬 대조는 리포트 셀과 맞출 필요가 없으므로 창을 좁혀 비용을 줄인다(실데이터 유지).
+_JOBS_YEARS = 0.5
 
 
 @pytest.fixture(autouse=True)
@@ -124,3 +131,29 @@ def test_cli_reproduces_wan99_pen_5bp_cell() -> None:
             "sharpe",
         ],
     )
+
+
+def _jobs_rows(jobs: int) -> list[RunRow]:
+    grid = grid_from_args(
+        build_parser().parse_args(["--symbol", _JOBS_SYMBOLS, "--tf", _TIMEFRAME])
+    )
+    return run_grid(grid, RunOptions(years=_JOBS_YEARS), log=False, jobs=jobs)
+
+
+def test_jobs_does_not_change_real_data_numbers() -> None:
+    """완료기준(WAN-121): `--jobs`가 **실데이터 숫자**를 바꾸지 않는다.
+
+    합성 데이터 대조(`tests/test_run_cli.py`)는 배선·순서·pickle을 잡지만, 지정가 팔이
+    0거래라 손익까지는 못 잰다(볼린저 기본 필터가 합성 후보를 전부 거른다). 실데이터는
+    체결·손익·펀딩이 전부 흐르는 유일한 축이라, 병렬이 숫자를 흔드는지는 **여기서만**
+    진짜로 증명된다. `--jobs`는 성능 노브이지 결과 축이 아니다.
+    """
+    serial = _jobs_rows(1)
+    assert len(serial) == 2, f"2심볼 대조가 아니다: {len(serial)}행"
+    assert any(row.num_trades > 0 for row in serial), "실데이터가 거래를 내지 않았다"
+
+    for jobs in (2, JOBS_AUTO):
+        parallel = _jobs_rows(jobs)
+        assert [r.model_dump() for r in parallel] == [r.model_dump() for r in serial], (
+            f"--jobs {jobs}의 결과가 직렬과 다르다"
+        )

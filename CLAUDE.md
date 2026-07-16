@@ -629,6 +629,7 @@ LimitOrderBook 배선)가 이 간극을 닫는다.
 uv run python -m backtest.run --tp-r 1.0,1.5,2.0,3.0          # 익절 R 스윕
 uv run python -m backtest.run --tf 15m --fill baseline,pen_5bp,pen_5bp_drop_50
 uv run python -m backtest.run --symbol BTCUSDT,ETHUSDT --oos --format csv --out x.csv
+uv run python -m backtest.run --symbol BTCUSDT,ETHUSDT,SOLUSDT --jobs 6   # 병렬(WAN-121)
 ```
 
 값에 콤마를 주면 데카르트 곱 격자를 돌고 조합별 1행(`total_return`/승률/MDD/거래수/
@@ -636,6 +637,17 @@ uv run python -m backtest.run --symbol BTCUSDT,ETHUSDT --oos --format csv --out 
 `--oos`/`--walkforward`가 IS/OOS 분할을 기본 제공한다. 인자 없이 돌리면 **채택 기본값**
 (`ConfluenceParams()`) 그대로이고, 그 결과가 WAN-95/99 리포트 셀과 1e-9 이내로 일치함이
 테스트로 고정돼 있다(`tests/test_harness.py` + `tests/test_run_regression_real_data.py`).
+
+📌 **`--jobs N`(기본 1 = 직렬)은 (심볼, TF) 단위 병렬이고 숫자를 바꾸지 않는다(WAN-121)** —
+`--jobs`는 **성능 노브이지 결과 축이 아니다**(직렬과 행·순서·stdout·stderr가 비트 단위로
+같음을 합성·실데이터 양쪽 테스트가 고정한다). `auto`/`0`이면 `os.cpu_count()`.
+⚠️ **기대 배수를 코어 수로 잡지 말 것** — 실측은 **6심볼 1h 3년 격자에서 93.2s → 69.7s
+(1.34배)** 수준이다(그 머신의 CPU 바운드 상한 자체가 2.36배였다). 두 가지가 천장을 만든다:
+(1) **1분봉 로딩이 1조합 실행의 ~36%** 인데 이건 셀마다 필요해 병렬로 사라지지 않고
+(WAN-91 이래 `--start`/`--end` 창은 캐시를 안 타 매번 SQL 전수 스캔이다),
+(2) 애플 실리콘은 `cpu_count()`가 **E코어까지 세므로**(M1 = P4+E4) `auto`가 성능 코어 수보다
+크게 잡힌다. 격자가 작으면 프로세스 기동 비용(spawn 재임포트)이 이득을 넘겨 **오히려
+느리다**(600봉 합성 6심볼에서 2.3s → 4.5s). 조합이 많은 스윕일수록 유리하다.
 
 공통 골격은 `backtest/harness.py`(데이터 로딩·파라미터 조립·경로 스위치·구간 분할·렌더)다.
 새 `wanNN_*.py` 리포트는 **CLI로 답이 안 나오는 것**(사후 분해·편향 진단·결론 문장이
