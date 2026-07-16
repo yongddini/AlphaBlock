@@ -396,8 +396,8 @@ class DeviationFilterParams(BaseModel):
     """`width_kind`별 배수/비율. `pct`는 소수(0.02=2%), `stdev`·`atr`는 배수."""
     atr_length: int = Field(default=14, ge=1)
     """`width_kind="atr"`일 때의 ATR 길이."""
-    band_bar: Literal["tap", "prev_closed", "intrabar_live"] = "tap"
-    """밴드의 **20번째 표본에 무엇을 넣나** (WAN-115 · WAN-119).
+    band_bar: Literal["tap", "prev_closed", "intrabar_live", "intrabar_causal"] = "tap"
+    """밴드의 **20번째 표본에 무엇을 넣나** (WAN-115 · WAN-119 · WAN-120).
 
     `tap`(기본, 현행 동작 보존): 탭 봉 **최종 종가**. **B안(지정가)에서는 룩어헤드다** —
     그 봉의 종가를 알아야 나오는 SMA20/σ에 그 봉 **내부**에서 체결되기 때문이다
@@ -411,6 +411,13 @@ class DeviationFilterParams(BaseModel):
     (`backtest.substep`의 `LiveLimitProvider`). B안(지정가) 전용 성질이며, A안(탭 봉
     종가 진입)에서는 현재가 = 탭 봉 종가라 `tap`과 **정확히 같은 값**이다
     (`ConfluenceStrategy.deviation_band_at` 참고).
+    `intrabar_causal`(WAN-120): **직전 서브스텝(1분봉) 종가**. `intrabar_live`가 남긴
+    **잔여 1분 룩어헤드를 0으로 만든** 변형이다 — `intrabar_live`는 밴드를 close(t)로
+    계산하는데 체결 판정(`low(t) <= 지정가`)도 **같은 1분봉 안**이라, 주문 가격을 그 분의
+    결과를 조금 알고 고르는 셈이다. 이 모드는 그 분이 **시작될 때 이미 알던 가격**만
+    쓴다(= 분당 주문을 재호가하는 봇이 실제로 할 수 있는 것). `intrabar_live`와 마찬가지로
+    B안 전용이며, A안은 이 값을 표현할 수 없어 **거부한다**
+    (`ConfluenceStrategy.deviation_band_at`).
 
     ⚠️ **기본값을 바꾸지 않는 이유**: 바꾸면 WAN-70/84/88/95/111/114 등 이 밴드 위에
     선 모든 리포트의 엔진 정의가 흔들린다. 재-베이스라인은 명시적 이슈로만 한다
