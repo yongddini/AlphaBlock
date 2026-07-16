@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 import math
 from enum import StrEnum
+from typing import Literal
 
 import pandas as pd
 from pydantic import BaseModel, ConfigDict
@@ -292,11 +293,23 @@ class ConfluenceStrategy:
 
     @staticmethod
     def deviation_band_at(
-        pos: int, direction_sign: int, anchor_vals: list[float], width_vals: list[float]
+        pos: int,
+        direction_sign: int,
+        anchor_vals: list[float],
+        width_vals: list[float],
+        band_bar: Literal["tap", "prev_closed"] = "tap",
     ) -> float | None:
-        """`pos` 위치의 밴드 값(`anchor - direction_sign*width`). 워밍업 중이면 `None`."""
-        anchor_val = anchor_vals[pos]
-        width_val = width_vals[pos]
+        """탭 봉 `pos`에서 쓸 밴드 값(`anchor - direction_sign*width`). 판정 불가면 `None`.
+
+        `band_bar="prev_closed"`(WAN-115)면 탭 봉이 아니라 **직전 확정봉**의 밴드를 읽는다
+        — 탭 봉 자신의 SMA20은 그 봉 종가를 포함하므로 B안(봉 내부 체결)에서 룩어헤드다.
+        구간 첫 봉(`pos=0`)에는 직전 봉이 없어 판정 불가다.
+        """
+        band_pos = pos - 1 if band_bar == "prev_closed" else pos
+        if band_pos < 0:
+            return None
+        anchor_val = anchor_vals[band_pos]
+        width_val = width_vals[band_pos]
         if math.isnan(anchor_val) or math.isnan(width_val):
             return None
         return anchor_val - direction_sign * width_val
@@ -346,8 +359,11 @@ class ConfluenceStrategy:
 
         entry_price = signal.price
         if confirmed and filter_components is not None:
+            assert params.deviation_filter is not None
             anchor_vals, width_vals = filter_components
-            band = self.deviation_band_at(pos, d, anchor_vals, width_vals)
+            band = self.deviation_band_at(
+                pos, d, anchor_vals, width_vals, params.deviation_filter.band_bar
+            )
             if band is None:
                 confirmed = False
             else:

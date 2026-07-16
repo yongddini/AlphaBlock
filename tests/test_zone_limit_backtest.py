@@ -448,6 +448,56 @@ def test_deviation_filter_extremely_wide_band_rejects_all_setups() -> None:
     assert stats.eligible == 0
 
 
+def _bollinger(band_bar: str) -> ConfluenceParams:
+    return ConfluenceParams(
+        entry_mode="zone_limit",
+        rsi_mode="realtime",
+        short_enabled=True,
+        deviation_filter=DeviationFilterParams(
+            anchor="sma", sma_length=20, width_kind="stdev", width_value=2.0, band_bar=band_bar
+        ),
+    )
+
+
+def test_band_bar_prev_closed_is_wired_into_zone_limit_path() -> None:
+    """WAN-115: 채택 경로(B안)가 `band_bar`를 **실제로 읽는다**.
+
+    B안이 이 배선을 빠뜨리면 교정 모드를 켠 채 옛 밴드로 돌면서 "룩어헤드를 뺐다"고
+    믿게 된다 — WAN-100이 첫 탭 면제에서 겪은 그 사고다. 진입가가 실제로 움직였는지로
+    배선을 증명한다(밴드가 한 봉 미뤄지면 규칙 2 진입가가 달라진다).
+    """
+    htf, one_min = _synthetic_pair()
+    tap, _ = build_zone_limit_candidates(
+        htf_df=htf, df_1m=one_min, timeframe="1h", params=_bollinger("tap"), cfg=BacktestConfig()
+    )
+    prev, _ = build_zone_limit_candidates(
+        htf_df=htf,
+        df_1m=one_min,
+        timeframe="1h",
+        params=_bollinger("prev_closed"),
+        cfg=BacktestConfig(),
+    )
+    tap_prices = [(c.entry_time, c.entry_price) for c in tap]
+    prev_prices = [(c.entry_time, c.entry_price) for c in prev]
+    assert tap_prices != prev_prices
+
+
+def test_band_bar_default_reproduces_adopted_engine_bit_for_bit() -> None:
+    """WAN-115: 기본값은 불변 — 명시적 `tap`과 기본 `ConfluenceParams()`가 동일 결과.
+
+    이 동치가 깨지면 WAN-95/111/114 리포트 셀이 조용히 움직인다(기본값 재-베이스라인은
+    명시적 이슈로만 한다 — CLAUDE.md).
+    """
+    htf, one_min = _synthetic_pair()
+    default = ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime", short_enabled=True)
+    assert default.deviation_filter is not None
+    assert default.deviation_filter.band_bar == "tap"
+
+    base = run_zone_limit_backtest(htf, one_min, "1h", confluence_params=default)
+    explicit = run_zone_limit_backtest(htf, one_min, "1h", confluence_params=_bollinger("tap"))
+    assert [t.entry_price for t in base.trades] == [t.entry_price for t in explicit.trades]
+
+
 def test_deviation_filter_does_not_increase_eligible_setups() -> None:
     htf, one_min = _synthetic_pair()
     base = ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime", short_enabled=True)

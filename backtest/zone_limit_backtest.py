@@ -524,11 +524,16 @@ def build_zone_limit_candidates(
 
         limit_price = params.zone_limit_price(ob)
         if filter_components is not None:
+            assert params.deviation_filter is not None
             anchor_vals, width_vals = filter_components
             d_sign = 1 if is_long else -1
-            band = ConfluenceStrategy.deviation_band_at(pos, d_sign, anchor_vals, width_vals)
+            # WAN-115: `band_bar="prev_closed"`면 직전 확정봉의 밴드를 읽는다 — 탭 봉
+            # 자신의 SMA20은 그 봉 종가를 포함하는데 체결은 봉 **내부**라 룩어헤드다.
+            band = ConfluenceStrategy.deviation_band_at(
+                pos, d_sign, anchor_vals, width_vals, params.deviation_filter.band_bar
+            )
             if band is None:
-                continue  # WAN-75: 워밍업 중이라 판정 불가.
+                continue  # WAN-75: 워밍업 중이라 판정 불가(WAN-115: 구간 첫 봉 포함).
             new_price = deviation_entry_price(d_sign, ob, band)
             if new_price is None:
                 continue  # WAN-75: 밴드가 존 전체보다 불리한 쪽 — 진입하지 않음(규칙 3).

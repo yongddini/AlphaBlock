@@ -396,6 +396,18 @@ class DeviationFilterParams(BaseModel):
     """`width_kind`별 배수/비율. `pct`는 소수(0.02=2%), `stdev`·`atr`는 배수."""
     atr_length: int = Field(default=14, ge=1)
     """`width_kind="atr"`일 때의 ATR 길이."""
+    band_bar: Literal["tap", "prev_closed"] = "tap"
+    """밴드를 **어느 봉에서** 읽나 (WAN-115).
+
+    `tap`(기본, 현행 동작 보존): 탭 봉 자신의 값. **B안(지정가)에서는 룩어헤드다** —
+    그 봉의 종가를 알아야 나오는 SMA20/σ에 그 봉 **내부**에서 체결되기 때문이다
+    (A안은 탭 봉 종가에 진입하므로 룩어헤드가 아니다).
+    `prev_closed`: **직전 확정봉**의 값. 탭 봉이 열리기 전에 확정돼 있으므로 지정가를
+    미리 걸 수 있다 = 룩어헤드 없음. 워밍업이 한 봉 늘어난다(`pos=0`은 판정 불가).
+
+    ⚠️ **기본값을 바꾸지 않는 이유**: 바꾸면 WAN-70/84/88/95/111/114 등 이 밴드 위에
+    선 모든 리포트의 엔진 정의가 흔들린다. 재-베이스라인은 명시적 이슈로만 한다
+    (CLAUDE.md). 이 필드는 그 재검을 **측정**하기 위한 옵트인이다."""
 
 
 def deviation_entry_price(direction_sign: int, ob: OrderBlock, band: float) -> float | None:
