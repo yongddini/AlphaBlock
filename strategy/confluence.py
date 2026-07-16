@@ -297,13 +297,20 @@ class ConfluenceStrategy:
         direction_sign: int,
         anchor_vals: list[float],
         width_vals: list[float],
-        band_bar: Literal["tap", "prev_closed"] = "tap",
+        band_bar: Literal["tap", "prev_closed", "intrabar_live"] = "tap",
     ) -> float | None:
         """탭 봉 `pos`에서 쓸 밴드 값(`anchor - direction_sign*width`). 판정 불가면 `None`.
 
         `band_bar="prev_closed"`(WAN-115)면 탭 봉이 아니라 **직전 확정봉**의 밴드를 읽는다
         — 탭 봉 자신의 SMA20은 그 봉 종가를 포함하므로 B안(봉 내부 체결)에서 룩어헤드다.
         구간 첫 봉(`pos=0`)에는 직전 봉이 없어 판정 불가다.
+
+        `intrabar_live`(WAN-119)는 **봉 단위 함수인 여기서는 `tap`과 같다** — 이 함수를
+        쓰는 A안은 탭 봉 **종가**에 진입하므로 그 시점의 "현재가"가 곧 탭 봉 종가이고,
+        20번째 표본이 `tap`과 한 값으로 만난다(= A안에는 이 룩어헤드가 없다는 WAN-115
+        관찰의 다른 표현이다). 봉 **내부**에서 현재가가 움직이는 성질은 봉 단위로
+        표현할 수 없으므로, B안(지정가)은 이 함수 대신 서브스텝마다 값을 다시 내는
+        `strategy.realtime_band.RealtimeBand`를 쓴다.
         """
         band_pos = pos - 1 if band_bar == "prev_closed" else pos
         if band_pos < 0:
