@@ -63,6 +63,7 @@ from pydantic import BaseModel, ConfigDict
 
 from backtest.harness import (
     DEFAULT_YEARS,
+    LEGACY_RSI_GATE_MODE,
     MarketData,
     Segment,
     detect_order_blocks,
@@ -82,9 +83,10 @@ DEFAULT_TIMEFRAMES: tuple[str, ...] = ("15m", "1h", "4h", "1d")
 #: **오프셋 0bp**). 이 리포트는 파라미터를 하나도 바꾸지 않는다 — 이슈가 묻는 건
 #: "그 기본값에서 얼마나 소각되는가"다.
 #:
-#: ⚠️ 오프셋만 **명시 고정**한다(WAN-112): 채택 기본값은 이제 2bp지만 이 리포트의 발표
-#: 수치는 0bp에서 나왔다. 기본값을 따라가게 두면 숫자가 조용히 움직여 본문과 어긋난다.
-PARAMS = ConfluenceParams(zone_limit_offset_bps=0.0)
+#: ⚠️ 오프셋·RSI 게이트를 **명시 고정**한다(WAN-112 / WAN-123): 채택 기본값은 이제 오프셋
+#: 2bp · 게이트 없음(`unconditional`)이지만 이 리포트의 발표 수치는 0bp · 게이트 on에서
+#: 나왔다. 기본값을 따라가게 두면 숫자가 조용히 움직여 본문과 어긋난다.
+PARAMS = ConfluenceParams(zone_limit_offset_bps=0.0, rsi_gate_mode=LEGACY_RSI_GATE_MODE)
 
 SCOPE_SERIES = "series"
 SCOPE_GLOBAL = "global"

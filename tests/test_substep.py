@@ -342,7 +342,7 @@ def test_rsi_gate_mode_neutral_accepts_rsi_within_band() -> None:
 
 
 def test_rsi_gate_mode_none_always_passes() -> None:
-    """게이트 없음(`none`)은 RSI 값과 무관하게 항상 통과한다."""
+    """게이트 없음(`none`)은 RSI 값과 무관하게 항상 통과한다(워밍업만 지나면 — 아래 참고)."""
     steps = [_step(0, high=116, low=99, close=115)]  # 극단 과매수 시딩이어도
     out = _simulate_long(
         steps,
@@ -351,6 +351,50 @@ def test_rsi_gate_mode_none_always_passes() -> None:
         take_profit_price=None,
     )
     assert out.status is ZoneLimitStatus.FILLED_OPEN
+
+
+# --------------------------- WAN-123: `unconditional` — 게이트 자체가 없다(채택 기본값)
+
+
+def test_unconditional_fills_retap_despite_failing_rsi_gate() -> None:
+    """`unconditional`은 **호출부 통보 없이도**(first_tap_free=False = 재탭) 체결한다.
+
+    `first_tap_free`와 달리 탭 순서를 보지 않으므로 시뮬레이터가 스스로 판정할 수 있다.
+    """
+    steps = [_step(0, high=116, low=99, close=115)]  # 지정가 터치 + 극단 과매수(롱 게이트 미충족)
+    out = _simulate_long(
+        steps,
+        state=RealtimeRsi.seed_from_closed(_OVERBOUGHT_SEED, length=3),
+        rsi_gate_mode="unconditional",
+        take_profit_price=None,
+        first_tap_free=False,  # 재탭이라는 뜻 — 옛 기본값이었다면 여기서 막혔다.
+    )
+    assert out.status is ZoneLimitStatus.FILLED_OPEN
+    assert out.entry_price == _LIMIT
+
+
+def test_unconditional_fills_during_warmup_but_none_does_not() -> None:
+    """워밍업(RSI 없음)에서 `unconditional`과 `none`이 갈린다 — **둘은 동의어가 아니다**.
+
+    `none`은 게이트 판정만 통과시킬 뿐 `live_rsi is not None` 요구가 남아 막히고
+    (WAN-114 `L0r`이 그 의미로 고정돼 있다), `unconditional`은 RSI를 아예 보지 않는다.
+    게이트를 끄려던 자리에 `none`을 넣는 조용한 절반짜리 제거를 이 대조가 막는다.
+    """
+    warmup = RealtimeRsi.seed_from_closed([100.0], length=3)  # 시드 미형성 → value()가 None
+    steps = [_step(0, high=101, low=99, close=99)]
+    assert warmup.value(99.0) is None  # 전제 확인: 정말 워밍업이다.
+
+    def _run(mode: str) -> ZoneLimitStatus:
+        return _simulate_long(
+            steps,
+            state=RealtimeRsi.seed_from_closed([100.0], length=3),
+            rsi_gate_mode=mode,  # type: ignore[arg-type]
+            take_profit_price=None,
+            cancel_on_condition_fail=False,
+        ).status
+
+    assert _run("unconditional") is ZoneLimitStatus.FILLED_OPEN
+    assert _run("none") is ZoneLimitStatus.NO_TOUCH  # 워밍업에 막혀 체결 없음
 
 
 # ------------------------------------- WAN-100: 첫 탭 면제(first_tap_free)가 B안에도 적용된다

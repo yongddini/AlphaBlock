@@ -11,6 +11,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
+from backtest.harness import LEGACY_RSI_GATE_MODE
 from backtest.metrics import build_metrics
 from backtest.models import (
     BacktestConfig,
@@ -88,12 +89,16 @@ def test_zero_offset_baseline_is_the_pre_wan112_engine_unchanged() -> None:
 
     ⚠️ 이 격자는 **오프셋을 축으로 명시해 돌리므로**(`params(offset_bps=...)`) 채택
     기본값이 2bp로 바뀌어도 발표 수치가 움직이지 않는다 — 기준선 셀이 "기본값"에서
-    "명시적 0bp"로 이름만 바뀐 것이다.
+    "명시적 0bp"로 이름만 바뀐 것이다. **RSI 게이트는 축이 아니라 핀이므로**(WAN-123)
+    `BASE_PARAMS`가 대신 고정한다.
     """
     baseline = FILL_ASSUMPTIONS[0]
     assert baseline.name == "baseline"
-    assert baseline.params(offset_bps=0.0, seed=0) == ConfluenceParams(zone_limit_offset_bps=0.0)
+    assert baseline.params(offset_bps=0.0, seed=0) == ConfluenceParams(
+        zone_limit_offset_bps=0.0, rsi_gate_mode=LEGACY_RSI_GATE_MODE
+    )
     assert ConfluenceParams().zone_limit_offset_bps == 2.0, "채택 기본값과 갈라졌음이 의도다"
+    assert ConfluenceParams().rsi_gate_mode == "unconditional", "게이트도 갈라졌음이 의도다"
 
 
 def test_grid_only_varies_offset_and_fill_assumptions() -> None:
@@ -101,6 +106,9 @@ def test_grid_only_varies_offset_and_fill_assumptions() -> None:
 
     이슈의 '과최적화 방어'는 오프셋 하나만 고르는 실험임을 전제한다. 다른 파라미터가
     같이 움직이면 무엇이 성과를 냈는지 귀속할 수 없다.
+
+    기준은 이 리포트가 **고정한 엔진**이다(WAN-123 이후 채택 기본값은 게이트가 없다) —
+    현재 기본값을 기준으로 삼으면 게이트 핀이 "격자 밖의 필드를 바꿨다"로 잡힌다.
     """
     tunable = {
         "zone_limit_offset_bps",
@@ -108,7 +116,7 @@ def test_grid_only_varies_offset_and_fill_assumptions() -> None:
         "fill_dropout_rate",
         "fill_dropout_seed",
     }
-    default = ConfluenceParams().model_dump()
+    default = ConfluenceParams(rsi_gate_mode=LEGACY_RSI_GATE_MODE).model_dump()
     for assumption in FILL_ASSUMPTIONS:
         for offset in DEFAULT_OFFSETS_BPS:
             for seed in assumption.seeds:

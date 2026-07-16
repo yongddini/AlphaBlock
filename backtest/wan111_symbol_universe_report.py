@@ -85,15 +85,24 @@ SEGMENT_ORDER: tuple[str, ...] = ("full", "is", "oos")
 
 
 def build_grid(symbols: Sequence[str]) -> Grid:
-    """채택 기본값 격자 — 심볼·TF·렌즈만 축으로 연다.
+    """WAN-111 당시 채택 기본값 격자 — 심볼·TF·렌즈만 축으로 연다.
 
     익절 R·오프셋을 축에 넣지 않는 것이 요점이다: 이 이슈는 **측정 층**이라 토대와
     구조 결정을 고정 입력으로 받는다(CLAUDE.md 작업 층 순서). `take_profit_rs`/
     `offsets_bps`에 `build_params()`의 값을 그대로 넣어 채택 기본값(오프셋 2bp,
     WAN-112)을 따라가게 한다 — 여기에 0.0을 하드코딩하면 기본값이 바뀔 때 이 리포트만
     혼자 옛 엔진을 돈다.
+
+    ⚠️ **RSI 게이트만은 정반대로 명시 고정한다**(WAN-123이 기본값을 `unconditional`로
+    옮겼다). 위 "기본값을 따라가게 한다"는 원칙이 오프셋에 맞고 여기엔 안 맞는 이유는
+    **이동의 크기**다: 오프셋 2bp는 같은 거래 집합의 가격을 조금 옮기지만, 게이트 제거는
+    **거래 집합 자체를 13~14% 늘린다**. 그러면 이 리포트의 결론(「6심볼로 넓히면 채택
+    수치가 사실상 0이 된다」)이 재현되지 않는 다른 표본의 표가 된다. 게다가 WAN-114
+    사다리의 `L2` 행이 이 CSV의 `baseline` 행과 **비트 단위로 일치**하는 것이 두 리포트의
+    상호 검산인데, 그쪽 사다리는 게이트를 `first_tap_free`로 고정하고 있다 — 여기만
+    따라가면 그 검산이 깨진다. 게이트 제거 뒤의 심볼 유니버스 판정은 `wan123_*` 소관이다.
     """
-    from backtest.harness import build_params
+    from backtest.harness import LEGACY_RSI_GATE_MODE, build_params
 
     defaults = build_params()
     return Grid(
@@ -103,6 +112,7 @@ def build_grid(symbols: Sequence[str]) -> Grid:
         take_profit_rs=(defaults.take_profit_r,),
         offsets_bps=(defaults.zone_limit_offset_bps,),
         fills=tuple(fill_preset(name) for name in LENS_NAMES),
+        rsi_gate_mode=LEGACY_RSI_GATE_MODE,
     )
 
 

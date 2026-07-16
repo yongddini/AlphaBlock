@@ -25,6 +25,7 @@ from backtest.wan110_multi_position_fill_conservatism import (
     LENS_NAMES,
     MULTI_LEVERAGES,
     PINNED_OFFSET_BPS,
+    PINNED_RSI_GATE_MODE,
     SCENARIO_SINGLE,
     _lens_seeds,
     aggregate,
@@ -102,14 +103,22 @@ def test_baseline_lens_is_the_pinned_wan103_engine() -> None:
     이 리포트의 `baseline` 열은 WAN-108 표와 **같은 숫자**여야 대조가 성립한다.
     보수화 노브를 뺀 나머지가 하나라도 다르면 그 대조가 깨진다.
 
-    ⚠️ WAN-112로 채택 기본 오프셋이 2bp가 됐지만 이 재검은 **WAN-103과 같은 셋업 풀**을
-    봐야 한다("같은 풀에 렌즈만 조이면 다중 우위가 남는가"가 질문이므로). 그래서 오프셋을
-    `PINNED_OFFSET_BPS`(= WAN-103의 0bp)로 고정한다.
+    ⚠️ 채택 기본값이 두 번(WAN-112 오프셋 2bp · WAN-123 게이트 제거) 움직였지만 이 재검은
+    **WAN-103과 같은 셋업 풀**을 봐야 한다("같은 풀에 렌즈만 조이면 다중 우위가 남는가"가
+    질문이므로). 그래서 둘 다 WAN-103 엔진에서 가져와 고정한다. 게이트는 특히 중요하다 —
+    오프셋과 달리 **풀 자체를 넓혀** 질문의 전제를 깬다.
     """
     assert (
-        build_params(fill=fill_preset("baseline"), seed=0, offset_bps=PINNED_OFFSET_BPS) == PARAMS
+        build_params(
+            fill=fill_preset("baseline"),
+            seed=0,
+            offset_bps=PINNED_OFFSET_BPS,
+            base=ConfluenceParams(rsi_gate_mode=PINNED_RSI_GATE_MODE),
+        )
+        == PARAMS
     )
     assert PINNED_OFFSET_BPS == 0.0
+    assert PINNED_RSI_GATE_MODE == "first_tap_free" != ConfluenceParams().rsi_gate_mode
 
 
 # --------------------------------------------------------------------------- #
@@ -146,7 +155,12 @@ def test_build_cell_params_default_to_the_adopted_params() -> None:
 
 def test_build_cell_lens_params_differ_from_default() -> None:
     """렌즈 파라미터는 기준선과 달라야 한다(같으면 축이 아무 일도 안 한 것)."""
-    lens = build_params(fill=fill_preset("pen_5bp"), seed=0, offset_bps=PINNED_OFFSET_BPS)
+    lens = build_params(
+        fill=fill_preset("pen_5bp"),
+        seed=0,
+        offset_bps=PINNED_OFFSET_BPS,
+        base=ConfluenceParams(rsi_gate_mode=PINNED_RSI_GATE_MODE),
+    )
     assert lens != PARAMS
     assert lens.fill_penetration_bps == 5.0
     # 보수화 노브 **말고는** 고정 엔진과 같아야 한다.
@@ -288,10 +302,15 @@ def test_rows_to_frame_keeps_column_order() -> None:
 def test_default_params_untouched_by_this_report() -> None:
     """이 리포트는 채택 기본값을 바꾸지 않는다(기본값 불변 — 이슈 완료기준).
 
-    ⚠️ 이 리포트의 엔진은 오프셋 하나에서 채택 기본값과 **의도적으로** 갈라져 있다
-    (WAN-112). 그건 이 리포트가 기본값을 바꿔서가 아니라 **WAN-103의 셋업 풀에 고정**돼
-    있어서다 — 체결 가정 노브는 여전히 기본값을 건드리지 않는다.
+    ⚠️ 이 리포트의 엔진은 **두 필드**(오프셋 · RSI 게이트)에서 채택 기본값과 **의도적으로**
+    갈라져 있다(WAN-112 · WAN-123). 그건 이 리포트가 기본값을 바꿔서가 아니라 **WAN-103의
+    셋업 풀에 고정**돼 있어서다 — 체결 가정 노브는 여전히 기본값을 건드리지 않는다.
     """
     assert ConfluenceParams().fill_penetration_bps == 0.0
     assert ConfluenceParams().fill_dropout_rate == 0.0
-    assert ConfluenceParams(zone_limit_offset_bps=PINNED_OFFSET_BPS) == PARAMS
+    assert (
+        ConfluenceParams(
+            zone_limit_offset_bps=PINNED_OFFSET_BPS, rsi_gate_mode=PINNED_RSI_GATE_MODE
+        )
+        == PARAMS
+    )

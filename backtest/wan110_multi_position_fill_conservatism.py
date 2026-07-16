@@ -71,11 +71,17 @@ from backtest.zone_limit_backtest import (
     build_result_from_trades,
     sequence_with_candidates,
 )
+from strategy.models import ConfluenceParams
 
 #: 이 리포트가 고정한 오프셋(bp) — **WAN-103과 같은 셋업 풀**을 봐야 하므로 그쪽 엔진에서
 #: 그대로 가져온다(WAN-112 이후 채택 기본값 2bp를 따라가면 안 된다). 이 재검의 질문은
 #: "같은 풀에 렌즈만 조이면 다중 우위가 남는가"라, 풀이 움직이면 질문 자체가 성립하지 않는다.
 PINNED_OFFSET_BPS = PARAMS.zone_limit_offset_bps
+
+#: 같은 이유로 RSI 게이트도 WAN-103 엔진에서 가져온다(WAN-123이 기본값을 `unconditional`로
+#: 옮겼다). 게이트 제거는 오프셋과 달리 **셋업 풀 자체를 13~14% 넓히므로**, 따라가게 두면
+#: 이 재검이 WAN-103과 다른 풀을 보게 되어 "같은 풀에 렌즈만 조인다"는 전제가 깨진다.
+PINNED_RSI_GATE_MODE = PARAMS.rsi_gate_mode
 
 DEFAULT_SYMBOLS: tuple[str, ...] = ("BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT")
 
@@ -256,7 +262,10 @@ def run_report(
                             market,
                             segment,
                             params=build_params(
-                                fill=preset, seed=seed, offset_bps=PINNED_OFFSET_BPS
+                                fill=preset,
+                                seed=seed,
+                                offset_bps=PINNED_OFFSET_BPS,
+                                base=ConfluenceParams(rsi_gate_mode=PINNED_RSI_GATE_MODE),
                             ),
                             order_blocks=order_blocks,
                         )

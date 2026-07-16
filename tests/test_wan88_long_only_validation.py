@@ -28,6 +28,7 @@ from backtest.wan88_long_only_validation import (
     NULL_FILL_LEVELS,
     OFFICIAL_FILL,
     PINNED_OFFSET_BPS,
+    PINNED_RSI_GATE_MODE,
     ContrastRow,
     CostRow,
     NullCellRow,
@@ -216,10 +217,12 @@ def test_adopted_params_changes_nothing_but_fill_knobs() -> None:
     재고 있다는 뜻이다.
 
     기준은 `ConfluenceParams()`(지금의 채택 기본값)가 아니라 **이 검정이 돌린 엔진**
-    (오프셋 0bp)이다 — WAN-112가 기본 오프셋을 2bp로 올렸고, 이 리포트의 결론은 그 전
-    엔진에서 나왔다.
+    (오프셋 0bp + RSI 게이트 `first_tap_free`)이다 — WAN-112가 기본 오프셋을 2bp로 올렸고
+    WAN-123이 게이트를 뺐지만, 이 리포트의 결론은 **그 둘 이전 엔진**에서 나왔다.
     """
-    defaults = ConfluenceParams(zone_limit_offset_bps=PINNED_OFFSET_BPS)
+    defaults = ConfluenceParams(
+        zone_limit_offset_bps=PINNED_OFFSET_BPS, rsi_gate_mode=PINNED_RSI_GATE_MODE
+    )
     params = adopted_params(fill_preset(OFFICIAL_FILL))
 
     fill_knobs = {"fill_penetration_bps", "fill_dropout_rate", "fill_dropout_seed"}
@@ -242,13 +245,18 @@ def test_baseline_fill_is_bit_identical_to_the_pinned_engine() -> None:
     """`baseline`은 이 검정이 실제로 돌린 엔진 그 자체 — 널의 대조축이 성립하려면 한 톨도
     달라선 안 된다.
 
-    ⚠️ WAN-112로 채택 기본 오프셋이 2bp가 되면서 그 엔진은 더 이상 `ConfluenceParams()`가
-    아니다. WAN-88의 「유의 셀 0개」 판정은 **0bp에서 나온 결론**이므로 오프셋을 고정한다.
+    ⚠️ WAN-112(오프셋 2bp)·WAN-123(게이트 제거)으로 그 엔진은 더 이상 `ConfluenceParams()`가
+    아니다. WAN-88의 「유의 셀 0개」 판정은 **0bp + 게이트 on에서 나온 결론**이므로 둘 다
+    고정한다 — 특히 게이트는 거래 집합 자체를 넓히므로 따라가면 같은 검정이 아니게 된다.
     """
-    pinned = ConfluenceParams(zone_limit_offset_bps=PINNED_OFFSET_BPS)
+    pinned = ConfluenceParams(
+        zone_limit_offset_bps=PINNED_OFFSET_BPS, rsi_gate_mode=PINNED_RSI_GATE_MODE
+    )
     assert adopted_params(fill_preset("baseline")) == pinned
     assert PINNED_OFFSET_BPS == 0.0
+    assert PINNED_RSI_GATE_MODE == "first_tap_free"
     assert ConfluenceParams().zone_limit_offset_bps == 2.0, "채택 기본값과 갈라졌음이 의도다"
+    assert ConfluenceParams().rsi_gate_mode == "unconditional", "게이트도 갈라졌음이 의도다"
 
 
 def test_official_fill_matches_wan97_decision() -> None:

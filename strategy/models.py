@@ -334,7 +334,7 @@ class OrderBlockResult(BaseModel):
         return select_active(self.order_blocks, time_ms, limit=limit, combine=combine)
 
 
-RsiGateMode = Literal["extreme", "neutral", "none", "first_tap_free"]
+RsiGateMode = Literal["extreme", "neutral", "none", "first_tap_free", "unconditional"]
 
 
 def rsi_gate_passes(
@@ -349,23 +349,33 @@ def rsi_gate_passes(
     """RSI 게이트 판정(WAN-73). A안(`strategy.confluence`)과 B안
     (`backtest.substep.simulate_zone_limit_trade`)이 공유하는 순수 함수다.
 
-    `mode="extreme"`(기본): 롱은 `rsi <= rsi_oversold`, 숏은 `rsi >= rsi_overbought`
-    (과매도/과매수 극단). `"neutral"`: 방향과 무관하게 `rsi_neutral_band` 안이면 통과
-    (존이 조용히 지켜지는 국면). `"none"`: 항상 통과 — 호출부가 이미 RSI 워밍업
-    (NaN) 여부는 걸러내고 유효값만 넘겨야 한다. `"first_tap_free"`(WAN-81): 첫 탭
-    면제는 `tap_index`를 아는 호출부가 이 함수를 호출하기 전에 직접 처리하므로, 이
-    함수에 도달했다는 것은 이미 재탭(첫 탭이 아님)이라는 뜻이다 — `extreme`과 동일한
-    극단 규칙을 적용한다.
+    `mode="extreme"`(구 엔진 기본): 롱은 `rsi <= rsi_oversold`, 숏은 `rsi >=
+    rsi_overbought`(과매도/과매수 극단). `"neutral"`: 방향과 무관하게 `rsi_neutral_band`
+    안이면 통과(존이 조용히 지켜지는 국면). `"first_tap_free"`(WAN-81): 첫 탭 면제는
+    `tap_index`를 아는 호출부가 이 함수를 호출하기 전에 직접 처리하므로, 이 함수에
+    도달했다는 것은 이미 재탭(첫 탭이 아님)이라는 뜻이다 — `extreme`과 동일한 극단
+    규칙을 적용한다.
 
-    ⚠️ 그 "호출부가 처리한다"는 계약은 **두 경로 모두**의 책임이다: A안은
+    ⚠️ **`"none"`과 `"unconditional"`은 동의어가 아니다** — 둘 다 여기서는 True를
+    반환하지만 **워밍업 처리가 다르고, 그 차이는 호출부에 있다**:
+
+    * `"none"`: 게이트 **판정**만 없다. 호출부는 여전히 `rsi is not None`(워밍업 통과)을
+      요구하므로 **RSI 워밍업 구간의 탭은 진입하지 못한다**. 그래서 `"none"`은
+      `"first_tap_free"`의 깨끗한 상위집합이 아니다(WAN-114 `L0r`이 이 비대칭을 안고
+      측정됐고, 그 CSV가 이 의미에 고정돼 있다).
+    * `"unconditional"`(WAN-123 채택 기본값): 게이트가 **아예 없다**. 호출부가 RSI를
+      읽지도 않으므로 **워밍업(NaN)이어도 지정가 터치 즉시 진입**한다 — 즉 첫 탭·재탭을
+      가리지 않는 `"first_tap_free"`의 진짜 상위집합이다.
+
+    ⚠️ "호출부가 처리한다"는 계약은 **두 경로 모두**의 책임이다: A안은
     `ConfluenceStrategy._evaluate_entry`, B안은 `backtest.zone_limit_backtest.
     build_zone_limit_candidates`가 `signal.tap_index == 0`을 보고
     `simulate_zone_limit_trade(first_tap_free=...)`로 넘긴다. B안이 이 계약을 지키지
     않아 채택 경로에서 첫 탭 면제가 통째로 빠져 있었다(WAN-100) — 이 함수는 모드만
     보고는 첫 탭인지 알 수 없으므로 누락이 조용히 지나갔다. 새 진입 경로를 붙일 때
-    `tap_index` 배선을 빠뜨리지 말 것.
+    `tap_index` 배선과 `"unconditional"` 면제를 빠뜨리지 말 것.
     """
-    if mode == "none":
+    if mode in ("none", "unconditional"):
         return True
     if mode == "neutral":
         low, high = rsi_neutral_band
@@ -670,16 +680,25 @@ class ConfluenceParams(BaseModel):
     원본 존으로 돌아갔다). `once`: 존(병합 포함) 확정 후 첫 탭만 진입 후보로
     삼는다(구 엔진 동작). 동시 포지션은 여전히 1개로 제한되므로(백테스트 엔진이
     플랫일 때만 진입) 청산 후에만 다음 탭이 진입으로 이어진다."""
-    rsi_gate_mode: RsiGateMode = "first_tap_free"
-    """RSI 게이트 방향. **기본 `first_tap_free`(WAN-81 메인 엔진)**: 존(병합 존 포함)
-    확정 후 **첫 탭**(`tap_index=0`)은 RSI 무관하게(워밍업 NaN이어도) 무조건
-    진입하고, **재탭**(`tap_index>=1`)부터 `extreme` 규칙(롱 `RSI<=rsi_oversold`,
-    숏 `RSI>=rsi_overbought`)을 적용한다. 미충족 탭은 기각하되 존을 소각하지
-    않는다 — 무효화 전까지 다음 탭에서 다시 평가한다.
+    rsi_gate_mode: RsiGateMode = "unconditional"
+    """RSI 게이트 방향. **기본 `unconditional`(WAN-123 재-베이스라인 = WAN-116 결정 B)**:
+    RSI 게이트가 **아예 없다** — 첫 탭·재탭을 가리지 않고 워밍업(NaN)이어도 지정가
+    터치 즉시 진입한다. 근거는 WAN-114 ablation의 `L0r→L1`(게이트만의 순수 기여):
+    12셀 중 8셀 음수, 1h는 6셀 전부 음수, 유일한 일관 플러스는 학습 구간인 15m IS뿐이다.
+    게이트는 거래의 13~14%를 쳐내는데 **그 쳐냄이 순손해**였다 = 고르는 방향이 틀렸다.
+    자세한 근거·파급은 [`docs/decisions/wan123.md`](../docs/decisions/wan123.md).
 
-    `extreme`(구 엔진 기본): 모든 탭에 항상 극단 규칙 적용. `neutral`: RSI가
-    `rsi_neutral_band` 안(방향 무관)이면 진입. `none`: RSI가 워밍업만 끝나면
-    항상 통과(게이트 없음)."""
+    `first_tap_free`(WAN-81~WAN-122 채택 기본값, 옵트인 보존): 존(병합 존 포함) 확정 후
+    **첫 탭**(`tap_index=0`)은 RSI 무관하게(워밍업 NaN이어도) 무조건 진입하고,
+    **재탭**(`tap_index>=1`)부터 `extreme` 규칙(롱 `RSI<=rsi_oversold`, 숏
+    `RSI>=rsi_overbought`)을 적용한다. 미충족 탭은 기각하되 존을 소각하지 않는다 —
+    무효화 전까지 다음 탭에서 다시 평가한다. `extreme`(구 엔진 기본): 모든 탭에 항상
+    극단 규칙 적용. `neutral`: RSI가 `rsi_neutral_band` 안(방향 무관)이면 진입.
+
+    ⚠️ **`none`은 이 기본값과 다르다** — 게이트 판정만 없앨 뿐 호출부의 워밍업 요구
+    (`rsi is not None`)는 남아 워밍업 구간 탭이 막힌다(`rsi_gate_passes` 참고). 게이트를
+    끄려던 자리에 `none`을 넣으면 **끈 줄 알면서 워밍업 필터만 남는다** — WAN-112의
+    단위 함정(`2.0` vs `0.0002`)과 같은 부류의 조용한 실패다. 회귀 테스트가 막는다."""
     rsi_neutral_band: tuple[float, float] = (40.0, 60.0)
     """`rsi_gate_mode="neutral"`일 때의 RSI 허용 밴드 `(하한, 상한)`."""
     take_profit_mode: Literal["line", "fixed_r"] = "fixed_r"

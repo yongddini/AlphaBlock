@@ -220,12 +220,14 @@ def test_tap_after_invalidation_is_skipped() -> None:
 
 
 def test_first_tap_confirms_with_neutral_rsi() -> None:
-    """`rsi_gate_mode="first_tap_free"`(기본)는 첫 탭이면 RSI 50(극단 아님)이어도 진입한다."""
+    """`rsi_gate_mode="first_tap_free"`(WAN-81~122 채택값, 지금은 옵트인)는 첫 탭이면
+    RSI 50(극단 아님)이어도 진입한다."""
     closes = [100.0, 105.0] * 12  # 오실레이션 -> 확정봉 RSI가 대략 50 부근에서 안정.
     df = _df(closes)
     pos = 23
-    params = ConfluenceParams(use_line_take_profit=False, use_order_block_stop=False)
-    assert params.rsi_gate_mode == "first_tap_free"
+    params = ConfluenceParams(
+        use_line_take_profit=False, use_order_block_stop=False, rsi_gate_mode="first_tap_free"
+    )
     signal = _signal(_BULL, pos, closes[pos])
     result = ConfluenceStrategy(params).run(
         df, OrderBlockResult(order_blocks=[], signals=[signal], retap_signals=[signal])
@@ -236,12 +238,15 @@ def test_first_tap_confirms_with_neutral_rsi() -> None:
 
 
 def test_first_tap_confirms_even_with_nan_rsi() -> None:
-    """`rsi_gate_mode="first_tap_free"`(기본)는 첫 탭이면 RSI 워밍업(NaN)이어도 진입한다."""
+    """`rsi_gate_mode="first_tap_free"`(옵트인)는 첫 탭이면 RSI 워밍업(NaN)이어도 진입한다."""
     closes = [200.0 - i * 3.0 for i in range(5)]  # RSI 워밍업(length=14) 구간
     df = _df(closes)
     pos = 3
     params = ConfluenceParams(
-        use_line_take_profit=False, use_order_block_stop=False, deviation_filter=None
+        use_line_take_profit=False,
+        use_order_block_stop=False,
+        deviation_filter=None,
+        rsi_gate_mode="first_tap_free",
     )
     signal = _signal(_BULL, pos, closes[pos], tap_index=0)
     result = ConfluenceStrategy(params).run(
@@ -253,11 +258,17 @@ def test_first_tap_confirms_even_with_nan_rsi() -> None:
 
 
 def test_retap_rejected_when_rsi_not_extreme_but_zone_not_burned() -> None:
-    """두 번째 탭(재탭, RSI 50)은 기각되지만 존은 소각되지 않고, 세 번째 탭(과매도)은 진입한다."""
+    """두 번째 탭(재탭, RSI 50)은 기각되지만 존은 소각되지 않고, 세 번째 탭(과매도)은 진입한다.
+
+    `rsi_gate_mode="first_tap_free"`를 명시한다 — WAN-123이 기본값을 `unconditional`로
+    옮겼으므로 이 시나리오는 이제 **옵트인 경로**의 회귀 고정이다(되돌릴 여지 보존).
+    """
     closes = [100.0, 105.0] * 12  # 확정봉 RSI가 대략 50 부근.
     df = _df(closes)
     neutral_pos = 23
-    params = ConfluenceParams(use_line_take_profit=False, use_order_block_stop=False)
+    params = ConfluenceParams(
+        use_line_take_profit=False, use_order_block_stop=False, rsi_gate_mode="first_tap_free"
+    )
     ob = _order_block(_BULL)
 
     second_tap = _signal(_BULL, neutral_pos, closes[neutral_pos], ob, tap_index=1)
@@ -857,14 +868,92 @@ def test_short_enabled_false_does_not_affect_long_entries() -> None:
 
 
 def test_wan73_new_params_preserve_defaults() -> None:
-    """WAN-73이 만든 파라미터의 현재 기본값(WAN-81 메인 엔진으로 전환됨)."""
+    """WAN-73이 만든 파라미터의 현재 기본값(WAN-81 메인 엔진 → WAN-123 게이트 제거)."""
     params = ConfluenceParams()
     assert params.retap_mode == "every_tap"
-    assert params.rsi_gate_mode == "first_tap_free"
+    assert params.rsi_gate_mode == "unconditional"
     assert params.rsi_neutral_band == (40.0, 60.0)
     assert params.take_profit_mode == "fixed_r"
     assert params.take_profit_r == 1.5
     assert params.limit_valid_bars == 24
+
+
+# --------------------------------- WAN-123: 재탭 RSI 게이트 제거 (WAN-116 결정 B)
+
+
+def test_wan123_default_gate_is_off_for_retaps() -> None:
+    """**기본값에서 게이트가 실제로 꺼진다** — 재탭인데 RSI가 극단이 아니어도 진입한다.
+
+    이것이 WAN-123의 회귀 고정이다. `rsi_gate_mode`를 `unconditional`로 적어 놓고도
+    호출부가 게이트를 계속 걸면 "뺐다고 믿으면서 그대로 도는" 상태가 된다 — WAN-112의
+    단위 함정(`2.0` vs `0.0002`)·WAN-91의 조용한 실패와 같은 부류다. 라벨이 아니라
+    **동작**을 검사한다.
+    """
+    closes = [100.0, 105.0] * 12  # 확정봉 RSI ≈ 50 (롱 게이트 RSI<=30을 통과 못 하는 값).
+    df = _df(closes)
+    pos = 23
+    params = ConfluenceParams(use_line_take_profit=False, use_order_block_stop=False)
+    assert params.rsi_gate_mode == "unconditional"
+    retap = _signal(_BULL, pos, closes[pos], tap_index=3)
+    result = ConfluenceStrategy(params).run(
+        df, OrderBlockResult(order_blocks=[], signals=[], retap_signals=[retap])
+    )
+    entry = result.entries[0]
+    assert entry.rsi is not None and entry.rsi > params.rsi_oversold  # 극단이 아니다
+    assert entry.confirmed is True  # 그런데도 진입 = 게이트가 없다
+
+
+def test_wan123_default_gate_enters_on_warmup_retap() -> None:
+    """워밍업(RSI NaN) **재탭**도 진입한다 — `unconditional`이 `none`과 갈리는 지점.
+
+    `none`은 게이트 판정만 없앨 뿐 호출부의 `rsi is not None` 요구가 남아 이 탭을 막는다
+    (WAN-114 `L0r`이 그 비대칭을 안고 측정됐다). 게이트를 끄려던 자리에 `none`을 넣으면
+    워밍업 필터만 남는데, 그 조용한 절반짜리 제거를 이 테스트가 막는다.
+    """
+    closes = [200.0 - i * 3.0 for i in range(5)]  # RSI 워밍업(length=14) 구간
+    df = _df(closes)
+    retap = _signal(_BULL, 3, closes[3], tap_index=2)
+    obr = OrderBlockResult(order_blocks=[], signals=[], retap_signals=[retap])
+    common = {
+        "use_line_take_profit": False,
+        "use_order_block_stop": False,
+        "deviation_filter": None,
+    }
+
+    unconditional = ConfluenceStrategy(ConfluenceParams(**common)).run(df, obr).entries[0]
+    assert unconditional.rsi is None
+    assert unconditional.confirmed is True, "게이트가 없으면 워밍업 재탭도 진입한다"
+
+    gated_none = (
+        ConfluenceStrategy(ConfluenceParams(**common, rsi_gate_mode="none")).run(df, obr).entries[0]
+    )
+    assert gated_none.confirmed is False, "`none`은 워밍업을 막는다 — 두 모드는 동의어가 아니다"
+
+
+def test_wan123_default_is_a_superset_of_first_tap_free() -> None:
+    """기본값은 `first_tap_free`의 **진짜 상위집합**이다 — 그쪽이 넣던 탭을 다 넣는다.
+
+    이슈 본문의 "첫 탭 면제는 어차피 상위집합이라 무의미해짐"이 참이려면 이 성질이
+    필요하다. `none`으로 갈아 끼우면 워밍업 첫 탭에서 이 성질이 깨진다.
+    """
+    closes = [200.0 - i * 3.0 for i in range(5)]  # 워밍업 구간(첫 탭 면제가 실제로 작동하는 자리)
+    df = _df(closes)
+    first_tap = _signal(_BULL, 3, closes[3], tap_index=0)
+    obr = OrderBlockResult(order_blocks=[], signals=[first_tap], retap_signals=[first_tap])
+    common = {
+        "use_line_take_profit": False,
+        "use_order_block_stop": False,
+        "deviation_filter": None,
+    }
+
+    legacy = (
+        ConfluenceStrategy(ConfluenceParams(**common, rsi_gate_mode="first_tap_free"))
+        .run(df, obr)
+        .entries[0]
+    )
+    new = ConfluenceStrategy(ConfluenceParams(**common)).run(df, obr).entries[0]
+    assert legacy.confirmed is True
+    assert new.confirmed is True
 
 
 def test_rsi_neutral_band_rejects_invalid_ordering() -> None:

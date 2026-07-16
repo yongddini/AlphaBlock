@@ -202,10 +202,16 @@ def simulate_zone_limit_trade(
     항상 `limit_price`다(관통은 체결 여부의 대리 변수일 뿐 더 유리한 체결가가 아니다).
 
     `first_tap_free`(WAN-100)는 이 셋업이 존(병합 존 포함) 확정 후 **첫 탭**이라는
-    호출부의 통보다 — `rsi_gate_mode="first_tap_free"`(WAN-81 기본값)의 첫 탭 면제는
+    호출부의 통보다 — `rsi_gate_mode="first_tap_free"`(WAN-81~122 기본값)의 첫 탭 면제는
     `tap_index`를 아는 호출부만 판정할 수 있고, 이 시뮬레이터는 셋업 하나만 보므로
     스스로 알 수 없다. 참이면 RSI 게이트를 건너뛰고 **워밍업(RSI None)이어도** 지정가
     터치 즉시 체결한다(따라서 `cancel_on_condition_fail`의 조건 실패 취소도 타지 않는다).
+
+    `rsi_gate_mode="unconditional"`(WAN-123 채택 기본값)은 그 면제를 **모든 탭**으로
+    넓힌 것이라 `first_tap_free`와 같은 자리에서 판정한다 — 호출부의 통보가 필요 없다
+    (탭 순서를 안 보므로 시뮬레이터가 스스로 안다). ⚠️ `"none"`은 이것과 **다르다**:
+    게이트 판정만 통과시킬 뿐 `live_rsi is not None`(워밍업) 요구는 그대로라 워밍업
+    구간 탭이 막힌다(WAN-114 `L0r`이 그 의미로 고정돼 있다).
 
     지정가는 `limit_price`(상수) **또는** `live_limit`(봉내 재산정, WAN-119) 중 정확히
     하나로 준다. `live_limit`을 쓰면 익절 목표도 체결 순간에 그 계약이 내므로
@@ -288,15 +294,21 @@ def simulate_zone_limit_trade(
                 live_rsi = rsi_state.value(step.close)
                 # WAN-100: 첫 탭 면제는 RSI 값 자체를 보지 않는다 — 워밍업(None)이어도
                 # 통과다. A안 `ConfluenceStrategy._evaluate_entry`와 같은 규칙이다.
-                condition = first_tap_free or (
-                    live_rsi is not None
-                    and rsi_gate_passes(
-                        live_rsi,
-                        is_long=is_long,
-                        mode=rsi_gate_mode,
-                        rsi_oversold=rsi_oversold,
-                        rsi_overbought=rsi_overbought,
-                        rsi_neutral_band=rsi_neutral_band,
+                # WAN-123: `unconditional`은 그 면제를 모든 탭으로 넓힌 것이라 여기서
+                # 함께 판정한다(`none`은 아래 워밍업 요구를 그대로 받는다 — 둘은 다르다).
+                condition = (
+                    first_tap_free
+                    or rsi_gate_mode == "unconditional"
+                    or (
+                        live_rsi is not None
+                        and rsi_gate_passes(
+                            live_rsi,
+                            is_long=is_long,
+                            mode=rsi_gate_mode,
+                            rsi_oversold=rsi_oversold,
+                            rsi_overbought=rsi_overbought,
+                            rsi_neutral_band=rsi_neutral_band,
+                        )
                     )
                 )
                 if condition:

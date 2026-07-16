@@ -10,7 +10,12 @@ from __future__ import annotations
 
 import pytest
 
-from backtest.harness import FILL_PRESETS_BY_NAME, build_params, fill_preset
+from backtest.harness import (
+    FILL_PRESETS_BY_NAME,
+    LEGACY_RSI_GATE_MODE,
+    build_params,
+    fill_preset,
+)
 from backtest.wan114_entry_rule_ablation import (
     ADOPTED_RUNG,
     ALL_SYMBOLS,
@@ -30,6 +35,7 @@ from backtest.wan114_entry_rule_ablation import (
     segments,
     verdict,
 )
+from strategy.models import ConfluenceParams
 
 _BASELINE = fill_preset("baseline")
 
@@ -80,14 +86,28 @@ def _row(
 
 
 def test_adopted_rung_is_exactly_the_adoption_default() -> None:
-    """`L2` == `ConfluenceParams()` 채택 기본값.
+    """`L2` == **WAN-122까지의** 채택 기본값(= 게이트가 켜진 엔진).
 
-    이것이 이 리포트의 중심 주장이다: 표의 `L2` 행이 곧 채택 기본값이고, 그래서 이슈의
-    `L3`을 따로 돌 필요가 없다. 어긋나면 "규칙 층 전체 기여"가 채택 기본값이 아닌 무언가에
-    대한 값이 된다 — 라벨만 맞고 실체가 다른 WAN-95식 사고다.
+    이것이 이 리포트의 중심 주장이었다: 표의 `L2` 행이 곧 채택 기본값이라 이슈의 `L3`을
+    따로 돌 필요가 없다. 어긋나면 "규칙 층 전체 기여"가 채택 기본값이 아닌 무언가에 대한
+    값이 된다 — 라벨만 맞고 실체가 다른 WAN-95식 사고다.
+
+    ⚠️ **WAN-123이 그 동일성을 깼다** — 재탭 RSI 게이트 제거로 기본값이
+    `rsi_gate_mode="unconditional"`이 됐고, 이 사다리는 `first_tap_free`를 **고정**한다.
+    고정이 맞는 선택인 이유: 이 표의 존재 이유가 **부품별 증분 분해**인데, 게이트를 기본값에
+    맡기면 `L0r→L1`(게이트의 기여)이라는 단 자체가 사라지고 `L1→L2` 증분도 "볼린저의 기여"가
+    아니게 된다. 즉 이 리포트는 **게이트 제거를 낳은 근거 그 자체**라, 그 결정 이후의
+    엔진으로 다시 도는 것은 의미가 없다. 그래서 동일성 검사도 **고정한 엔진**과 한다.
     """
     adopted = rung_params(RUNGS_BY_NAME[ADOPTED_RUNG], fill=_BASELINE)
-    assert adopted == build_params(entry_mode="zone_limit", fill=_BASELINE)
+    assert adopted == build_params(
+        entry_mode="zone_limit",
+        fill=_BASELINE,
+        base=ConfluenceParams(rsi_gate_mode=LEGACY_RSI_GATE_MODE),
+    )
+    # 고정한 게이트가 현재 기본값과 **다르다**는 것 자체를 못 박는다 — 같아지면 위
+    # docstring이 거짓이 되고, 이 사다리가 조용히 새 엔진으로 옮겨 간 것이다.
+    assert adopted.rsi_gate_mode == LEGACY_RSI_GATE_MODE != ConfluenceParams().rsi_gate_mode
 
 
 def test_ladder_changes_one_component_per_step() -> None:
