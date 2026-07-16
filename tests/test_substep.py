@@ -429,3 +429,165 @@ def test_first_tap_free_does_not_trigger_condition_fail_cancel() -> None:
         first_tap_free=True,
     )
     assert out.status is ZoneLimitStatus.FILLED_OPEN
+
+
+# ---------------------------------------------------- 봉내 움직이는 지정가 (WAN-119)
+
+
+class _StubLiveLimit:
+    """대본대로 지정가를 내는 `LiveLimitProvider` — 시뮬레이터 계약만 격리해 본다.
+
+    실제 밴드 수식은 `tests/test_realtime_band.py`가, 가격 확정 순서는
+    `tests/test_zone_limit_backtest.py`가 본다. 여기서는 시뮬레이터가 **매 서브스텝
+    다시 묻고**, 봉 마감에 `commit`하고, 체결 순간의 가격으로 익절을 잡는지만 본다.
+    """
+
+    def __init__(self, prices: list[float | None], tp: float | None = _TP) -> None:
+        self._prices = list(prices)
+        self._tp = tp
+        self.asked: list[float] = []
+        self.committed: list[float] = []
+        self.tp_called_with: list[float] = []
+
+    def commit(self, closed_price: float) -> None:
+        self.committed.append(closed_price)
+
+    def limit_price(self, live_price: float) -> float | None:
+        self.asked.append(live_price)
+        return self._prices.pop(0) if self._prices else None
+
+    def take_profit_price(self, limit_price: float) -> float | None:
+        self.tp_called_with.append(limit_price)
+        return self._tp
+
+
+def _simulate_live(steps: list[SubStep], provider: _StubLiveLimit) -> ZoneLimitOutcome:
+    return simulate_zone_limit_trade(
+        direction=OrderBlockDirection.BULLISH,
+        live_limit=provider,
+        stop_price=_STOP,
+        substeps=steps,
+        rsi_state=_long_state(),
+        rsi_oversold=30.0,
+        rsi_overbought=70.0,
+        limit_valid_bars=24,
+    )
+
+
+def test_live_limit_is_re_asked_every_substep_with_the_live_price() -> None:
+    """WAN-119: 지정가가 상수가 아니다 — 매 스텝 현재가로 다시 묻는다."""
+    steps = [
+        _step(0, high=101, low=99.5, close=99.5),
+        _step(60_000, high=100, low=98.5, close=98.5),
+    ]
+    # 첫 스텝의 지정가(99)는 그 스텝 저가(99.5)에 안 닿고, 둘째 스텝(98.6)은 닿는다.
+    provider = _StubLiveLimit([99.0, 98.6])
+    out = _simulate_live(steps, provider)
+    assert provider.asked == [99.5, 98.5]  # 그 스텝의 현재가로 물었다
+    assert out.status is ZoneLimitStatus.FILLED_OPEN
+    assert out.entry_price == 98.6  # 상수 _LIMIT(100)이 아니라 그 순간의 지정가
+
+
+def test_live_limit_none_means_no_order_and_does_not_end_the_setup() -> None:
+    """지금 주문이 없어도(밴드 워밍업·WAN-75 규칙 3) 다음 스텝에 생길 수 있다."""
+    steps = [
+        _step(0, high=101, low=90, close=99),  # 주문 없음 → 통과했어도 체결 없음
+        _step(60_000, high=101, low=99, close=99),  # 이제 주문이 걸린다
+    ]
+    provider = _StubLiveLimit([None, 100.0])
+    out = _simulate_live(steps, provider)
+    assert out.status is ZoneLimitStatus.FILLED_OPEN
+    assert out.entry_time == 60_000  # 첫 스텝 저가 90은 체결로 세지 않았다
+
+
+def test_order_rested_is_false_when_the_band_never_yields_a_price() -> None:
+    """끝까지 주문이 안 걸린 셋업 — 체결률 분모(eligible)에서 빠져야 한다.
+
+    정적 모드는 같은 셋업을 탭 봉에서 걸러내므로, 이 값이 없으면 live 모드만 분모가
+    부풀어 같은 표의 체결률 열이 서로 다른 것을 잰다.
+    """
+    steps = [_step(0, high=101, low=90, close=99), _step(60_000, high=101, low=90, close=99)]
+    out = _simulate_live(steps, _StubLiveLimit([None, None]))
+    assert out.status is ZoneLimitStatus.NO_TOUCH
+    assert out.order_rested is False
+
+
+def test_order_rested_is_true_once_an_order_existed_even_if_unfilled() -> None:
+    steps = [_step(0, high=101, low=99.5, close=99.5)]
+    out = _simulate_live(steps, _StubLiveLimit([99.0]))
+    assert out.status is ZoneLimitStatus.NO_TOUCH
+    assert out.order_rested is True
+
+
+def test_static_limit_always_counts_as_rested() -> None:
+    """상수 지정가는 탭 봉부터 걸려 있다 — 기존 모드의 분모는 바뀌지 않는다."""
+    out = _simulate_long([_step(0, high=101, low=100.5, close=100.5)])
+    assert out.status is ZoneLimitStatus.NO_TOUCH
+    assert out.order_rested is True
+
+
+def test_live_take_profit_is_resolved_from_the_realized_entry_price() -> None:
+    """1R은 체결가에서 나온다 — 탭 봉의 옛 가격으로 잡으면 없는 손익비로 청산한다."""
+    steps = [
+        _step(0, high=101, low=98, close=98),
+        _step(60_000, high=106, low=98, close=105),
+    ]
+    provider = _StubLiveLimit([98.5], tp=105.0)
+    out = _simulate_live(steps, provider)
+    assert provider.tp_called_with == [98.5]  # 체결가로 익절을 잡았다
+    assert out.status is ZoneLimitStatus.FILLED_EXITED
+    assert out.exit_price == 105.0
+    assert out.exit_reason is SignalExitReason.TAKE_PROFIT
+
+
+def test_live_limit_commits_closed_bars_like_the_rsi_state() -> None:
+    """상위TF 봉이 마감되면 그 확정 종가로 밴드 상태를 굴린다(RSI와 같은 생애주기)."""
+    steps = [
+        _step(0, high=101, low=99.5, close=99.4, htf=0),
+        _step(60_000, high=101, low=99.5, close=99.6, htf=0),
+        _step(120_000, high=101, low=99.5, close=99.8, htf=3_600_000),  # 봉 경계
+    ]
+    provider = _StubLiveLimit([99.0, 99.0, 99.0])
+    _simulate_live(steps, provider)
+    # 경계 직전 스텝의 종가(=그 상위TF 봉의 확정 종가)가 커밋된다.
+    assert provider.committed == [99.6]
+
+
+def test_limit_price_and_live_limit_are_mutually_exclusive() -> None:
+    """둘 다/둘 다 아님을 거부한다 — 조용히 하나를 이기게 하면 라벨과 실행이 갈라진다."""
+    steps = [_step(0, high=101, low=99, close=99)]
+    with pytest.raises(ValueError, match="정확히 하나"):
+        simulate_zone_limit_trade(
+            direction=OrderBlockDirection.BULLISH,
+            limit_price=_LIMIT,
+            live_limit=_StubLiveLimit([100.0]),
+            stop_price=_STOP,
+            substeps=steps,
+            rsi_state=_long_state(),
+            rsi_oversold=30.0,
+            rsi_overbought=70.0,
+        )
+    with pytest.raises(ValueError, match="정확히 하나"):
+        simulate_zone_limit_trade(
+            direction=OrderBlockDirection.BULLISH,
+            stop_price=_STOP,
+            substeps=steps,
+            rsi_state=_long_state(),
+            rsi_oversold=30.0,
+            rsi_overbought=70.0,
+        )
+
+
+def test_live_limit_rejects_a_static_take_profit() -> None:
+    """익절이 체결 순간에 정해지는데 상수 목표까지 주면 어느 쪽이 이겼는지 알 수 없다."""
+    with pytest.raises(ValueError, match="take_profit_price"):
+        simulate_zone_limit_trade(
+            direction=OrderBlockDirection.BULLISH,
+            live_limit=_StubLiveLimit([100.0]),
+            stop_price=_STOP,
+            substeps=[_step(0, high=101, low=99, close=99)],
+            rsi_state=_long_state(),
+            rsi_oversold=30.0,
+            rsi_overbought=70.0,
+            take_profit_price=_TP,
+        )

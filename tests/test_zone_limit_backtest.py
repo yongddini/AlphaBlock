@@ -19,6 +19,7 @@ from backtest.zone_limit_backtest import (
     SetupDiagnostic,
     _Candidate,
     _IncrementalRsiSeeder,
+    _IntrabarLiveLimit,
     _line_snapshots,
     _sequence_and_cost,
     _to_trade,
@@ -39,6 +40,7 @@ from strategy.models import (
     OrderBlockResult,
     OrderBlockSignal,
 )
+from strategy.realtime_band import RealtimeBand
 from strategy.realtime_rsi import RealtimeRsi
 
 
@@ -498,6 +500,106 @@ def test_band_bar_default_reproduces_adopted_engine_bit_for_bit() -> None:
     assert [t.entry_price for t in base.trades] == [t.entry_price for t in explicit.trades]
 
 
+def test_intrabar_live_limit_applies_band_then_offset_in_the_adopted_order() -> None:
+    """WAN-119: 봉내 공급자도 WAN-99의 가격 확정 순서를 그대로 따른다.
+
+    밴드 → `deviation_entry_price`(볼린저가 이김) → 오프셋. 순서가 바뀌면 오프셋이
+    볼린저가 기각한 셋업을 되살리거나(WAN-99가 막은 것) 존 근단 위에 얹혀 버린다.
+    """
+    ob = OrderBlock(
+        direction=OrderBlockDirection.BULLISH,
+        top=100.0,
+        bottom=90.0,
+        start_time=0,
+        confirmed_time=0,
+        ob_volume=1.0,
+        ob_low_volume=1.0,
+        ob_high_volume=1.0,
+    )
+    params = ConfluenceParams(
+        entry_mode="zone_limit", rsi_mode="realtime", zone_limit_offset_bps=2.0
+    )
+    # 밴드가 존 안(90~100)에 오도록 만든 결정적 창: 종가가 모두 95면 σ=0 → band=95.
+    filt = DeviationFilterParams(anchor="sma", sma_length=20, width_kind="stdev", width_value=2.0)
+    provider = _IntrabarLiveLimit(
+        band=RealtimeBand.seed_from_closed([95.0] * 19, filt),
+        order_block=ob,
+        is_long=True,
+        params=params,
+        stop_price=90.0,
+        lines=[],
+    )
+    # 현재가도 95면 20표본이 모두 95라 σ=0 → 밴드 = SMA = 95(존 안 → 규칙 2 진입가).
+    # 그 위에 롱 오프셋 2bp가 체결 쉬운 쪽(위)으로 얹힌다.
+    assert provider.limit_price(95.0) == pytest.approx(95.0 * (1.0 + 2.0 / 10_000.0), rel=1e-12)
+
+
+def test_intrabar_live_limit_is_absent_when_band_rejects_the_zone() -> None:
+    """밴드가 존 전체보다 불리하면 그 순간엔 주문이 없다(WAN-75 규칙 3).
+
+    오프셋이 이 기각을 되살리면 안 된다 — 정적 경로와 같은 계약이다(WAN-99).
+    """
+    ob = OrderBlock(
+        direction=OrderBlockDirection.BULLISH,
+        top=100.0,
+        bottom=90.0,
+        start_time=0,
+        confirmed_time=0,
+        ob_volume=1.0,
+        ob_low_volume=1.0,
+        ob_high_volume=1.0,
+    )
+    filt = DeviationFilterParams(anchor="sma", sma_length=20, width_kind="stdev", width_value=2.0)
+    provider = _IntrabarLiveLimit(
+        band=RealtimeBand.seed_from_closed([50.0] * 19, filt),
+        order_block=ob,
+        is_long=True,
+        params=ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime"),
+        stop_price=90.0,
+        lines=[],
+    )
+    # 밴드 = 50 → 존 하단(90)보다 아래 = 존 전체가 밴드에 못 미친다 → 진입 없음.
+    assert provider.limit_price(50.0) is None
+
+
+def test_intrabar_live_rejects_min_rr_gate_instead_of_ignoring_it() -> None:
+    """WAN-119: 진입가가 봉내에 정해지므로 탭 봉의 손익비 게이트를 판정할 수 없다.
+
+    조용히 건너뛰면 게이트를 켠 채 안 걸린 결과가 나온다(채택 기본값은 `min_rr=None`이라
+    이 조합은 실제로 쓰이지 않는다 — 그래도 지어내지 않고 거부한다).
+    """
+    htf, one_min = _synthetic_pair()
+    params = _bollinger("intrabar_live").model_copy(update={"min_rr": 1.5})
+    with pytest.raises(ValueError, match="min_rr"):
+        build_zone_limit_candidates(
+            htf_df=htf, df_1m=one_min, timeframe="1h", params=params, cfg=BacktestConfig()
+        )
+
+
+def test_intrabar_live_diagnostic_has_no_limit_price_when_unfilled() -> None:
+    """WAN-119: 미체결 셋업엔 단일 주문 가격이 없다 — 지어내지 않고 `None`이다.
+
+    밴드가 봉내에 움직이므로 "그 셋업의 지정가"라는 상수가 존재하지 않는다. 정적 모드와
+    달리 진단 레코드가 그 사실을 그대로 남겨야 사후 분석이 착각하지 않는다.
+    """
+    htf, one_min = _synthetic_pair()
+    sink: list[SetupDiagnostic] = []
+    build_zone_limit_candidates(
+        htf_df=htf,
+        df_1m=one_min,
+        timeframe="1h",
+        params=_bollinger("intrabar_live"),
+        cfg=BacktestConfig(),
+        setup_sink=sink,
+    )
+    assert sink, "전제: 진단 레코드가 쌓인다"
+    for s in sink:
+        if s.filled:
+            assert s.limit_price is not None
+        else:
+            assert s.limit_price is None
+
+
 def test_deviation_filter_does_not_increase_eligible_setups() -> None:
     htf, one_min = _synthetic_pair()
     base = ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime", short_enabled=True)
@@ -590,6 +692,8 @@ def test_zone_limit_offset_applies_on_top_of_deviation_filter_price() -> None:
         # 전제: 이 셋업은 볼린저가 존 근단을 실제로 덮어쓴 케이스다. 그렇지 않으면
         # "볼린저 가격 위에 얹혔다"와 "존 근단 위에 얹혔다"를 구분할 수 없다.
         assert before.limit_price != unfiltered[before.trigger_time]
+        # 정적 밴드 모드라 주문 가격은 탭 봉에서 상수로 정해진다(None은 live 모드 전용).
+        assert before.limit_price is not None
         sign = 1.0 if before.side is PositionSide.LONG else -1.0
         expected = before.limit_price * (1.0 + sign * offset_bps / 10_000.0)
         assert after.limit_price == pytest.approx(expected, rel=1e-12)

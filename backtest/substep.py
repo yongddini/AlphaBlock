@@ -36,6 +36,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Protocol
 
 import pandas as pd
 
@@ -78,6 +79,40 @@ class SubStep:
     htf_bar_time: int
 
 
+class LiveLimitProvider(Protocol):
+    """봉내에 **움직이는 지정가**를 공급하는 계약 (WAN-119).
+
+    `band_bar="intrabar_live"`는 밴드의 20번째 표본이 현재가라 봉 내부에서 값이 계속
+    변한다 — 즉 지정가가 탭 봉 시점에 한 번 정해지는 상수가 아니다. 이 시뮬레이터는
+    오더블록·밴드·오프셋 규칙을 모르므로(셋업 하나의 체결·청산만 본다), 그 재산정을
+    호출부가 이 계약으로 주입한다. 구현은 `backtest.zone_limit_backtest`에 있다.
+
+    `RealtimeRsi`와 **같은 생애주기**를 갖는다: 상위TF 봉이 마감되면 `commit`으로 상태를
+    굴리고, 매 서브스텝 `limit_price(현재가)`로 그 순간의 주문 가격을 읽는다.
+    """
+
+    def commit(self, closed_price: float) -> None:
+        """상위TF 봉 마감 — 그 확정 종가로 밴드 상태를 굴린다."""
+        ...
+
+    def limit_price(self, live_price: float) -> float | None:
+        """이 순간 주문판에 걸려 있는 지정가. `None`이면 **주문이 없다**.
+
+        `None`인 경우: 밴드 워밍업이라 값을 못 내거나(WAN-75), 밴드가 존 전체보다 불리해
+        진입하지 않는 구간(WAN-75 규칙 3). 밴드가 움직이므로 이 판정은 서브스텝마다
+        달라질 수 있다 — 지금 주문이 없어도 다음 스텝에 생길 수 있다.
+        """
+        ...
+
+    def take_profit_price(self, limit_price: float) -> float | None:
+        """체결가가 정해진 **그 순간** 산출하는 익절 목표가.
+
+        진입가가 봉내에 정해지므로 1R(진입가→무효화 경계)도, 그 배수인 고정 R 익절
+        목표도 체결 전에는 알 수 없다.
+        """
+        ...
+
+
 @dataclass(frozen=True)
 class ZoneLimitOutcome:
     """`simulate_zone_limit_trade`의 결과."""
@@ -89,6 +124,16 @@ class ZoneLimitOutcome:
     exit_time: int | None = None
     exit_price: float | None = None
     exit_reason: SignalExitReason | None = None
+    order_rested: bool = True
+    """이 셋업에 주문이 **한 번이라도 주문판에 걸렸는지** (WAN-119).
+
+    상수 지정가(`limit_price`)면 언제나 참이다 — 주문 가격이 탭 봉에서 이미 정해져 있다.
+    `live_limit`이면 밴드가 움직이며 "지금은 주문 없음"(워밍업·WAN-75 규칙 3 기각)이
+    나올 수 있고, 끝까지 한 번도 걸리지 않으면 거짓이다.
+
+    체결률(`filled/eligible`)의 **분모를 모드 간에 맞추는** 값이다: 정적 모드는 밴드가
+    기각한 셋업을 탭 봉에서 걸러내 분모에 넣지 않는데, live 모드가 그것까지 세면 같은
+    표의 체결률 열이 서로 다른 것을 재게 된다."""
 
     @property
     def filled(self) -> bool:
@@ -124,7 +169,8 @@ def build_substeps(df_1m: pd.DataFrame, htf_ms: int) -> list[SubStep]:
 def simulate_zone_limit_trade(
     *,
     direction: OrderBlockDirection,
-    limit_price: float,
+    limit_price: float | None = None,
+    live_limit: LiveLimitProvider | None = None,
     stop_price: float,
     substeps: Sequence[SubStep],
     rsi_state: RealtimeRsi,
@@ -160,17 +206,39 @@ def simulate_zone_limit_trade(
     `tap_index`를 아는 호출부만 판정할 수 있고, 이 시뮬레이터는 셋업 하나만 보므로
     스스로 알 수 없다. 참이면 RSI 게이트를 건너뛰고 **워밍업(RSI None)이어도** 지정가
     터치 즉시 체결한다(따라서 `cancel_on_condition_fail`의 조건 실패 취소도 타지 않는다).
+
+    지정가는 `limit_price`(상수) **또는** `live_limit`(봉내 재산정, WAN-119) 중 정확히
+    하나로 준다. `live_limit`을 쓰면 익절 목표도 체결 순간에 그 계약이 내므로
+    `take_profit_price`를 함께 줄 수 없다 — 둘 다 주면 어느 쪽이 이겼는지 결과만 보고는
+    알 수 없어(WAN-95의 "라벨과 실제 실행이 갈라진다") 조용히 무시하지 않고 거부한다.
     """
     if not substeps:
-        return ZoneLimitOutcome(status=ZoneLimitStatus.NO_TOUCH)
+        # 서브스텝이 없으면 live 밴드는 값을 낼 기회조차 없었다 = 주문이 걸린 적 없다.
+        return ZoneLimitOutcome(status=ZoneLimitStatus.NO_TOUCH, order_rested=live_limit is None)
     if penetration_bps < 0.0:
         raise ValueError(f"penetration_bps는 음수일 수 없습니다: {penetration_bps}")
+    if (limit_price is None) == (live_limit is None):
+        raise ValueError("limit_price와 live_limit 중 정확히 하나를 줘야 합니다.")
+    if live_limit is not None and take_profit_price is not None:
+        raise ValueError(
+            "live_limit을 쓰면 익절 목표는 체결 순간에 산출되므로 "
+            "take_profit_price를 함께 줄 수 없습니다."
+        )
 
     is_long = direction is OrderBlockDirection.BULLISH
-    # 관통 요구: 체결로 인정할 가격 문턱. 롱은 지정가 아래로, 숏은 위로 그만큼 지나가야 한다.
-    penetration = limit_price * (penetration_bps / 10_000.0)
-    fill_trigger = limit_price - penetration if is_long else limit_price + penetration
 
+    def _fill_trigger(price: float) -> float:
+        """체결로 인정할 가격 문턱. 롱은 지정가 아래로, 숏은 위로 그만큼 관통해야 한다."""
+        penetration = price * (penetration_bps / 10_000.0)
+        return price - penetration if is_long else price + penetration
+
+    # 상수 지정가면 문턱도 상수다(`live_limit`이면 서브스텝마다 다시 낸다).
+    static_trigger = None if limit_price is None else _fill_trigger(limit_price)
+    # 청산 판정에 쓰는 익절 목표. `live_limit`이면 체결 순간에 정해진다.
+    active_tp = take_profit_price
+
+    # 상수 지정가는 탭 봉부터 이미 주문판에 걸려 있다. live는 밴드가 값을 낸 순간부터다.
+    order_rested = live_limit is None
     current_htf = substeps[0].htf_bar_time
     htf_elapsed = 0  # 주문 이후 마감된 상위TF 봉 수
     running_close: float | None = None
@@ -184,6 +252,8 @@ def simulate_zone_limit_trade(
         if step.htf_bar_time != current_htf:
             if running_close is not None:
                 rsi_state.commit(running_close)
+                if live_limit is not None:
+                    live_limit.commit(running_close)
             current_htf = step.htf_bar_time
             htf_elapsed += 1
         running_close = step.close
@@ -191,10 +261,28 @@ def simulate_zone_limit_trade(
         if not position_open:
             # 미체결 취소: 오더블록 무효화가 먼저(보수적), 그다음 유효기간 경과.
             if invalidation_time is not None and step.time >= invalidation_time:
-                return ZoneLimitOutcome(status=ZoneLimitStatus.CANCELLED_INVALIDATED)
+                return ZoneLimitOutcome(
+                    status=ZoneLimitStatus.CANCELLED_INVALIDATED, order_rested=order_rested
+                )
             if limit_valid_bars is not None and htf_elapsed >= limit_valid_bars:
-                return ZoneLimitOutcome(status=ZoneLimitStatus.CANCELLED_EXPIRED)
+                return ZoneLimitOutcome(
+                    status=ZoneLimitStatus.CANCELLED_EXPIRED, order_rested=order_rested
+                )
 
+            if live_limit is None:
+                assert static_trigger is not None
+                current_limit, fill_trigger = limit_price, static_trigger
+            else:
+                # WAN-119: 밴드가 현재가를 표본으로 쓰므로 지정가가 봉내에 움직인다.
+                # `None`이면 지금 주문판에 주문이 없다 — 다음 스텝에 생길 수 있으므로
+                # 셋업을 끝내지 않고 그냥 넘어간다.
+                current_limit = live_limit.limit_price(step.close)
+                if current_limit is None:
+                    continue
+                order_rested = True
+                fill_trigger = _fill_trigger(current_limit)
+
+            assert current_limit is not None
             touched = step.low <= fill_trigger if is_long else step.high >= fill_trigger
             if touched:
                 live_rsi = rsi_state.value(step.close)
@@ -214,16 +302,22 @@ def simulate_zone_limit_trade(
                 if condition:
                     position_open = True
                     entry_time = step.time
-                    entry_price = limit_price
+                    entry_price = current_limit
                     entry_rsi = live_rsi
+                    if live_limit is not None:
+                        # 1R = 진입가→무효화 경계라 체결가가 정해진 지금에야 익절 목표가 나온다.
+                        active_tp = live_limit.take_profit_price(current_limit)
                     # 관통 방지: 같은 스텝에서 손절/익절을 곧바로 재판정한다(아래로 진행).
                 elif cancel_on_condition_fail:
-                    return ZoneLimitOutcome(status=ZoneLimitStatus.CANCELLED_CONDITION_FAILED)
+                    return ZoneLimitOutcome(
+                        status=ZoneLimitStatus.CANCELLED_CONDITION_FAILED,
+                        order_rested=order_rested,
+                    )
 
         if position_open:
             stop_hit = step.low <= stop_price if is_long else step.high >= stop_price
-            tp_hit = take_profit_price is not None and (
-                step.high >= take_profit_price if is_long else step.low <= take_profit_price
+            tp_hit = active_tp is not None and (
+                step.high >= active_tp if is_long else step.low <= active_tp
             )
             if stop_hit and (not tp_hit or stop_before_tp):
                 return ZoneLimitOutcome(
@@ -234,6 +328,7 @@ def simulate_zone_limit_trade(
                     exit_time=step.time,
                     exit_price=stop_price,
                     exit_reason=SignalExitReason.STOP_LOSS,
+                    order_rested=order_rested,
                 )
             if tp_hit:
                 return ZoneLimitOutcome(
@@ -242,8 +337,9 @@ def simulate_zone_limit_trade(
                     entry_price=entry_price,
                     entry_rsi=entry_rsi,
                     exit_time=step.time,
-                    exit_price=take_profit_price,
+                    exit_price=active_tp,
                     exit_reason=SignalExitReason.TAKE_PROFIT,
+                    order_rested=order_rested,
                 )
 
     if position_open:
@@ -252,5 +348,6 @@ def simulate_zone_limit_trade(
             entry_time=entry_time,
             entry_price=entry_price,
             entry_rsi=entry_rsi,
+            order_rested=order_rested,
         )
-    return ZoneLimitOutcome(status=ZoneLimitStatus.NO_TOUCH)
+    return ZoneLimitOutcome(status=ZoneLimitStatus.NO_TOUCH, order_rested=order_rested)

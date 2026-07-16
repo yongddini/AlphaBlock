@@ -75,6 +75,7 @@ from strategy.models import (
     deviation_entry_price,
 )
 from strategy.order_blocks import OrderBlockDetector
+from strategy.realtime_band import RealtimeBand
 from strategy.realtime_rsi import RealtimeRsi
 
 logger = logging.getLogger(__name__)
@@ -168,7 +169,10 @@ class SetupDiagnostic:
     tap_close: float
     """탭 봉 종가 = 가상 진입가(= A안이 실제로 지불했을 가격)."""
     side: PositionSide
-    limit_price: float
+    limit_price: float | None
+    """주문이 걸린 지정가. `band_bar="intrabar_live"`(WAN-119)에서는 밴드가 봉내에
+    움직여 **미체결 셋업에 단일 주문 가격이 존재하지 않으므로**, 체결됐으면 실제 체결가,
+    아니면 `None`이다. 다른 모드에서는 항상 값이 있다(탭 봉에서 상수로 정해진다)."""
     stop_price: float
     filled: bool
     """보수화를 적용한 뒤 최종적으로 체결됐는지."""
@@ -222,6 +226,47 @@ def _take_profit_price(is_long: bool, entry_price: float, lines: list[float]) ->
         return min(beyond) if beyond else None
     beyond = [v for v in lines if v < entry_price]
     return max(beyond) if beyond else None
+
+
+@dataclass
+class _IntrabarLiveLimit:
+    """`band_bar="intrabar_live"`(WAN-119)의 봉내 지정가 공급자 — `LiveLimitProvider` 구현.
+
+    시뮬레이터는 오더블록·밴드·오프셋 규칙을 모르므로(셋업 하나의 체결·청산만 본다),
+    "지금 이 순간 주문판에 걸려 있는 가격"을 이 객체가 낸다. 가격 확정 순서는 정적
+    경로(WAN-99)와 **완전히 같다**: 밴드 → `deviation_entry_price`(볼린저가 이김,
+    기각 시 주문 없음) → `apply_zone_limit_offset`. 달라지는 건 밴드가 상수가 아니라
+    **매 서브스텝 현재가로 다시 계산된다**는 것뿐이다.
+    """
+
+    band: RealtimeBand
+    order_block: OrderBlock
+    is_long: bool
+    params: ConfluenceParams
+    stop_price: float
+    lines: list[float]
+
+    @property
+    def _direction_sign(self) -> int:
+        return 1 if self.is_long else -1
+
+    def commit(self, closed_price: float) -> None:
+        self.band.commit(closed_price)
+
+    def limit_price(self, live_price: float) -> float | None:
+        d_sign = self._direction_sign
+        band = self.band.value(live_price, d_sign)
+        if band is None:
+            return None  # WAN-75: 워밍업이라 판정 불가.
+        price = deviation_entry_price(d_sign, self.order_block, band)
+        if price is None:
+            return None  # WAN-75 규칙 3: 밴드가 존 전체보다 불리 — 지금은 주문이 없다.
+        return self.params.apply_zone_limit_offset(price, is_long=self.is_long)
+
+    def take_profit_price(self, limit_price: float) -> float | None:
+        return _resolve_take_profit(
+            self.params, self.is_long, limit_price, self.stop_price, self.lines
+        )
 
 
 def _resolve_take_profit(
@@ -488,10 +533,28 @@ def build_zone_limit_candidates(
         dev_frame = emas(htf_df, lengths=(dev_length,), source=params.source)
         deviation_ema = dev_frame[f"ema_{dev_length}"]
 
+    # WAN-119: `intrabar_live`는 밴드가 봉내에 움직이므로 봉 단위 시리즈로 표현할 수 없다
+    # — 정적 밴드 대신 서브스텝마다 값을 내는 `RealtimeBand`를 셋업별로 만들어 쓴다.
+    deviation = params.deviation_filter
+    live_band_mode = deviation is not None and deviation.band_bar == "intrabar_live"
+    if live_band_mode:
+        if params.min_rr is not None:
+            raise ValueError(
+                "band_bar='intrabar_live'는 min_rr 게이트를 지원하지 않습니다 — "
+                "손익비는 진입가에 달렸는데 진입가가 봉내에 정해지므로 탭 봉 시점에 "
+                "판정할 수 없습니다(채택 기본값은 min_rr=None)."
+            )
+        if params.source != "close":
+            raise ValueError(
+                f"band_bar='intrabar_live'는 source='close'만 지원합니다: {params.source!r} — "
+                "서브스텝이 공급하는 현재가는 체결 가격이라 hl2 같은 합성 소스의 "
+                "실시간 대응값이 없습니다."
+            )
+
     filter_components: tuple[list[float], list[float]] | None = None
-    if params.deviation_filter is not None:
+    if deviation is not None and not live_band_mode:
         filter_components = ConfluenceStrategy.deviation_filter_components(
-            htf_df, params.deviation_filter, params.source
+            htf_df, deviation, params.source
         )
     line_snapshots = _line_snapshots(params, htf_df)
 
@@ -522,15 +585,15 @@ def build_zone_limit_candidates(
         if not is_long and not params.short_enabled:
             continue  # WAN-68: 숏 완전 제거 게이트.
 
-        limit_price = params.zone_limit_price(ob)
+        limit_price: float | None = params.zone_limit_price(ob)
         if filter_components is not None:
-            assert params.deviation_filter is not None
+            assert deviation is not None
             anchor_vals, width_vals = filter_components
             d_sign = 1 if is_long else -1
             # WAN-115: `band_bar="prev_closed"`면 직전 확정봉의 밴드를 읽는다 — 탭 봉
             # 자신의 SMA20은 그 봉 종가를 포함하는데 체결은 봉 **내부**라 룩어헤드다.
             band = ConfluenceStrategy.deviation_band_at(
-                pos, d_sign, anchor_vals, width_vals, params.deviation_filter.band_bar
+                pos, d_sign, anchor_vals, width_vals, deviation.band_bar
             )
             if band is None:
                 continue  # WAN-75: 워밍업 중이라 판정 불가(WAN-115: 구간 첫 봉 포함).
@@ -538,17 +601,23 @@ def build_zone_limit_candidates(
             if new_price is None:
                 continue  # WAN-75: 밴드가 존 전체보다 불리한 쪽 — 진입하지 않음(규칙 3).
             limit_price = new_price
-        # WAN-99: 체결 오프셋은 **볼린저 재산정 뒤에** 얹는다 — WAN-95의 "볼린저가 이긴다"
-        # 규칙을 깨지 않기 위해서다. 위 `continue`(밴드가 "진입 없음" 판정)를 지나온
-        # 셋업에만 적용되므로 오프셋이 진입 자체를 되살리는 일도 없다. 여기서 확정된
-        # 가격이 아래 min_rr 게이트·손절 거리(1R)·익절 목표의 기준이 된다.
-        limit_price = params.apply_zone_limit_offset(limit_price, is_long=is_long)
         lines = line_snapshots[pos] if line_snapshots is not None else []
-        lines_by_key = {str(i): v for i, v in enumerate(lines)}
-        if params.min_rr is not None and not ConfluenceStrategy._passes_min_rr(
-            1 if is_long else -1, limit_price, ob, lines_by_key, params.min_rr
-        ):
-            continue  # WAN-68: 최소 손익비 게이트.
+        if live_band_mode:
+            # WAN-119: 지정가·1R·익절 목표가 전부 봉내 체결 순간에 정해진다 — 탭 봉
+            # 시점에는 값이 없다. 지어내지 않고 `None`으로 두고 아래에서 공급자를 만든다.
+            limit_price = None
+        else:
+            # WAN-99: 체결 오프셋은 **볼린저 재산정 뒤에** 얹는다 — WAN-95의 "볼린저가
+            # 이긴다" 규칙을 깨지 않기 위해서다. 위 `continue`(밴드가 "진입 없음" 판정)를
+            # 지나온 셋업에만 적용되므로 오프셋이 진입 자체를 되살리는 일도 없다. 여기서
+            # 확정된 가격이 아래 min_rr 게이트·손절 거리(1R)·익절 목표의 기준이 된다.
+            assert limit_price is not None  # live 모드에서만 None이고 여기는 그 반대 갈래다.
+            limit_price = params.apply_zone_limit_offset(limit_price, is_long=is_long)
+            lines_by_key = {str(i): v for i, v in enumerate(lines)}
+            if params.min_rr is not None and not ConfluenceStrategy._passes_min_rr(
+                1 if is_long else -1, limit_price, ob, lines_by_key, params.min_rr
+            ):
+                continue  # WAN-68: 최소 손익비 게이트.
         if is_long and params.long_max_deviation is not None:
             assert deviation_ema is not None
             if not ConfluenceStrategy._passes_deviation_gate(
@@ -567,12 +636,28 @@ def build_zone_limit_candidates(
         if setup_substeps[0].htf_bar_time != tap_htf:
             continue  # 탭 봉에 1분봉 커버 없음 → 평가 제외.
 
-        eligible += 1
         stop_price = ob.bottom if is_long else ob.top
-        tp_price = _resolve_take_profit(params, is_long, limit_price, stop_price, lines)
+        tp_price = (
+            None
+            if limit_price is None
+            else _resolve_take_profit(params, is_long, limit_price, stop_price, lines)
+        )
 
         cut = bisect.bisect_left(times, setup_substeps[0].htf_bar_time)
         rsi_state = rsi_seeder.seed(cut)
+        live_limit: _IntrabarLiveLimit | None = None
+        if live_band_mode:
+            assert deviation is not None
+            # 탭 봉 **직전까지의** 확정봉으로 시딩한다 — 탭 봉 종가를 넣는 순간 그것이
+            # 곧 WAN-115가 잡아낸 룩어헤드다. 20번째 표본 자리는 현재가 몫으로 비운다.
+            live_limit = _IntrabarLiveLimit(
+                band=RealtimeBand.seed_from_closed(closes[:cut], deviation),
+                order_block=ob,
+                is_long=is_long,
+                params=params,
+                stop_price=stop_price,
+                lines=lines,
+            )
         # WAN-100 갭A: 첫 탭 면제는 `tap_index`를 아는 여기서만 판정할 수 있다 —
         # 시뮬레이터는 셋업 하나만 보므로 몇 번째 탭인지 모른다. A안
         # (`ConfluenceStrategy._evaluate_entry`)과 같은 조건이며, 병합 존이면
@@ -581,6 +666,7 @@ def build_zone_limit_candidates(
         outcome = simulate_zone_limit_trade(
             direction=ob.direction,
             limit_price=limit_price,
+            live_limit=live_limit,
             stop_price=stop_price,
             substeps=setup_substeps,
             rsi_state=rsi_state,
@@ -597,6 +683,14 @@ def build_zone_limit_candidates(
             first_tap_free=first_tap_free,
         )
 
+        if not outcome.order_rested:
+            # WAN-119: live 밴드가 이 셋업에 **끝까지 주문을 걸지 못했다**(워밍업이거나
+            # 밴드가 줄곧 존보다 불리 = WAN-75 규칙 3). 정적 모드는 같은 셋업을 탭 봉에서
+            # `continue`로 걸러내 분모(eligible)에 넣지 않으므로, 여기서도 세지 않아야
+            # 체결률이 모드 간 같은 것을 잰다.
+            continue
+
+        eligible += 1
         is_filled = (
             outcome.filled and outcome.entry_time is not None and outcome.entry_price is not None
         )
@@ -618,7 +712,9 @@ def build_zone_limit_candidates(
                     tap_bar_time=tap_htf,
                     tap_close=closes[pos],
                     side=side,
-                    limit_price=limit_price,
+                    # WAN-119 live 모드엔 상수 주문 가격이 없다 — 체결됐으면 그때 걸려
+                    # 있던 실제 가격, 아니면 `None`(지어내지 않는다).
+                    limit_price=limit_price if limit_price is not None else outcome.entry_price,
                     stop_price=stop_price,
                     filled=is_filled,
                     dropped=is_dropped,
