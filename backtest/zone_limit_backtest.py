@@ -230,13 +230,22 @@ def _take_profit_price(is_long: bool, entry_price: float, lines: list[float]) ->
 
 @dataclass
 class _IntrabarLiveLimit:
-    """`band_bar="intrabar_live"`(WAN-119)의 봉내 지정가 공급자 — `LiveLimitProvider` 구현.
+    """봉내 지정가 공급자 — `LiveLimitProvider` 구현 (WAN-119 · WAN-120).
 
     시뮬레이터는 오더블록·밴드·오프셋 규칙을 모르므로(셋업 하나의 체결·청산만 본다),
     "지금 이 순간 주문판에 걸려 있는 가격"을 이 객체가 낸다. 가격 확정 순서는 정적
     경로(WAN-99)와 **완전히 같다**: 밴드 → `deviation_entry_price`(볼린저가 이김,
     기각 시 주문 없음) → `apply_zone_limit_offset`. 달라지는 건 밴드가 상수가 아니라
-    **매 서브스텝 현재가로 다시 계산된다**는 것뿐이다.
+    **매 서브스텝 다시 계산된다**는 것뿐이다.
+
+    `pending_price`(WAN-120 `intrabar_causal`)를 주면 밴드의 20번째 표본으로 **직전
+    서브스텝 종가**를 쓴다 — `intrabar_live`가 남긴 잔여 1분 룩어헤드를 0으로 만든
+    변형이다(그 분이 시작될 때 이미 알던 가격만 쓴다). `None`이면 현재가를 그대로 쓰는
+    `intrabar_live`다.
+
+    ⚠️ **인과 모드는 호출부가 `limit_price`를 서브스텝마다 정확히 한 번, 시간 순서대로
+    부른다는 계약에 기댄다** — 지연선(delay line)이 그 호출로 굴러가기 때문이다.
+    `simulate_zone_limit_trade`의 미체결 루프가 그 계약이고, 테스트가 고정한다.
     """
 
     band: RealtimeBand
@@ -245,6 +254,13 @@ class _IntrabarLiveLimit:
     params: ConfluenceParams
     stop_price: float
     lines: list[float]
+    pending_price: float | None = None
+    """인과 모드의 지연선: 다음 `limit_price` 호출이 밴드 표본으로 쓸 가격.
+
+    셋업 첫 서브스텝 직전 1분봉 종가로 시딩된다(= 그 분이 시작될 때 이미 알던 마지막
+    가격). `None`이면 인과 모드가 아니거나(현재가 사용) 아직 아는 가격이 없다.
+    """
+    causal: bool = False
 
     @property
     def _direction_sign(self) -> int:
@@ -254,8 +270,16 @@ class _IntrabarLiveLimit:
         self.band.commit(closed_price)
 
     def limit_price(self, live_price: float) -> float | None:
+        # WAN-120: 인과 모드는 **직전** 서브스텝 종가로 밴드를 낸다. 지연선을 먼저 굴려
+        # 이번 호출이 쓸 표본을 정하고(`sample`), 현재가는 다음 호출 몫으로 남긴다.
+        sample = live_price
+        if self.causal:
+            sample_or_none, self.pending_price = self.pending_price, live_price
+            if sample_or_none is None:
+                return None  # 아직 아는 가격이 없다 — 주문을 낼 근거가 없다.
+            sample = sample_or_none
         d_sign = self._direction_sign
-        band = self.band.value(live_price, d_sign)
+        band = self.band.value(sample, d_sign)
         if band is None:
             return None  # WAN-75: 워밍업이라 판정 불가.
         price = deviation_entry_price(d_sign, self.order_block, band)
@@ -533,20 +557,27 @@ def build_zone_limit_candidates(
         dev_frame = emas(htf_df, lengths=(dev_length,), source=params.source)
         deviation_ema = dev_frame[f"ema_{dev_length}"]
 
-    # WAN-119: `intrabar_live`는 밴드가 봉내에 움직이므로 봉 단위 시리즈로 표현할 수 없다
-    # — 정적 밴드 대신 서브스텝마다 값을 내는 `RealtimeBand`를 셋업별로 만들어 쓴다.
+    # WAN-119/120: 봉내 밴드(`intrabar_live`·`intrabar_causal`)는 값이 봉 안에서 움직이므로
+    # 봉 단위 시리즈로 표현할 수 없다 — 정적 밴드 대신 서브스텝마다 값을 내는
+    # `RealtimeBand`를 셋업별로 만들어 쓴다. 두 모드는 밴드 표본으로 현재가를 쓰느냐
+    # 직전 서브스텝 종가를 쓰느냐만 다르고, 아래 제약은 똑같이 적용된다.
     deviation = params.deviation_filter
-    live_band_mode = deviation is not None and deviation.band_bar == "intrabar_live"
+    causal_band_mode = deviation is not None and deviation.band_bar == "intrabar_causal"
+    live_band_mode = deviation is not None and (
+        deviation.band_bar == "intrabar_live" or causal_band_mode
+    )
     if live_band_mode:
+        assert deviation is not None
+        mode = deviation.band_bar
         if params.min_rr is not None:
             raise ValueError(
-                "band_bar='intrabar_live'는 min_rr 게이트를 지원하지 않습니다 — "
+                f"band_bar={mode!r}는 min_rr 게이트를 지원하지 않습니다 — "
                 "손익비는 진입가에 달렸는데 진입가가 봉내에 정해지므로 탭 봉 시점에 "
                 "판정할 수 없습니다(채택 기본값은 min_rr=None)."
             )
         if params.source != "close":
             raise ValueError(
-                f"band_bar='intrabar_live'는 source='close'만 지원합니다: {params.source!r} — "
+                f"band_bar={mode!r}는 source='close'만 지원합니다: {params.source!r} — "
                 "서브스텝이 공급하는 현재가는 체결 가격이라 hl2 같은 합성 소스의 "
                 "실시간 대응값이 없습니다."
             )
@@ -650,6 +681,11 @@ def build_zone_limit_candidates(
             assert deviation is not None
             # 탭 봉 **직전까지의** 확정봉으로 시딩한다 — 탭 봉 종가를 넣는 순간 그것이
             # 곧 WAN-115가 잡아낸 룩어헤드다. 20번째 표본 자리는 현재가 몫으로 비운다.
+            #
+            # WAN-120 인과 모드의 지연선은 셋업 **직전 1분봉 종가**로 시딩한다 — 첫 분이
+            # 시작될 때 봇이 이미 알던 마지막 가격이다. 비워 두면 첫 분에만 주문이 없어
+            # `intrabar_live`와 체결 기회가 어긋나고, 그 차이가 밴드 표본 차이로 오인된다.
+            pending = float(substeps[start - 1].close) if causal_band_mode and start > 0 else None
             live_limit = _IntrabarLiveLimit(
                 band=RealtimeBand.seed_from_closed(closes[:cut], deviation),
                 order_block=ob,
@@ -657,6 +693,8 @@ def build_zone_limit_candidates(
                 params=params,
                 stop_price=stop_price,
                 lines=lines,
+                pending_price=pending,
+                causal=causal_band_mode,
             )
         # WAN-100 갭A: 첫 탭 면제는 `tap_index`를 아는 여기서만 판정할 수 있다 —
         # 시뮬레이터는 셋업 하나만 보므로 몇 번째 탭인지 모른다. A안

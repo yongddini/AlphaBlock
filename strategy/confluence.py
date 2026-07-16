@@ -297,7 +297,7 @@ class ConfluenceStrategy:
         direction_sign: int,
         anchor_vals: list[float],
         width_vals: list[float],
-        band_bar: Literal["tap", "prev_closed", "intrabar_live"] = "tap",
+        band_bar: Literal["tap", "prev_closed", "intrabar_live", "intrabar_causal"] = "tap",
     ) -> float | None:
         """탭 봉 `pos`에서 쓸 밴드 값(`anchor - direction_sign*width`). 판정 불가면 `None`.
 
@@ -311,7 +311,18 @@ class ConfluenceStrategy:
         관찰의 다른 표현이다). 봉 **내부**에서 현재가가 움직이는 성질은 봉 단위로
         표현할 수 없으므로, B안(지정가)은 이 함수 대신 서브스텝마다 값을 다시 내는
         `strategy.realtime_band.RealtimeBand`를 쓴다.
+
+        `intrabar_causal`(WAN-120)은 **거부한다**. `intrabar_live`처럼 `tap`으로 접을 수
+        없기 때문이다 — 그 모드가 `tap`과 만나는 건 A안 진입 시점의 현재가가 정확히 탭 봉
+        종가라서인데, 이 모드가 쓰는 값은 **직전 1분봉 종가**라 탭 봉 종가와 다르고 봉
+        단위 시리즈에는 그 값이 없다. 조용히 `tap`으로 접으면 "인과 라벨을 달고 룩어헤드
+        값을 돌리는" 결과가 되므로(WAN-95의 교훈) 값을 지어내지 않고 거부한다.
         """
+        if band_bar == "intrabar_causal":
+            raise ValueError(
+                "band_bar='intrabar_causal'는 봉 단위 밴드로 표현할 수 없습니다 — "
+                "직전 1분봉 종가가 필요하므로 B안(지정가) 서브스텝 경로에서만 유효합니다."
+            )
         band_pos = pos - 1 if band_bar == "prev_closed" else pos
         if band_pos < 0:
             return None

@@ -31,6 +31,7 @@ from backtest.zone_limit_backtest import (
 )
 from common.costs import Liquidity
 from data.models import FundingRate
+from strategy.confluence import ConfluenceStrategy
 from strategy.indicators import emas, vwma
 from strategy.models import (
     ConfluenceParams,
@@ -598,6 +599,84 @@ def test_intrabar_live_diagnostic_has_no_limit_price_when_unfilled() -> None:
             assert s.limit_price is not None
         else:
             assert s.limit_price is None
+
+
+def _live_provider(*, causal: bool, pending_price: float | None = None) -> _IntrabarLiveLimit:
+    """봉내 공급자 하나 — 두 모드가 `causal`/`pending_price`만 다르게 갈린다."""
+    ob = OrderBlock(
+        direction=OrderBlockDirection.BULLISH,
+        top=100.0,
+        bottom=90.0,
+        start_time=0,
+        confirmed_time=0,
+        ob_volume=1.0,
+        ob_low_volume=1.0,
+        ob_high_volume=1.0,
+    )
+    filt = DeviationFilterParams(anchor="sma", sma_length=20, width_kind="stdev", width_value=2.0)
+    return _IntrabarLiveLimit(
+        band=RealtimeBand.seed_from_closed([95.0] * 19, filt),
+        order_block=ob,
+        is_long=True,
+        params=ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime"),
+        stop_price=90.0,
+        lines=[],
+        pending_price=pending_price,
+        causal=causal,
+    )
+
+
+def test_intrabar_causal_band_lags_live_by_exactly_one_substep() -> None:
+    """WAN-120: 인과 모드는 밴드 표본으로 **직전** 서브스텝 종가를 쓴다.
+
+    계약을 가장 좁게 고정하는 방법: 같은 가격 시퀀스를 두 공급자에 흘리면 인과 모드의
+    t번째 출력이 라이브 모드의 **t−1번째** 출력과 같아야 한다. 지연이 0이면(= 잔여 1분
+    룩어헤드가 그대로 남으면) 두 열이 겹쳐 이 테스트가 깨지고, 2분이면 어긋난다 — 즉
+    이 이슈가 재는 대상 자체가 배선됐는지를 고정한다.
+    """
+    prices = [95.0, 96.0, 94.0, 93.5, 97.0]
+    live = _live_provider(causal=False)
+    # 셋업 직전 1분봉 종가로 시딩 = 첫 분이 시작될 때 이미 알던 가격.
+    causal = _live_provider(causal=True, pending_price=prices[0])
+
+    live_out = [live.limit_price(p) for p in prices]
+    causal_out = [causal.limit_price(p) for p in prices[1:]]
+
+    assert causal_out == live_out[:-1]
+
+
+def test_intrabar_causal_has_no_order_until_a_price_is_known() -> None:
+    """지연선이 비어 있으면 주문이 없다 — 값을 지어내지 않는다.
+
+    시딩(`pending_price`)은 호출부가 셋업 직전 1분봉으로 해 준다. 그것조차 없는 구간
+    (데이터 첫 분)에서는 밴드 표본이 될 **과거 가격이 실제로 없으므로**, 현재가로 대신
+    채우면 그게 곧 이 모드가 없애려는 그 룩어헤드다.
+    """
+    causal = _live_provider(causal=True)
+    assert causal.limit_price(95.0) is None
+    # 첫 호출이 지연선을 채웠으므로 두 번째 호출부터 값이 나온다.
+    assert causal.limit_price(95.0) == pytest.approx(95.0 * (1.0 + 2.0 / 10_000.0), rel=1e-12)
+
+
+def test_intrabar_causal_is_rejected_by_the_bar_level_band() -> None:
+    """A안(봉 단위)은 이 모드를 표현할 수 없으므로 `tap`으로 접지 않고 거부한다.
+
+    `intrabar_live`는 A안 진입 시점의 현재가가 곧 탭 봉 종가라 `tap`과 만나지만, 인과
+    모드가 쓰는 값은 **직전 1분봉 종가**라 봉 단위 시리즈에 없다. 조용히 접으면 "인과
+    라벨을 달고 룩어헤드 값을 돌리는" WAN-95 부류의 사고가 된다.
+    """
+    with pytest.raises(ValueError, match="intrabar_causal"):
+        ConfluenceStrategy.deviation_band_at(5, 1, [100.0] * 10, [2.0] * 10, "intrabar_causal")
+
+
+def test_intrabar_causal_rejects_min_rr_gate_like_live_does() -> None:
+    """봉내 모드의 제약(WAN-119)은 인과 변형에도 그대로 걸린다 — 진입가가 봉내에 정해진다."""
+    htf, one_min = _synthetic_pair()
+    params = _bollinger("intrabar_causal").model_copy(update={"min_rr": 1.5})
+    with pytest.raises(ValueError, match="min_rr"):
+        build_zone_limit_candidates(
+            htf_df=htf, df_1m=one_min, timeframe="1h", params=params, cfg=BacktestConfig()
+        )
 
 
 def test_deviation_filter_does_not_increase_eligible_setups() -> None:
