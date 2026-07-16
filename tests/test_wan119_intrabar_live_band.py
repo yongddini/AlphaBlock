@@ -155,8 +155,10 @@ def test_window_is_pinned_like_wan115() -> None:
 
 def test_segments_split_is_two_thirds() -> None:
     is_seg, oos_seg = segments()
-    assert (is_seg.start_fraction, is_seg.end_fraction) == (0.0, pytest.approx(2 / 3))
-    assert (oos_seg.start_fraction, oos_seg.end_fraction) == (pytest.approx(2 / 3), 1.0)
+    assert is_seg.start_fraction == 0.0
+    assert is_seg.end_fraction == pytest.approx(2 / 3)
+    assert oos_seg.start_fraction == pytest.approx(2 / 3)
+    assert oos_seg.end_fraction == 1.0
 
 
 # --------------------------------------------------------------------------- #
