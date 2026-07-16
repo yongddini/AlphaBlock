@@ -1073,6 +1073,9 @@ def test_deviation_filter_default_is_bollinger() -> None:
     assert filt.sma_length == 20
     assert filt.width_kind == "stdev"
     assert filt.width_value == pytest.approx(2.0)
+    # WAN-115: 밴드 봉 기준의 기본값은 `tap`(탭 봉) — 룩어헤드 교정은 옵트인이다.
+    # 이 기본값이 움직이면 WAN-70/84/88/95/111/114 리포트의 엔진 정의가 통째로 흔들린다.
+    assert filt.band_bar == "tap"
     # 명시적으로 끄면(구 엔진) 필드 자체가 없던 이전 동작으로 돌아간다.
     assert ConfluenceParams(deviation_filter=None).deviation_filter is None
 
@@ -1151,6 +1154,34 @@ def test_deviation_band_at_returns_none_on_warmup_nan() -> None:
 def test_deviation_band_at_combines_anchor_and_signed_width() -> None:
     assert ConfluenceStrategy.deviation_band_at(0, 1, [100.0], [10.0]) == pytest.approx(90.0)
     assert ConfluenceStrategy.deviation_band_at(0, -1, [100.0], [10.0]) == pytest.approx(110.0)
+
+
+def test_deviation_band_at_prev_closed_reads_previous_bar() -> None:
+    """WAN-115: `prev_closed`는 탭 봉이 아니라 **직전 확정봉**의 밴드를 읽는다.
+
+    탭 봉(pos=1)의 값을 쓰면 그 봉 종가를 알아야 나오는 가격이라 B안(봉 내부 체결)에서
+    룩어헤드다. 두 봉의 값을 다르게 줘서 어느 쪽을 읽는지 가른다.
+    """
+    anchor_vals = [100.0, 200.0]  # [직전 확정봉, 탭 봉]
+    width_vals = [10.0, 20.0]
+
+    tap = ConfluenceStrategy.deviation_band_at(1, 1, anchor_vals, width_vals, "tap")
+    prev = ConfluenceStrategy.deviation_band_at(1, 1, anchor_vals, width_vals, "prev_closed")
+
+    assert tap == pytest.approx(180.0)  # 200 - 20 (탭 봉 자신 = 현행 = 룩어헤드)
+    assert prev == pytest.approx(90.0)  # 100 - 10 (직전 확정봉 = 교정)
+
+
+def test_deviation_band_at_prev_closed_has_no_previous_bar_at_pos_zero() -> None:
+    """WAN-115: 구간 첫 봉은 직전 봉이 없어 판정 불가 — 워밍업이 한 봉 늘어난다."""
+    assert ConfluenceStrategy.deviation_band_at(0, 1, [100.0], [10.0], "prev_closed") is None
+    # 직전 봉이 워밍업 NaN인 경우도 마찬가지로 판정 불가다.
+    assert (
+        ConfluenceStrategy.deviation_band_at(
+            1, 1, [float("nan"), 200.0], [10.0, 20.0], "prev_closed"
+        )
+        is None
+    )
 
 
 def test_deviation_filter_end_to_end_rule1_keeps_zone_boundary() -> None:
