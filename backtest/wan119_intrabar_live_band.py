@@ -529,35 +529,45 @@ def adopted_ladder(summary: pd.DataFrame, *, segment: str = SEGMENT_OOS) -> list
     return lines
 
 
-def selection_vs_price(steps: pd.DataFrame, *, segment: str = SEGMENT_OOS) -> list[str]:
+#: 「가격 쪽 손상」으로 부를 거래 수 변화의 상한. WAN-115가 `prev_closed`에서 관찰한 +3.0%가
+#: 이 안에 들어오는 크기이고, 그 정도면 "같은 셋업에 같은 빈도로 들어갔다"고 읽을 수 있다.
+PRICE_ONLY_TRADE_SHIFT = 0.10
+
+
+def selection_vs_price(symbol_frame: pd.DataFrame, *, segment: str = SEGMENT_OOS) -> list[str]:
     """손상이 「선별」인가 「가격」인가 — 거래 수가 그대로인데 수익만 움직이면 가격이다.
 
     WAN-115가 `prev_closed`에서 확인한 성질(거래 +3.0%인데 수익 −4.88%p)이 `intrabar_live`
     에서도 성립하는지 본다. 성립하면 세 밴드 정의는 **같은 셋업에 같은 빈도로 들어가되 값만
     다르게 매기는** 것이고, 곧 이 축의 차이는 순수하게 진입 **가격**이다.
+
+    ⚠️ 여기서 재는 건 **`L2`(채택 기본값) 대비** 변화이므로 `incremental`의 `L1→X` 증분을
+    빼서 만들면 안 된다 — 그 둘의 차는 분모가 `L1`이라(볼린저 없는 단은 체결률 100%라 거래가
+    가장 많다) 같은 이름의 다른 수가 된다. 그래서 심볼 프레임에서 `L2`→X를 직접 낸다.
     """
     lines: list[str] = []
+    view = symbol_frame[
+        (symbol_frame["segment"] == segment) & (symbol_frame["fill"] == OFFICIAL_LENS)
+    ]
     for timeframe in DEFAULT_TIMEFRAMES:
-        view = steps[
-            (steps["timeframe"] == timeframe)
-            & (steps["segment"] == segment)
-            & (steps["lens"] == OFFICIAL_LENS)
-        ].set_index("step")
+        cell = view[view["timeframe"] == timeframe]
+        if cell.empty:
+            continue
+        pivots = {
+            column: cell.pivot_table(index="symbol", columns="level", values=column)
+            for column in ("total_return", "num_trades", "fill_rate")
+        }
         for rung in (PREV_RUNG, LIVE_RUNG):
-            step = f"{BASE_RUNG}→{rung}"
-            tap_step = f"{BASE_RUNG}→{TAP_RUNG}"
-            if step not in view.index or tap_step not in view.index:
+            if not {TAP_RUNG, rung} <= set(pivots["total_return"].columns):
                 continue
-            d_ret = float(view.loc[step, "delta_return"]) - float(
-                view.loc[tap_step, "delta_return"]
-            )
-            trades = float(view.loc[step, "delta_trades_pct"]) - float(
-                view.loc[tap_step, "delta_trades_pct"]
-            )
+            d_ret = _mean_delta(pivots["total_return"], TAP_RUNG, rung)
+            trades = _relative(pivots["num_trades"], TAP_RUNG, rung)
+            d_fill = _mean_delta(pivots["fill_rate"], TAP_RUNG, rung)
+            kind = "가격" if abs(trades) < PRICE_ONLY_TRADE_SHIFT else "선별+가격"
             lines.append(
-                f"- **{timeframe} {segment}** `{rung}` vs 채택 기본값: 수익 "
+                f"- **{timeframe} {segment}** `{rung}` vs 채택 기본값(`{TAP_RUNG}`): 수익 "
                 f"**{d_ret * 100:+.2f}%p**인데 거래 수는 **{trades * 100:+.1f}%** "
-                f"— {'가격' if abs(trades) < 0.10 else '선별+가격'} 쪽 손상"
+                f"(체결률 {d_fill * 100:+.2f}%p) — **{kind}** 쪽 손상"
             )
     return lines
 
@@ -734,7 +744,7 @@ def write_summary(rows: Sequence[LiveBandRow], path: Path) -> None:
         "거래 수가 거의 그대로인데 수익만 움직이면 **같은 셋업에 같은 빈도로 들어가되 값만 다르게 "
         "매긴 것** = 가격이다(WAN-96/115와 같은 읽기).",
         "",
-        *selection_vs_price(steps, segment=SEGMENT_OOS),
+        *selection_vs_price(symbol_frame, segment=SEGMENT_OOS),
         "",
         "## 1. 본표 — 단별 심볼평균 (L1/L2/L2p/L2i × TF × 렌즈 × IS/OOS)",
         "",

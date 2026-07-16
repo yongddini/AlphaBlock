@@ -31,6 +31,7 @@ from backtest.wan119_intrabar_live_band import (
     rung_params,
     rung_summary,
     segments,
+    selection_vs_price,
     verdict,
 )
 from strategy.models import ConfluenceParams
@@ -240,3 +241,21 @@ def test_incremental_pairs_deltas_per_symbol() -> None:
     assert steps.loc["L1→L2i", "delta_return"] == pytest.approx(0.04)
     assert steps.loc["L1→L2i", "symbols_up"] == 1.0  # BTC만 올랐다
     assert steps.loc["L1→L2i", "symbols"] == 2.0
+
+
+def test_selection_vs_price_measures_trades_relative_to_the_adopted_default() -> None:
+    """거래 수 변화의 분모가 `L2`(채택 기본값)여야 한다 — `L1`이 아니다.
+
+    `incremental`의 `L1→X` 증분을 빼서 만들면 분모가 `L1`이 된다. `L1`은 볼린저가 꺼져
+    체결률 100%라 거래가 가장 많으므로(WAN-114), 같은 이름의 **다른 수**가 조용히 나온다.
+    """
+    rows = [
+        # L2 = 100건 · L2i = 110건 → L2 대비 +10.0% (L1 대비로 재면 +5.0%로 절반이 된다)
+        _row(level="L1", symbol="BTC/USDT:USDT", total_return=0.0, num_trades=200),
+        _row(level="L2", symbol="BTC/USDT:USDT", total_return=0.10, num_trades=100),
+        _row(level="L2i", symbol="BTC/USDT:USDT", total_return=0.06, num_trades=110),
+    ]
+    line = selection_vs_price(per_symbol(rows), segment="oos")[0]
+    assert "+10.0%" in line
+    assert "-4.00%p" in line  # 수익은 L2 대비로 뺀다
+    assert "선별+가격" in line  # 10%는 문턱(<10%) 밖이다
