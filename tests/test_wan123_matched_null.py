@@ -26,6 +26,8 @@ from backtest.wan70_random_control_b import (
     run_random_control_b_segment,
 )
 from backtest.wan88_long_only_validation import _MIN_TRADES_FOR_VERDICT as WAN88_MIN_TRADES
+from backtest.wan88_long_only_validation import NULL_FILL_LEVELS as WAN88_NULL_LENSES
+from backtest.wan123_fill_conservatism import LENS_NAMES as FILL_REPORT_LENSES
 from backtest.wan123_matched_null import (
     LENS_NAMES,
     MIN_TRADES_FOR_VERDICT,
@@ -188,10 +190,19 @@ def test_verdict_ruler_matches_wan70_84_88() -> None:
     assert MIN_TRADES_FOR_VERDICT == WAN88_MIN_TRADES == 20
 
 
-def test_lens_axis_matches_the_repo_lenses() -> None:
-    assert LENS_NAMES == ("baseline", "pen_5bp", "pen_5bp_drop_50")
+def test_null_lens_axis_matches_wan88_and_excludes_the_stress_lens() -> None:
+    """널의 렌즈 축은 WAN-88과 같다 — 스트레스 렌즈는 뺀다.
+
+    이슈(WAN-124)는 널에도 3렌즈를 요구했지만, 탈락 추첨의 시드 잡음 위에 부트스트랩
+    난수를 얹으면 p값이 「엔진이 뭘 하는가」가 아니라 「시드를 어떻게 뽑았는가」를 잰다
+    (WAN-88이 아예 제외한 근거). 3렌즈 요구는 **3단 표**가 채운다 — 그쪽은 부트스트랩이
+    없어 난수가 탈락 추첨 하나뿐이다.
+    """
+    assert LENS_NAMES == WAN88_NULL_LENSES == ("baseline", "pen_5bp")
     assert OFFICIAL_LENS == "baseline"  # WAN-104 공식 렌즈.
-    assert STRESS_LENS == "pen_5bp_drop_50"
+    assert STRESS_LENS not in LENS_NAMES
+    # 3렌즈는 3단 표가 낸다 — 이슈 요구가 어디서 충족되는지 코드로 고정한다.
+    assert STRESS_LENS in FILL_REPORT_LENSES
 
 
 # --------------------------------------------------------- 판정 로직
@@ -291,7 +302,7 @@ def test_rows_round_trip_through_csv(tmp_path: Path) -> None:
     assert rows_from_csv(path) == rows
 
 
-def test_summary_renders_all_three_lenses_and_flags_the_stress_lens() -> None:
+def test_summary_flags_the_stress_lens_when_it_is_explicitly_requested() -> None:
     rows = [
         _row(fill=OFFICIAL_LENS),
         _row(fill="pen_5bp"),
@@ -302,6 +313,7 @@ def test_summary_renders_all_three_lenses_and_flags_the_stress_lens() -> None:
     assert "공식 렌즈 `baseline`" in summary
     assert "민감도 렌즈 `pen_5bp`" in summary
     # 이슈가 3렌즈를 요구했으므로 싣되, 판정에서 뺀다는 경고가 함께 있어야 한다.
+    # 기본 축은 2렌즈지만 `--lenses`로 명시하면 실릴 수 있다 — 그때도 경고가 따라붙는다.
     assert "스트레스 렌즈 `pen_5bp_drop_50`" in summary
     assert "이 표의 p값으로 판정하지 말 것" in summary
     # WAN-88을 그대로 못 돌린 이유가 산출물에 남아야 한다.

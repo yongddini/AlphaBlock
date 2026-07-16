@@ -54,9 +54,11 @@ WAN-114 사다리의 존-단독 가격)에서 방향·시각대를 맞춰 뽑는
 ## 축 · 창 · 자
 
 * **심볼 6개**(WAN-111) · **TF 2개**(15m·1h, WAN-107 공동 작업 TF) · **구간** IS/OOS.
-* **렌즈 3개**: `baseline`(공식, WAN-104) · `pen_5bp`(민감도) · `pen_5bp_drop_50`(스트레스).
-  이슈가 3렌즈를 요구했다. ⚠️ 스트레스 렌즈는 **판정에서 뺀다** — 이유는 아래 「스트레스
-  렌즈」.
+* **렌즈 2개**: `baseline`(공식, WAN-104) · `pen_5bp`(민감도) — **WAN-88의 널과 같은 축**.
+  ⚠️ 이슈(WAN-124)는 널에도 3렌즈를 요구했지만 스트레스 렌즈(`pen_5bp_drop_50`)는 **뺀다**
+  — 이유는 아래 「스트레스 렌즈」. 3렌즈 요구는 **3단 표**(`wan123_fill_conservatism.py`)가
+  채운다. 거기가 그 렌즈가 실제로 뜻을 갖는 자리다(부트스트랩이 없어 난수가 하나뿐이다).
+  `--lenses`로 명시하면 여기서도 돌릴 수 있다(기본이 아닐 뿐이다).
 * **창**: WAN-111/114/115/119/120과 **같은 못 박은 창**(2023-07-14~2026-07-15). `--years N`은
   마지막 봉 기준으로 미끄러진다(CLAUDE.md).
 * **구간 분할**: harness(`slice_market`, 시간 2/3)를 쓴다 — WAN-88의 `_split_bars`(봉 수
@@ -68,13 +70,20 @@ WAN-114 사다리의 존-단독 가격)에서 방향·시각대를 맞춰 뽑는
   실제>무작위평균 — WAN-70/84/88과 **같은 자**다(다른 자로 재면 "판정이 바뀌었다"와 "자를
   바꿨다"를 구분할 수 없다).
 
-## 스트레스 렌즈(`pen_5bp_drop_50`)를 판정에서 빼는 이유
+## 스트레스 렌즈(`pen_5bp_drop_50`)를 널에서 빼는 이유 — 이슈 요구와 다른 점
 
-WAN-88이 그 렌즈를 널에서 **아예 제외**한 근거가 여기서도 유효하다: 탈락 추첨은 시드마다
-결과가 크게 널뛰는데 매칭 널은 그 위에 **부트스트랩이라는 두 번째 난수**를 얹는다. 두
-잡음이 겹치면 p값은 "엔진이 뭘 하는가"가 아니라 "시드를 어떻게 뽑았는가"를 잰다. 다만
-이슈가 3렌즈를 명시 요구했으므로 **돌려서 싣되**(시드 5개를 각각 행으로 낸다) 판정
-문장은 공식 렌즈에서 내고 스트레스 렌즈는 **참고**로만 읽는다.
+WAN-88이 그 렌즈를 널에서 **아예 제외**한 근거가 여기서도 그대로다: 탈락 추첨은 시드마다
+결과가 크게 널뛰는데(같은 셀이 −11%~+30%) 매칭 널은 그 위에 **부트스트랩이라는 두 번째
+난수**를 얹는다. 두 잡음이 겹치면 p값은 "엔진이 뭘 하는가"가 아니라 **"시드를 어떻게
+뽑았는가"** 를 잰다 — 임의 모수(탈락률 50%)가 판정을 좌우하게 두지 않는다는 WAN-97의 원칙.
+
+여기에 실측 근거가 하나 더 붙는다: 그 렌즈는 시드 5개를 도므로 **널 격자 계산의 71%**
+(7 렌즈-시드 중 5)를 혼자 먹는데, 그렇게 얻은 p값을 **판정에서는 쓰지 않는다**. 판정에
+쓰지 않을 숫자를 위해 격자를 3.5배로 늘리는 것은 값을 주지 않는다.
+
+**대신 3단 표가 3렌즈를 전부 낸다**(`wan123_fill_conservatism.py`) — 그쪽은 부트스트랩이
+없어 난수가 **탈락 추첨 하나뿐**이라 시드 5개 평균이 뜻을 갖는다. 즉 이슈의 「3렌즈」 요구는
+**그 렌즈가 뜻을 갖는 표에서** 충족된다.
 
 ## 재현
 
@@ -126,12 +135,15 @@ ALL_SYMBOLS: tuple[str, ...] = (
 #: WAN-107 공동 작업 TF.
 DEFAULT_TIMEFRAMES: tuple[str, ...] = ("15m", "1h")
 
-#: 공식 렌즈 + 민감도 + 스트레스(CLAUDE.md 토대 2).
-LENS_NAMES: tuple[str, ...] = ("baseline", "pen_5bp", "pen_5bp_drop_50")
+#: 널을 돌릴 렌즈 — **WAN-88의 `NULL_FILL_LEVELS`와 같은 축**(공식 + 민감도).
+#: 스트레스 렌즈를 뺀 이유는 모듈 docstring 「스트레스 렌즈」 — 시드 잡음 × 부트스트랩
+#: 잡음이라 p값이 엔진이 아니라 시드를 재고, 판정에 쓰지도 않으면서 격자의 71%를 먹는다.
+#: 3렌즈는 3단 표(`wan123_fill_conservatism.py`)가 낸다.
+LENS_NAMES: tuple[str, ...] = ("baseline", "pen_5bp")
 
 OFFICIAL_LENS = "baseline"
 
-#: 판정에서 빼는 렌즈 — 시드 잡음 × 부트스트랩 잡음(모듈 docstring 「스트레스 렌즈」).
+#: 널에서 뺀 렌즈. `--lenses`로 명시하면 돌릴 수는 있어서 렌더가 이 이름을 안다.
 STRESS_LENS = "pen_5bp_drop_50"
 
 #: WAN-111/114/115/119/120과 같은 못 박은 창.
@@ -603,19 +615,19 @@ def _implications(rows: Sequence[NullRow]) -> str:
 def build_summary_markdown(rows: Sequence[NullRow], *, csv_path: Path) -> str:
     stress_rows = [r for r in rows if r.fill == STRESS_LENS]
     stress_section = (
-        "## 스트레스 렌즈 `pen_5bp_drop_50` (참고 — 판정에서 뺀다)\n\n"
+        "## 스트레스 렌즈 `pen_5bp_drop_50` (기본이 아님 — `--lenses`로 명시해 돌린 결과)\n\n"
         "⚠️ **이 표의 p값으로 판정하지 말 것.** 탈락 추첨은 시드마다 크게 널뛰는데 매칭 널은 "
         "그 위에 부트스트랩이라는 두 번째 난수를 얹는다 — 두 잡음이 겹치면 p값은 「엔진이 뭘 "
         "하는가」가 아니라 「시드를 어떻게 뽑았는가」를 잰다. WAN-88이 이 렌즈를 널에서 아예 "
-        "제외한 이유이고(그 모듈 docstring 「체결 가정」), 여기서는 이슈가 3렌즈를 명시 "
-        "요구했으므로 **싣되 판정에서 뺀다**. 시드 5개를 각각 행으로 낸다.\n\n"
+        "제외한 이유다(그 모듈 docstring 「체결 가정」).\n\n"
         f"{null_table(rows, lens=STRESS_LENS)}\n\n"
         if stress_rows
         else ""
     )
+    lens_count = len({r.fill for r in rows}) or len(LENS_NAMES)
     return (
         "# WAN-124 2단 — 게이트 제거 엔진의 매칭 널\n\n"
-        "6심볼 × 2TF(15m·1h) × IS/OOS × 3렌즈, 못 박은 창 "
+        f"6심볼 × 2TF(15m·1h) × IS/OOS × {lens_count}렌즈, 못 박은 창 "
         f"{DEFAULT_START}~{DEFAULT_END}, 로컬 `data/ohlcv.db` 실데이터.\n"
         "재현: `uv run python -m backtest.wan123_matched_null` "
         "(요약만: `--from-csv`). 원자료: "
@@ -630,8 +642,13 @@ def build_summary_markdown(rows: Sequence[NullRow], *, csv_path: Path) -> str:
         "> 검정하면서도 p값을 멀쩡히 뱉는다. 그래서 무력화 축을 **남은 유일한 선별 규칙인\n"
         "> 볼린저**로 옮겼다 — 근거·읽는 법은 모듈 docstring과\n"
         "> [`docs/decisions/wan124.md`](../../docs/decisions/wan124.md).\n\n"
-        "> **공식 렌즈는 `baseline`**([WAN-104](../../docs/decisions/wan104.md)). `pen_5bp`는\n"
-        "> 민감도, `pen_5bp_drop_50`은 스트레스이며 **판정에서 뺀다**(아래 절).\n\n"
+        "> **공식 렌즈는 `baseline`**([WAN-104](../../docs/decisions/wan104.md)) · `pen_5bp`는\n"
+        "> 민감도. **스트레스 렌즈(`pen_5bp_drop_50`)는 널에서 뺐다** — WAN-88과 같은 축이다.\n"
+        "> 탈락 추첨의 시드 잡음 위에 부트스트랩 난수를 얹으면 p값이 엔진이 아니라 시드를\n"
+        "> 재기 때문이다(모듈 docstring 「스트레스 렌즈」). ⚠️ 이슈(WAN-124)는 널에도 3렌즈를\n"
+        "> 요구했지만, **그 요구는 3단 표가 채운다** —\n"
+        "> [`wan123_fill_conservatism_summary.md`](wan123_fill_conservatism_summary.md)는\n"
+        "> 부트스트랩이 없어 난수가 탈락 추첨 하나뿐이라 그 렌즈가 뜻을 갖는 자리다.\n\n"
         "## 공식 렌즈 `baseline` — 셀별 결과\n\n"
         f"{null_table(rows, lens=OFFICIAL_LENS)}\n\n"
         "`p` = 무작위 반복 중 실제 총수익률 이상을 낸 비율(단측). 95% CI는 무작위 분포의\n"
