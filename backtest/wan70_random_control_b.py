@@ -133,7 +133,11 @@ class RandomControlBResult(BaseModel):
     real_long: int
     real_short: int
     pool_size: int
-    """RSI 게이트 무력화 풀(체결된 후보) 크기 — 표본추출 대상 전체."""
+    """무력화 풀(체결된 후보) 크기 — 표본추출 대상 전체.
+
+    무력화 축은 기본이 **RSI 게이트**지만 `pool_params`(WAN-124)를 주면 호출부가 정한
+    다른 축이다. 어느 축이었는지는 이 모델이 들고 있지 않으므로 리포트가 적어야 한다.
+    """
     random_mean_return: float | None
     random_ci_low: float | None
     """무작위 총수익률 분포의 2.5 백분위수."""
@@ -175,8 +179,9 @@ def run_random_control_b_segment(
     iterations: int = _BOOTSTRAP_ITERATIONS,
     seed: int = 70,
     funding_rates: Sequence[FundingRate] | None = None,
+    pool_params: ConfluenceParams | None = None,
 ) -> RandomControlBResult:
-    """한 구간에서 실제(RSI 게이트) 결과와 매칭 널 부트스트랩을 비교한다.
+    """한 구간에서 실제 결과와 매칭 널 부트스트랩을 비교한다.
 
     `htf_seg`/`one_min_seg`는 이미 구간·워밍업 창으로 잘려 있어야 한다(IS/OOS 분할은
     `run_experiment`가 담당). `order_block_result`를 주면 실제 경로와 무력화 풀
@@ -185,7 +190,30 @@ def run_random_control_b_segment(
     `funding_rates`(WAN-88)를 주면 실제·널 **양쪽 시퀀싱에 똑같이** 펀딩비가 붙는다.
     안 넘기면(기본) 펀딩 0으로 계산된다 — `cfg.funding_enabled`가 True여도 그렇다.
     이 모듈의 `main()`은 넘기지 않으므로 WAN-70 CSV는 그대로 재현된다.
+
+    ## `pool_params` — 무력화 축을 호출부가 고르게 한다 (WAN-124)
+
+    기본(`None`)은 **RSI 게이트 무력화**다: `confluence_params`에 `rsi_oversold=100`/
+    `rsi_overbought=0`만 덮어써 풀을 만든다(이 모듈 docstring의 정의 그대로). WAN-70/84/88
+    CSV는 이 경로를 타므로 비트 단위로 재현된다.
+
+    ⚠️ **그 기본 축은 채택 기본값에서 죽었다.** [WAN-123](../docs/decisions/wan123.md)이
+    게이트를 뺀 뒤(`rsi_gate_mode="unconditional"`) 시뮬레이터가 RSI를 **읽지도 않으므로**
+    (`backtest/substep.py`의 단락 평가), 위 두 오버라이드는 **아무것도 하지 않는다** — 풀이
+    실제 후보 집합과 **글자 그대로 같아진다**. 그러면 널은 자기 자신과 비교하면서도 p값을
+    멀쩡히 뱉는다(= 이 저장소가 반복해 겪은 조용한 실패). 그래서 게이트가 없는 엔진의 널은
+    **남은 선별 규칙**(볼린저)을 무력화한 `pool_params`를 넘겨야 한다 —
+    `backtest/wan123_matched_null.py`가 그 호출부이고, 근거·수치는
+    [`docs/decisions/wan124.md`](../docs/decisions/wan124.md)에 있다.
+
+    `pool_params`를 주면 RSI 오버라이드는 **걸지 않는다**(그 파라미터가 자기 완결적인
+    풀 정의다). 실제와 **같은 파라미터**를 주면 널이 정의상 퇴화하므로 거부한다.
     """
+    if pool_params is not None and pool_params == confluence_params:
+        raise ValueError(
+            "pool_params가 confluence_params와 같습니다 — 무력화 풀이 실제 후보 집합과 "
+            "같아져 널이 자기 자신을 검정하게 됩니다. 무력화할 규칙을 실제로 끄세요."
+        )
     cfg = backtest_config or default_backtest_config(timeframe)
     ob_result = order_block_result or OrderBlockDetector(order_block_params).run(htf_seg)
 
@@ -222,17 +250,19 @@ def run_random_control_b_segment(
             bucket_fallback_count=0,
         )
 
-    # RSI 게이트 무력화 풀: 셋업당 시뮬레이션 정확히 1회(성능 — 모듈 docstring).
+    # 무력화 풀: 셋업당 시뮬레이션 정확히 1회(성능 — 모듈 docstring).
+    # `pool_params`가 없으면 RSI 게이트 무력화(WAN-70 기본 축), 있으면 호출부가 정의한
+    # 풀 그대로다(WAN-124) — 후자에 RSI 오버라이드를 겹쳐 걸지 않는 이유는 위 docstring.
     pool_candidates, _ = build_zone_limit_candidates(
         htf_seg,
         one_min_seg,
         timeframe,
-        params=confluence_params,
+        params=confluence_params if pool_params is None else pool_params,
         cfg=cfg,
         order_block_params=order_block_params,
         order_block_result=ob_result,
-        rsi_oversold=_RSI_GATE_DISABLED_OVERSOLD,
-        rsi_overbought=_RSI_GATE_DISABLED_OVERBOUGHT,
+        rsi_oversold=_RSI_GATE_DISABLED_OVERSOLD if pool_params is None else None,
+        rsi_overbought=_RSI_GATE_DISABLED_OVERBOUGHT if pool_params is None else None,
     )
 
     pool_by_bucket: dict[tuple[PositionSide, int], list[_Candidate]] = defaultdict(list)
