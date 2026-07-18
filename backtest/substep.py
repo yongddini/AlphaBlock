@@ -124,6 +124,25 @@ class ZoneLimitOutcome:
     exit_time: int | None = None
     exit_price: float | None = None
     exit_reason: SignalExitReason | None = None
+    mfe_r: float | None = None
+    """보유 구간의 최대유리이탈(MFE), **R 단위**(WAN-90). 체결됐을 때만 값이 있다.
+
+    1R = 진입가 → 무효화 경계(손절 참조가)까지의 거리다. 롱이면
+    `(구간 최고가 − 진입가) / 1R`, 숏이면 `(진입가 − 구간 최저가) / 1R`. 구간은
+    체결 스텝부터 청산 스텝까지(둘 다 포함)이며 **청산 이후 봉은 보지 않는다**(look-ahead
+    금지). 손절/익절이 진입가에 매우 가깝게 붙지 않는 한 보통 0 이상이지만, 진입 봉에서
+    곧바로 손절된 경우 음수가 될 수 있다(순수 관측값이라 0에서 절단하지 않는다).
+
+    ⚠️ 이 값은 **실제로 일어난 청산까지의** 경로만 잰다 — 고정 R 익절이 켜진 채택
+    엔진에서는 승자가 익절 목표에서 잘리므로 MFE도 대체로 그 목표 부근에서 검열된다.
+    "거래가 익절 없이 어디까지 갔는가"를 보려면 익절을 끈(먼 목표) 실행에서 재야 한다.
+    """
+    mae_r: float | None = None
+    """보유 구간의 최대불리이탈(MAE), **R 단위**(WAN-90). 체결됐을 때만 값이 있다.
+
+    롱이면 `(구간 최저가 − 진입가) / 1R`, 숏이면 `(진입가 − 구간 최고가) / 1R`. 통상
+    0 이하이며, 손절로 청산된 거래는 손절선을 관통했다면 −1R 아래로도 내려갈 수 있다.
+    """
     order_rested: bool = True
     """이 셋업에 주문이 **한 번이라도 주문판에 걸렸는지** (WAN-119).
 
@@ -233,6 +252,22 @@ def simulate_zone_limit_trade(
 
     is_long = direction is OrderBlockDirection.BULLISH
 
+    # WAN-90: 보유 구간의 유리/불리 극값을 추적해 MFE/MAE를 R 단위로 낸다. 체결 스텝부터
+    # 청산 스텝까지(둘 다 포함)의 서브스텝 고가/저가만 보고, 청산 이후는 보지 않는다.
+    hold_high: float | None = None
+    hold_low: float | None = None
+
+    def _excursions() -> tuple[float | None, float | None]:
+        """추적한 극값으로 (MFE_R, MAE_R)을 낸다. 1R을 못 재면 (None, None)."""
+        if hold_high is None or hold_low is None or entry_price is None:
+            return None, None
+        risk = abs(entry_price - stop_price)
+        if risk <= 0:
+            return None, None
+        if is_long:
+            return (hold_high - entry_price) / risk, (hold_low - entry_price) / risk
+        return (entry_price - hold_low) / risk, (entry_price - hold_high) / risk
+
     def _fill_trigger(price: float) -> float:
         """체결로 인정할 가격 문턱. 롱은 지정가 아래로, 숏은 위로 그만큼 관통해야 한다."""
         penetration = price * (penetration_bps / 10_000.0)
@@ -327,11 +362,16 @@ def simulate_zone_limit_trade(
                     )
 
         if position_open:
+            # WAN-90: 이 스텝(진입 스텝·청산 스텝 포함)의 고가/저가를 극값에 반영한 뒤
+            # 청산을 판정한다 — 청산 봉의 범위까지가 보유 구간이고 그 이후는 보지 않는다.
+            hold_high = step.high if hold_high is None else max(hold_high, step.high)
+            hold_low = step.low if hold_low is None else min(hold_low, step.low)
             stop_hit = step.low <= stop_price if is_long else step.high >= stop_price
             tp_hit = active_tp is not None and (
                 step.high >= active_tp if is_long else step.low <= active_tp
             )
             if stop_hit and (not tp_hit or stop_before_tp):
+                mfe_r, mae_r = _excursions()
                 return ZoneLimitOutcome(
                     status=ZoneLimitStatus.FILLED_EXITED,
                     entry_time=entry_time,
@@ -340,9 +380,12 @@ def simulate_zone_limit_trade(
                     exit_time=step.time,
                     exit_price=stop_price,
                     exit_reason=SignalExitReason.STOP_LOSS,
+                    mfe_r=mfe_r,
+                    mae_r=mae_r,
                     order_rested=order_rested,
                 )
             if tp_hit:
+                mfe_r, mae_r = _excursions()
                 return ZoneLimitOutcome(
                     status=ZoneLimitStatus.FILLED_EXITED,
                     entry_time=entry_time,
@@ -351,15 +394,20 @@ def simulate_zone_limit_trade(
                     exit_time=step.time,
                     exit_price=active_tp,
                     exit_reason=SignalExitReason.TAKE_PROFIT,
+                    mfe_r=mfe_r,
+                    mae_r=mae_r,
                     order_rested=order_rested,
                 )
 
     if position_open:
+        mfe_r, mae_r = _excursions()
         return ZoneLimitOutcome(
             status=ZoneLimitStatus.FILLED_OPEN,
             entry_time=entry_time,
             entry_price=entry_price,
             entry_rsi=entry_rsi,
+            mfe_r=mfe_r,
+            mae_r=mae_r,
             order_rested=order_rested,
         )
     return ZoneLimitOutcome(status=ZoneLimitStatus.NO_TOUCH, order_rested=order_rested)

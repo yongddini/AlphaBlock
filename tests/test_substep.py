@@ -635,3 +635,87 @@ def test_live_limit_rejects_a_static_take_profit() -> None:
             rsi_overbought=70.0,
             take_profit_price=_TP,
         )
+
+
+# ---------------------------------------------------- MFE/MAE 계측 (WAN-90)
+#
+# 완료기준: 합성 데이터로 MFE/MAE 계산의 정확성을 검증한다. 1R = 진입가 → 무효화
+# 경계이고(롱 limit=100·stop=90 → 1R=10), 극값은 체결 스텝부터 청산 스텝까지(둘 다
+# 포함)의 서브스텝 고가/저가만 본다(청산 이후 봉은 look-ahead 금지).
+
+
+def test_mfe_mae_long_take_profit() -> None:
+    """롱 정상 익절: MFE는 청산 봉 고가까지(목표 초과분 포함), MAE는 구간 최저가."""
+    steps = [
+        _step(0, high=101, low=99, close=99),  # 체결(low<=100) — 유리 +0.1R·불리 -0.1R
+        _step(1, high=105, low=100, close=104),  # 유리 확대(고가 105)
+        _step(2, high=112, low=108, close=110),  # 익절 110 도달, 그 봉 고가 112
+    ]
+    out = _simulate_long(steps, rsi_gate_mode="unconditional")
+    assert out.exit_reason is SignalExitReason.TAKE_PROFIT
+    assert out.mfe_r == pytest.approx(1.2)  # (112 - 100) / 10
+    assert out.mae_r == pytest.approx(-0.1)  # (99 - 100) / 10
+
+
+def test_mfe_mae_long_stop_loss() -> None:
+    """롱 손절: MAE는 손절선(-1R), MFE는 손절 전 최고 유리 이동."""
+    steps = [
+        _step(0, high=101, low=95, close=96),  # 체결 — 유리 +0.1R·불리 -0.5R
+        _step(1, high=104, low=90, close=91),  # 손절 90 도달, 그 봉 고가 104
+    ]
+    out = _simulate_long(steps, rsi_gate_mode="unconditional")
+    assert out.exit_reason is SignalExitReason.STOP_LOSS
+    assert out.mfe_r == pytest.approx(0.4)  # (104 - 100) / 10
+    assert out.mae_r == pytest.approx(-1.0)  # (90 - 100) / 10
+
+
+def test_mfe_mae_penetration_same_step() -> None:
+    """같은 스텝 진입+손절(관통): MAE가 -1R 아래로 내려간다(손절선을 관통했으므로)."""
+    steps = [_step(0, high=101, low=88, close=88)]  # 체결 + 같은 봉에서 손절선 88까지 관통
+    out = _simulate_long(steps, rsi_gate_mode="unconditional")
+    assert out.exit_reason is SignalExitReason.STOP_LOSS
+    assert out.mfe_r == pytest.approx(0.1)  # (101 - 100) / 10
+    assert out.mae_r == pytest.approx(-1.2)  # (88 - 100) / 10
+
+
+def test_mfe_mae_filled_open_runs_to_end() -> None:
+    """데이터 종료까지 보유(FILLED_OPEN): 전 구간 극값이 기록된다."""
+    steps = [
+        _step(0, high=101, low=99, close=99),  # 체결
+        _step(1, high=106, low=101, close=105),  # 계속 상승, 익절 없음
+    ]
+    out = _simulate_long(steps, take_profit_price=None, rsi_gate_mode="unconditional")
+    assert out.status is ZoneLimitStatus.FILLED_OPEN
+    assert out.mfe_r == pytest.approx(0.6)  # (106 - 100) / 10
+    assert out.mae_r == pytest.approx(-0.1)  # (99 - 100) / 10
+
+
+def test_mfe_mae_short_symmetry() -> None:
+    """숏은 부호가 대칭이다: 유리=가격 하락, 불리=가격 상승. limit=100·stop=110 → 1R=10."""
+    steps = [
+        _step(0, high=100, low=99, close=99),  # 체결(high>=100) — 유리 +0.1R·불리 0R
+        _step(1, high=101, low=88, close=89),  # 익절 90 도달, 그 봉 저가 88
+    ]
+    out = simulate_zone_limit_trade(
+        direction=OrderBlockDirection.BEARISH,
+        limit_price=100.0,
+        stop_price=110.0,
+        substeps=steps,
+        rsi_state=_long_state(),
+        rsi_oversold=30.0,
+        rsi_overbought=70.0,
+        take_profit_price=90.0,
+        rsi_gate_mode="unconditional",
+    )
+    assert out.exit_reason is SignalExitReason.TAKE_PROFIT
+    assert out.mfe_r == pytest.approx(1.2)  # (100 - 88) / 10
+    assert out.mae_r == pytest.approx(-0.1)  # (100 - 101) / 10
+
+
+def test_mfe_mae_none_when_not_filled() -> None:
+    """체결되지 않으면 MFE/MAE는 없다(잴 보유 구간이 없다)."""
+    steps = [_step(0, high=103, low=101, close=102)]  # 저가 101 > 지정가 100 → 닿지 않음
+    out = _simulate_long(steps, rsi_gate_mode="unconditional")
+    assert out.status is ZoneLimitStatus.NO_TOUCH
+    assert out.mfe_r is None
+    assert out.mae_r is None

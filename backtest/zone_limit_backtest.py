@@ -124,6 +124,10 @@ class _Candidate:
     `(zone_key, tap_index)`는 유일하지 않다 — 병합 존은 새로 편입된 구성 존이 같은
     클러스터 안에서 다시 `tap_index=0`을 받을 수 있기 때문이다(WAN-81 §5). 진단 전용이며
     체결·청산 로직에는 쓰이지 않는다."""
+    mfe_r: float | None = None
+    """보유 구간의 최대유리이탈(MFE), R 단위(WAN-90). 시뮬레이터가 낸 값 그대로 싣는다."""
+    mae_r: float | None = None
+    """보유 구간의 최대불리이탈(MAE), R 단위(WAN-90). 시뮬레이터가 낸 값 그대로 싣는다."""
 
 
 @dataclass(frozen=True)
@@ -794,6 +798,8 @@ def build_zone_limit_candidates(
                 tap_index=signal.tap_index,
                 zone_key=signal.zone_key,
                 trigger_time=signal.trigger_time,
+                mfe_r=outcome.mfe_r,
+                mae_r=outcome.mae_r,
             )
         )
 
@@ -956,6 +962,8 @@ def _to_trade(
         funding_cost=funding_cost,
         realized_pnl=realized,
         return_pct=realized / entry_notional if entry_notional else 0.0,
+        mfe_r=cand.mfe_r,
+        mae_r=cand.mae_r,
     )
 
 
