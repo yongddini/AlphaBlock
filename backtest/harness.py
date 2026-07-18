@@ -141,6 +141,13 @@ FILL_PRESETS: tuple[FillPreset, ...] = (
 
 FILL_PRESETS_BY_NAME: dict[str, FillPreset] = {p.name: p for p in FILL_PRESETS}
 
+#: 공식 체결 렌즈(WAN-104) = 유일한 렌즈다. **신규 리포트는 이것 단독으로 낸다(WAN-128)** —
+#: `pen_5bp`·`pen_5bp_drop_50` 3렌즈 병기 요구는 WAN-128(사용자 재-베이스라인)이 폐지했다.
+#: 두 민감도 렌즈는 삭제가 아니라 **옵트인**이라 `FILL_PRESETS`·CLI `--fill`에 그대로 남는다
+#: (수동 확인용). 기본 실행이 `baseline` 단독인 것은 `build_params`의 `fill=BASELINE_FILL`
+#: 기본 인자와 `run._fills_from_args`의 무인자 분기(`--fill` 없으면 `(BASELINE_FILL,)`)가
+#: 강제한다 — 3렌즈를 자동으로 뱉는 코드 경로는 없다(각 `wanNN_*.py`의 `LENS_NAMES` 3렌즈
+#: 상수는 그 리포트만의 것이고 당시 기록으로 보존한다). 배경은 docs/decisions/wan128.md.
 BASELINE_FILL = FILL_PRESETS[0]
 
 
