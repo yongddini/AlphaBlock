@@ -186,6 +186,16 @@ class Trade(BaseModel):
     """모든 수수료(진입·청산)와 펀딩비용을 차감·가감한 순손익."""
     return_pct: float
     """`realized_pnl`을 진입 노셔널로 나눈 수익률."""
+    mfe_r: float | None = None
+    """보유 구간의 최대유리이탈(MFE), R 단위(WAN-90). 1R = 진입가 → 무효화 경계.
+
+    지정가(B안, `zone_limit`) 경로에서만 채워진다 — 봉 내부 경로를 1분봉 서브스텝으로
+    아는 유일한 엔진이기 때문이다. 종가(A안) 엔진 거래는 None이다. 값의 정의·검열
+    주의는 `backtest.substep.ZoneLimitOutcome.mfe_r` 참고. 비용·사이징과 무관한 순수
+    관측 지표라 손익 계산에는 전혀 쓰이지 않는다(측정 전용, WAN-90).
+    """
+    mae_r: float | None = None
+    """보유 구간의 최대불리이탈(MAE), R 단위(WAN-90). 정의는 위 `mfe_r`와 대칭."""
 
     @property
     def exit_time(self) -> int:
