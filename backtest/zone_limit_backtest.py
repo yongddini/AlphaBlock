@@ -40,7 +40,7 @@ import copy
 import logging
 import math
 import random
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 import pandas as pd
@@ -305,6 +305,28 @@ class _IntrabarLiveLimit:
         )
 
 
+@dataclass(frozen=True)
+class TakeProfitContext:
+    """익절 목표를 외부 규칙이 정할 때 넘기는 셋업 문맥 (WAN-137 Phase 2, 옵트인).
+
+    `entry_price`는 볼린저·오프셋까지 확정된 지정가(= 체결가)이고 `stop_price`는 무효화
+    경계다 — 이 둘로 1R을 재고 저항 목표까지의 거리를 낼 수 있다. `trigger_time`은 저항
+    아카이브를 룩어헤드-안전하게 클리핑하는 키다(WAN-126 provider). 진입 결정·체결 판정은
+    익절과 무관하므로, 이 문맥을 받아 목표만 갈아끼워도 셋업·체결 집합은 기본 익절과 같다.
+    """
+
+    is_long: bool
+    entry_price: float
+    stop_price: float
+    trigger_time: int
+    order_block: OrderBlock
+
+
+#: 셋업 문맥 → 익절 목표가(없으면 None = 익절 목표 없음, 무효화까지 홀딩). 정적 지정가
+#: 경로 전용 — 봉내 라이브 밴드는 익절을 체결 순간에 내므로 이 훅을 걸 지점이 없다(가드가 거부).
+TakeProfitOverride = Callable[["TakeProfitContext"], float | None]
+
+
 def _resolve_take_profit(
     params: ConfluenceParams,
     is_long: bool,
@@ -541,6 +563,7 @@ def build_zone_limit_candidates(
     setup_sink: list[SetupDiagnostic] | None = None,
     overlap: MultiTfOverlapParams | None = None,
     zone_provider: ZoneProvider | None = None,
+    take_profit_override: TakeProfitOverride | None = None,
 ) -> tuple[list[_Candidate], ZoneLimitStats]:
     """B안 셋업 순회 → 1분 서브스텝 시뮬레이션까지(비용 반영 전 원가 후보 목록).
 
@@ -559,7 +582,14 @@ def build_zone_limit_candidates(
     대조(= 기본 동작), `B`는 겹침이 있는 셋업만 상위TF 존으로 진입(선별만), `C`는 겹치는
     **하위TF 존**을 씨앗으로 삼아 진입가·손절·1R을 재계산(선별+가격)한다. 볼린저·오프셋
     사슬은 세 팔이 동일하고 씨앗 존만 갈아끼운다(WAN-126 확정 사양). `overlap`이 None이면
-    (기본) 이 경로는 통째로 비활성이라 엔진이 비트 단위로 예전과 같다."""
+    (기본) 이 경로는 통째로 비활성이라 엔진이 비트 단위로 예전과 같다.
+
+    `take_profit_override`(WAN-137 Phase 2, 옵트인)를 주면 익절 목표를 `_resolve_take_profit`
+    (고정 R/선) 대신 그 콜러블이 정한다 — 저항 OB를 목표로 파는 변형 C 손익 격자용이다.
+    익절은 청산만 바꾸고 진입 결정·체결 판정에는 전혀 안 쓰이므로, 오버라이드를 걸어도
+    셋업·체결 집합(따라서 후보 수·`ZoneLimitStats`)은 기본 익절과 **비트 단위로 같고**
+    달라지는 건 각 후보의 청산(`exit_time`·`exit_price`·`reason`)뿐이다. None이면(기본)
+    이 경로도 비활성이라 엔진이 예전과 같다."""
     if overlap is not None and overlap.arm != "A" and zone_provider is None:
         raise ValueError(
             "overlap.arm이 'B'/'C'면 zone_provider가 필요합니다 — 하위TF 겹침 존을 "
@@ -607,6 +637,13 @@ def build_zone_limit_candidates(
                 "서브스텝이 공급하는 현재가는 체결 가격이라 hl2 같은 합성 소스의 "
                 "실시간 대응값이 없습니다."
             )
+    if take_profit_override is not None and live_band_mode:
+        raise ValueError(
+            "take_profit_override는 정적 지정가 경로 전용입니다 — 봉내 라이브 밴드"
+            "(intrabar_live/intrabar_causal)는 익절을 체결 순간에 산출하므로(WAN-119) "
+            "탭 봉 시점에 오버라이드를 걸 지점이 없습니다. 채택 기본값(band_bar='tap')은 "
+            "정적 경로라 여기 걸린다."
+        )
 
     filter_components: tuple[list[float], list[float]] | None = None
     if deviation is not None and not live_band_mode:
@@ -709,11 +746,22 @@ def build_zone_limit_candidates(
             continue  # 탭 봉에 1분봉 커버 없음 → 평가 제외.
 
         stop_price = seed_ob.bottom if is_long else seed_ob.top
-        tp_price = (
-            None
-            if limit_price is None
-            else _resolve_take_profit(params, is_long, limit_price, stop_price, lines)
-        )
+        if limit_price is None:
+            tp_price = None  # live 밴드: 익절은 체결 순간 산출(위 가드가 오버라이드를 막는다).
+        elif take_profit_override is not None:
+            # WAN-137 Phase 2: 익절 목표를 외부 규칙(저항 OB)이 정한다. 진입·체결 판정은
+            # 익절과 무관하므로 후보·체결 집합은 기본 익절과 같고 청산만 달라진다.
+            tp_price = take_profit_override(
+                TakeProfitContext(
+                    is_long=is_long,
+                    entry_price=limit_price,
+                    stop_price=stop_price,
+                    trigger_time=signal.trigger_time,
+                    order_block=seed_ob,
+                )
+            )
+        else:
+            tp_price = _resolve_take_profit(params, is_long, limit_price, stop_price, lines)
 
         cut = bisect.bisect_left(times, setup_substeps[0].htf_bar_time)
         rsi_state = rsi_seeder.seed(cut)
