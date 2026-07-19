@@ -55,6 +55,11 @@ from backtest.models import (
     Trade,
     TradeFill,
 )
+from backtest.multi_tf_overlap import (
+    MultiTfOverlapParams,
+    ZoneProvider,
+    find_refinement,
+)
 from backtest.portfolio import PortfolioParams, PortfolioStats, sequence_portfolio
 from backtest.substep import ZoneLimitStatus, build_substeps, simulate_zone_limit_trade
 from backtest.sweep import bars_per_year, default_backtest_config, timeframe_to_ms
@@ -128,6 +133,9 @@ class _Candidate:
     """보유 구간의 최대유리이탈(MFE), R 단위(WAN-90). 시뮬레이터가 낸 값 그대로 싣는다."""
     mae_r: float | None = None
     """보유 구간의 최대불리이탈(MAE), R 단위(WAN-90). 시뮬레이터가 낸 값 그대로 싣는다."""
+    refinement_tf: str | None = None
+    """겹침을 찾은 하위TF(WAN-126 캐스케이드가 멈춘 칸). 겹침 미적용(`A`·overlap=None)이면
+    None. 바닥 TF별 성과 분해(어느 TF에서 찾은 겹침이 좋은가)를 위한 진단 전용 필드다."""
 
 
 @dataclass(frozen=True)
@@ -531,6 +539,8 @@ def build_zone_limit_candidates(
     rsi_overbought: float | None = None,
     rsi_gate_mode: RsiGateMode | None = None,
     setup_sink: list[SetupDiagnostic] | None = None,
+    overlap: MultiTfOverlapParams | None = None,
+    zone_provider: ZoneProvider | None = None,
 ) -> tuple[list[_Candidate], ZoneLimitStats]:
     """B안 셋업 순회 → 1분 서브스텝 시뮬레이션까지(비용 반영 전 원가 후보 목록).
 
@@ -542,7 +552,19 @@ def build_zone_limit_candidates(
 
     `setup_sink`(WAN-96)를 주면 eligible 셋업마다 `SetupDiagnostic`을 append한다 —
     체결/미체결을 같은 기준으로 사후 비교하는 편향 진단용이며, 체결 로직에는 영향이 없다.
-    """
+
+    `overlap`/`zone_provider`(WAN-126, 옵트인)를 주면 다중TF 겹침 캐스케이드를 적용한다:
+    상위TF 탭 시점에 하위TF 겹침 존을 찾아(`find_refinement`, 룩어헤드 가드는
+    `zone_provider`가 책임), `overlap.arm`에 따라 진입을 건다. `A`는 겹침을 무시하는
+    대조(= 기본 동작), `B`는 겹침이 있는 셋업만 상위TF 존으로 진입(선별만), `C`는 겹치는
+    **하위TF 존**을 씨앗으로 삼아 진입가·손절·1R을 재계산(선별+가격)한다. 볼린저·오프셋
+    사슬은 세 팔이 동일하고 씨앗 존만 갈아끼운다(WAN-126 확정 사양). `overlap`이 None이면
+    (기본) 이 경로는 통째로 비활성이라 엔진이 비트 단위로 예전과 같다."""
+    if overlap is not None and overlap.arm != "A" and zone_provider is None:
+        raise ValueError(
+            "overlap.arm이 'B'/'C'면 zone_provider가 필요합니다 — 하위TF 겹침 존을 "
+            "룩어헤드-안전하게 공급해야 합니다(WAN-126)."
+        )
     frame = _prepare_htf(htf_df)
     if len(frame) == 0:
         return [], ZoneLimitStats()
@@ -620,7 +642,22 @@ def build_zone_limit_candidates(
         if not is_long and not params.short_enabled:
             continue  # WAN-68: 숏 완전 제거 게이트.
 
-        limit_price: float | None = params.zone_limit_price(ob)
+        # WAN-126: 다중TF 겹침 캐스케이드(옵트인). `A`(또는 overlap=None)는 상위TF 존을
+        # 그대로 쓰고, `B`/`C`는 상위TF 탭 시점(`signal.trigger_time`)에 하위TF 겹침 존을
+        # 찾는다 — 없으면 진입하지 않는다(규칙의 핵심). 씨앗 존만 갈아끼우고 아래 볼린저·
+        # 오프셋 사슬은 세 팔이 동일하다.
+        seed_ob = ob
+        refinement_tf: str | None = None
+        if overlap is not None and overlap.arm != "A":
+            assert zone_provider is not None  # 위 가드가 보장.
+            refinement = find_refinement(ob, signal.trigger_time, overlap, zone_provider)
+            if refinement is None:
+                continue  # 겹침 없음 → 진입하지 않음.
+            refinement_tf = refinement.timeframe
+            if overlap.arm == "C":
+                seed_ob = refinement.zone  # 하위TF 존으로 진입가·손절·1R 재계산.
+
+        limit_price: float | None = params.zone_limit_price(seed_ob)
         if filter_components is not None:
             assert deviation is not None
             anchor_vals, width_vals = filter_components
@@ -632,7 +669,7 @@ def build_zone_limit_candidates(
             )
             if band is None:
                 continue  # WAN-75: 워밍업 중이라 판정 불가(WAN-115: 구간 첫 봉 포함).
-            new_price = deviation_entry_price(d_sign, ob, band)
+            new_price = deviation_entry_price(d_sign, seed_ob, band)
             if new_price is None:
                 continue  # WAN-75: 밴드가 존 전체보다 불리한 쪽 — 진입하지 않음(규칙 3).
             limit_price = new_price
@@ -650,7 +687,7 @@ def build_zone_limit_candidates(
             limit_price = params.apply_zone_limit_offset(limit_price, is_long=is_long)
             lines_by_key = {str(i): v for i, v in enumerate(lines)}
             if params.min_rr is not None and not ConfluenceStrategy._passes_min_rr(
-                1 if is_long else -1, limit_price, ob, lines_by_key, params.min_rr
+                1 if is_long else -1, limit_price, seed_ob, lines_by_key, params.min_rr
             ):
                 continue  # WAN-68: 최소 손익비 게이트.
         if is_long and params.long_max_deviation is not None:
@@ -671,7 +708,7 @@ def build_zone_limit_candidates(
         if setup_substeps[0].htf_bar_time != tap_htf:
             continue  # 탭 봉에 1분봉 커버 없음 → 평가 제외.
 
-        stop_price = ob.bottom if is_long else ob.top
+        stop_price = seed_ob.bottom if is_long else seed_ob.top
         tp_price = (
             None
             if limit_price is None
@@ -692,7 +729,7 @@ def build_zone_limit_candidates(
             pending = float(substeps[start - 1].close) if causal_band_mode and start > 0 else None
             live_limit = _IntrabarLiveLimit(
                 band=RealtimeBand.seed_from_closed(closes[:cut], deviation),
-                order_block=ob,
+                order_block=seed_ob,
                 is_long=is_long,
                 params=params,
                 stop_price=stop_price,
@@ -800,6 +837,7 @@ def build_zone_limit_candidates(
                 trigger_time=signal.trigger_time,
                 mfe_r=outcome.mfe_r,
                 mae_r=outcome.mae_r,
+                refinement_tf=refinement_tf,
             )
         )
 
