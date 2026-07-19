@@ -23,6 +23,7 @@ from backtest.multi_tf_overlap import (
     ZoneProvider,
     choose_refinement_zone,
     find_refinement,
+    indexed_zone_provider,
     order_block_zone_provider,
     zones_overlap,
 )
@@ -196,6 +197,25 @@ def test_zone_provider_excludes_future_confirmed_zones() -> None:
 def test_zone_provider_unknown_tf_returns_empty() -> None:
     provider = order_block_zone_provider({}, combine=False)
     assert provider("5m", 10, BULL) == []
+
+
+@pytest.mark.parametrize("combine", [False, True])
+def test_indexed_provider_matches_naive(combine: bool) -> None:
+    """격자용 인덱스 provider가 순진한 provider와 **같은 존 집합**을 낸다(속도만 다름)."""
+    zones = [
+        _zone(BULL, 100.0, 110.0, confirmed_time=100),
+        _zone(BULL, 105.0, 112.0, confirmed_time=300),  # 병합 대상(가격 겹침)
+        _zone(BEAR, 200.0, 210.0, confirmed_time=200),
+        _zone(BULL, 300.0, 305.0, confirmed_time=500),
+    ]
+    result = OrderBlockResult(order_blocks=zones, signals=[], retap_signals=[])
+    naive = order_block_zone_provider({"15m": result}, combine=combine)
+    fast = indexed_zone_provider({"15m": result}, combine=combine)
+    for t in (50, 150, 250, 400, 600):
+        for direction in (BULL, BEAR):
+            got = [(z.top, z.bottom) for z in fast("15m", t, direction)]
+            want = [(z.top, z.bottom) for z in naive("15m", t, direction)]
+            assert sorted(got) == sorted(want), (t, direction, combine)
 
 
 # --------------------------------------------------------------------------- #

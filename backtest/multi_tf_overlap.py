@@ -51,6 +51,7 @@
 
 from __future__ import annotations
 
+import bisect
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Literal
@@ -192,5 +193,41 @@ def order_block_zone_provider(
             return []  # 데이터 없는 TF는 조용히 건너뛴다(리포트가 별도로 센다).
         zones = select_active(result.order_blocks, time_ms, combine=combine)
         return [z for z in zones if z.direction is direction]
+
+    return provider
+
+
+def indexed_zone_provider(
+    results_by_tf: Mapping[str, OrderBlockResult], *, combine: bool
+) -> ZoneProvider:
+    """`order_block_zone_provider`와 **같은 존 집합**을 내되 격자용으로 빠르게 (WAN-126).
+
+    두 가지로 가속한다: (1) 아카이브를 `confirmed_time`으로 미리 정렬해 질의 시각 `T`의
+    `confirmed <= T` 접두사만 `select_active`에 넘긴다(그 뒤는 어차피 alive_at이 거른다),
+    (2) `(tf, T)` 결과를 **메모이즈**한다 — 클리핑·병합은 방향·팔·정의·구간과 무관하게
+    시각에만 달렸으므로, 같은 탭 시각을 7팔이 다시 질의해도 한 번만 계산된다.
+
+    클리핑·병합 규칙은 **복제하지 않고** `select_active`를 그대로 재사용하므로
+    `order_block_zone_provider`와 반환이 동일하다(`tests/test_multi_tf_overlap.py`가 고정).
+    """
+    sorted_obs: dict[str, list[OrderBlock]] = {}
+    confirmed_times: dict[str, list[int]] = {}
+    for timeframe, result in results_by_tf.items():
+        obs = sorted(result.order_blocks, key=lambda o: o.confirmed_time)
+        sorted_obs[timeframe] = obs
+        confirmed_times[timeframe] = [o.confirmed_time for o in obs]
+    cache: dict[tuple[str, int], list[OrderBlock]] = {}
+
+    def provider(timeframe: str, time_ms: int, direction: OrderBlockDirection) -> list[OrderBlock]:
+        obs = sorted_obs.get(timeframe)
+        if obs is None:
+            return []
+        key = (timeframe, time_ms)
+        active = cache.get(key)
+        if active is None:
+            hi = bisect.bisect_right(confirmed_times[timeframe], time_ms)
+            active = select_active(obs[:hi], time_ms, combine=combine)
+            cache[key] = active
+        return [z for z in active if z.direction is direction]
 
     return provider
