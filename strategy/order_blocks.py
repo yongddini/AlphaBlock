@@ -282,6 +282,7 @@ def _make_merged_group(
         swept_time=distal.swept_time,
         tapped_times=tuple(sorted(tapped)),
         combined=True,
+        num_component_obs=len(obs),
     )
     return _MergedGroup(
         direction=direction,
