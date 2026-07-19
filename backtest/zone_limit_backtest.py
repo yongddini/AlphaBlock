@@ -327,6 +327,35 @@ class TakeProfitContext:
 TakeProfitOverride = Callable[["TakeProfitContext"], float | None]
 
 
+@dataclass(frozen=True)
+class StopLossContext:
+    """손절(1R 참조가)을 외부 규칙이 정할 때 넘기는 셋업 문맥 (WAN-133, 옵트인).
+
+    `TakeProfitContext`의 손절 판(版)이다 — `entry_price`는 볼린저·오프셋까지 확정된
+    지정가(= 체결가), `default_stop`은 이 훅이 없을 때 쓰였을 무효화 경계(존 원단)다.
+    이 훅은 손절 거리를 존폭에서 **떼어내** ATR 등 다른 축으로 고정할 때 쓴다(WAN-133
+    「기하 대 선별」 분리 — 존폭/ATR 상관이 장벽 거리 기하에서 오는지 선별에서 오는지).
+
+    ⚠️ 손절은 익절과 달리 **진입 결정 자체를 바꾸지 않는다**(체결은 지정가 터치·RSI
+    게이트로만 정해지고 손절선을 보지 않는다) — 그래서 체결(`filled`) 셋업 집합은 훅을
+    걸어도 **비트 단위로 같다**. 달라지는 건 각 셋업의 **청산**(손절선·거기서 파생되는
+    고정 R 익절 목표·따라서 뚫림/버팀 라벨)과 1R 사이징뿐이다. 미체결 주문의 무효화
+    취소(`invalidation_time`)는 훅과 무관하게 유지되므로(존폭 기하지만 두 팔 공통) 체결
+    집합의 동일성을 깨지 않는다.
+    """
+
+    is_long: bool
+    entry_price: float
+    default_stop: float
+    trigger_time: int
+    order_block: OrderBlock
+
+
+#: 셋업 문맥 → 손절 참조가(1R 기준). None이면 이 셋업을 제외한다(유효 장벽을 못 만듦).
+#: 정적 지정가 경로 전용 — 봉내 라이브 밴드는 손절·익절을 체결 순간에 내므로 훅 지점이 없다.
+StopLossOverride = Callable[["StopLossContext"], float | None]
+
+
 def _resolve_take_profit(
     params: ConfluenceParams,
     is_long: bool,
@@ -564,6 +593,7 @@ def build_zone_limit_candidates(
     overlap: MultiTfOverlapParams | None = None,
     zone_provider: ZoneProvider | None = None,
     take_profit_override: TakeProfitOverride | None = None,
+    stop_loss_override: StopLossOverride | None = None,
 ) -> tuple[list[_Candidate], ZoneLimitStats]:
     """B안 셋업 순회 → 1분 서브스텝 시뮬레이션까지(비용 반영 전 원가 후보 목록).
 
@@ -589,7 +619,15 @@ def build_zone_limit_candidates(
     익절은 청산만 바꾸고 진입 결정·체결 판정에는 전혀 안 쓰이므로, 오버라이드를 걸어도
     셋업·체결 집합(따라서 후보 수·`ZoneLimitStats`)은 기본 익절과 **비트 단위로 같고**
     달라지는 건 각 후보의 청산(`exit_time`·`exit_price`·`reason`)뿐이다. None이면(기본)
-    이 경로도 비활성이라 엔진이 예전과 같다."""
+    이 경로도 비활성이라 엔진이 예전과 같다.
+
+    `stop_loss_override`(WAN-133, 옵트인)를 주면 손절 참조가(1R 기준)를 존 무효화 경계
+    (`seed_ob.bottom`/`top`) 대신 그 콜러블이 정한다 — 손절 거리를 존폭에서 떼어 ATR 등
+    으로 고정해 「기하 대 선별」을 가르는 실험용이다. 손절은 **진입·체결 판정에 쓰이지
+    않으므로**(체결은 지정가 터치·RSI 게이트로만) 체결 셋업 집합(`filled`·`ZoneLimitStats`)은
+    기본과 **비트 단위로 같고**, 달라지는 건 청산(손절선·거기서 파생되는 고정 R 익절 목표·
+    뚫림/버팀)과 1R 사이징뿐이다. 콜러블이 None을 돌려주면(유효 장벽 불가) 그 셋업만
+    제외한다. None이면(기본) 이 경로도 비활성이라 엔진이 예전과 같다."""
     if overlap is not None and overlap.arm != "A" and zone_provider is None:
         raise ValueError(
             "overlap.arm이 'B'/'C'면 zone_provider가 필요합니다 — 하위TF 겹침 존을 "
@@ -643,6 +681,12 @@ def build_zone_limit_candidates(
             "(intrabar_live/intrabar_causal)는 익절을 체결 순간에 산출하므로(WAN-119) "
             "탭 봉 시점에 오버라이드를 걸 지점이 없습니다. 채택 기본값(band_bar='tap')은 "
             "정적 경로라 여기 걸린다."
+        )
+    if stop_loss_override is not None and live_band_mode:
+        raise ValueError(
+            "stop_loss_override는 정적 지정가 경로 전용입니다 — 봉내 라이브 밴드"
+            "(intrabar_live/intrabar_causal)는 1R을 체결 순간에 산출하므로(WAN-119) "
+            "탭 봉 시점에 손절 오버라이드를 걸 지점이 없습니다."
         )
 
     filter_components: tuple[list[float], list[float]] | None = None
@@ -746,6 +790,22 @@ def build_zone_limit_candidates(
             continue  # 탭 봉에 1분봉 커버 없음 → 평가 제외.
 
         stop_price = seed_ob.bottom if is_long else seed_ob.top
+        if stop_loss_override is not None and limit_price is not None:
+            # WAN-133: 손절 참조가를 존 무효화 경계에서 떼어 외부 규칙(예: ATR 고정 거리)이
+            # 정한다. 위 라이브 밴드 가드가 limit_price is not None을 보장한다. None이면
+            # 유효한 장벽을 못 만든 것이라 이 셋업을 제외한다.
+            new_stop = stop_loss_override(
+                StopLossContext(
+                    is_long=is_long,
+                    entry_price=limit_price,
+                    default_stop=stop_price,
+                    trigger_time=signal.trigger_time,
+                    order_block=seed_ob,
+                )
+            )
+            if new_stop is None:
+                continue
+            stop_price = new_stop
         if limit_price is None:
             tp_price = None  # live 밴드: 익절은 체결 순간 산출(위 가드가 오버라이드를 막는다).
         elif take_profit_override is not None:
