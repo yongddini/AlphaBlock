@@ -95,6 +95,9 @@ class OrderBlock(BaseModel):
     바깥→안 전이 시각만 기록한다(존 안에 머무는 연속 봉은 첫 진입만)."""
     combined: bool = False
     """`combine_obs`로 다른 존과 병합되어 생성된 존인지 여부."""
+    num_component_obs: int = 1
+    """이 존이 병합한 구성 존 개수(단일 존이면 1). 측정용(WAN-134) — 진입·손절·익절
+    로직에는 쓰이지 않고, 병합 강도를 사후 분석에서 세기 위한 주석이다."""
 
     def alive_at(self, time_ms: int) -> bool:
         """`time_ms` 시점에 이 존이 차트에 존재(생존)하는지.
