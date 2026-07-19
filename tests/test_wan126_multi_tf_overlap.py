@@ -14,6 +14,7 @@ from backtest.wan126_multi_tf_overlap import (
     _cache_path,
     decomposition,
     detect_ltf_archives,
+    matched_null,
     sample_gate,
     symbol_bias,
     trade_contamination,
@@ -95,6 +96,39 @@ def test_verdict_c_both_nonpositive() -> None:
     assert any("(c)" in ln for ln in lines)
 
 
+def test_verdict_contaminated_price_downgrades_to_c() -> None:
+    """`C−B`가 플러스여도 거래 수 5% 초과 차이면 (b)가 아니라 (c)로 내려간다(사양 §3)."""
+    rows = [
+        _row(
+            symbol="BTC/USDT:USDT",
+            segment="oos",
+            arm="A",
+            definition="none",
+            total_return=0.10,
+            num_trades=100,
+        ),
+        _row(
+            symbol="BTC/USDT:USDT",
+            segment="oos",
+            arm="B",
+            definition="contained",
+            total_return=0.10,
+            num_trades=100,
+        ),
+        _row(
+            symbol="BTC/USDT:USDT",
+            segment="oos",
+            arm="C",
+            definition="contained",
+            total_return=0.20,
+            num_trades=50,
+        ),
+    ]
+    lines = verdict(_frame(rows))
+    assert any("(c)" in ln and "오염" in ln for ln in lines)
+    assert not any("(b)" in ln for ln in lines)
+
+
 def test_trade_contamination_flags_over_5pct() -> None:
     rows = [
         _row(
@@ -169,6 +203,55 @@ def test_symbol_bias_detects_single_symbol_carry() -> None:
     # 전체 B−A는 플러스인데(평균 B 0.20 vs A 0.10) ETH를 빼면 0으로 무너진다.
     assert none_row["selection_B_minus_A"] == pytest_approx(0.10)
     assert drop_eth["selection_B_minus_A"] == pytest_approx(0.0)
+
+
+def test_matched_null_flags_degenerate_when_filter_weak() -> None:
+    """B가 A의 95% 이상이면(필터가 거의 안 걸러냄) 퇴화로 표시한다(WAN-124 취지)."""
+    rows = [
+        _row(
+            symbol="BTC/USDT:USDT",
+            segment="oos",
+            arm="A",
+            definition="none",
+            total_return=0.10,
+            num_trades=100,
+        ),
+        _row(
+            symbol="BTC/USDT:USDT",
+            segment="oos",
+            arm="B",
+            definition="contained",
+            total_return=0.10,
+            num_trades=99,
+        ),
+    ]
+    null = matched_null(_frame(rows))
+    row = null.iloc[0]
+    assert row["overlap_fraction"] == pytest_approx(0.99)
+    assert bool(row["degenerate"]) is True
+
+
+def test_matched_null_not_degenerate_when_filter_strong() -> None:
+    rows = [
+        _row(
+            symbol="BTC/USDT:USDT",
+            segment="oos",
+            arm="A",
+            definition="none",
+            total_return=0.10,
+            num_trades=100,
+        ),
+        _row(
+            symbol="BTC/USDT:USDT",
+            segment="oos",
+            arm="B",
+            definition="contained",
+            total_return=0.10,
+            num_trades=40,
+        ),
+    ]
+    null = matched_null(_frame(rows))
+    assert bool(null.iloc[0]["degenerate"]) is False
 
 
 def test_sample_gate_flags_thin_cells() -> None:

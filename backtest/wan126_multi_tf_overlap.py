@@ -400,6 +400,58 @@ def symbol_bias(
     return pd.DataFrame(records)
 
 
+#: 매칭 널 퇴화 임계 — 겹침 필터가 풀의 이 비율 이상을 그대로 통과시키면(=거의 안 걸러내면)
+#: 실제 팔(`B`)이 풀(`A`)과 사실상 같아져 부트스트랩 널이 자기 자신을 검정한다. WAN-124가
+#: `run_random_control_b_segment`에서 풀==실제를 ValueError로 막은 것과 같은 취지다.
+NULL_DEGENERATE_THRESHOLD = 0.95
+
+
+def matched_null(
+    frame: pd.DataFrame, *, definition: str = "contained", segment: str = "oos"
+) -> pd.DataFrame:
+    """매칭 널(WAN-70/124식): 겹침 요구 진입(`B`)이 같은 상위TF 존 풀(`A`)의 무작위 진입을
+    이기는가 — **단, WAN-124 퇴화 가드를 먼저 적용한다.**
+
+    `B`는 정의상 `A`의 부분집합이다(겹침이 없는 셋업만 뺀 것). 그 겹침 필터가 풀의
+    `NULL_DEGENERATE_THRESHOLD`(95%) 이상을 그대로 통과시키면 `B`가 `A`와 거의 같아져
+    부트스트랩이 "자기 자신에서 뽑은 부분집합"과 비교하게 된다 — WAN-124가 경계한 퇴화다.
+    그때는 p값이 무의미하므로 **부트스트랩을 돌리지 않고 퇴화로 보고**한다(그 사실 자체가
+    "필터가 아무것도 안 걸러낸다"는 이 이슈의 핵심 발견이다). 거래 수는 격자 CSV에 이미
+    있으므로 재실행 없이 계산한다.
+    """
+    records: list[dict[str, object]] = []
+    for timeframe in sorted(set(frame["timeframe"])):
+        a = frame[
+            (frame["timeframe"] == timeframe)
+            & (frame["segment"] == segment)
+            & (frame["arm"] == "A")
+        ]
+        b = frame[
+            (frame["timeframe"] == timeframe)
+            & (frame["segment"] == segment)
+            & (frame["arm"] == "B")
+            & (frame["definition"] == definition)
+        ]
+        if a.empty or b.empty:
+            continue
+        pool_trades = int(a["num_trades"].sum())
+        real_trades = int(b["num_trades"].sum())
+        frac = real_trades / pool_trades if pool_trades else float("nan")
+        records.append(
+            {
+                "timeframe": timeframe,
+                "pool_trades_A": pool_trades,
+                "real_trades_B": real_trades,
+                "overlap_fraction": frac,
+                "degenerate": bool(frac >= NULL_DEGENERATE_THRESHOLD),
+                "real_return_B": float(b["total_return"].mean()),
+                "pool_return_A": float(a["total_return"].mean()),
+                "effect_B_minus_A": float(b["total_return"].mean() - a["total_return"].mean()),
+            }
+        )
+    return pd.DataFrame(records)
+
+
 def sample_gate(frame: pd.DataFrame) -> pd.DataFrame:
     """셀당 거래 수 — 20 미만은 판정 불가(표에는 남긴다)."""
     grp = (
@@ -439,6 +491,10 @@ _PCT_COLS = frozenset(
         "max_drawdown",
         "fill_rate",
         "diff_pct",
+        "overlap_fraction",
+        "real_return_B",
+        "pool_return_A",
+        "effect_B_minus_A",
     }
 )
 
@@ -454,9 +510,15 @@ def _fmt(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def verdict(frame: pd.DataFrame, *, definition: str = "contained") -> list[str]:
-    """공식 렌즈 OOS `B−A`(선별)·`C−B`(가격)의 부호로 (a)/(b)/(c)를 읽는다."""
+    """공식 렌즈 OOS `B−A`(선별)·`C−B`(가격)의 부호로 (a)/(b)/(c)를 읽는다.
+
+    ⚠️ **오염 게이트**(사양 §3): `C−B`가 플러스여도 `B`/`C` 거래 수 차이가 5% 초과면 그것은
+    "순수 가격 효과"가 아니라 "거래 집합 차이 + 가격"이라 (b)로 인용하지 않고 **(c)**로
+    내린다 — WAN-114가 빠진 "선별과 가격을 못 가른다"는 함정을 자로 막는다.
+    """
     dec = decomposition(frame, definition=definition)
     gate = sample_gate(frame)
+    contam = trade_contamination(frame, definition=definition)
     lines: list[str] = []
     for timeframe in sorted(set(frame["timeframe"])):
         row = dec[(dec["timeframe"] == timeframe) & (dec["segment"] == "oos")]
@@ -470,15 +532,24 @@ def verdict(frame: pd.DataFrame, *, definition: str = "contained") -> list[str]:
             & (gate["arm"] == "B")
             & (gate["definition"] == definition)
         ]
+        c_row = contam[(contam["timeframe"] == timeframe) & (contam["segment"] == "oos")]
+        contaminated = (not c_row.empty) and bool(c_row["contaminated"].iloc[0])
+        diff_pct = float(c_row["diff_pct"].iloc[0]) if not c_row.empty else float("nan")
         note = ""
         if not b_gate.empty and not bool(b_gate["ok"].iloc[0]):
             note = f" ⚠️ 표본 미달(최소 {int(b_gate['min_trades'].iloc[0])}거래 < {MIN_TRADES})"
-        if sel > 0 and price > 0:
+        price_usable = price > 0 and not contaminated
+        if sel > 0 and price_usable:
             tag = "(a) 선별·가격 모두 플러스"
-        elif sel <= 0 < price:
-            tag = "(b) 선별 0/음수, 가격만 플러스 → 볼린저 부류(가격 효과)"
         elif sel > 0 >= price:
             tag = "(a?) 선별만 플러스 — 유효 선별 규칙 후보"
+        elif sel <= 0 < price and price_usable:
+            tag = "(b) 선별 0/음수, 가격만 플러스 → 볼린저 부류(가격 효과)"
+        elif sel <= 0 < price and contaminated:
+            tag = (
+                f"(c) 선별 0/음수 · 가격 `C−B`는 플러스지만 거래 수 {diff_pct * 100:.0f}% "
+                "차이(오염)라 순수 가격 효과로 못 읽음 — 규칙 값 확인 안 됨"
+            )
         else:
             tag = "(c) 둘 다 0/음수 — 규칙 값 없음"
         lines.append(
@@ -494,6 +565,7 @@ def write_summary(rows: Sequence[OverlapRow], path: Path) -> None:
     contam = trade_contamination(frame)
     bias = symbol_bias(frame)
     gate = sample_gate(frame)
+    null = matched_null(frame)
     lines = [
         "# WAN-126: 다중TF 겹침 캐스케이드 — 선별 대 가격 분리",
         "",
@@ -522,7 +594,16 @@ def write_summary(rows: Sequence[OverlapRow], path: Path) -> None:
         "",
         _md_table(_fmt(bias)),
         "",
-        "## 4. 표본 게이트 (셀당 최소 거래 수, 20 미만 판정 불가)",
+        "## 4. 매칭 널 (WAN-70/124식) — `B`가 상위존 풀 `A`의 무작위 진입을 이기나",
+        "",
+        f"⚠️ **퇴화 가드**: `overlap_fraction`(= `B`거래/`A`거래)이 "
+        f"{NULL_DEGENERATE_THRESHOLD:.0%} 이상이면 겹침 필터가 풀을 거의 그대로 통과시킨 "
+        "것이라 `B`가 `A`와 사실상 같아진다 — 부트스트랩이 자기 자신을 검정하므로(WAN-124) "
+        "**돌리지 않고 퇴화로 표시**한다. 그 자체가 「필터가 아무것도 안 걸러낸다」는 발견이다.",
+        "",
+        _md_table(_fmt(null)),
+        "",
+        "## 5. 표본 게이트 (셀당 최소 거래 수, 20 미만 판정 불가)",
         "",
         _md_table(_fmt(gate)),
         "",
