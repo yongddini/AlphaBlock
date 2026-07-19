@@ -31,16 +31,18 @@ from backtest.zone_limit_backtest import (
 )
 from common.costs import Liquidity
 from data.models import FundingRate
-from strategy.confluence import ConfluenceStrategy
+from strategy.confluence import ConfluenceStrategy, entry_candidate_signals
 from strategy.indicators import emas, vwma
 from strategy.models import (
     ConfluenceParams,
     DeviationFilterParams,
     OrderBlock,
     OrderBlockDirection,
+    OrderBlockParams,
     OrderBlockResult,
     OrderBlockSignal,
 )
+from strategy.order_blocks import OrderBlockDetector
 from strategy.realtime_band import RealtimeBand
 from strategy.realtime_rsi import RealtimeRsi
 
@@ -390,6 +392,37 @@ def test_retap_every_tap_yields_at_least_as_many_eligible_setups() -> None:
     _, once_stats = build_zone_limit_candidates(params=once_params, **cfg_kwargs)
     _, every_tap_stats = build_zone_limit_candidates(params=every_tap_params, **cfg_kwargs)
     assert every_tap_stats.eligible >= once_stats.eligible
+
+
+def test_retap_mode_selects_first_tap_vs_retap_signal_view() -> None:
+    """WAN-138: `retap_mode`가 **동작으로** 첫 탭 뷰(`once`)와 전체 탭 뷰(`every_tap`)를
+    가른다 — 라벨이 아니라 실제 소비하는 시그널 집합이 갈린다.
+
+    채택 기본값(`combine_obs=True`)에서 탐지한 `OrderBlockResult`를 `entry_candidate_signals`
+    (A안·B안 공유 진입점)에 먹여, `once`는 병합 존당 **첫 탭만**(`signals`, 전부
+    `tap_index==0`)을, `every_tap`은 재탭 포함 전체(`retap_signals`, 상위집합)를 쓰는지
+    고정한다. WAN-91/95/100/112/123 부류의 "라벨만 바뀌고 동작은 그대로"인 조용한 실패를
+    막는다.
+    """
+    htf = make_synthetic_ohlcv(timeframe="1h", bars=3000, seed=7)
+    ob_result = OrderBlockDetector(OrderBlockParams(combine_obs=True)).run(htf)
+    base = ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime")
+
+    once = entry_candidate_signals(
+        ob_result, base.model_copy(update={"retap_mode": "once"}), [], [], {}
+    )
+    every_tap = entry_candidate_signals(
+        ob_result, base.model_copy(update={"retap_mode": "every_tap"}), [], [], {}
+    )
+
+    # `once`는 첫 탭 뷰 그 자체 — 모든 시그널이 tap_index==0(재탭 없음).
+    assert once is ob_result.signals
+    assert once  # 이 시드는 실제로 진입 후보를 낸다.
+    assert all(s.tap_index == 0 for s in once)
+    # `every_tap`은 재탭 포함 뷰(상위집합)이고, 이 시드엔 실제 재탭(tap_index>=1)이 있다.
+    assert every_tap is ob_result.retap_signals
+    assert len(every_tap) >= len(once)
+    assert any(s.tap_index >= 1 for s in every_tap)
 
 
 def test_limit_valid_bars_none_runs_end_to_end() -> None:

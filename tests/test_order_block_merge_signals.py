@@ -14,7 +14,14 @@
 from __future__ import annotations
 
 from backtest.synthetic import make_synthetic_ohlcv
-from strategy.models import OrderBlock, OrderBlockDirection, OrderBlockParams
+from strategy.confluence import entry_candidate_signals
+from strategy.models import (
+    ConfluenceParams,
+    OrderBlock,
+    OrderBlockDirection,
+    OrderBlockParams,
+    OrderBlockResult,
+)
 from strategy.order_blocks import (
     OrderBlockDetector,
     _generate_merged_signals,
@@ -180,6 +187,31 @@ def test_new_zone_joining_entered_cluster_still_gets_its_own_first_tap() -> None
     by_time = {s.trigger_time: s for s in signals}
     assert (by_time[4].order_block.top, by_time[4].order_block.bottom) == (105.0, 100.0)
     assert (by_time[8].order_block.top, by_time[8].order_block.bottom) == (105.0, 98.0)
+
+
+def test_retap_once_consumes_per_component_first_taps_in_merged_zone() -> None:
+    """WAN-138: `retap_mode="once"` 소비자(`entry_candidate_signals`)가 병합 존에서
+    「첫 탭」을 **구성 존 단위**로 본다 — 클러스터 단위가 아니다.
+
+    §5 시나리오(A 단독 첫 탭 t4 → B가 편입돼 병합 클러스터 첫 탭 t8)의 첫 탭 뷰
+    (`signals`)를 담은 `OrderBlockResult`를 `once` 파라미터로 소비하면, **두 개**의
+    `tap_index==0` 진입(t4·t8)이 그대로 나와야 한다. `once`가 "병합 클러스터당 딱 1회"로
+    접으면 t8(신규 편입 존 B의 첫 탭)이 사라진다 — 그 회귀를 라벨이 아니라 동작으로 막는다.
+    """
+    a = _bull(105.0, 100.0, confirmed=2)
+    b = _bull(103.0, 98.0, confirmed=6)
+    ob_result = OrderBlockResult(
+        order_blocks=[a, b],
+        signals=_generate_merged_signals([a, b], _S5_TIMES, _S5_HIGHS, _S5_LOWS, _S5_CLOSES),
+        retap_signals=_generate_merged_signals(
+            [a, b], _S5_TIMES, _S5_HIGHS, _S5_LOWS, _S5_CLOSES, include_retaps=True
+        ),
+    )
+    once = ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime", retap_mode="once")
+
+    candidates = entry_candidate_signals(ob_result, once, [], [], {})
+
+    assert [(s.trigger_time, s.tap_index) for s in candidates] == [(4, 0), (8, 0)]
 
 
 def test_new_zone_joining_entered_cluster_does_not_infinitely_reenter() -> None:

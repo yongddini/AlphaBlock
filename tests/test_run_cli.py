@@ -153,8 +153,25 @@ def test_cli_defaults_produce_the_adopted_engine() -> None:
     # 혼자 옛 엔진을 돌게 된다(WAN-112).
     assert grid.offsets_bps == (ConfluenceParams().zone_limit_offset_bps,) == (2.0,)
     assert tuple(f.name for f in grid.fills) == ("baseline",)
+    # 재탭 정책도 채택 기본값을 물려받는다(WAN-138) — 하드코딩하면 기본값이 바뀔 때
+    # CLI 기본 실행만 조용히 갈라진다.
+    assert grid.retap_modes == (ConfluenceParams().retap_mode,) == ("every_tap",)
     assert grid.short_enabled is None  # 기본값을 덮어쓰지 않는다.
     assert len(iter_combos(grid)) == 1
+
+
+def test_retap_mode_axis_expands_to_both_arms() -> None:
+    """WAN-138: `--retap-mode every_tap,once`가 두 팔을 한 표에서 낸다."""
+    grid = _grid_from(["--retap-mode", "every_tap,once"])
+    assert grid.retap_modes == ("every_tap", "once")
+    combos = iter_combos(grid)
+    assert len(combos) == 2
+    assert {c.retap_mode for c in combos} == {"every_tap", "once"}
+
+
+def test_retap_mode_rejects_unknown_value() -> None:
+    with pytest.raises(ValueError, match="재탭 정책"):
+        _grid_from(["--retap-mode", "twice"])
 
 
 def test_comma_values_expand_to_cartesian_product() -> None:
