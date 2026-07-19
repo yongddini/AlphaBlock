@@ -87,6 +87,11 @@ DEFAULT_END = "2026-07-15"
 SEGMENT_ORDER: tuple[str, ...] = ("full", "is", "oos")
 MIN_TRADES = 20  # WAN-84 유효 기준.
 
+#: 하위TF 오더블록 아카이브 디스크 캐시(gitignore된 data/cache 아래). 1분봉 탐지가 심볼당
+#: 8분+(초선형)이라 (심볼, TF, 창)마다 한 번만 탐지하고 재사용한다 — 탐지는 결정적이므로
+#: 캐시가 정당하다(wan126.md §5·[[project_1m_ob_detection_slow]]).
+DEFAULT_CACHE_DIR = "data/cache/wan126_ob"
+
 
 class OverlapRow(BaseModel):
     """3팔 격자 한 셀."""
@@ -118,22 +123,49 @@ class OverlapRow(BaseModel):
 # --------------------------------------------------------------------------- #
 
 
+def _cache_path(cache_dir: str, symbol: str, tf: str, start_ms: int, end_ms: int) -> Path:
+    safe = symbol.replace("/", "_").replace(":", "_")
+    return Path(cache_dir) / f"{safe}_{tf}_{start_ms}_{end_ms}.json"
+
+
 def detect_ltf_archives(
-    symbol: str, ladder: Sequence[str], *, start_ms: int, end_ms: int
+    symbol: str,
+    ladder: Sequence[str],
+    *,
+    start_ms: int,
+    end_ms: int,
+    cache_dir: str | None = DEFAULT_CACHE_DIR,
+    log: bool = False,
 ) -> dict[str, OrderBlockResult]:
     """사다리의 하위TF 오더블록을 **전체 창에서** 탐지한다(룩어헤드는 질의 시 클리핑).
 
     탐지는 인과적이라 시각 T의 존은 창 끝과 무관하게 같다 — 그래서 구간마다 다시 탐지하지
     않고 한 번만 하고 `indexed_zone_provider`가 T까지 클리핑해 쓴다.
+
+    `cache_dir`을 주면 (심볼, TF, 창)별 결과를 JSON으로 캐시한다 — 1분봉 탐지가 심볼당
+    8분+(초선형)이라 재실행·15m 축에서 반드시 재사용해야 한다. 캐시 파일은 gitignore된
+    `data/cache` 아래이고 탐지가 결정적이라 (심볼, 창) 키만으로 정합적이다.
     """
     archives: dict[str, OrderBlockResult] = {}
     for tf in ladder:
+        cache = _cache_path(cache_dir, symbol, tf, start_ms, end_ms) if cache_dir else None
+        if cache is not None and cache.exists():
+            archives[tf] = OrderBlockResult.model_validate_json(cache.read_text(encoding="utf-8"))
+            if log:
+                print(f"[wan126] cache hit {symbol} {tf} ({len(archives[tf].order_blocks)} obs)")
+            continue
         df = load_market_data(
             symbol, tf, start_ms=start_ms, end_ms=end_ms, need_1m=False, funding=False
         ).htf_df
         if df.empty:
             continue  # 데이터 없는 칸(예: 과거 5m 결측)은 사다리에서 조용히 빠진다.
-        archives[tf] = OrderBlockDetector().run(df)
+        result = OrderBlockDetector().run(df)
+        archives[tf] = result
+        if cache is not None:
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            cache.write_text(result.model_dump_json(), encoding="utf-8")
+            if log:
+                print(f"[wan126] cached {symbol} {tf} ({len(result.order_blocks)} obs)")
     return archives
 
 
@@ -193,6 +225,7 @@ def run_report(
     *,
     start: str = DEFAULT_START,
     end: str = DEFAULT_END,
+    cache_dir: str | None = DEFAULT_CACHE_DIR,
     log: bool = True,
 ) -> list[OverlapRow]:
     """3팔 격자를 돈다: 심볼 × TF × 구간 × (A + B·C × 3정의)."""
@@ -208,7 +241,9 @@ def run_report(
                 if log:
                     print(f"[wan126] skip {sym} {timeframe}: 데이터 없음")
                 continue
-            archives = detect_ltf_archives(sym, ladder, start_ms=start_ms, end_ms=end_ms)
+            archives = detect_ltf_archives(
+                sym, ladder, start_ms=start_ms, end_ms=end_ms, cache_dir=cache_dir, log=log
+            )
             # 하위TF 존은 **병합하지 않는다**(combine=False). 두 가지 이유: (1) "그 자리에
             # 뚜렷한 하위TF 오더블록이 있는가"라는 refinement 질문에는 병합 전 개별 존이 더
             # 충실하다(병합은 인접 존을 더 넓은 블록으로 뭉쳐 겹침 판정을 흐린다). (2) 1분봉
@@ -509,6 +544,10 @@ def main() -> None:
     )
     parser.add_argument("--append", action="store_true", help="기존 CSV에 새 TF 행을 덧붙인다")
     parser.add_argument("--from-csv", action="store_true", help="격자 재실행 없이 요약만 재생성")
+    parser.add_argument("--cache-dir", type=str, default=DEFAULT_CACHE_DIR)
+    parser.add_argument(
+        "--no-cache", action="store_true", help="LTF 아카이브 디스크 캐시를 쓰지 않는다"
+    )
     args = parser.parse_args()
 
     out_csv = Path(args.out_csv)
@@ -518,7 +557,8 @@ def main() -> None:
     else:
         symbols = tuple(s.strip() for s in args.symbols.split(",") if s.strip())
         timeframes = tuple(t.strip() for t in args.tf.split(",") if t.strip())
-        rows = run_report(symbols, timeframes, start=args.start, end=args.end)
+        cache_dir = None if args.no_cache else args.cache_dir
+        rows = run_report(symbols, timeframes, start=args.start, end=args.end, cache_dir=cache_dir)
         if args.append and out_csv.exists():
             existing = rows_from_csv(out_csv)
             keep = [r for r in existing if r.timeframe not in set(timeframes)]

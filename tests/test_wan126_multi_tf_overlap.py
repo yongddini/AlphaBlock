@@ -11,12 +11,15 @@ import pandas as pd
 
 from backtest.wan126_multi_tf_overlap import (
     OverlapRow,
+    _cache_path,
     decomposition,
+    detect_ltf_archives,
     sample_gate,
     symbol_bias,
     trade_contamination,
     verdict,
 )
+from strategy.models import OrderBlock, OrderBlockDirection, OrderBlockResult
 
 
 def _row(
@@ -191,6 +194,40 @@ def test_sample_gate_flags_thin_cells() -> None:
     row = gate[(gate["arm"] == "B")].iloc[0]
     assert row["min_trades"] == 10
     assert bool(row["ok"]) is False  # 최소 10 < 20.
+
+
+def test_ltf_archive_cache_roundtrip(tmp_path: object) -> None:
+    """캐시가 있으면 탐지를 건너뛰고 디스크에서 읽는다(1분봉 8분+/심볼을 피하는 핵심).
+
+    캐시 파일을 미리 심어 두고 `detect_ltf_archives`가 DB 탐지 없이 그 값을 그대로 돌려주는지
+    확인한다 — 캐시 히트 경로는 DB·거래소를 안 탄다.
+    """
+    import pathlib
+
+    cache_dir = pathlib.Path(str(tmp_path))
+    sym = "BTC/USDT:USDT"
+    start_ms, end_ms = 1_000, 2_000
+    zone = OrderBlock(
+        direction=OrderBlockDirection.BULLISH,
+        top=110.0,
+        bottom=100.0,
+        start_time=500,
+        confirmed_time=500,
+        ob_volume=1.0,
+        ob_low_volume=0.5,
+        ob_high_volume=0.5,
+    )
+    result = OrderBlockResult(order_blocks=[zone], signals=[], retap_signals=[])
+    path = _cache_path(str(cache_dir), sym, "5m", start_ms, end_ms)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(result.model_dump_json(), encoding="utf-8")
+
+    got = detect_ltf_archives(
+        sym, ("5m",), start_ms=start_ms, end_ms=end_ms, cache_dir=str(cache_dir)
+    )
+    assert "5m" in got
+    assert len(got["5m"].order_blocks) == 1
+    assert got["5m"].order_blocks[0].top == 110.0
 
 
 def pytest_approx(value: float) -> object:
