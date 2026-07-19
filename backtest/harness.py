@@ -170,6 +170,10 @@ _RSI_MODE_FOR_ENTRY: dict[str, str] = {"close": "closed_bar", "zone_limit": "rea
 
 ENTRY_MODES: tuple[str, ...] = tuple(_RSI_MODE_FOR_ENTRY)
 
+#: 재탭 정책 축(WAN-138). `ConfluenceParams.retap_mode`의 `Literal`과 같은 값이라야
+#: 격자가 pydantic 검증에 걸리기 전에 CLI에서 깔끔한 오류를 낸다.
+RETAP_MODES: tuple[str, ...] = ("every_tap", "once")
+
 #: WAN-81~WAN-122 채택 엔진의 RSI 게이트 — 첫 탭 면제 + 재탭 `extreme`(롱 `RSI<=30`).
 #:
 #: **WAN-123이 기본값을 `"unconditional"`(게이트 제거)로 옮겼다.** 그 이전 수치를 결론
@@ -191,6 +195,7 @@ def build_params(
     fill: FillPreset = BASELINE_FILL,
     seed: int = 0,
     short_enabled: bool | None = None,
+    retap_mode: str | None = None,
     base: ConfluenceParams | None = None,
 ) -> ConfluenceParams:
     """CLI 인자를 `ConfluenceParams`로 조립한다.
@@ -241,6 +246,11 @@ def build_params(
         update["take_profit_r"] = take_profit_r
     if short_enabled is not None:
         update["short_enabled"] = short_enabled
+    if retap_mode is not None:
+        if retap_mode not in RETAP_MODES:
+            supported = ", ".join(RETAP_MODES)
+            raise ValueError(f"알 수 없는 재탭 정책: {retap_mode!r} (지원: {supported})")
+        update["retap_mode"] = retap_mode
     return (base or ConfluenceParams()).model_copy(update=update)
 
 
@@ -617,6 +627,10 @@ class RunRow(BaseModel):
     entry_mode: str
     take_profit_r: float
     offset_bps: float
+    retap_mode: str = "every_tap"
+    """재탭 정책(WAN-138). 기본값은 채택 기본값(`every_tap`) — 이 축이 생기기 전에 만들어진
+    행 생성부(옛 리포트 테스트 픽스처 등)는 전부 채택 기본값 시절 행이라 기본값이 곧 정답이다.
+    `build_row`는 항상 `params.retap_mode`로 명시 설정하므로 실행 산출 행은 실제 값을 싣는다."""
     fill: str
     seed: int
     start_time: int | None
@@ -657,6 +671,7 @@ def build_row(
         entry_mode=params.entry_mode,
         take_profit_r=params.take_profit_r,
         offset_bps=params.zone_limit_offset_bps,
+        retap_mode=params.retap_mode,
         fill=fill_name,
         seed=params.fill_dropout_seed,
         start_time=market.start_ms if not market.empty else None,
@@ -707,6 +722,7 @@ _AXIS_COLUMNS: tuple[tuple[str, str], ...] = (
     ("entry", "entry_mode"),
     ("tp_r", "take_profit_r"),
     ("off_bp", "offset_bps"),
+    ("retap", "retap_mode"),
     ("fill", "fill"),
     ("seed", "seed"),
 )

@@ -76,6 +76,7 @@ from backtest.harness import (
     ENTRY_MODES,
     FILL_PRESETS,
     FORMATS,
+    RETAP_MODES,
     FillPreset,
     RunRow,
     build_config,
@@ -187,6 +188,10 @@ class Grid:
     take_profit_rs: tuple[float, ...]
     offsets_bps: tuple[float, ...]
     fills: tuple[FillPreset, ...]
+    retap_modes: tuple[str, ...] = ("every_tap",)
+    """재탭 정책 축(WAN-138). 기본은 채택 기본값(`every_tap`) 하나 — `every_tap,once`로
+    두 팔을 한 표에서 비교한다. 다른 축과 달리 이건 **진짜 축이지 핀이 아니다**(사용자가
+    두 팔을 나란히 보려는 것이 이슈의 목적이라 CLI 플래그로 연다)."""
     seeds: tuple[int, ...] | None = None
     """탈락 시드 오버라이드. None이면 프리셋의 시드를 쓴다."""
     short_enabled: bool | None = None
@@ -204,6 +209,10 @@ class Grid:
         for mode in self.entry_modes:
             if mode not in ENTRY_MODES:
                 raise ValueError(f"알 수 없는 진입 방식: {mode!r} (지원: {', '.join(ENTRY_MODES)})")
+        for retap in self.retap_modes:
+            if retap not in RETAP_MODES:
+                supported = ", ".join(RETAP_MODES)
+                raise ValueError(f"알 수 없는 재탭 정책: {retap!r} (지원: {supported})")
         # 종가 진입은 지정가 노브를 쓰지 않는다. 격자에 섞여 있으면 조용히 무시하는
         # 대신 여기서 막는다 — 무시하면 `--offset-bps 5`가 아무 일도 하지 않은 표에
         # `off_bp=5` 라벨만 붙는다(WAN-95가 고친 바로 그 거짓말).
@@ -235,6 +244,7 @@ class Combo:
     entry_mode: str
     take_profit_r: float
     offset_bps: float
+    retap_mode: str
     fill: FillPreset
     seed: int
 
@@ -243,19 +253,21 @@ def iter_combos(grid: Grid) -> list[Combo]:
     """격자의 모든 조합을 결정적 순서로 열거한다."""
     combos: list[Combo] = []
     for entry_mode in grid.entry_modes:
-        for take_profit_r in grid.take_profit_rs:
-            for offset_bps in grid.offsets_bps:
-                for fill in grid.fills:
-                    for seed in iter_seeds(fill, grid.seeds):
-                        combos.append(
-                            Combo(
-                                entry_mode=entry_mode,
-                                take_profit_r=take_profit_r,
-                                offset_bps=offset_bps,
-                                fill=fill,
-                                seed=seed,
+        for retap_mode in grid.retap_modes:
+            for take_profit_r in grid.take_profit_rs:
+                for offset_bps in grid.offsets_bps:
+                    for fill in grid.fills:
+                        for seed in iter_seeds(fill, grid.seeds):
+                            combos.append(
+                                Combo(
+                                    entry_mode=entry_mode,
+                                    take_profit_r=take_profit_r,
+                                    offset_bps=offset_bps,
+                                    retap_mode=retap_mode,
+                                    fill=fill,
+                                    seed=seed,
+                                )
                             )
-                        )
     return combos
 
 
@@ -374,6 +386,7 @@ def _run_cell(task: _CellTask) -> _CellOutcome:
                 offset_bps=combo.offset_bps,
                 fill=combo.fill,
                 seed=combo.seed,
+                retap_mode=combo.retap_mode,
                 short_enabled=grid.short_enabled,
                 base=(
                     None
@@ -508,6 +521,13 @@ def build_parser() -> argparse.ArgumentParser:
     strategy.add_argument("--tp-r", help="고정 R 익절 배수(기본: 채택 기본값 1.5)")
     strategy.add_argument("--offset-bps", help="지정가 오프셋 bp(기본 0). 지정가 전용")
     strategy.add_argument(
+        "--retap-mode",
+        help=(
+            f"재탭 정책(콤마 복수 = 격자). 지원: {', '.join(RETAP_MODES)}. "
+            "기본: 채택 기본값 every_tap"
+        ),
+    )
+    strategy.add_argument(
         "--fill",
         help=f"체결 가정(기본 baseline). 지원: {', '.join(p.name for p in FILL_PRESETS)}",
     )
@@ -604,6 +624,7 @@ def grid_from_args(args: argparse.Namespace) -> Grid:
             if args.offset_bps
             else _default_offsets_bps(entry_modes)
         ),
+        retap_modes=(split_list(args.retap_mode) if args.retap_mode else _default_retap_modes()),
         fills=_fills_from_args(args),
         seeds=split_ints(args.seeds, label="--seeds") if args.seeds else None,
         short_enabled=short_enabled,
@@ -613,6 +634,15 @@ def grid_from_args(args: argparse.Namespace) -> Grid:
 def _default_tp_r() -> float:
     """익절 R을 안 주면 채택 기본값 그대로."""
     return build_params().take_profit_r
+
+
+def _default_retap_modes() -> tuple[str, ...]:
+    """재탭 정책을 안 주면 채택 기본값 하나만(`every_tap`).
+
+    `_default_offsets_bps`와 같은 이유로 `("every_tap",)`를 하드코딩하지 않고 채택
+    기본값에서 읽는다 — 기본값이 바뀌면 CLI 기본 실행도 따라가야 조용한 갈라짐이 없다.
+    """
+    return (build_params().retap_mode,)
 
 
 def _default_offsets_bps(entry_modes: tuple[str, ...]) -> tuple[float, ...]:
