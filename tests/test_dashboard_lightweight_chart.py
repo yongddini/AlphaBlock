@@ -17,7 +17,15 @@ import pytest
 
 from backtest.engine import run_backtest
 from backtest.models import BacktestConfig
-from dashboard.lightweight_chart import _RSI_LENGTH, BAND_LINE_COLOR, build_chart_html
+from dashboard.lightweight_chart import (
+    _BAND_LINE_WIDTH,
+    _EMA_LENGTH_COLORS_DARK,
+    _EMA_LINE_PALETTE,
+    _MA_LINE_WIDTH,
+    _RSI_LENGTH,
+    BAND_LINE_COLOR,
+    build_chart_html,
+)
 from dashboard.live_chart import LiveChartConfig, build_live_config
 from strategy.confluence import ConfluenceStrategy
 from strategy.indicators import ema
@@ -264,6 +272,137 @@ def test_light_theme_overrides_all_surfaces() -> None:
     assert theme["textColor"] == "#333333"
     assert payload["rsiColor"] == "#7e57c2"
     assert theme["legendText"] == "#333333"
+
+
+def _line_colors(payload: dict[str, object]) -> dict[str, str]:
+    lines = payload["lines"]
+    assert isinstance(lines, list)
+    return {line["key"]: line["color"] for line in lines}
+
+
+def test_ema_colors_are_fixed_by_length_not_order() -> None:
+    """WAN-67: 20 빨강 / 60 주황 / 120 노랑 / 240 초록 / 365 파랑 (다크 기준)."""
+    df = _df(30)
+    conf_params = ConfluenceParams(display_ema_lengths=(20, 60, 120, 240, 365), tp_vwma_length=None)
+
+    colors = _line_colors(_payload(build_chart_html(df, [], conf_params=conf_params)))
+
+    assert colors == {
+        "ema_20": "#ff5252",
+        "ema_60": "#ff9800",
+        "ema_120": "#ffee58",
+        "ema_240": "#4caf50",
+        "ema_365": "#42a5f5",
+    }
+    # 색 5개가 서로 다르다(같은 값이 겹치면 눈으로 선을 못 가른다).
+    assert len(set(colors.values())) == 5
+
+
+def test_ema_color_survives_dropping_a_length() -> None:
+    """목록에서 하나를 빼도 남은 선의 색은 그대로다 — 순번 매핑이면 밀린다."""
+    df = _df(30)
+    full = ConfluenceParams(display_ema_lengths=(20, 60, 120), tp_vwma_length=None)
+    dropped = ConfluenceParams(display_ema_lengths=(60, 120), tp_vwma_length=None)
+
+    full_colors = _line_colors(_payload(build_chart_html(df, [], conf_params=full)))
+    dropped_colors = _line_colors(_payload(build_chart_html(df, [], conf_params=dropped)))
+
+    assert dropped_colors["ema_60"] == full_colors["ema_60"]
+    assert dropped_colors["ema_120"] == full_colors["ema_120"]
+
+
+def test_unspecified_ema_length_falls_back_to_index_palette() -> None:
+    """스펙에 없는 길이를 넣어도 렌더가 깨지지 않는다(폴백 팔레트)."""
+    df = _df(30)
+    conf_params = ConfluenceParams(display_ema_lengths=(7, 60), tp_vwma_length=None)
+
+    colors = _line_colors(_payload(build_chart_html(df, [], conf_params=conf_params)))
+
+    assert colors["ema_60"] == "#ff9800"  # 스펙 길이는 그대로 고정색
+    assert colors["ema_7"] in _EMA_LINE_PALETTE  # 스펙 밖 길이는 순번 팔레트
+    assert colors["ema_7"] != colors["ema_60"]
+
+
+def test_vwma_is_white_on_dark_and_dark_on_light() -> None:
+    """사용자 스펙(2026-07-20): VWMA는 다크에서 흰색. 라이트에선 배경 대비 중립색."""
+    df = _df(30)
+    conf_params = ConfluenceParams(display_ema_lengths=(20,), tp_vwma_length=100)
+
+    dark = _line_colors(_payload(build_chart_html(df, [], conf_params=conf_params)))
+    light = _line_colors(_payload(build_chart_html(df, [], conf_params=conf_params, theme="light")))
+
+    assert dark["vwma_100"] == "#ffffff"
+    assert light["vwma_100"] == "#212121"
+    # EMA 5색·볼린저 시안 어느 것과도 겹치지 않는다.
+    assert dark["vwma_100"] not in set(_EMA_LENGTH_COLORS_DARK.values()) | {BAND_LINE_COLOR}
+
+
+def test_ema_colors_differ_between_themes_but_keep_hue_order() -> None:
+    df = _df(30)
+    conf_params = ConfluenceParams(display_ema_lengths=(20, 365), tp_vwma_length=None)
+
+    dark = _line_colors(_payload(build_chart_html(df, [], conf_params=conf_params)))
+    light = _line_colors(_payload(build_chart_html(df, [], conf_params=conf_params, theme="light")))
+
+    assert dark["ema_20"] != light["ema_20"]
+    assert light["ema_20"] == "#d32f2f"
+    assert light["ema_365"] == "#1565c0"
+
+
+def test_display_line_width_is_bumped() -> None:
+    """WAN-67: 표시선 굵기 상향. RSI 패인의 선은 그대로 1이다."""
+    html = build_chart_html(_df(5), [])
+
+    assert _MA_LINE_WIDTH >= 2
+    assert "__MA_LINE_WIDTH__" not in html
+    assert f"lineWidth: {_MA_LINE_WIDTH}," in html
+
+
+def test_band_line_is_thinner_than_moving_averages() -> None:
+    """WAN-67 사용자 지시: 볼린저 하단선은 이동평균선보다 얇게."""
+    html = build_chart_html(_df(5), [])
+
+    assert _BAND_LINE_WIDTH < _MA_LINE_WIDTH
+    assert "__BAND_LINE_WIDTH__" not in html
+
+
+def test_candles_are_white_up_red_down_on_dark() -> None:
+    """WAN-67 사용자 스펙: 상승 캔들 하양 · 하락 캔들 빨강."""
+    payload = _payload(build_chart_html(_df(5), []))
+
+    colors = payload["priceColors"]
+    assert isinstance(colors, dict)
+    assert colors["up"] == "#ffffff"
+    assert colors["down"] == "#ef5350"
+    # 다크 배경에서는 흰 몸통이 그대로 보이므로 테두리를 켜지 않는다.
+    assert colors["borderVisible"] is False
+
+
+def test_light_theme_keeps_white_body_but_adds_border() -> None:
+    """흰 배경 + 흰 몸통이라 테두리 없이는 상승봉이 사라진다 — 색이 아니라 형태로 대응."""
+    colors = _payload(build_chart_html(_df(5), [], theme="light"))["priceColors"]
+
+    assert isinstance(colors, dict)
+    assert colors["up"] == "#ffffff"  # 몸통 색 스펙은 라이트에서도 유지
+    assert colors["borderVisible"] is True
+    assert colors["borderUp"] != colors["up"]
+
+
+def test_live_bar_colors_follow_candle_theme() -> None:
+    """형성 중인 봉도 캔들 색을 따라간다 — 확정봉과 색이 갈리면 안 된다(WAN-147 유지)."""
+    df = _df(30)
+    config = _live_config(df)  # 아래 WAN-147 절의 헬퍼(호출 시점에 해석된다)
+
+    dark = _payload(build_chart_html(df, [], live=config))["live"]
+    light = _payload(build_chart_html(df, [], live=config, theme="light"))["live"]
+
+    assert isinstance(dark, dict) and isinstance(light, dict)
+    assert dark["liveColors"] == {
+        "up": "rgba(255, 255, 255, 0.45)",
+        "down": "rgba(239, 83, 80, 0.45)",
+    }
+    # 라이트에서는 옅은 흰색이 배경에 묻히므로 회색으로 내린다.
+    assert light["liveColors"]["up"] != dark["liveColors"]["up"]
 
 
 def test_zone_fill_follows_theme() -> None:

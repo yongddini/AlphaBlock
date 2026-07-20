@@ -63,8 +63,8 @@ from __future__ import annotations
 import json
 import math
 import uuid
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 
@@ -85,9 +85,13 @@ from strategy.models import (
     SignalExitReason,
 )
 
-#: 캔들 몸통(강세/약세) 색. 트레이딩뷰 기본값이라 밝은/어두운 배경 양쪽에서 잘 보여
-#: 테마와 무관하게 공유한다.
-_BULL_COLOR = "#26a69a"
+#: 캔들 몸통(강세/약세) 색 — **상승 하양 / 하락 빨강**(WAN-67 사용자 스펙 2026-07-20).
+#: 흰 몸통은 어두운 배경을 전제한 색이라(`DEFAULT_THEME = "dark"`) 라이트에서는 몸통을
+#: 흰색으로 두되 **테두리를 켜서** 배경과 가른다(고전적인 할로우 캔들). 그래서 캔들
+#: 색은 테마별 값(`ChartTheme.bull_candle` 등)이고, 아래 상수는 그 기본값이다.
+#: ⚠️ 옛 값(트레이딩뷰 기본 `#26a69a`/`#ef5350`)은 존 채움색으로 여전히 쓰인다 —
+#: 존은 강세/약세 오더블록을 구분하는 별개 축이라 캔들 스펙을 따라가지 않는다.
+_BULL_COLOR = "#ffffff"
 _BEAR_COLOR = "#ef5350"
 
 
@@ -120,6 +124,23 @@ class ChartTheme:
     exit_stop_loss: str
     exit_end_of_data: str
     exit_default: str
+    #: 차트 표시선 색(WAN-67). `ema_length_colors`는 **길이**를 키로 하는 고정 매핑이고
+    #: (사용자 스펙: 20 빨강 / 60 주황 / 120 노랑 / 240 초록 / 365 파랑), 스펙에 없는
+    #: 길이가 오면 `_EMA_LINE_PALETTE`(순번 기반)로 폴백한다. `vwma_line`은 EMA 5색과
+    #: 겹치지 않는 색이다. 두 값 모두 테마별로 명도를 달리 잡되 색상(hue)은 스펙을 지킨다.
+    #: `hash=False`는 dict 필드가 `ChartTheme`의 자동 `__hash__`를 깨지 않게 한다.
+    ema_length_colors: Mapping[int, str] = field(hash=False, default_factory=dict)
+    vwma_line: str = "#d81b60"
+    #: 캔들 몸통·테두리·형성 중인 봉 색(WAN-67 — 상승 하양 / 하락 빨강). 흰 몸통이
+    #: 배경에 묻히는 라이트 테마에서만 테두리를 켜 가른다(`candle_border_visible`).
+    bull_candle: str = _BULL_COLOR
+    bear_candle: str = _BEAR_COLOR
+    candle_border_visible: bool = False
+    bull_candle_border: str = _BULL_COLOR
+    bear_candle_border: str = _BEAR_COLOR
+    #: 형성 중인 봉(라이브)은 같은 색을 옅게 — 확정봉과 구분해야 한다(WAN-147).
+    bull_candle_live: str = "rgba(255, 255, 255, 0.45)"
+    bear_candle_live: str = "rgba(239, 83, 80, 0.45)"
 
     def exit_marker_colors(self) -> dict[ExitReason, str]:
         return {
@@ -129,6 +150,34 @@ class ChartTheme:
             ExitReason.END_OF_DATA: self.exit_end_of_data,
         }
 
+
+#: 표시선 색 — **길이별 고정 매핑**(WAN-67 사용자 스펙: 20 빨강 / 60 주황 / 120 노랑 /
+#: 240 초록 / 365 파랑). 다크가 기준 테마다(`DEFAULT_THEME = "dark"` · 사용자 지시
+#: "무조건 다크테마로") — 어두운 배경에서 대비가 최대가 되도록 명도를 올린 값이다.
+#: 캔들 몸통색(#26a69a/#ef5350)과 겹치지 않도록 빨강·초록은 톤을 달리 잡았다.
+_EMA_LENGTH_COLORS_DARK: Mapping[int, str] = {
+    20: "#ff5252",  # red
+    60: "#ff9800",  # orange
+    120: "#ffee58",  # yellow
+    240: "#4caf50",  # green
+    365: "#42a5f5",  # blue
+}
+
+#: 라이트 테마용 같은 색상(hue) · 낮은 명도. 흰 배경에서 노랑은 그대로 쓰면 안 보여
+#: 앰버로 내린다(색상 스펙은 유지, 명도만 조정 — 이슈 §작업 범위가 정한 원칙).
+_EMA_LENGTH_COLORS_LIGHT: Mapping[int, str] = {
+    20: "#d32f2f",  # red
+    60: "#ef6c00",  # orange
+    120: "#f9a825",  # yellow(amber)
+    240: "#2e7d32",  # green
+    365: "#1565c0",  # blue
+}
+
+#: VWMA 100 — 다크에서 **흰색**(사용자 스펙 2026-07-20). EMA 5색·볼린저 시안과 겹치지
+#: 않고 어두운 배경에서 대비가 가장 크다. 라이트 배경에서는 흰 선이 사라지므로 같은
+#: 역할(무채색 중립)을 하는 짙은 회색으로 대응한다.
+_VWMA_LINE_COLOR_DARK = "#ffffff"  # white
+_VWMA_LINE_COLOR_LIGHT = "#212121"  # near-black
 
 _LIGHT_THEME = ChartTheme(
     name="light",
@@ -150,6 +199,15 @@ _LIGHT_THEME = ChartTheme(
     exit_stop_loss="#c62828",
     exit_end_of_data="#616161",
     exit_default="#6d4c41",
+    ema_length_colors=_EMA_LENGTH_COLORS_LIGHT,
+    vwma_line=_VWMA_LINE_COLOR_LIGHT,
+    # 흰 배경 + 흰 몸통이라 테두리 없이는 상승봉이 사라진다. 몸통은 스펙(하양)대로
+    # 두고 회색 테두리로 가른다 — 색을 바꾸는 대신 형태로 대응한 것이다.
+    candle_border_visible=True,
+    bull_candle_border="#787b86",
+    bear_candle_border="#c62828",
+    bull_candle_live="rgba(120, 123, 134, 0.35)",
+    bear_candle_live="rgba(239, 83, 80, 0.45)",
 )
 
 #: 다크 테마: 트레이딩뷰 기본 다크에 준한다(배경 #131722, 글자 #d1d4dc, 격자
@@ -176,6 +234,8 @@ _DARK_THEME = ChartTheme(
     exit_stop_loss="#ef5350",
     exit_end_of_data="#9e9e9e",
     exit_default="#a1887f",
+    ema_length_colors=_EMA_LENGTH_COLORS_DARK,
+    vwma_line=_VWMA_LINE_COLOR_DARK,
 )
 
 _THEMES: dict[str, ChartTheme] = {"light": _LIGHT_THEME, "dark": _DARK_THEME}
@@ -203,8 +263,10 @@ _RSI_PANE_HEIGHT_RATIO = 0.25
 _LINE_STYLE_DOTTED = 1
 _LINE_STYLE_DASHED = 2
 
-#: 익절 목표선(EMA) 오버레이 색 팔레트. 길이 순서대로 순환 배정한다(WAN-59 후속:
-#: 사용자가 `tp_ema_lengths`를 바꿔도 팔레트가 무너지지 않도록 길이가 아닌 순번으로 매핑).
+#: 표시선(EMA) 오버레이 **폴백** 팔레트. 기본 색은 길이별 고정 매핑
+#: (`ChartTheme.ema_length_colors`, WAN-67)이고, 사용자가 `display_ema_lengths`를 바꿔
+#: **스펙에 없는 길이**가 오면 팔레트가 무너지지 않도록 여기서 순번으로 순환 배정한다
+#: (WAN-59의 순번 매핑 의도를 폴백으로 보존한 것이다).
 #: 밝은/어두운 배경 양쪽에서 식별 가능하도록 중간 채도·명도를 고른다(WAN-55 대비 고려).
 _EMA_LINE_PALETTE: tuple[str, ...] = (
     "#2962ff",  # blue
@@ -215,7 +277,14 @@ _EMA_LINE_PALETTE: tuple[str, ...] = (
     "#00838f",  # teal
     "#7cb342",  # olive green
 )
-_VWMA_LINE_COLOR = "#d81b60"  # magenta — VWMA는 항상 이 색으로 고정해 EMA들과 구분.
+
+#: 표시선(EMA/VWMA) 굵기(WAN-67). 1은 캔들 위에서 잘 안 보인다는 사용자 지적이라 2로
+#: 올린다. RSI 패인의 선·가이드는 캔들과 겹치지 않으므로 1 그대로 둔다.
+_MA_LINE_WIDTH = 2
+
+#: 볼린저 하단선 굵기(WAN-67 사용자 지시 2026-07-20: "좀 얇게"). 이동평균선보다 얇게 둬
+#: 진입 기준선이 표시선 다발에 묻히지 않으면서도 캔들을 덜 가린다.
+_BAND_LINE_WIDTH = 1
 
 #: 볼린저 하단선(진입가 기준선) 색. EMA 팔레트·VWMA와 겹치지 않는 시안 계열로 둔다
 #: (WAN-147 — 이 선이 라이브로 움직이는 대상이라 한눈에 구분돼야 한다).
@@ -426,12 +495,16 @@ _TEMPLATE = """
     timeScale: { borderVisible: false, timeVisible: true, secondsVisible: false },
   });
 
+  // 상승 하양 / 하락 빨강(WAN-67). 흰 몸통은 라이트 배경에서 사라지므로 그 테마에서만
+  // 테두리를 켠다 — payload가 테마별로 색·on/off를 다 실어 온다.
   const candleSeries = chart.addSeries(LightweightCharts.CandlestickSeries, {
     upColor: payload.priceColors.up,
     downColor: payload.priceColors.down,
-    borderVisible: false,
-    wickUpColor: payload.priceColors.up,
-    wickDownColor: payload.priceColors.down,
+    borderVisible: payload.priceColors.borderVisible,
+    borderUpColor: payload.priceColors.borderUp,
+    borderDownColor: payload.priceColors.borderDown,
+    wickUpColor: payload.priceColors.borderUp,
+    wickDownColor: payload.priceColors.borderDown,
   }, 0);
 
   class OrderBlockBoxesPrimitive {
@@ -494,13 +567,14 @@ _TEMPLATE = """
     candleSeries.attachPrimitive(new OrderBlockBoxesPrimitive(payload.boxes));
   }
 
-  // 익절 목표선(EMA/VWMA) 오버레이 — 사이드바 토글로 켜진 선만 payload.lines에 담겨
-  // 온다(WAN-59 후속). 캔들 패인(0)에 얇은 LineSeries로 겹쳐 그린다.
+  // 표시선(EMA/VWMA) 오버레이 — 사이드바 토글로 켜진 선만 payload.lines에 담겨
+  // 온다(WAN-59 후속). 캔들 패인(0)에 LineSeries로 겹쳐 그린다. 굵기는 파이썬 쪽
+  // `_MA_LINE_WIDTH`가 정한다(WAN-67 — 두 곳에 숫자를 흩뿌리지 않는다).
   const lineSeriesList = [];
   (payload.lines || []).forEach(function (line) {
     const s = chart.addSeries(LightweightCharts.LineSeries, {
       color: line.color,
-      lineWidth: 1,
+      lineWidth: __MA_LINE_WIDTH__,
       priceLineVisible: false,
       lastValueVisible: false,
       crosshairMarkerVisible: false,
@@ -537,7 +611,7 @@ _TEMPLATE = """
   if (payload.band) {
     bandSeries = chart.addSeries(LightweightCharts.LineSeries, {
       color: payload.band.color,
-      lineWidth: 2,
+      lineWidth: __BAND_LINE_WIDTH__,
       priceLineVisible: false,
       lastValueVisible: true,
       crosshairMarkerVisible: false,
@@ -816,9 +890,29 @@ def _band_points(
     return points
 
 
-def _line_color(key: str, ema_index: int) -> str:
+def _ema_key_length(key: str) -> int | None:
+    """`"ema_60"` → `60`. EMA 키가 아니거나 길이를 못 읽으면 `None`."""
+    if not key.startswith("ema_"):
+        return None
+    suffix = key[len("ema_") :]
+    return int(suffix) if suffix.isdigit() else None
+
+
+def _line_color(key: str, ema_index: int, theme: ChartTheme) -> str:
+    """표시선 색: 길이별 고정 매핑(WAN-67), 스펙 밖 길이는 순번 팔레트로 폴백.
+
+    사용자 스펙은 EMA 20/60/120/240/365 = 빨강/주황/노랑/초록/파랑이다. 그 다섯 길이는
+    `theme.ema_length_colors`에서 **길이를 키로** 꺼내므로 `display_ema_lengths` 순서가
+    바뀌어도 같은 선은 같은 색이다(트레이딩뷰 화면과 눈으로 대조하기 위한 요구). 목록에
+    없는 길이를 사용자가 추가해도 렌더가 깨지지 않도록 옛 순번 팔레트로 떨어뜨린다.
+    """
     if key.startswith("vwma_"):
-        return _VWMA_LINE_COLOR
+        return theme.vwma_line
+    length = _ema_key_length(key)
+    if length is not None:
+        fixed = theme.ema_length_colors.get(length)
+        if fixed is not None:
+            return fixed
     return _EMA_LINE_PALETTE[ema_index % len(_EMA_LINE_PALETTE)]
 
 
@@ -891,7 +985,7 @@ def build_chart_html(
     lines_payload: list[dict[str, object]] = []
     ema_index = 0
     for key, series in tp_lines.items():
-        color = _line_color(key, ema_index)
+        color = _line_color(key, ema_index, chart_theme)
         if not key.startswith("vwma_"):
             ema_index += 1
         if key not in allowed_lines:
@@ -923,6 +1017,12 @@ def build_chart_html(
     live_payload: dict[str, object] | None = None
     if live is not None:
         live_payload = live.to_payload()
+        # 형성 중인 봉 색은 캔들 색을 따라간다(WAN-67) — `live_chart`는 테마를 모르므로
+        # 여기서 덮어쓴다. 두 곳에 색을 두면 캔들만 바꿨을 때 라이브 봉이 옛 색으로 남는다.
+        live_payload["liveColors"] = {
+            "up": chart_theme.bull_candle_live,
+            "down": chart_theme.bear_candle_live,
+        }
         if band_payload is None:
             # 밴드 선 자체를 안 그리는 화면이면 라이브 밴드도 끈다 — 그리지 않는 선을
             # 갱신하는 배선을 남기면 "켜져 있다고 믿는" 조용한 실패가 된다.
@@ -945,7 +1045,13 @@ def build_chart_html(
         "band": band_payload,
         "live": live_payload,
         "initialBars": min(initial_bars, len(candles)),
-        "priceColors": {"up": _BULL_COLOR, "down": _BEAR_COLOR},
+        "priceColors": {
+            "up": chart_theme.bull_candle,
+            "down": chart_theme.bear_candle,
+            "borderVisible": chart_theme.candle_border_visible,
+            "borderUp": chart_theme.bull_candle_border,
+            "borderDown": chart_theme.bear_candle_border,
+        },
         "rsiColor": chart_theme.rsi_line,
         "guideColor": chart_theme.rsi_guide,
         "theme": {
@@ -971,4 +1077,6 @@ def build_chart_html(
     html = html.replace("__RSI_MIDLINE__", str(_RSI_MIDLINE))
     html = html.replace("__RSI_OVERSOLD__", str(_RSI_OVERSOLD))
     html = html.replace("__RSI_PANE_HEIGHT_RATIO__", str(_RSI_PANE_HEIGHT_RATIO))
+    html = html.replace("__MA_LINE_WIDTH__", str(_MA_LINE_WIDTH))
+    html = html.replace("__BAND_LINE_WIDTH__", str(_BAND_LINE_WIDTH))
     return html
