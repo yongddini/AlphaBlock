@@ -817,10 +817,35 @@ WAN-97 §3-3이 "증거 부족"으로 넘긴 판정을 IS/OOS + 증분 분해로
 2bp만큼 이동). 반면 **WAN-88/96/103/110 리포트 모듈은 오프셋을 0bp로 명시 고정**해 당시 엔진의
 기록으로 보존했다(WAN-95가 `SHORT_DISABLED_PARAMS`에 `entry_mode`를 못 박은 것과 같은 패턴) —
 그 리포트들의 결론 문장이 0bp 수치에 박혀 있어 기본값을 따라 움직이면 본문과 어긋난다.
-WAN-99/104는 오프셋을 **축으로 명시**해 돌리므로 무관하다. **WAN-107(채택 TF)·WAN-108/110
-(다중 포지션) 판정 수치는 아직 재산출 안 했다** — 0.43%p 이동이 그 결론을 가를 크기는
-아니지만 엄밀히는 대상이다. 0이면 입력 가격을 그대로 반환하므로 그 고정 리포트들은 비트
-단위로 재현된다.
+WAN-99/104는 오프셋을 **축으로 명시**해 돌리므로 무관하다. 🔁 **WAN-107(채택 TF)·WAN-108/110
+(다중 포지션) 판정은 WAN-130이 채택 기본값에서 확인했다 — 둘 다 유지다**(아래 📌 WAN-130
+문단). 0이면 입력 가격을 그대로 반환하므로 그 고정 리포트들은 비트 단위로 재현된다.
+
+📌 **채택 기본값에서의 재확인(WAN-130): TF 순위도 다중 대 단일 부호도 유지다 — 재산출이
+아니라 확인이다.** [`docs/decisions/wan130.md`](docs/decisions/wan130.md)(재현: `uv run python
+-m backtest.run --symbol BTCUSDT,ETHUSDT,SOLUSDT --tf 15m,1h,4h --positions single,3 --oos
+--start 2023-07-15 --end 2026-07-15 --jobs auto`). WAN-107/108/110 판정이 **오프셋 0bp ·
+밴드 `tap` · RSI 게이트 on** 위에 서 있던 것을, 오늘의 채택 기본값(2bp × `intrabar_live` ×
+`unconditional` × `baseline` 단독)에서 창을 못 박고(2023-07-15~2026-07-15, 3심볼) 다시 냈다.
+- **TF 순위 유지** — 단일 포지션 OOS 심볼평균 **15m +21.10% > 1h +12.40% > 4h +0.58%**
+  (IS도 같은 순위). 4h의 「보류(표본 부족)」도 **OOS 심볼당 18.3거래**로 유효 기준 20건
+  미달이라 그대로다. 「15m·1h 공동 작업 TF」는 채택 기본값에서도 성립한다.
+- **다중 대 단일 부호 유지** — OOS에서 **15m은 다중 승**(+21.10% → +35.31%, 수익/MDD
+  1.64→1.93), **1h·4h는 단일 승**(1h +12.40% → +9.40%, 수익/MDD 1.54→0.68). 두 작업 TF가
+  여전히 정반대이므로 **기본값(동시 1포지션) 유지** 근거가 성립한다. MDD는 세 TF 전부
+  다중이 더 크다.
+- 🚨 **옛 표와 이 표의 차이를 어느 한 축의 몫으로 읽지 말 것** — 네 축(오프셋·밴드·게이트·
+  렌즈)이 **동시에** 움직였고 창도 다르다. 확인된 것은 **순위·부호**이지 크기가 아니다.
+- ⚠️ **WAN-110(체결 보수화)은 확인 불가** — WAN-128에 따라 `baseline` 단독이라 `pen_5bp`
+  축을 안 돌았다. 15m 다중 우위는 **낙관 렌즈 위의 값**이고 WAN-110 경고는 반증되지 않았다.
+- ⚠️ **「엣지 없음」(WAN-84/88/111/114/124) 그대로** — 15m OOS +21.10%는 ETH를 빼면
+  +10.02%, **1h +12.40%는 ETH를 빼면 +0.17%**(사실상 0). 3심볼이라 WAN-111의 6심볼 희석도
+  반영돼 있지 않다.
+- **기본값·토대 불변**(확인 전용, 실거래 보류 유지). 옛 md/csv는 **손대지 않았다**.
+- 📌 **도구: 범용 CLI에 포지션 정책 축이 생겼다** — `--positions single,3`(단일 = 채택
+  기본값 경로 그대로, 숫자 = 다중 포지션 명목 상한 배수). 인자를 안 주면 예전과 비트 단위로
+  같은 행이 나오고, 다중 팔이 **실제로 포트폴리오 엔진을 타는지**를 테스트가 동작으로
+  고정한다(라벨만 붙는 WAN-95/112/123 부류 방지). 종가 진입(A안)과는 함께 못 쓴다.
 
 ⚠️ **`entry_mode`는 라벨이 아니라 경로 스위치다(WAN-95)**: `close`는 A안
 (`backtest.sweep.evaluate` → `BacktestEngine`), `zone_limit`은 B안
@@ -902,10 +927,13 @@ uv run python -m backtest.run --tp-r 1.0,1.5,2.0,3.0          # 익절 R 스윕
 uv run python -m backtest.run --tf 15m --fill baseline,pen_5bp,pen_5bp_drop_50
 uv run python -m backtest.run --symbol BTCUSDT,ETHUSDT --oos --format csv --out x.csv
 uv run python -m backtest.run --symbol BTCUSDT,ETHUSDT,SOLUSDT --jobs 6   # 병렬(WAN-121)
+uv run python -m backtest.run --tf 15m,1h --positions single,3 --oos      # 단일 vs 다중(WAN-130)
 ```
 
 값에 콤마를 주면 데카르트 곱 격자를 돌고 조합별 1행(`total_return`/승률/MDD/거래수/
-체결률/평균 R/Sharpe)을 낸다. 축은 심볼·TF·진입 방식·익절 R·오프셋·체결 가정·시드이며,
+체결률/평균 R/Sharpe)을 낸다. 축은 심볼·TF·진입 방식·익절 R·오프셋·재탭 정책·**포지션
+정책**(`--positions`, WAN-130: `single` = 동시 1포지션 기본값 · 숫자 = 다중 포지션 명목
+상한 배수)·체결 가정·시드이며,
 `--oos`/`--walkforward`가 IS/OOS 분할을 기본 제공한다. 인자 없이 돌리면 **채택 기본값**
 (`ConfluenceParams()`) 그대로이고, 그 결과가 WAN-95/99 리포트 셀과 1e-9 이내로 일치함이
 테스트로 고정돼 있다(`tests/test_harness.py` + `tests/test_run_regression_real_data.py`).

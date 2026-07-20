@@ -30,20 +30,23 @@
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 
 from backtest.metrics import build_metrics
 from backtest.models import BacktestConfig, BacktestResult, ExitReason, Trade
+from backtest.portfolio import PortfolioParams
 from backtest.sweep import bars_per_year, default_backtest_config, evaluate
 from backtest.zone_limit_backtest import (
     ZoneLimitStats,
     build_result_from_trades,
     run_zone_limit_backtest_verbose,
+    run_zone_limit_portfolio_backtest,
 )
 from data.funding import FundingRateStore
 from data.models import FundingRate
@@ -582,6 +585,7 @@ def run_once(
     cfg: BacktestConfig,
     order_block_result: OrderBlockResult | None = None,
     fair_window: bool = False,
+    portfolio: PortfolioParams | None = None,
 ) -> RunOutcome:
     """`entry_mode`에 따라 A안/B안 엔진을 태운다 (WAN-95 경로 스위치).
 
@@ -592,13 +596,37 @@ def run_once(
 
     `fair_window`는 종가 진입 성과를 1분봉 커버 창으로 한정한다 — 같은 표에서 지정가와
     나란히 비교할 때만 의미가 있다(그때만 기간이 어긋나므로).
+
+    `portfolio`를 주면 동시 다중 포지션 회계(WAN-103)로 돈다 — 셋업 탐색·체결
+    시뮬레이션은 **완전히 같고**(같은 `build_zone_limit_candidates`) 후보를 배치하는
+    회계만 달라진다. `None`(기본)이면 채택 기본값인 동시 1포지션 경로 그대로다:
+    포트폴리오 시퀀서로 `max_concurrent=1`을 흉내 내지 않는 이유는 그러면 대조군과
+    실험군이 같은 시퀀서를 타서 **시퀀서 버그가 차이를 0으로 감출 수 있기** 때문이다
+    (wan103 `series_rows`가 같은 이유로 대조군을 채택 엔진으로 낸다).
     """
+    if portfolio is not None and params.entry_mode != "zone_limit":
+        raise ValueError(
+            "동시 다중 포지션(portfolio)은 지정가(B안) 전용인데 "
+            f'entry_mode="{params.entry_mode}"가 들어왔습니다(WAN-95/103).'
+        )
     if params.entry_mode == "zone_limit":
         if market.df_1m.empty:
             raise ValueError(
                 f"{market.symbol} {market.timeframe}: 지정가(zone_limit) 백테스트는 1분봉이 "
                 "필요한데 데이터가 없습니다. 종가 진입은 --entry-mode close를 쓰세요."
             )
+        if portfolio is not None:
+            pf_result, pf_stats, _pf = run_zone_limit_portfolio_backtest(
+                market.htf_df,
+                market.df_1m,
+                market.timeframe,
+                portfolio=portfolio,
+                confluence_params=params,
+                backtest_config=cfg,
+                order_block_result=order_block_result,
+                funding_rates=market.funding_rates,
+            )
+            return RunOutcome(result=pf_result, stats=pf_stats)
         result, stats = run_zone_limit_backtest_verbose(
             market.htf_df,
             market.df_1m,
@@ -663,6 +691,14 @@ class RunRow(BaseModel):
     """재탭 정책(WAN-138). 기본값은 채택 기본값(`every_tap`) — 이 축이 생기기 전에 만들어진
     행 생성부(옛 리포트 테스트 픽스처 등)는 전부 채택 기본값 시절 행이라 기본값이 곧 정답이다.
     `build_row`는 항상 `params.retap_mode`로 명시 설정하므로 실행 산출 행은 실제 값을 싣는다."""
+    position_mode: str = "single"
+    """포지션 정책(WAN-130). `"single"` = 채택 기본값(동시 1포지션) · `"multi"` = 동시
+    다중 포지션(WAN-103). 기본값이 채택 기본값이라 이 축이 생기기 전 행 생성부(옛 픽스처)는
+    그대로 유효하다 — `retap_mode`가 같은 자리에서 쓴 방식이다."""
+    portfolio_leverage: float | None = None
+    """다중 포지션의 명목 상한 배수(`열린 명목 합 ≤ 자본 × leverage`). 단일 포지션 행은
+    `None` — 그 경로에는 포트폴리오 레버리지라는 개념이 없다(`cfg.risk_sizing.leverage`가
+    per-trade clamp로만 쓰인다). 0이 아니라 `None`인 이유는 "안 씀"과 "0배"를 가르기 위해서다."""
     fill: str
     seed: int
     start_time: int | None
@@ -680,6 +716,20 @@ class RunRow(BaseModel):
     num_filled: int | None
     funding_coverage: float | None
 
+    @field_validator("portfolio_leverage", mode="before")
+    @classmethod
+    def _empty_leverage_is_none(cls, value: object) -> object:
+        """CSV 왕복에서 빈 칸(→ `NaN`)을 `None`으로 되돌린다.
+
+        단일 포지션 행은 이 열이 항상 비어 있는데, `pd.read_csv`가 그 빈 칸을 `NaN`(float)로
+        읽어 오면 pydantic이 `float | None`의 float 가지로 받아 **저장 전 행과 달라진다** —
+        요약만 다시 그리는 `--from-csv` 경로가 원본과 어긋나는 그 사고다(리포트 모듈의
+        `rows_from_csv`가 회귀 테스트로 왕복 일치를 고정한다).
+        """
+        if isinstance(value, float) and math.isnan(value):
+            return None
+        return value
+
 
 ROW_COLUMNS: tuple[str, ...] = tuple(RunRow.model_fields)
 
@@ -691,8 +741,13 @@ def build_row(
     segment: Segment,
     params: ConfluenceParams,
     fill_name: str,
+    portfolio: PortfolioParams | None = None,
 ) -> RunRow:
-    """실행 결과를 한 행으로."""
+    """실행 결과를 한 행으로.
+
+    `portfolio`는 `run_once`에 넘긴 것과 **같은 객체**를 준다 — 라벨을 따로 만들면
+    "다중으로 돌고 single 라벨이 붙는" WAN-95 부류의 거짓말이 가능해진다.
+    """
     m = outcome.result.metrics
     stats = outcome.stats
     return RunRow(
@@ -704,6 +759,8 @@ def build_row(
         take_profit_r=params.take_profit_r,
         offset_bps=params.zone_limit_offset_bps,
         retap_mode=params.retap_mode,
+        position_mode="single" if portfolio is None else "multi",
+        portfolio_leverage=None if portfolio is None else portfolio.leverage,
         fill=fill_name,
         seed=params.fill_dropout_seed,
         start_time=market.start_ms if not market.empty else None,
@@ -755,6 +812,8 @@ _AXIS_COLUMNS: tuple[tuple[str, str], ...] = (
     ("tp_r", "take_profit_r"),
     ("off_bp", "offset_bps"),
     ("retap", "retap_mode"),
+    ("pos", "position_mode"),
+    ("lev", "portfolio_leverage"),
     ("fill", "fill"),
     ("seed", "seed"),
 )
@@ -771,7 +830,7 @@ def _fmt_cell(field: str, value: object) -> str:
         return f"{value:.2f}"
     if field == "take_profit_r" and isinstance(value, float):
         return f"{value:g}"
-    if field == "offset_bps" and isinstance(value, float):
+    if field in {"offset_bps", "portfolio_leverage"} and isinstance(value, float):
         return f"{value:g}"
     return str(value)
 

@@ -8,7 +8,7 @@ uv run python -m backtest.run --tp-r 1.0,1.5,2.0,3.0
 ```
 
 값에 콤마를 주면 데카르트 곱으로 격자를 돌고 조합별 1행을 낸다. 축은 심볼 · TF ·
-진입 방식 · 익절 R · 지정가 오프셋 · 체결 가정 · 시드다.
+진입 방식 · 익절 R · 지정가 오프셋 · 재탭 정책 · **포지션 정책** · 체결 가정 · 시드다.
 
 ## 기본값 = 채택 기본값
 
@@ -37,7 +37,17 @@ python -m backtest.run --tp-r 1.0,1.5,2.0 --oos
 
 # 6. 병렬 실행 — 6심볼 격자를 코어에 나눠 돌린다(결과는 직렬과 동일)
 python -m backtest.run --symbol BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,TRXUSDT --jobs auto
+
+# 7. 단일 대 동시 다중 포지션 — 같은 셋업 풀에서 회계만 바꿔 부호를 본다(WAN-103/108)
+python -m backtest.run --tf 15m,1h --positions single,3 --oos
 ```
+
+## 포지션 정책 (`--positions`, WAN-130)
+
+`single`(기본)은 채택 기본값인 **동시 1포지션** 경로 그대로이고, 숫자는 **동시 다중
+포지션**(WAN-103)의 명목 상한 배수다(`열린 명목 합 ≤ 자본 × leverage`). 두 팔은 셋업
+탐색·체결 시뮬레이션이 **완전히 같고** 후보를 배치하는 회계만 다르므로, 한 표의 두 줄이
+같은 풀에서 나온다. 인자를 안 주면 예전과 비트 단위로 같은 행이 나온다.
 
 ## 병렬 실행 (`--jobs`, WAN-121)
 
@@ -94,6 +104,7 @@ from backtest.harness import (
     slice_market,
     write_output,
 )
+from backtest.portfolio import PortfolioParams
 from strategy.models import BandBar, ConfluenceParams, RsiGateMode
 
 # --------------------------------------------------------------------------- #
@@ -205,6 +216,14 @@ class Grid:
     용도다(`harness.LEGACY_RSI_GATE_MODE`). 없으면 그런 리포트는 `run_grid`를 통과하는
     순간 새 게이트로 조용히 다시 돈다.
     """
+    portfolio_leverages: tuple[float | None, ...] = (None,)
+    """포지션 정책 축(WAN-130). `None` = 채택 기본값(동시 1포지션), 숫자 = 동시 다중
+    포지션(WAN-103)의 명목 상한 배수.
+
+    **진짜 축이다**(`retap_mode`와 같은 자리, `band_bar` 같은 핀이 아니다) — 단일 대 다중은
+    한 표에 나란히 놓고 부호를 봐야 하는 비교라 CLI로 연다. 기본값 `(None,)`이라 인자를
+    안 주면 예전과 **비트 단위로 같은 행**이 나온다.
+    """
     band_bar: BandBar | None = None
     """이격 밴드 표본 **고정**. None이면 채택 기본값(WAN-132: `intrabar_live`).
 
@@ -235,6 +254,11 @@ class Grid:
                     "--entry-mode close와 --fill을 같이 줄 수 없습니다. "
                     "종가 진입은 탭이 곧 진입이라 미체결 개념이 없습니다."
                 )
+            if self.portfolio_leverages != (None,):
+                raise ValueError(
+                    "--entry-mode close와 --positions(다중 포지션)를 같이 줄 수 없습니다. "
+                    "동시 다중 포지션 회계는 지정가(B안) 경로에만 있습니다(WAN-103)."
+                )
 
     @property
     def needs_1m(self) -> bool:
@@ -253,8 +277,20 @@ class Combo:
     take_profit_r: float
     offset_bps: float
     retap_mode: str
+    portfolio_leverage: float | None
     fill: FillPreset
     seed: int
+
+    @property
+    def portfolio(self) -> PortfolioParams | None:
+        """이 조합의 포트폴리오 파라미터. 단일 포지션이면 `None`.
+
+        `max_concurrent`·`one_per_zone`은 기본값 그대로다 — WAN-103/108이 발표 수치를 낸
+        설정이 그것이라, 확인 격자가 다른 값을 쓰면 비교 대상이 달라진다.
+        """
+        if self.portfolio_leverage is None:
+            return None
+        return PortfolioParams(leverage=self.portfolio_leverage)
 
 
 def iter_combos(grid: Grid) -> list[Combo]:
@@ -264,18 +300,20 @@ def iter_combos(grid: Grid) -> list[Combo]:
         for retap_mode in grid.retap_modes:
             for take_profit_r in grid.take_profit_rs:
                 for offset_bps in grid.offsets_bps:
-                    for fill in grid.fills:
-                        for seed in iter_seeds(fill, grid.seeds):
-                            combos.append(
-                                Combo(
-                                    entry_mode=entry_mode,
-                                    take_profit_r=take_profit_r,
-                                    offset_bps=offset_bps,
-                                    retap_mode=retap_mode,
-                                    fill=fill,
-                                    seed=seed,
+                    for leverage in grid.portfolio_leverages:
+                        for fill in grid.fills:
+                            for seed in iter_seeds(fill, grid.seeds):
+                                combos.append(
+                                    Combo(
+                                        entry_mode=entry_mode,
+                                        take_profit_r=take_profit_r,
+                                        offset_bps=offset_bps,
+                                        retap_mode=retap_mode,
+                                        portfolio_leverage=leverage,
+                                        fill=fill,
+                                        seed=seed,
+                                    )
                                 )
-                            )
     return combos
 
 
@@ -415,12 +453,14 @@ def _run_cell(task: _CellTask) -> _CellOutcome:
                 short_enabled=grid.short_enabled,
                 base=_pinned_base(grid),
             )
+            portfolio = combo.portfolio
             outcome = run_once(
                 window,
                 params=params,
                 cfg=cfg,
                 order_block_result=ob_result,
                 fair_window=task.fair_window,
+                portfolio=portfolio,
             )
             rows.append(
                 build_row(
@@ -429,6 +469,7 @@ def _run_cell(task: _CellTask) -> _CellOutcome:
                     segment=segment,
                     params=params,
                     fill_name=combo.fill.name,
+                    portfolio=portfolio,
                 )
             )
     return _CellOutcome(
@@ -549,6 +590,14 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     strategy.add_argument(
+        "--positions",
+        help=(
+            "포지션 정책 축(콤마 복수 = 격자). single(기본, 동시 1포지션 = 채택 기본값) "
+            "또는 숫자 = 동시 다중 포지션의 명목 상한 배수(WAN-103). "
+            "예: --positions single,3 → 단일 대 3배 다중을 한 표에서 비교"
+        ),
+    )
+    strategy.add_argument(
         "--fill",
         help=f"체결 가정(기본 baseline). 지원: {', '.join(p.name for p in FILL_PRESETS)}",
     )
@@ -647,9 +696,41 @@ def grid_from_args(args: argparse.Namespace) -> Grid:
         ),
         retap_modes=(split_list(args.retap_mode) if args.retap_mode else _default_retap_modes()),
         fills=_fills_from_args(args),
+        portfolio_leverages=_positions_from_args(args),
         seeds=split_ints(args.seeds, label="--seeds") if args.seeds else None,
         short_enabled=short_enabled,
     )
+
+
+#: `--positions`에서 "동시 1포지션(채택 기본값)"을 가리키는 토큰. 숫자로 표현하지 않는
+#: 이유는 단일 포지션 경로에 레버리지 축이 없기 때문이다 — `1`을 단일의 뜻으로 쓰면
+#: "다중 1배"와 구분되지 않는데, 그 둘은 실제로 다른 경로다(WAN-108 대조군 설계).
+SINGLE_POSITION_TOKEN = "single"
+
+
+def _positions_from_args(args: argparse.Namespace) -> tuple[float | None, ...]:
+    """`--positions single,3` → `(None, 3.0)`. 안 주면 `(None,)`(채택 기본값)."""
+    if not args.positions:
+        return (None,)
+    values: list[float | None] = []
+    for token in split_list(args.positions):
+        if token == SINGLE_POSITION_TOKEN:
+            value: float | None = None
+        else:
+            try:
+                value = float(token)
+            except ValueError as exc:
+                raise ValueError(
+                    f"--positions에 알 수 없는 값이 있습니다: {token!r} "
+                    f"({SINGLE_POSITION_TOKEN} 또는 레버리지 숫자)"
+                ) from exc
+            if value <= 0:
+                raise ValueError(f"--positions의 레버리지는 0보다 커야 합니다: {token!r}")
+        if value not in values:
+            values.append(value)
+    if not values:
+        raise ValueError("--positions가 비어 있습니다.")
+    return tuple(values)
 
 
 def _default_tp_r() -> float:
