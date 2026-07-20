@@ -252,7 +252,7 @@ def measure_setups(
 
     # 후보 생성에 쓸 진입 TF 오더블록(라인 577과 같이 raw htf_df에서 탐지) — 저항 질의에도
     # 이 결과를 그대로 재사용해 자기-TF 저항이 엔진이 본 존과 정확히 일치하게 한다.
-    htf_obr = OrderBlockDetector().run(market.htf_df)
+    htf_obr = OrderBlockDetector(harness.LEGACY_OB_PARAMS).run(market.htf_df)
     candidates, _ = build_zone_limit_candidates(
         market.htf_df,
         market.df_1m,

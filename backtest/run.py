@@ -136,7 +136,13 @@ from backtest.trade_store import (
     engine_revision,
 )
 from backtest.zone_limit_backtest import SetupDiagnostic, ZoneLimitStats
-from strategy.models import BandBar, ConfluenceParams, OrderBlockParams, RsiGateMode
+from strategy.models import (
+    BandBar,
+    ConfluenceParams,
+    OrderBlockParams,
+    OrderBlockResult,
+    RsiGateMode,
+)
 
 # --------------------------------------------------------------------------- #
 # 인자 파싱 헬퍼
@@ -255,6 +261,18 @@ class Grid:
     한 표에 나란히 놓고 부호를 봐야 하는 비교라 CLI로 연다. 기본값 `(None,)`이라 인자를
     안 주면 예전과 **비트 단위로 같은 행**이 나온다.
     """
+    combine_obs: tuple[bool | None, ...] = (None,)
+    """존 병합 축(WAN-149). `None` = 채택 기본값(WAN-149: 분리), `True`/`False` = 명시.
+
+    **진짜 축이다**(`portfolio_leverages`와 같은 자리, `band_bar` 같은 핀이 아니다) —
+    병합 폐지 전후를 한 표에 나란히 놓고 봐야 하는 비교라 CLI로 연다. 기본값 `(None,)`
+    이라 인자를 안 주면 예전과 **비트 단위로 같은 행**이 나온다.
+
+    ⚠️ **이 축은 탐지 파라미터라 다른 축과 성격이 다르다** — `OrderBlockParams`에 있어서
+    조합마다 오더블록을 **다시 탐지**해야 한다(다른 축은 탐지를 공유한다). 그래서
+    `_run_cell`이 이 값별로 탐지 결과를 따로 캐시한다. 옛 수치를 결론에 박아 둔
+    리포트는 `(harness.LEGACY_COMBINE_OBS,)`로 고정한다.
+    """
     band_bar: BandBar | None = None
     """이격 밴드 표본 **고정**. None이면 채택 기본값(WAN-132: `intrabar_live`).
 
@@ -309,8 +327,21 @@ class Combo:
     offset_bps: float
     retap_mode: str
     portfolio_leverage: float | None
+    combine_obs: bool | None
     fill: FillPreset
     seed: int
+
+    @property
+    def order_block(self) -> OrderBlockParams:
+        """이 조합의 탐지 파라미터. `combine_obs`가 `None`이면 채택 기본값 그대로다.
+
+        `None`을 여기서 채택 기본값으로 **푸는 것**이 중요하다 — 격자 밖에서
+        `OrderBlockParams()`를 지어내면 기본값이 움직여도 그 경로만 옛 값을 물고 도는
+        조용한 갈라짐이 생긴다(`_pinned_base`가 `None`을 그대로 넘기는 것과 같은 원칙).
+        """
+        if self.combine_obs is None:
+            return OrderBlockParams()
+        return OrderBlockParams(combine_obs=self.combine_obs)
 
     @property
     def portfolio(self) -> PortfolioParams | None:
@@ -332,19 +363,21 @@ def iter_combos(grid: Grid) -> list[Combo]:
             for take_profit_r in grid.take_profit_rs:
                 for offset_bps in grid.offsets_bps:
                     for leverage in grid.portfolio_leverages:
-                        for fill in grid.fills:
-                            for seed in iter_seeds(fill, grid.seeds):
-                                combos.append(
-                                    Combo(
-                                        entry_mode=entry_mode,
-                                        take_profit_r=take_profit_r,
-                                        offset_bps=offset_bps,
-                                        retap_mode=retap_mode,
-                                        portfolio_leverage=leverage,
-                                        fill=fill,
-                                        seed=seed,
+                        for combine_obs in grid.combine_obs:
+                            for fill in grid.fills:
+                                for seed in iter_seeds(fill, grid.seeds):
+                                    combos.append(
+                                        Combo(
+                                            entry_mode=entry_mode,
+                                            take_profit_r=take_profit_r,
+                                            offset_bps=offset_bps,
+                                            retap_mode=retap_mode,
+                                            portfolio_leverage=leverage,
+                                            combine_obs=combine_obs,
+                                            fill=fill,
+                                            seed=seed,
+                                        )
                                     )
-                                )
     return combos
 
 
@@ -501,10 +534,16 @@ def _run_cell(task: _CellTask) -> _CellOutcome:
         window = slice_market(market, segment)
         if window.empty:
             continue
-        ob_result = detect_order_blocks(window)
+        # 존 병합 축(WAN-149)은 **탐지** 파라미터라 값마다 다시 탐지해야 한다. 그 밖의
+        # 축은 탐지와 무관하므로 같은 결과를 공유한다 — 그래서 캐시 키가 이 값 하나다.
+        ob_cache: dict[bool | None, OrderBlockResult] = {}
         for combo in combos:
             if combo.entry_mode == "zone_limit" and window.df_1m.empty:
                 continue
+            ob_params = combo.order_block
+            if combo.combine_obs not in ob_cache:
+                ob_cache[combo.combine_obs] = detect_order_blocks(window, ob_params)
+            ob_result = ob_cache[combo.combine_obs]
             params = build_params(
                 entry_mode=combo.entry_mode,
                 take_profit_r=combo.take_profit_r,
@@ -536,6 +575,7 @@ def _run_cell(task: _CellTask) -> _CellOutcome:
                 params=params,
                 fill_name=combo.fill.name,
                 portfolio=portfolio,
+                order_block=ob_params,
             )
             rows.append(row)
             if options.collect_artifacts:
@@ -543,7 +583,11 @@ def _run_cell(task: _CellTask) -> _CellOutcome:
                     RunArtifact(
                         row=row,
                         fingerprint=fingerprint_for(
-                            row, params=params, cfg=cfg, revision=options.revision
+                            row,
+                            params=params,
+                            cfg=cfg,
+                            revision=options.revision,
+                            order_block=ob_params,
                         ),
                         result=outcome.result,
                         stats=outcome.stats,
@@ -733,6 +777,13 @@ def build_parser() -> argparse.ArgumentParser:
     strategy.add_argument(
         "--fill-penetration-bps", type=float, help="--fill 대신 관통 요구를 직접 지정"
     )
+    strategy.add_argument(
+        "--combine-obs",
+        help=(
+            "존 병합 축(WAN-149). true/false 콤마 복수. "
+            "안 주면 채택 기본값(false = 원본 존 단위 분리)"
+        ),
+    )
     strategy.add_argument("--fill-dropout-rate", type=float, help="--fill 대신 탈락률을 직접 지정")
     strategy.add_argument("--seeds", help="탈락 추첨 시드(콤마 복수). 기본은 프리셋 시드")
 
@@ -849,6 +900,7 @@ def grid_from_args(args: argparse.Namespace) -> Grid:
         retap_modes=(split_list(args.retap_mode) if args.retap_mode else _default_retap_modes()),
         fills=_fills_from_args(args),
         portfolio_leverages=_positions_from_args(args),
+        combine_obs=_combine_obs_from_args(args),
         seeds=split_ints(args.seeds, label="--seeds") if args.seeds else None,
         short_enabled=short_enabled,
     )
@@ -858,6 +910,33 @@ def grid_from_args(args: argparse.Namespace) -> Grid:
 #: 이유는 단일 포지션 경로에 레버리지 축이 없기 때문이다 — `1`을 단일의 뜻으로 쓰면
 #: "다중 1배"와 구분되지 않는데, 그 둘은 실제로 다른 경로다(WAN-108 대조군 설계).
 SINGLE_POSITION_TOKEN = "single"
+
+#: `--combine-obs`가 받는 토큰 → 불리언.
+_BOOL_TOKENS: dict[str, bool] = {"true": True, "false": False, "on": True, "off": False}
+
+
+def _combine_obs_from_args(args: argparse.Namespace) -> tuple[bool | None, ...]:
+    """`--combine-obs true,false` → `(True, False)`. 안 주면 `(None,)`(채택 기본값).
+
+    `None`을 여기서 `False`로 풀지 않는 이유는 `_default_offsets_bps`와 같다 — 채택
+    기본값을 CLI가 복사하면 기본값이 움직일 때 이 경로만 옛 값을 물고 돈다.
+    """
+    if not args.combine_obs:
+        return (None,)
+    values: list[bool | None] = []
+    for token in split_list(args.combine_obs):
+        try:
+            value = _BOOL_TOKENS[token.lower()]
+        except KeyError as exc:
+            supported = ", ".join(_BOOL_TOKENS)
+            raise ValueError(
+                f"--combine-obs에 알 수 없는 값이 있습니다: {token!r} (지원: {supported})"
+            ) from exc
+        if value not in values:
+            values.append(value)
+    if not values:
+        raise ValueError("--combine-obs가 비어 있습니다.")
+    return tuple(values)
 
 
 def _positions_from_args(args: argparse.Namespace) -> tuple[float | None, ...]:

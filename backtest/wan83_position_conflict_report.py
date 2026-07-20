@@ -63,6 +63,7 @@ from pydantic import BaseModel, ConfigDict
 
 from backtest.harness import (
     DEFAULT_YEARS,
+    LEGACY_OB_PARAMS,
     LEGACY_RSI_GATE_MODE,
     MarketData,
     Segment,
@@ -167,7 +168,7 @@ def build_cell(
     window = slice_market(market, segment)
     if window.empty or window.df_1m.empty:
         return None
-    ob_result = detect_order_blocks(window)
+    ob_result = detect_order_blocks(window, LEGACY_OB_PARAMS)
     cfg = default_backtest_config(timeframe)
     candidates, _stats = build_zone_limit_candidates(
         window.htf_df,

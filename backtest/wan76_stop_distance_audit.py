@@ -36,7 +36,7 @@ from backtest import wan68_short_gate_analysis as wan68
 from backtest import wan70_random_control_b as wan70
 from backtest import wan73_validation as wan73
 from backtest import wan74_discrepancy_audit as wan74
-from backtest.harness import pin_band_bar
+from backtest.harness import LEGACY_OB_PARAMS, pin_band_bar
 from backtest.models import BacktestConfig, PositionSide
 from backtest.sweep import default_backtest_config
 from backtest.zone_limit_backtest import (
@@ -221,7 +221,7 @@ def collect_diagnostics(
                 )
             }
         )
-        ob_result = OrderBlockDetector().run(htf_win)
+        ob_result = OrderBlockDetector(LEGACY_OB_PARAMS).run(htf_win)
         candidates, _ = build_zone_limit_candidates(
             htf_win,
             one_min_win,

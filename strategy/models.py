@@ -40,7 +40,18 @@ class OrderBlockParams(BaseModel):
     swing_length: int = Field(default=10, ge=3)
     zone_invalidation: Literal["wick", "close"] = "wick"
     zone_count: Literal["high", "medium", "low", "one"] = "low"
-    combine_obs: bool = True
+    combine_obs: bool = False
+    """겹치는 오더블록을 하나로 접을지. **WAN-149가 기본값을 `True`→`False`로 옮겼다**
+    (사용자 결정 2026-07-21) — 원본 존 단위로 탐지·진입·손절한다.
+
+    ⚠️ **「데이터가 분리를 골랐다」로 읽지 말 것** — WAN-134 부검의 공식 판정은 (c)
+    「병합은 손절률에 중립」이었고 채택 권고가 없었다. 분리 팔이 4칸 중 3칸에서 이기지만
+    **거래가 5~8% 늘어** 두 팔이 아예 다른 거래를 하고, 그 차이는 「병합이 존폭의
+    대리변수」라 존폭 효과일 수 있다(WAN-142 소관). 배경은 docs/decisions/wan149.md.
+
+    `True` 옵트인 경로(`_generate_merged_signals`)는 **존치**한다 — 옛 수치를 결론에 박아
+    둔 리포트는 `harness.LEGACY_COMBINE_OBS`로 이 값을 명시 고정한다.
+    """
     max_atr_mult: float = Field(default=3.5, gt=0)
     atr_length: int = Field(default=10, ge=1)
     max_order_blocks: int = Field(default=30, ge=1)

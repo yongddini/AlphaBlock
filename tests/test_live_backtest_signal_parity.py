@@ -53,4 +53,9 @@ def test_live_and_backtest_paths_produce_identical_signal_set() -> None:
         for s in pipeline.signals
         if s.planned_exit is not None
     ]
-    assert live_exits == backtest_exits
+    # ⚠️ **정렬 순서는 두 경로가 원래 다르다** — 실시간 경로는 청산을 **청산 시각 순**으로
+    # 흘리고, 파이프라인은 **진입(시그널) 순**으로 담는다. 병합 시절에는 존이 겹치지 않아
+    # 두 순서가 우연히 같았는데, WAN-149로 존을 분리하자 진입이 겹쳐 어긋난다. 이 테스트가
+    # 지키는 것은 **집합의 일치**이므로(이름 그대로 "identical signal set") 정렬해 비교한다
+    # — 진입 쪽은 위에서 순서까지 그대로 대조하므로 순서 보장이 통째로 사라지지는 않는다.
+    assert sorted(live_exits) == sorted(backtest_exits)

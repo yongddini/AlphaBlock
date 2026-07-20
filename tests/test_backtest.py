@@ -756,7 +756,10 @@ def test_reports_carry_entry_mode_rsi_mode_combine_obs() -> None:
     default_summary = summary_dict(result)
     assert default_summary["entry_mode"] == "unknown"
     assert default_summary["rsi_mode"] == "unknown"
-    assert default_summary["combine_obs"] is True
+    # ⚠️ `combine_obs`만 "unknown"이 아니라 **채택 기본값**으로 채워진다(`report.py`가
+    # `OrderBlockParams()`로 폴백한다). 이 값을 리터럴로 박으면 기본값이 움직일 때마다
+    # (WAN-149: True→False) 테스트가 깨질 뿐 아무것도 지키지 못하므로 기본값에서 읽는다.
+    assert default_summary["combine_obs"] is OrderBlockParams().combine_obs
 
 
 def test_csv_writers(tmp_path: Path) -> None:

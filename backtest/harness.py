@@ -52,7 +52,13 @@ from backtest.zone_limit_backtest import (
 from data.funding import FundingRateStore
 from data.models import FundingRate
 from data.storage import OhlcvStore
-from strategy.models import BandBar, ConfluenceParams, OrderBlockResult, RsiGateMode
+from strategy.models import (
+    BandBar,
+    ConfluenceParams,
+    OrderBlockParams,
+    OrderBlockResult,
+    RsiGateMode,
+)
 from strategy.order_blocks import OrderBlockDetector
 
 # --------------------------------------------------------------------------- #
@@ -205,6 +211,38 @@ LEGACY_RSI_GATE_MODE: RsiGateMode = "first_tap_free"
 #: `intrabar_live`는 `tap`과 정확히 같은 값이라(`ConfluenceStrategy.deviation_band_at`)
 #: 고정할 것도 움직일 것도 없다.
 LEGACY_BAND_BAR: BandBar = "tap"
+
+#: WAN-19~WAN-148 채택 엔진의 존 병합 — 겹치는 오더블록을 하나로 접음(`combine_obs=True`).
+#:
+#: **WAN-149가 기본값을 `False`(원본 존 단위 분리)로 옮겼다.** 그 이전 수치를 결론 문장에
+#: 박아 둔 리포트는 이 값을 **명시 고정**해 당시 엔진의 기록으로 보존한다 — `combine_obs`는
+#: `LEGACY_BAND_BAR`와 같은 부류라 **거의 아무 리포트도 고정해 두지 않았으므로**, 고정하지
+#: 않으면 기본값을 따라 조용히 분리 엔진으로 다시 돌아 본문과 어긋난다. 그 어긋남은 이
+#: 저장소가 반복해 당한 「바꿨다고 믿으면서 안 바뀐 것」의 거울상이다 — **「안 바꿨다고
+#: 믿었는데 바뀐 것」**. 고정 대상 목록은
+#: [`docs/decisions/wan149.md`](../docs/decisions/wan149.md) §2다.
+#:
+#: ⚠️ 반대로 **"지금 채택된 것"을 재는 리포트는 고정하지 않는다**(wan95) — 기본값이
+#: 움직이면 그 수치는 낡은 것이 되어야 맞다.
+#: ⚠️ **이미 이 축을 명시한 모듈은 손대지 않는다**(wan134/wan77/wan81) — 특히
+#: `wan134_zone_merge_autopsy`는 `combine_obs`가 실험 변수라 고정하면 실험이 깨진다.
+LEGACY_COMBINE_OBS: bool = True
+
+#: 옛 리포트가 그대로 넘겨 쓰는 탐지 파라미터(병합 ON). `OrderBlockParams`는 frozen이라
+#: 모듈 상수로 공유해도 안전하다.
+LEGACY_OB_PARAMS = OrderBlockParams(combine_obs=LEGACY_COMBINE_OBS)
+
+
+def pin_combine_obs(
+    params: OrderBlockParams | None = None, *, combine_obs: bool = LEGACY_COMBINE_OBS
+) -> OrderBlockParams:
+    """탐지 파라미터의 `combine_obs`만 갈아끼운다(다른 필드는 손대지 않는다).
+
+    `pin_band_bar`와 같은 자리다 — 리포트가 `OrderBlockParams(...)`를 아예 만들지 않고
+    기본값에 맡기던 곳이 대부분이라, 고정 보일러플레이트를 각자 짜면 한 곳을 빠뜨리는
+    것이 정확히 WAN-149 §2가 경고한 조용한 실패가 된다.
+    """
+    return (params or OrderBlockParams()).model_copy(update={"combine_obs": combine_obs})
 
 
 def pin_band_bar(params: ConfluenceParams, band_bar: BandBar = LEGACY_BAND_BAR) -> ConfluenceParams:
@@ -678,12 +716,19 @@ def run_once(
     return RunOutcome(result=result, stats=None)
 
 
-def detect_order_blocks(market: MarketData) -> OrderBlockResult:
+def detect_order_blocks(
+    market: MarketData, ob_params: OrderBlockParams | None = None
+) -> OrderBlockResult:
     """구간의 오더블록을 탐지한다. 격자 안에서 한 번만 하고 조합들이 공유한다.
 
     오더블록 탐지는 컨플루언스 파라미터와 무관하므로 이 재사용은 결과를 바꾸지 않는다.
+
+    ⚠️ `ob_params`는 **컨플루언스와 달리 결과를 바꾼다** — `combine_obs`가 여기 있고
+    (WAN-149), 병합 여부에 따라 `signals`/`retap_signals`가 통째로 달라진다. 따라서
+    이 인자가 다른 조합끼리는 탐지 결과를 공유하면 안 된다. `None`이면 채택 기본값
+    (WAN-149: 분리)이고, 옛 수치를 결론에 박아 둔 리포트는 `LEGACY_OB_PARAMS`를 준다.
     """
-    return OrderBlockDetector().run(market.htf_df)
+    return OrderBlockDetector(ob_params).run(market.htf_df)
 
 
 # --------------------------------------------------------------------------- #
@@ -719,6 +764,12 @@ class RunRow(BaseModel):
     """다중 포지션의 명목 상한 배수(`열린 명목 합 ≤ 자본 × leverage`). 단일 포지션 행은
     `None` — 그 경로에는 포트폴리오 레버리지라는 개념이 없다(`cfg.risk_sizing.leverage`가
     per-trade clamp로만 쓰인다). 0이 아니라 `None`인 이유는 "안 씀"과 "0배"를 가르기 위해서다."""
+    combine_obs: bool = False
+    """존 병합 여부(WAN-149). `False` = 채택 기본값(원본 존 단위 분리) · `True` = 옛 기본값.
+
+    **실제로 탐지에 넘어간 값**이지 요청 라벨이 아니다(`build_row`가 `OrderBlockParams`를
+    받아 그대로 싣는다) — "분리로 돌고 병합 라벨이 붙는" WAN-95 부류를 막는다. 기본값이
+    채택 기본값이라 이 축이 생기기 전 행 생성부(옛 픽스처)는 그대로 유효하다."""
     fill: str
     seed: int
     start_time: int | None
@@ -762,11 +813,13 @@ def build_row(
     params: ConfluenceParams,
     fill_name: str,
     portfolio: PortfolioParams | None = None,
+    order_block: OrderBlockParams | None = None,
 ) -> RunRow:
     """실행 결과를 한 행으로.
 
-    `portfolio`는 `run_once`에 넘긴 것과 **같은 객체**를 준다 — 라벨을 따로 만들면
-    "다중으로 돌고 single 라벨이 붙는" WAN-95 부류의 거짓말이 가능해진다.
+    `portfolio`·`order_block`은 `run_once`/`detect_order_blocks`에 넘긴 것과 **같은
+    객체**를 준다 — 라벨을 따로 만들면 "다중으로 돌고 single 라벨이 붙는" WAN-95 부류의
+    거짓말이 가능해진다.
     """
     m = outcome.result.metrics
     stats = outcome.stats
@@ -781,6 +834,7 @@ def build_row(
         retap_mode=params.retap_mode,
         position_mode="single" if portfolio is None else "multi",
         portfolio_leverage=None if portfolio is None else portfolio.leverage,
+        combine_obs=(order_block or OrderBlockParams()).combine_obs,
         fill=fill_name,
         seed=params.fill_dropout_seed,
         start_time=market.start_ms if not market.empty else None,
@@ -834,6 +888,7 @@ _AXIS_COLUMNS: tuple[tuple[str, str], ...] = (
     ("retap", "retap_mode"),
     ("pos", "position_mode"),
     ("lev", "portfolio_leverage"),
+    ("merge", "combine_obs"),
     ("fill", "fill"),
     ("seed", "seed"),
 )

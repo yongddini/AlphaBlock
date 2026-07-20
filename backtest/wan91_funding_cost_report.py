@@ -45,7 +45,7 @@ import pandas as pd
 from pydantic import BaseModel, ConfigDict
 
 from backtest.engine import run_backtest
-from backtest.harness import LEGACY_RSI_GATE_MODE
+from backtest.harness import LEGACY_OB_PARAMS, LEGACY_RSI_GATE_MODE
 from backtest.models import BacktestConfig, Trade
 from backtest.sweep import default_backtest_config, timeframe_to_ms
 from backtest.wan68_short_gate_analysis import _split_bars
@@ -221,7 +221,7 @@ def run_report(
             funding_rates = funding_store.get_rates(
                 symbol, start_ms=start_ms, end_ms=end_ms, include_predicted=True
             )
-            ob_result = OrderBlockDetector().run(df)
+            ob_result = OrderBlockDetector(LEGACY_OB_PARAMS).run(df)
             rows.extend(
                 run_symbol_timeframe(
                     df,

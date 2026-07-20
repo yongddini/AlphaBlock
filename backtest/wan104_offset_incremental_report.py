@@ -84,6 +84,7 @@ from backtest.harness import (
     DB_PATH,
     DEFAULT_SYMBOLS,
     DEFAULT_YEARS,
+    LEGACY_OB_PARAMS,
     LEGACY_RSI_GATE_MODE,
     MarketData,
     build_config,
@@ -510,7 +511,7 @@ def _runs_for_window(
     """구간 하나에서 오프셋들을 돈다. 오더블록은 한 번만 탐지해 오프셋들이 공유한다 —
     탐지는 오프셋과 무관하므로 결과가 바뀌지 않고, 오프셋 간 비교가 **동일한 존** 위에서
     이뤄져야 분해가 성립한다."""
-    ob_result = detect_order_blocks(window)
+    ob_result = detect_order_blocks(window, LEGACY_OB_PARAMS)
     return {
         offset: run_offset(window, offset_bps=offset, cfg=cfg, order_block_result=ob_result)
         for offset in offsets

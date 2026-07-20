@@ -73,7 +73,7 @@ from typing import Literal
 import pandas as pd
 from pydantic import BaseModel, ConfigDict
 
-from backtest.harness import pin_band_bar
+from backtest.harness import LEGACY_OB_PARAMS, pin_band_bar
 from backtest.models import BacktestConfig, PositionSide
 from backtest.sweep import default_backtest_config, timeframe_to_ms
 from backtest.wan68_short_gate_analysis import _split_bars
@@ -373,7 +373,7 @@ def run_symbol_timeframe(
     symbol: str,
     timeframe: str,
     gates: dict[str, ConfluenceParams] | None = None,
-    order_block_params: OrderBlockParams | None = None,
+    order_block_params: OrderBlockParams | None = LEGACY_OB_PARAMS,
     backtest_config: BacktestConfig | None = None,
     iterations: int = _BOOTSTRAP_ITERATIONS,
     seed: int = 70,

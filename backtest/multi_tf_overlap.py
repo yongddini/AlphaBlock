@@ -97,7 +97,12 @@ class MultiTfOverlapParams(BaseModel):
     """상위TF **아래로** 내려갈 TF 순서(예: 1h 진입이면 `("15m", "5m", "1m")`). 위에서부터
     첫 겹침에서 멈춘다. 빈 사다리면 어떤 하위TF도 보지 않으므로 `B`/`C`는 항상 진입 없음."""
     combine: bool = True
-    """하위TF 존을 병합(`combine_obs`)한 뒤 겹침을 볼지. 기본 True(탐지 기본값과 일치)."""
+    """하위TF 존을 병합(`combine_obs`)한 뒤 겹침을 볼지. 기본 `True`.
+
+    ⚠️ **WAN-149 이후로는 탐지 기본값과 어긋난다** — 그쪽은 `False`(분리)로 옮겼는데 여기는
+    `True`로 남긴다. WAN-126이 발표 수치를 낸 설정이 병합이라, 기본값을 따라가면 그 표가
+    조용히 다른 사다리로 다시 돈다(`harness.LEGACY_COMBINE_OBS`와 같은 이유의 고정).
+    """
 
 
 @dataclass(frozen=True)

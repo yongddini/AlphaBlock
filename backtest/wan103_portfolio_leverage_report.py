@@ -39,6 +39,7 @@ from pydantic import BaseModel, ConfigDict
 
 from backtest.harness import (
     DEFAULT_YEARS,
+    LEGACY_OB_PARAMS,
     LEGACY_RSI_GATE_MODE,
     MarketData,
     Segment,
@@ -264,7 +265,7 @@ def build_cell(
         cfg=cfg,
         order_block_result=order_blocks
         if order_blocks is not None
-        else detect_order_blocks(window),
+        else detect_order_blocks(window, LEGACY_OB_PARAMS),
     )
     return _Cell(
         symbol=symbol,

@@ -71,7 +71,7 @@ from pydantic import BaseModel, ConfigDict
 
 # 평균 R 산식은 공용 골격(WAN-101)으로 옮겼다. 이 모듈의 이름으로도 계속 쓸 수 있게
 # 명시적으로 재수출한다 — 리포트 재현 커맨드와 기존 참조가 그대로 살아 있어야 한다.
-from backtest.harness import LEGACY_RSI_GATE_MODE, pin_band_bar
+from backtest.harness import LEGACY_OB_PARAMS, LEGACY_RSI_GATE_MODE, pin_band_bar
 from backtest.harness import mean_r as mean_r
 from backtest.models import BacktestConfig
 from backtest.sweep import default_backtest_config
@@ -256,7 +256,7 @@ def run_cell(
         # 물려줘도 미래 정보가 새지 않는다). 대가는 OOS 앞머리의 워밍업 공백인데,
         # 오프셋들이 구간 안에서 **동일한 존**을 공유하므로 이 리포트가 실제로 재는
         # 오프셋 간 상대 비교는 그 공백에 영향받지 않는다.
-        ob_result = OrderBlockDetector().run(window)
+        ob_result = OrderBlockDetector(LEGACY_OB_PARAMS).run(window)
         segment_rates = [r for r in funding_rates if start_ms <= r.funding_time <= end_ms]
         for offset_bps in offsets_bps:
             for seed in assumption.seeds:

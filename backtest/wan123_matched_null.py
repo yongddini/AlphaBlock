@@ -105,6 +105,7 @@ import pandas as pd
 from pydantic import BaseModel, ConfigDict
 
 from backtest.harness import (
+    LEGACY_OB_PARAMS,
     SEGMENT_IS,
     SEGMENT_OOS,
     FillPreset,
@@ -290,7 +291,7 @@ def run_symbol_timeframe(task: _SymbolTfTask, *, log: bool = True) -> list[NullR
         seg = slice_market(market, segment)
         if seg.empty or seg.df_1m.empty:
             continue
-        ob_result = detect_order_blocks(seg)
+        ob_result = detect_order_blocks(seg, LEGACY_OB_PARAMS)
 
         for lens_name in task.lens_names:
             preset = fill_preset(lens_name)
