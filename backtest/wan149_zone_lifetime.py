@@ -114,6 +114,23 @@ BOOTSTRAP_SEED = 149
 #: 판정을 내기 위한 최소 존 수. 이보다 적으면 곡선이 우연이라 「판정 불가」로 접는다.
 MIN_ZONES = 100
 
+#: 🚨 **추세 검정이 세는 최소 회차 = 1.** 이 상수가 이 모듈에서 가장 중요한 판단이다.
+#:
+#: `h(0)`의 위험집합은 **탐지된 모든 존**이고 그 대부분은 우리가 **탭조차 못 했거나 지정가가
+#: 안 닿은 존**이다(1h 실측: 무효화된 존의 **72%가 진입 0회**). `h(1)` 이상의 위험집합은
+#: **실제로 진입한 존**이다 — 즉 `h(0)`과 `h(1)`은 같은 모집단이 아니다. 두 칸을 한 회귀에
+#: 넣으면 그 **모집단 교체**가 기울기로 둔갑한다.
+#:
+#: 실측이 정확히 그렇다(1h): 전곡선 기울기는 **+0.138(p=0.001)** 로 유의하지만, `h(0)`을
+#: 빼면 **+0.009**(회차 1~4만 보면 **−0.004**)로 사라진다. 즉 그 유의성은 `h(0)→h(1)` 한 칸이
+#: 통째로 만든 것이고, 그 칸은 *"진입을 한 번 더 하면 더 잘 깨지나"*가 아니라 *"우리가 들어갈
+#: 수 있었던 존과 못 들어간 존이 다르다"*를 재고 있다.
+#:
+#: 사용자 질문은 **진입한 존**에 대한 것이므로(*"같은 오더블록에 여러 번 진입하면"*) 판정은
+#: `min_level=1`로 낸다. 전곡선 값은 §2 표와 요약에 **함께 싣되 판정에 쓰지 않는다** —
+#: 「틀린 이유로 맞는 답」(WAN-91/95/100/112/124 부류)을 막는 자리다.
+MIN_LEVEL_ENTERED = 1
+
 
 # --------------------------------------------------------------------------- #
 # 존 1행
@@ -403,11 +420,21 @@ def trend_test(
     lives: Sequence[ZoneLife],
     *,
     axis: str = "entry",
+    min_level: int = MIN_LEVEL_ENTERED,
     iterations: int = BOOTSTRAP_ITERATIONS,
     seed: int = BOOTSTRAP_SEED,
 ) -> TrendResult:
-    """이산시간 생존 모형의 기울기 + 존 단위 클러스터 부트스트랩 구간."""
-    periods = _person_periods(lives, axis)
+    """이산시간 생존 모형의 기울기 + 존 단위 클러스터 부트스트랩 구간.
+
+    `min_level`이 이 함수의 핵심 인자다 — 위 상수 문단을 읽을 것. 기본값은 **1**이라
+    「한 번이라도 진입한 존」에서만 재고, `0`을 주면 진입 없이 죽은 존까지 포함한 전곡선
+    기울기가 나온다(그 값은 판정에 쓰지 않는다).
+    """
+    periods = [
+        (zone, [(level, y) for level, y in rows if level >= min_level])
+        for zone, rows in _person_periods(lives, axis)
+    ]
+    periods = [(zone, rows) for zone, rows in periods if rows]
     n_broken = sum(1 for life in lives if life.broken)
     flat = [row for _, rows in periods for row in rows]
     slope = _fit_logit(flat)
@@ -423,7 +450,9 @@ def trend_test(
         value = _fit_logit(sample)
         if value is not None:
             draws.append(value)
-    if len(draws) < iterations // 2:
+    # `iterations=0`(점추정만 원할 때, leave-one-out이 그렇게 쓴다)이면 `draws`가 비어
+    # 있다 — `0 < 0`은 거짓이라 이 가드를 `<`만으로 두면 빈 리스트를 인덱싱한다.
+    if not draws or len(draws) < iterations // 2:
         return TrendResult(slope, None, None, None, len(lives), n_broken)
     draws.sort()
     low = draws[int(0.025 * len(draws))]
@@ -452,6 +481,7 @@ def verdict(lives: Sequence[ZoneLife], timeframe: str) -> str:
     if not subset:
         return "판정 불가(데이터 없음)."
     result = trend_test(subset)
+    full = trend_test(subset, min_level=0)
     table = hazard_table(subset)
     shown = ", ".join(f"h({r.level})={r.hazard * 100:.1f}%" for r in table[: MAX_LEVEL + 1])
     head = (
@@ -484,9 +514,20 @@ def verdict(lives: Sequence[ZoneLife], timeframe: str) -> str:
             "(*재탭 거래가 유독 더 잘 깨지는 게 아니라 같은 품질 거래가 더 적어질 뿐*)이 "
             "**생존 편향을 걷어낸 뒤에도 유지**된다"
         )
+    # 🚨 전곡선 값을 **판정 옆에 나란히** 찍는다 — 이 둘이 갈릴 때가 정확히 이 모듈이
+    # 경계하는 자리이고(모집단 교체가 기울기로 둔갑), 따로 두면 인용할 때 하나만 떼어 간다.
+    contrast = ""
+    if full.slope is not None and (full.increasing != result.increasing):
+        contrast = (
+            f" 🚨 **전곡선(회차 0 포함) 기울기는 b={full.slope:+.3f}로 부호·유의성이 다르다 — "
+            "그 차이는 신호가 아니라 **모집단 교체**다**: `h(0)`의 위험집합은 탐지된 모든 존이고 "
+            "그 대부분은 우리가 **진입조차 못 한 존**이라(§4 간극 표) `h(1)` 이상과 같은 "
+            "모집단이 아니다. **전곡선 값을 사용자 가설의 근거로 인용 금지.**"
+        )
     return (
         f"{tag} — 이산시간 생존 모형 기울기 b={result.slope:+.3f} "
-        f"(존 단위 클러스터 부트스트랩 95% {band}, p={result.p_value:.3f}). {head}."
+        f"(**진입한 존만**, 회차 ≥{MIN_LEVEL_ENTERED} · 존 단위 클러스터 부트스트랩 95% "
+        f"{band}, p={result.p_value:.3f}). {head}.{contrast}"
     )
 
 
@@ -501,7 +542,10 @@ def lives_to_frame(lives: Sequence[ZoneLife]) -> pd.DataFrame:
 
 def lives_from_csv(path: Path) -> list[ZoneLife]:
     frame = pd.read_csv(path)
-    records = frame.where(pd.notna(frame), None).to_dict(orient="records")
+    # ⚠️ `frame.where(notna, None)`만으로는 **float 열의 NaN이 그대로 남는다**(pandas가
+    # float dtype에 None을 못 넣어 NaN으로 되돌린다). `astype(object)`를 먼저 씌워야
+    # 검열된 존의 빈 칸(`break_time`·`death_after_*`)이 진짜 `None`으로 온다.
+    records = frame.astype(object).where(pd.notna(frame), None).to_dict(orient="records")
     return [_life_from_record(record) for record in records]
 
 
@@ -510,7 +554,9 @@ def _life_from_record(record: dict[str, object]) -> ZoneLife:
 
     def opt_int(key: str) -> int | None:
         value = record.get(key)
-        return None if value is None else int(float(str(value)))
+        if value is None or (isinstance(value, float) and math.isnan(value)):
+            return None
+        return int(float(str(value)))
 
     def req_int(key: str) -> int:
         value = opt_int(key)
@@ -520,7 +566,9 @@ def _life_from_record(record: dict[str, object]) -> ZoneLife:
 
     def opt_float(key: str) -> float | None:
         value = record.get(key)
-        return None if value is None else float(str(value))
+        if value is None or (isinstance(value, float) and math.isnan(value)):
+            return None
+        return float(str(value))
 
     def req_float(key: str) -> float:
         value = opt_float(key)
@@ -632,6 +680,7 @@ def leave_one_out(lives: Sequence[ZoneLife], timeframe: str) -> pd.DataFrame:
     subset = [life for life in lives if life.timeframe == timeframe]
     base = trend_test(subset, iterations=0)
     symbols = sorted({life.symbol for life in subset})
+    # 판정과 같은 축(진입한 존만)으로 뺀다 — 다른 축으로 재면 표와 판정이 갈라진다.
     records = [
         {
             "dropped": symbol,
@@ -675,6 +724,12 @@ def write_summary(lives: Sequence[ZoneLife], path: Path) -> None:
         "",
         "`h(n)` = **n번 진입에 도달한** 존이 (n+1)번째 진입 대신 무효화될 조건부 확률. "
         "`survival%` = `Π(1−h)`. **오르면 사용자 가설 성립, 평평·비단조면 기각.**",
+        "",
+        "🚨 **`h(0)`은 다른 모집단이다 — 추세 판정에서 제외한다.** 그 위험집합은 탐지된 "
+        "**모든** 존이고 대부분은 우리가 탭조차 못 했거나 지정가가 안 닿은 존이다(§4 간극 "
+        "표의 `never_entered_broken%`). `h(1)` 이상은 **실제로 진입한 존**이라, 두 칸을 한 "
+        "회귀에 넣으면 그 **모집단 교체가 기울기로 둔갑**한다. 숫자는 그대로 싣되 판정은 "
+        "회차 ≥1에서 낸다.",
         "",
     ]
     for timeframe in timeframes:

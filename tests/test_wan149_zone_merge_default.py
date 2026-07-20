@@ -201,3 +201,54 @@ def test_merged_path_still_has_the_known_chart_limitation() -> None:
         "병합 경로에서는 합쳐진 존의 키가 원본 아카이브에 없어야 한다 — 이 성질이 "
         "사라졌다면 §6 한계가 해소된 것이니 결정문서를 갱신할 것."
     )
+
+
+# --------------------------------------------------------------------------- #
+# §5 대시보드 — 새 기본값으로 돌고, 옛 적재분이 그 사실을 드러내는가
+# --------------------------------------------------------------------------- #
+
+
+def test_dashboard_badge_says_merge_off_on_the_adopted_default() -> None:
+    """대시보드는 `OrderBlockParams()`를 그대로 쓰므로 배지가 새 기본값을 따라간다.
+
+    라벨을 손으로 적어 두면 기본값이 움직여도 화면만 옛 값을 말한다 — 이 저장소가
+    반복해 당한 그 사고라, 배지를 **기본값에서 읽는지**를 동작으로 고정한다.
+    """
+    from backtest.models import BacktestConfig
+    from dashboard.app import _run_config_badge_text
+
+    text = _run_config_badge_text(
+        ConfluenceParams(entry_mode="close", rsi_mode="closed_bar"),
+        OrderBlockParams(),
+        BacktestConfig(),
+    )
+    assert "병합: OFF" in text
+
+
+def test_saved_run_badge_reveals_the_merge_setting() -> None:
+    """저장된 거래 탭에서 **옛 실행을 고르면 병합 시절 거래가 보인다**(이슈 §5-3).
+
+    `run_id`는 지문에 엔진 파라미터가 들어가 자동으로 갈리지만, 화면 배지가 말해 주지
+    않으면 사용자는 그 표를 오늘의 엔진 성적으로 읽는다.
+    """
+    from backtest.models import BacktestConfig
+    from backtest.trade_store import RunFingerprint
+
+    def fingerprint(ob: OrderBlockParams) -> RunFingerprint:
+        return RunFingerprint(
+            symbol="BTC/USDT:USDT",
+            timeframe="1h",
+            entry_mode="zone_limit",
+            fill="baseline",
+            confluence_json=ConfluenceParams().model_dump_json(),
+            order_block_json=ob.model_dump_json(),
+            config_json=BacktestConfig().model_dump_json(),
+        )
+
+    merged = fingerprint(LEGACY_OB_PARAMS)
+    separated = fingerprint(OrderBlockParams())
+    assert merged.combine_obs is True
+    assert separated.combine_obs is False
+    assert "병합 ON" in merged.label()
+    assert "병합 OFF" in separated.label()
+    assert merged.run_id != separated.run_id

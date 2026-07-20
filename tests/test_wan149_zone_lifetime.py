@@ -292,7 +292,7 @@ def test_grid_verdict_gates_control_timeframes(monkeypatch: pytest.MonkeyPatch) 
     import backtest.wan149_merge_grid as module
 
     monkeypatch.setattr(module, "per_symbol", lambda rows: rows)
-    summary = arm_summary(_grid_rows("4h", trades=10))  # type: ignore[arg-type]
+    summary = arm_summary(_grid_rows("4h", trades=10))
     assert "판정 불가(대조군)" in grid_verdict(summary, "4h")
 
 
@@ -300,7 +300,59 @@ def test_grid_verdict_judges_when_sample_suffices(monkeypatch: pytest.MonkeyPatc
     import backtest.wan149_merge_grid as module
 
     monkeypatch.setattr(module, "per_symbol", lambda rows: rows)
-    summary = arm_summary(_grid_rows("1h", trades=50))  # type: ignore[arg-type]
+    summary = arm_summary(_grid_rows("1h", trades=50))
     text = grid_verdict(summary, "1h")
     assert "판정 불가" not in text
     assert "(a)" in text  # 두 구간 모두 분리 팔이 이기도록 만든 자료.
+
+
+def test_trend_test_point_estimate_only_when_iterations_is_zero() -> None:
+    """`iterations=0`은 **점추정만** 원한다는 뜻이다(leave-one-out이 그렇게 쓴다).
+
+    가드를 `len(draws) < iterations // 2`만으로 두면 `0 < 0`이 거짓이라 빈 부트스트랩
+    분포를 인덱싱해 `IndexError`로 죽는다 — 라벨링을 다 끝낸 뒤 요약 렌더에서 터진다.
+    """
+    lives = [_life(entries=i % 4, broken=(i % 4) >= 2, zone_id=i) for i in range(120)]
+    result = trend_test(lives, iterations=0)
+    assert result.slope is not None
+    assert result.ci_low is None and result.ci_high is None and result.p_value is None
+    assert not result.increasing  # 구간이 없으면 "오른다"고 주장하지 않는다.
+
+
+def test_trend_ignores_the_level_zero_population_switch() -> None:
+    """🚨 이 모듈에서 가장 중요한 방어 — `h(0)`은 **다른 모집단**이라 판정에서 뺀다.
+
+    `h(0)`의 위험집합은 탐지된 **모든** 존이고 대부분은 **진입조차 못 한 존**이다.
+    `h(1)` 이상은 실제로 진입한 존이다. 두 칸을 한 회귀에 넣으면 그 **모집단 교체가
+    기울기로 둔갑**한다 — 실데이터 1h가 정확히 그랬다(전곡선 +0.138 p=0.001 → 회차 ≥1만
+    보면 +0.009).
+
+    여기서는 그 상황을 손으로 만든다: 회차 0에서만 위험률이 낮고 1 이상은 **완전히
+    평평한** 자료. 기본 판정은 (b)여야 하고, `min_level=0`을 명시로 요청해야만 그
+    가짜 상승이 보인다.
+    """
+    lives: list[ZoneLife] = []
+    zone_id = 0
+    # 회차 0에서 200개 중 20개만 죽는다(h(0)=10%) — 나머지는 진입으로 넘어간다.
+    for _ in range(20):
+        lives.append(_life(entries=0, broken=True, zone_id=zone_id))
+        zone_id += 1
+    # 회차 1~4는 매 회차 위험률 **정확히 1/2**로 일정하다(남은 절반이 그 회차에서 죽는다).
+    remaining = 180
+    for level in range(1, 5):
+        deaths = remaining // 2
+        for _ in range(deaths):
+            lives.append(_life(entries=level, broken=True, zone_id=zone_id))
+            zone_id += 1
+        remaining -= deaths
+    for _ in range(remaining):  # 남은 존은 검열.
+        lives.append(_life(entries=5, broken=False, zone_id=zone_id))
+        zone_id += 1
+
+    judged = trend_test(lives, iterations=200)
+    full = trend_test(lives, min_level=0, iterations=200)
+    assert not judged.increasing, "회차 ≥1이 평평하면 가설은 기각이다"
+    assert full.slope is not None and judged.slope is not None
+    assert full.slope > judged.slope, "전곡선은 h(0) 한 칸 때문에 더 가파르게 보인다"
+    assert "판정 불가" not in verdict(lives, "1h")
+    assert "**(b)" in verdict(lives, "1h")

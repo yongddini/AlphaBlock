@@ -48,7 +48,7 @@ from backtest.harness import (
     build_params,
     normalize_symbol,
 )
-from backtest.run import JOBS_AUTO, Grid, RunOptions, parse_date_ms, run_grid
+from backtest.run import JOBS_AUTO, Grid, RunOptions, parse_date_ms, parse_jobs, run_grid
 
 #: 6심볼(WAN-111 유니버스). 3심볼 시절 수치와 섞이지 않도록 전부 같은 창에서 돈다.
 ALL_SYMBOLS: tuple[str, ...] = (
@@ -413,7 +413,12 @@ def main() -> None:
     parser.add_argument("--symbols", type=str, default=",".join(ALL_SYMBOLS))
     parser.add_argument("--start", type=str, default=DEFAULT_START)
     parser.add_argument("--end", type=str, default=DEFAULT_END)
-    parser.add_argument("--jobs", type=int, default=JOBS_AUTO)
+    parser.add_argument(
+        "--jobs",
+        type=parse_jobs,
+        default=JOBS_AUTO,
+        help="(심볼, TF) 단위 병렬 워커 수. auto/0이면 CPU 코어 수(기본)",
+    )
     parser.add_argument("--out-csv", type=str, default="backtest/reports/wan149_merge_grid.csv")
     parser.add_argument(
         "--out-md", type=str, default="backtest/reports/wan149_merge_grid_summary.md"
