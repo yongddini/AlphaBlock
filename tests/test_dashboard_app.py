@@ -103,6 +103,19 @@ def test_app_renders_price_chart_and_metrics_when_data_available(seeded_db_path:
     assert any("진입:" in w and "사이징:" in w for w in warnings)
 
 
+def test_app_trade_table_is_korean_time_and_keeps_engine_labels(seeded_db_path: str) -> None:
+    """WAN-146: 거래 표가 KST 안내와 함께 그려지고, 엔진 라벨은 표 밖에 보존된다."""
+    at = AppTest.from_file("dashboard/app.py")
+    at.run(timeout=30)
+
+    assert not at.exception
+    assert "거래 목록" in [s.value for s in at.subheader]
+    captions = [c.value for c in at.caption]
+    assert any("한국시간(KST)" in c for c in captions)
+    # 표 본문에서 뺀 엔진 라벨 6개는 삭제가 아니라 이동이다(expander 안 캡션).
+    assert any("entry_mode=" in c and "funding_coverage=" in c for c in captions)
+
+
 def test_app_health_tab_renders_without_error(seeded_db_path: str) -> None:
     at = AppTest.from_file("dashboard/app.py")
     at.run(timeout=30)
