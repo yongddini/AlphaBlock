@@ -1046,7 +1046,28 @@ uv run python -m backtest.run --tf 15m --fill baseline,pen_5bp,pen_5bp_drop_50
 uv run python -m backtest.run --symbol BTCUSDT,ETHUSDT --oos --format csv --out x.csv
 uv run python -m backtest.run --symbol BTCUSDT,ETHUSDT,SOLUSDT --jobs 6   # 병렬(WAN-121)
 uv run python -m backtest.run --tf 15m,1h --positions single,3 --oos      # 단일 vs 다중(WAN-130)
+uv run python -m backtest.run --symbol BTCUSDT --tf 15m --trades t.csv --equity s.csv  # 거래별(WAN-106)
+uv run python -m backtest.run --symbol BTCUSDT --tf 15m --persist         # DB 적재 → 대시보드 조회(WAN-106)
 ```
+
+📌 **거래별 내역·DB 적재(WAN-106)** — 요약 1행은 "언제 샀나 · 어디서 손절났나"에 답하지
+못한다. `--trades`/`--equity`는 **단일 조합 전용** CSV(KST·UTC 병기 · 시드 변화 포함)이고
+격자면 **거부한다**(조용히 마지막 조합만 내보낸 파일이 나중에 "채택 엔진의 거래"로 인용되는
+것이 WAN-95의 교훈). `--persist`는 격자에서도 되며 **거래 · 미체결 셋업 · 시드곡선**을
+`backtest/trade_store.py`의 테이블(`backtest_runs`/`_trades`/`_trade_exits`/`_setups`/
+`_equity`)에 넣는다. 대시보드 **「저장된 거래」 탭**이 그걸 **계산 없이 조회**한다(손절/익절
+필터 · 미체결 셋업 · 행 클릭 → 차트 점프).
+- 📌 **실행 지문 없이는 적재도 조회도 되지 않는다** — 지문 = 심볼·TF·구간·창 + `ConfluenceParams`/
+  `OrderBlockParams`/`BacktestConfig` 직렬화 + **엔진 버전 + 코드 리비전**(git 해시, 더러우면
+  `-dirty`)이고 그 해시가 `run_id`다. **코드 리비전이 핵심**이다: 파라미터만으로 키를 만들면
+  엔진 버그를 고쳐도 키가 같아 **옛 결과를 꺼내 준다**(WAN-91/95/112와 같은 부류의 조용한 실패).
+  같은 지문 재적재는 **기본이 거부**(`--persist-replace`가 명시적 덮어쓰기).
+- ⚠️ **지표의 정본은 적재된 요약이지 복원 결과가 아니다** — 종가(A안) 엔진의 자본곡선은 **봉
+  단위**라 거래 단위로 다시 만든 곡선과 **MDD·Sharpe가 다르다**(최종 시드·거래 수·수익률은 같다).
+  화면도 요약 지표를 쓴다.
+- 컬럼은 **WAN-146이 만든 `backtest.report.trades_to_display_frame`을 그대로 재사용**한다
+  (`include_utc=True`가 파일·DB용 옵트인) — 화면·CSV·DB가 두 벌로 갈라지면 같은 거래가 세 곳에서
+  다른 숫자로 보인다.
 
 값에 콤마를 주면 데카르트 곱 격자를 돌고 조합별 1행(`total_return`/승률/MDD/거래수/
 체결률/평균 R/Sharpe)을 낸다. 축은 심볼·TF·진입 방식·익절 R·오프셋·재탭 정책·**포지션

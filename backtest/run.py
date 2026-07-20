@@ -40,7 +40,25 @@ python -m backtest.run --symbol BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,TRXUSDT 
 
 # 7. 단일 대 동시 다중 포지션 — 같은 셋업 풀에서 회계만 바꿔 부호를 본다(WAN-103/108)
 python -m backtest.run --tf 15m,1h --positions single,3 --oos
+
+# 8. 거래별 내역 — 언제 샀고 어디서 손절났고 시드가 어떻게 바뀌었나(WAN-106)
+python -m backtest.run --symbol BTCUSDT --tf 15m --trades out.csv --equity seed.csv
+
+# 9. DB 적재 — 한 번 계산해 넣고 대시보드에서 계산 없이 조회한다(WAN-106)
+python -m backtest.run --symbol BTCUSDT --tf 15m --persist
 ```
+
+## 거래별 내역 (`--trades`/`--equity`/`--persist`, WAN-106)
+
+요약 1행은 "언제 샀나 · 어디서 손절났나"에 답하지 못한다. 세 플래그가 **같은 실행의**
+거래 단위 산출물을 낸다 — 컬럼은 대시보드와 **같은 함수**
+(`backtest.report.trades_to_display_frame`)가 만들어 화면·CSV·DB가 같은 숫자를 낸다.
+
+* `--trades`/`--equity`는 **단일 조합 전용**이다. 격자면 거부한다 — 조용히 마지막 조합만
+  내보낸 파일이 나중에 "채택 엔진의 거래"로 인용되는 것이 WAN-95의 교훈이다.
+* `--persist`는 격자에서도 쓸 수 있다. 조합마다 **실행 지문**(파라미터 전부 + 엔진
+  버전 + 코드 리비전)이 붙어 섞이지 않고, 같은 지문의 재적재는 기본이 거부다
+  (`--persist-replace`가 명시적 덮어쓰기). 상세는 `backtest/trade_store.py`.
 
 ## 포지션 정책 (`--positions`, WAN-130)
 
@@ -104,8 +122,21 @@ from backtest.harness import (
     slice_market,
     write_output,
 )
+from backtest.models import BacktestConfig, BacktestResult
 from backtest.portfolio import PortfolioParams
-from strategy.models import BandBar, ConfluenceParams, RsiGateMode
+from backtest.report import (
+    equity_to_display_frame,
+    trades_to_display_frame,
+)
+from backtest.trade_store import (
+    UNKNOWN_REVISION,
+    BacktestRunStore,
+    DuplicateRunError,
+    RunFingerprint,
+    engine_revision,
+)
+from backtest.zone_limit_backtest import SetupDiagnostic, ZoneLimitStats
+from strategy.models import BandBar, ConfluenceParams, OrderBlockParams, RsiGateMode
 
 # --------------------------------------------------------------------------- #
 # 인자 파싱 헬퍼
@@ -326,6 +357,16 @@ def iter_combos(grid: Grid) -> list[Combo]:
 class RunOptions:
     """격자 밖의 실행 설정(데이터 창·비용·구간)."""
 
+    collect_artifacts: bool = False
+    """거래별 산출물(`RunArtifact`)을 모을지 (WAN-106 — `--trades`/`--equity`/`--persist`).
+
+    기본은 `False`다. 요약 1행만 필요한 격자에서 결과·셋업 진단을 통째로 들고 다니면
+    (특히 병렬 실행에서 프로세스 경계를 넘겨야 하므로) 메모리·직렬화 비용만 든다.
+    """
+    revision: str = UNKNOWN_REVISION
+    """실행 지문에 실을 코드 리비전(WAN-106). 부모가 한 번 구해 워커에 실어 보낸다 —
+    워커마다 `git`을 부르면 느릴 뿐 아니라, 실행 도중 워킹트리가 바뀌면 같은 격자의
+    행들이 서로 다른 지문을 받는다."""
     years: float = DEFAULT_YEARS
     start_ms: int | None = None
     end_ms: int | None = None
@@ -366,6 +407,22 @@ class _CellTask:
 
 
 @dataclass(frozen=True)
+class RunArtifact:
+    """한 조합·구간의 **거래 단위** 산출물 (WAN-106).
+
+    요약 1행(`RunRow`)이 답하지 못하는 "언제 샀나 · 어디서 손절났나 · 못 산 자리는
+    어디였나"를 담는다. `fingerprint`는 이 거래들이 **어느 엔진의 것인지**를 실행
+    단위로 못 박는 지문이고, 적재·내보내기 양쪽이 같은 것을 쓴다.
+    """
+
+    row: RunRow
+    fingerprint: RunFingerprint
+    result: BacktestResult
+    stats: ZoneLimitStats | None
+    setups: tuple[SetupDiagnostic, ...]
+
+
+@dataclass(frozen=True)
 class _CellOutcome:
     """한 셀의 산출물. 로그를 **값으로** 들고 나오는 게 핵심이다.
 
@@ -375,6 +432,10 @@ class _CellOutcome:
 
     rows: list[RunRow]
     logs: tuple[str, ...]
+    artifacts: tuple[RunArtifact, ...] = ()
+    """`options.collect_artifacts`일 때만 채워진다(WAN-106). 적재는 **부모가** 한다 —
+    워커가 각자 SQLite에 쓰면 같은 파일에 동시 쓰기가 되고, 그 순간 `--jobs`가 결과를
+    바꾸는 축이 된다(이 CLI가 지키기로 한 성질을 깬다)."""
 
 
 def _pinned_base(grid: Grid) -> ConfluenceParams | None:
@@ -435,6 +496,7 @@ def _run_cell(task: _CellTask) -> _CellOutcome:
         funding_enabled=options.funding,
     )
     rows: list[RunRow] = []
+    artifacts: list[RunArtifact] = []
     for segment in segments:
         window = slice_market(market, segment)
         if window.empty:
@@ -454,6 +516,10 @@ def _run_cell(task: _CellTask) -> _CellOutcome:
                 base=_pinned_base(grid),
             )
             portfolio = combo.portfolio
+            wants_setups = (
+                options.collect_artifacts and combo.entry_mode == "zone_limit" and portfolio is None
+            )
+            setup_sink: list[SetupDiagnostic] | None = [] if wants_setups else None
             outcome = run_once(
                 window,
                 params=params,
@@ -461,17 +527,29 @@ def _run_cell(task: _CellTask) -> _CellOutcome:
                 order_block_result=ob_result,
                 fair_window=task.fair_window,
                 portfolio=portfolio,
+                setup_sink=setup_sink,
             )
-            rows.append(
-                build_row(
-                    outcome,
-                    window,
-                    segment=segment,
-                    params=params,
-                    fill_name=combo.fill.name,
-                    portfolio=portfolio,
+            row = build_row(
+                outcome,
+                window,
+                segment=segment,
+                params=params,
+                fill_name=combo.fill.name,
+                portfolio=portfolio,
+            )
+            rows.append(row)
+            if options.collect_artifacts:
+                artifacts.append(
+                    RunArtifact(
+                        row=row,
+                        fingerprint=fingerprint_for(
+                            row, params=params, cfg=cfg, revision=options.revision
+                        ),
+                        result=outcome.result,
+                        stats=outcome.stats,
+                        setups=tuple(setup_sink or ()),
+                    )
                 )
-            )
     return _CellOutcome(
         rows,
         (
@@ -479,6 +557,40 @@ def _run_cell(task: _CellTask) -> _CellOutcome:
             f"1분봉 {len(market.df_1m)}행, 펀딩 {len(market.funding_rates)}건 "
             f"→ {len(combos) * len(segments)}조합",
         ),
+        tuple(artifacts),
+    )
+
+
+def fingerprint_for(
+    row: RunRow,
+    *,
+    params: ConfluenceParams,
+    cfg: BacktestConfig,
+    revision: str,
+    order_block: OrderBlockParams | None = None,
+) -> RunFingerprint:
+    """실행 지문을 만든다 (WAN-106).
+
+    좌표(`RunRow`)와 **실제로 엔진에 넘어간 객체**(`params`/`cfg`)에서 만든다 —
+    라벨을 따로 조립하면 "다중으로 돌고 single 라벨이 붙는" WAN-95 부류의 거짓말이
+    가능해진다(`build_row`가 `portfolio`를 그대로 받는 것과 같은 이유).
+    """
+    return RunFingerprint(
+        symbol=row.symbol,
+        timeframe=row.timeframe,
+        segment=row.segment,
+        window=row.window,
+        start_time=row.start_time,
+        end_time=row.end_time,
+        entry_mode=params.entry_mode,
+        fill=row.fill,
+        seed=row.seed,
+        position_mode=row.position_mode,
+        portfolio_leverage=row.portfolio_leverage,
+        confluence_json=params.model_dump_json(),
+        order_block_json=(order_block or OrderBlockParams()).model_dump_json(),
+        config_json=cfg.model_dump_json(),
+        revision=revision,
     )
 
 
@@ -496,14 +608,17 @@ def _iter_outcomes(tasks: Sequence[_CellTask], workers: int) -> Iterator[_CellOu
         yield from pool.map(_run_cell, tasks)
 
 
-def run_grid(
+def run_grid_full(
     grid: Grid,
     options: RunOptions,
     *,
     log: bool = True,
     jobs: int = 1,
-) -> list[RunRow]:
-    """격자를 돌아 조합별 1행을 낸다.
+) -> tuple[list[RunRow], list[RunArtifact]]:
+    """`run_grid`와 같되 거래 단위 산출물도 함께 낸다 (WAN-106).
+
+    `options.collect_artifacts`가 꺼져 있으면 두 번째 값은 항상 빈 목록이다 —
+    `run_grid`(요약 전용)와 **같은 이 함수**를 타므로 두 경로가 갈라지지 않는다.
 
     (심볼, TF)마다 데이터를 한 번만 로드하고, 구간마다 오더블록을 한 번만 탐지해 그
     구간의 조합들이 공유한다 — 탐지는 컨플루언스 파라미터와 무관하므로 결과는 같고
@@ -527,10 +642,24 @@ def run_grid(
         for timeframe in grid.timeframes
     ]
     rows: list[RunRow] = []
+    artifacts: list[RunArtifact] = []
     for outcome in _iter_outcomes(tasks, resolve_jobs(jobs, len(tasks))):
         rows.extend(outcome.rows)
+        artifacts.extend(outcome.artifacts)
         for message in outcome.logs:
             _log(log, message)
+    return rows, artifacts
+
+
+def run_grid(
+    grid: Grid,
+    options: RunOptions,
+    *,
+    log: bool = True,
+    jobs: int = 1,
+) -> list[RunRow]:
+    """격자를 돌아 조합별 1행을 낸다(요약 전용 — 거래 단위 산출물은 버린다)."""
+    rows, _ = run_grid_full(grid, options, log=log, jobs=jobs)
     return rows
 
 
@@ -649,6 +778,29 @@ def build_parser() -> argparse.ArgumentParser:
     output.add_argument("--format", default="table", choices=list(FORMATS))
     output.add_argument("--out", help="결과를 파일로 저장(경로)")
     output.add_argument("--quiet", action="store_true", help="진행 로그(stderr) 끄기")
+
+    detail = parser.add_argument_group("거래별 내역 (WAN-106)")
+    detail.add_argument(
+        "--trades",
+        metavar="PATH",
+        help="거래별 CSV 저장(KST·UTC 병기, 시드 변화 포함). 단일 조합일 때만",
+    )
+    detail.add_argument("--equity", metavar="PATH", help="시드곡선 CSV 저장. 단일 조합일 때만")
+    detail.add_argument(
+        "--persist",
+        action="store_true",
+        help="거래·미체결 셋업·시드곡선을 DB에 적재한다(격자 전체 가능 — 조합마다 실행 지문)",
+    )
+    detail.add_argument(
+        "--persist-db",
+        default=DB_PATH,
+        help=f"적재할 DB 경로(기본 {DB_PATH} — OHLCV와 같은 파일, 테이블만 다름)",
+    )
+    detail.add_argument(
+        "--persist-replace",
+        action="store_true",
+        help="같은 실행 지문이 이미 있으면 덮어쓴다(기본은 거부)",
+    )
     return parser
 
 
@@ -765,8 +917,16 @@ def _default_offsets_bps(entry_modes: tuple[str, ...]) -> tuple[float, ...]:
     return (build_params().zone_limit_offset_bps,)
 
 
+def wants_detail(args: argparse.Namespace) -> bool:
+    """거래 단위 산출물이 필요한 실행인가 (`--trades`/`--equity`/`--persist`)."""
+    return bool(args.trades or args.equity or args.persist)
+
+
 def options_from_args(args: argparse.Namespace) -> RunOptions:
+    detail = wants_detail(args)
     return RunOptions(
+        collect_artifacts=detail,
+        revision=engine_revision() if detail else UNKNOWN_REVISION,
         years=args.years,
         start_ms=parse_date_ms(args.start) if args.start else None,
         end_ms=parse_date_ms(args.end) if args.end else None,
@@ -796,7 +956,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("오류: --oos와 --walkforward는 함께 쓸 수 없습니다.", file=sys.stderr)
         return 2
 
-    rows = run_grid(grid, options, log=not args.quiet, jobs=jobs)
+    rows, artifacts = run_grid_full(grid, options, log=not args.quiet, jobs=jobs)
+    try:
+        _write_detail(args, artifacts, log=not args.quiet)
+    except (ValueError, DuplicateRunError) as exc:
+        print(f"오류: {exc}", file=sys.stderr)
+        return 2
+
     text = render(rows, args.format)
     if args.out:
         path = write_output(text, args.out)
@@ -804,6 +970,80 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:
         print(text)
     return 0
+
+
+def _single_artifact(artifacts: Sequence[RunArtifact], flag: str) -> RunArtifact:
+    """거래별 출력은 **단일 조합**일 때만 의미가 있다 — 격자면 거부한다.
+
+    조용히 마지막 조합만 내보내면 파일 이름과 내용이 어긋난 채로 남고, 그 파일이
+    나중에 "채택 엔진의 거래"로 인용된다(WAN-95의 교훈). DB 적재(`--persist`)는 조합마다
+    실행 지문이 붙어 섞이지 않으므로 격자에서도 허용한다 — 그쪽이 이 방어의 대안이다.
+    """
+    if not artifacts:
+        raise ValueError(f"{flag}: 내보낼 실행 결과가 없습니다(데이터 없음 또는 빈 격자).")
+    if len(artifacts) > 1:
+        raise ValueError(
+            f"{flag}는 단일 조합에만 쓸 수 있는데 {len(artifacts)}개 조합이 나왔습니다. "
+            "축을 하나로 좁히거나(--symbol/--tf 하나, --oos 없이), 격자 전체를 남기려면 "
+            "--persist로 DB에 적재하세요(조합마다 실행 지문이 붙습니다)."
+        )
+    return artifacts[0]
+
+
+def _write_detail(args: argparse.Namespace, artifacts: Sequence[RunArtifact], *, log: bool) -> None:
+    """`--trades`/`--equity`/`--persist` 출력 (WAN-106)."""
+    if args.trades:
+        artifact = _single_artifact(artifacts, "--trades")
+        frame = trades_to_display_frame(artifact.result, include_utc=True)
+        path = write_output(str(frame.to_csv(index=False)), args.trades)
+        _log(log, f"[run] 거래별 CSV 저장: {path} ({len(frame)}건)")
+    if args.equity:
+        artifact = _single_artifact(artifacts, "--equity")
+        frame = equity_to_display_frame(artifact.result, include_utc=True)
+        path = write_output(str(frame.to_csv(index=False)), args.equity)
+        _log(log, f"[run] 시드곡선 CSV 저장: {path} ({len(frame)}점)")
+    if args.persist:
+        persist_artifacts(
+            artifacts,
+            db_path=args.persist_db,
+            replace=args.persist_replace,
+            log=log,
+        )
+
+
+def persist_artifacts(
+    artifacts: Sequence[RunArtifact],
+    *,
+    db_path: str,
+    replace: bool = False,
+    log: bool = True,
+) -> list[str]:
+    """산출물을 DB에 적재하고 `run_id` 목록을 반환한다 (WAN-106).
+
+    **부모 프로세스에서 한 번에** 쓴다 — 워커가 각자 쓰면 같은 SQLite 파일에 동시
+    쓰기가 되어 `--jobs`가 결과를 바꾸는 축이 된다.
+    """
+    if not artifacts:
+        raise ValueError("--persist: 적재할 실행 결과가 없습니다(데이터 없음 또는 빈 격자).")
+    run_ids: list[str] = []
+    created_at = int(datetime.now(tz=UTC).timestamp() * 1000)
+    with BacktestRunStore(db_path) as store:
+        for artifact in artifacts:
+            run_id = store.save_run(
+                artifact.fingerprint,
+                artifact.result,
+                stats=artifact.stats,
+                setups=artifact.setups,
+                replace=replace,
+                created_at=created_at,
+            )
+            run_ids.append(run_id)
+            _log(
+                log,
+                f"[run] 적재: {run_id} — {artifact.fingerprint.label()} "
+                f"(거래 {len(artifact.result.trades)}건 · 셋업 {len(artifact.setups)}건)",
+            )
+    return run_ids
 
 
 if __name__ == "__main__":  # pragma: no cover
