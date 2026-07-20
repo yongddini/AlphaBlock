@@ -136,8 +136,14 @@ COL_EQUITY_BEFORE = "시드(전)"
 COL_EQUITY_AFTER = "시드(후)"
 
 
-def _fmt_time_kst(ms: int) -> str:
+def format_time_kst(ms: int) -> str:
+    """epoch ms → `YYYY-MM-DD HH:MM`(KST). 표시 계층 전용(저장·계산은 UTC 그대로)."""
     return datetime.fromtimestamp(ms / 1000, tz=KST).strftime("%Y-%m-%d %H:%M")
+
+
+#: 내부 호출부용 별칭. 표시 시각 포맷은 이 모듈 한 곳에서만 정의한다 — 화면·CSV·DB
+#: 조회가 각자 포맷하면 같은 거래의 시각이 화면마다 달라 보인다(WAN-146/106 공용 규칙).
+_fmt_time_kst = format_time_kst
 
 
 def _fmt_time_utc(ms: int) -> str:
@@ -240,6 +246,31 @@ def equity_to_dataframe(result: BacktestResult) -> pd.DataFrame:
             "equity": [p.equity for p in result.equity_curve],
         }
     )
+
+
+COL_TIME_KST = "시각(KST)"
+COL_TIME_UTC = "시각(UTC)"
+COL_EQUITY = "시드"
+
+
+def equity_to_display_frame(result: BacktestResult, *, include_utc: bool = False) -> pd.DataFrame:
+    """시드곡선을 **사람이 읽는** 표로 (WAN-106).
+
+    `trades_to_display_frame`과 같은 규칙이다: 시각은 KST이고(`include_utc=True`면 UTC를
+    병기 — 파일 내보내기), 저장·계산은 UTC 그대로다. 값은 엔진의 자본곡선
+    (`result.equity_curve`) 그대로라 마지막 점이 `metrics.final_equity`와 같다.
+    """
+    columns = (
+        [COL_TIME_KST, COL_EQUITY] if not include_utc else [COL_TIME_KST, COL_TIME_UTC, COL_EQUITY]
+    )
+    rows: list[dict[str, object]] = []
+    for point in result.equity_curve:
+        row: dict[str, object] = {COL_TIME_KST: _fmt_time_kst(point.time)}
+        if include_utc:
+            row[COL_TIME_UTC] = _fmt_time_utc(point.time)
+        row[COL_EQUITY] = point.equity
+        rows.append(row)
+    return pd.DataFrame(rows, columns=columns)
 
 
 def summary_dict(

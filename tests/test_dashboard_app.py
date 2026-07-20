@@ -151,3 +151,49 @@ def test_app_shows_warning_when_no_data(tmp_path: Path, monkeypatch: pytest.Monk
         assert at.warning
     finally:
         get_settings.cache_clear()
+
+
+def _seed_backtest_run(db_path: str) -> str:
+    """저장된 거래 탭이 읽을 실행 하나를 DB에 넣는다 (WAN-106)."""
+    from backtest.trade_store import BacktestRunStore, RunFingerprint
+    from tests.test_trade_display_frame import _win_then_loss
+
+    fingerprint = RunFingerprint(
+        symbol="BTC/USDT:USDT",
+        timeframe="1h",
+        entry_mode="zone_limit",
+        fill="baseline",
+        confluence_json=ConfluenceParams().model_dump_json(),
+        order_block_json=OrderBlockParams().model_dump_json(),
+        config_json=BacktestConfig().model_dump_json(),
+        revision="abc1234",
+    )
+    with BacktestRunStore(db_path) as store:
+        return store.save_run(fingerprint, _win_then_loss())
+
+
+def test_saved_trades_tab_hints_how_to_persist_when_empty(seeded_db_path: str) -> None:
+    """적재된 게 없으면 "빈 화면"이 아니라 **넣는 방법**을 보여준다 (WAN-106)."""
+    at = AppTest.from_file("dashboard/app.py")
+    at.run(timeout=30)
+
+    assert not at.exception
+    assert any("--persist" in i.value for i in at.info)
+
+
+def test_saved_trades_tab_renders_stored_trades_with_fingerprint(seeded_db_path: str) -> None:
+    """WAN-106: 계산 없이 조회한 거래 표 + 실행 지문 배지 + 청산사유 필터가 그려진다."""
+    _seed_backtest_run(seeded_db_path)
+
+    at = AppTest.from_file("dashboard/app.py")
+    at.run(timeout=30)
+
+    assert not at.exception
+    captions = [c.value for c in at.caption]
+    # 지금 보고 있는 게 어느 엔진의 거래인지가 화면에서 사라지면 안 된다(WAN-65/95).
+    assert any("실행 지문" in c and "B안(존-지정가)" in c for c in captions)
+    radio_labels = {r.label for r in at.radio}
+    assert "청산사유" in radio_labels
+    # 사용자의 원 요청("어디서 손절났는지")이 선택지로 실제로 있다.
+    reason_radio = next(r for r in at.radio if r.label == "청산사유")
+    assert "손절" in list(reason_radio.options)

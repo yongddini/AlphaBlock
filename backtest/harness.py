@@ -43,6 +43,7 @@ from backtest.models import BacktestConfig, BacktestResult, ExitReason, Trade
 from backtest.portfolio import PortfolioParams
 from backtest.sweep import bars_per_year, default_backtest_config, evaluate
 from backtest.zone_limit_backtest import (
+    SetupDiagnostic,
     ZoneLimitStats,
     build_result_from_trades,
     run_zone_limit_backtest_verbose,
@@ -586,6 +587,7 @@ def run_once(
     order_block_result: OrderBlockResult | None = None,
     fair_window: bool = False,
     portfolio: PortfolioParams | None = None,
+    setup_sink: list[SetupDiagnostic] | None = None,
 ) -> RunOutcome:
     """`entry_mode`에 따라 A안/B안 엔진을 태운다 (WAN-95 경로 스위치).
 
@@ -603,7 +605,24 @@ def run_once(
     포트폴리오 시퀀서로 `max_concurrent=1`을 흉내 내지 않는 이유는 그러면 대조군과
     실험군이 같은 시퀀서를 타서 **시퀀서 버그가 차이를 0으로 감출 수 있기** 때문이다
     (wan103 `series_rows`가 같은 이유로 대조군을 채택 엔진으로 낸다).
+
+    `setup_sink`(WAN-106)를 주면 eligible 셋업별 `SetupDiagnostic`을 채운다 — **미체결
+    셋업**("살 뻔했는데 못 산 자리")을 DB에 적재하는 입력이다. 종가 진입·다중 포지션
+    경로에는 이 진단이 없으므로 **조용히 빈 리스트를 주는 대신 거부한다**: 미체결이
+    0건인 것과 미체결을 셀 줄 모르는 것이 화면에서 같아 보이면 안 된다(WAN-95 부류).
     """
+    if setup_sink is not None:
+        if params.entry_mode != "zone_limit":
+            raise ValueError(
+                "미체결 셋업 진단(setup_sink)은 지정가(B안) 전용입니다 — 종가 진입은 "
+                "탭이 곧 진입이라 미체결이라는 개념이 없습니다(WAN-95)."
+            )
+        if portfolio is not None:
+            raise ValueError(
+                "미체결 셋업 진단(setup_sink)은 동시 다중 포지션 경로에 아직 없습니다"
+                "(run_zone_limit_portfolio_backtest에 setup_sink 인자가 없음). "
+                "단일 포지션(채택 기본값)으로 적재하세요."
+            )
     if portfolio is not None and params.entry_mode != "zone_limit":
         raise ValueError(
             "동시 다중 포지션(portfolio)은 지정가(B안) 전용인데 "
@@ -635,6 +654,7 @@ def run_once(
             backtest_config=cfg,
             order_block_result=order_block_result,
             funding_rates=market.funding_rates,
+            setup_sink=setup_sink,
         )
         return RunOutcome(result=result, stats=stats)
 

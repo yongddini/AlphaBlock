@@ -1,6 +1,9 @@
 """통합 트레이딩 웹 대시보드 (WAN-15 · WAN-30).
 
-**분석 탭**: 캔들+오더블록+시그널 차트와 백테스트 성과.
+**분석 탭**: 캔들+오더블록+시그널 차트와 백테스트 성과(화면을 열 때마다 재계산 —
+1분봉을 안 읽으므로 A안 종가 진입이다).
+**저장된 거래 탭(WAN-106)**: `backtest.run --persist`가 적재해 둔 **채택 엔진(B안
+지정가)** 거래를 계산 없이 조회한다(손절/익절 필터 · 미체결 셋업 · 차트 점프).
 **운영 상태(Health) 탭**: 데이터 신선도·펀딩·러너 생존·페이퍼 포지션·최근 신호를
 한눈에 보여, 수집이 멈췄는지/러너가 살아있는지 즉시 식별한다.
 
@@ -19,8 +22,9 @@ import pandas as pd
 import streamlit as st
 
 from backtest.models import BacktestConfig, BacktestMetrics, BacktestResult
-from backtest.report import trades_to_dataframe, trades_to_display_frame
+from backtest.report import COL_EXIT_REASON, trades_to_dataframe, trades_to_display_frame
 from backtest.sweep import default_backtest_config
+from backtest.trade_store import BacktestRunStore, RunFingerprint, RunSummary
 from config import get_settings
 from config.settings import Settings
 from dashboard.charts import (
@@ -43,6 +47,13 @@ from dashboard.health_data import HealthView, OpenPositionView, build_health_vie
 from dashboard.lightweight_chart import BAND_LINE_COLOR, build_chart_html
 from dashboard.live_chart import LIVE_INTERVALS, build_live_config
 from dashboard.pipeline import PipelineResult, run_pipeline
+from dashboard.saved_trades import (
+    exit_reason_options,
+    filter_by_exit_reason,
+    run_label,
+    selected_trade_no,
+    setups_display_frame,
+)
 from dashboard.trade_table import (
     engine_label_caption,
     parse_selected_rows,
@@ -187,12 +198,26 @@ def _resolve_chart_theme() -> str:
             key="chart_theme_choice",
             help="자동은 Streamlit 테마를 따라갑니다(⋮ → Settings → Theme). 기본은 다크.",
         )
+    return _chart_theme_from_choice(choice)
+
+
+def _chart_theme_from_choice(choice: str) -> str:
     if choice == "라이트":
         return "light"
     if choice == "다크":
         return "dark"
     base = st.get_option("theme.base")
     return "light" if base == "light" else "dark"
+
+
+def _current_chart_theme() -> str:
+    """이미 만들어진 테마 위젯의 선택값을 **읽기만** 한다 (WAN-106).
+
+    `_resolve_chart_theme`를 두 번째 탭에서 다시 부르면 같은 `key`의 사이드바 위젯을
+    또 만들게 되어 Streamlit이 중복 키로 죽는다. 탭마다 각자 위젯을 두면 두 탭의 테마가
+    갈라지므로, 선택은 분석 탭이 한 번만 만들고 나머지는 그 상태를 읽는다.
+    """
+    return _chart_theme_from_choice(str(st.session_state.get("chart_theme_choice", "자동")))
 
 
 def _select_chart_zones(
@@ -549,6 +574,150 @@ def _render_analysis(settings: Settings) -> None:
     _render_trade_table(backtest, conf_params, ob_params, bt_config)
 
 
+# --- 저장된 거래 탭 (WAN-106) ------------------------------------------------
+#
+# 분석 탭과 정반대 성격이다: 저기는 화면을 열 때마다 다시 계산하고(그래서 1분봉을 못 읽어
+# A안으로 내려가 있다), 여기는 `backtest.run --persist`가 한 번 계산해 DB에 넣어 둔
+# **채택 엔진(B안 지정가)** 거래를 **계산 없이 조회**만 한다.
+
+_SAVED_TABLE_KEY = "saved_trade_table_selection"
+_SAVED_CHART_HEIGHT = 520
+
+
+@st.cache_data(ttl=_SERIES_TTL_SECONDS, show_spinner=False)
+def _cached_saved_runs(db_path: str) -> list[RunSummary]:
+    with BacktestRunStore(db_path) as store:
+        return store.list_runs()
+
+
+@st.cache_data(ttl=_HEAVY_TTL_SECONDS, show_spinner=False)
+def _cached_saved_run(db_path: str, run_id: str) -> tuple[BacktestResult, pd.DataFrame]:
+    """적재된 실행 하나를 복원한다 — **조회일 뿐 백테스트가 아니다**."""
+    with BacktestRunStore(db_path) as store:
+        return store.load_result(run_id), store.setups_frame(run_id)
+
+
+def _saved_run_empty_hint(db_path: str) -> None:
+    st.info(
+        "적재된 백테스트 거래가 없습니다. 채택 엔진(B안 지정가) 거래를 한 번 계산해 "
+        "넣어 두면 여기서 계산 없이 조회할 수 있습니다:\n\n"
+        "```bash\n"
+        "uv run python -m backtest.run --symbol BTCUSDT --tf 15m --persist\n"
+        "```\n\n"
+        f"적재 대상 DB: `{db_path}`"
+    )
+
+
+def _render_saved_trades(settings: Settings) -> None:
+    db_path = settings.db_path
+    summaries = _cached_saved_runs(db_path)
+    if not summaries:
+        _saved_run_empty_hint(db_path)
+        return
+
+    labels = {run_label(s): s for s in summaries}
+    with st.sidebar:
+        st.header("저장된 거래")
+        chosen = st.selectbox("실행(실행 지문)", list(labels), key="saved_run_choice")
+    summary = labels[chosen]
+    fingerprint = summary.fingerprint
+
+    # 실행 지문 배지 — 지금 보고 있는 게 어느 엔진의 거래인지 항상 드러낸다(WAN-65/95).
+    # 분석 탭의 "A안(봉 마감 종가)" 배지가 하던 역할을 이 탭에서는 이 줄이 이어받는다.
+    st.subheader(f"{fingerprint.symbol} · {fingerprint.timeframe}")
+    st.caption(f"🔒 실행 지문: {fingerprint.label()} · run_id `{summary.run_id}`")
+
+    result, setups = _cached_saved_run(db_path, summary.run_id)
+    # 지표는 **적재된 요약**을 쓴다(복원 결과의 지표가 아니다) — 종가(A안) 실행은 원본
+    # 자본곡선이 봉 단위라 거래 단위로 다시 만든 곡선과 MDD가 다르다
+    # (`BacktestRunStore.load_result` 독스트링). 복원 결과는 표·차트 마커에만 쓴다.
+    cols = st.columns(6)
+    cols[0].metric("Total Return", f"{summary.total_return * 100:.2f}%")
+    cols[1].metric("Max Drawdown", f"{summary.max_drawdown * 100:.2f}%")
+    cols[2].metric("Win Rate", f"{summary.win_rate * 100:.2f}%")
+    cols[3].metric("Trades", str(summary.num_trades))
+    cols[4].metric(
+        "체결률", "—" if summary.fill_rate is None else f"{summary.fill_rate * 100:.2f}%"
+    )
+    cols[5].metric("최종 시드", f"{summary.final_equity:,.0f}")
+
+    reason = st.radio(
+        "청산사유",
+        options=exit_reason_options(),
+        horizontal=True,
+        key="saved_exit_reason",
+        help="손절만 / 익절만 골라 봅니다. 시드(전)·시드(후)는 전체 실행 기준 그대로입니다.",
+    )
+    frame = filter_by_exit_reason(trades_to_display_frame(result), reason, column=COL_EXIT_REASON)
+
+    trade_no = selected_trade_no(frame, parse_selected_rows(st.session_state.get(_SAVED_TABLE_KEY)))
+    focus = None if trade_no is None else selected_trade_window(result, [trade_no - 1])
+    _render_saved_chart(db_path, fingerprint, result, focus)
+
+    st.caption(
+        "시각은 **한국시간(KST)** 입니다(저장·계산은 UTC 그대로). "
+        "행을 누르면 위 차트가 그 거래의 진입~청산 구간으로 이동합니다."
+    )
+    st.dataframe(
+        style_trade_frame(frame),
+        use_container_width=True,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        key=_SAVED_TABLE_KEY,
+    )
+
+    unfilled = setups[~setups["filled"]] if not setups.empty else setups
+    with st.expander(f"미체결 셋업 — 살 뻔했는데 못 산 자리 ({len(unfilled)}건)"):
+        if setups.empty:
+            st.caption(
+                "이 실행에는 셋업 진단이 없습니다(종가 진입·다중 포지션 경로는 미체결이라는 "
+                "개념이 없거나 진단을 내지 않습니다)."
+            )
+        else:
+            st.dataframe(setups_display_frame(unfilled), use_container_width=True, hide_index=True)
+
+
+def _render_saved_chart(
+    db_path: str,
+    fingerprint: RunFingerprint,
+    result: BacktestResult,
+    focus: tuple[int, int] | None,
+) -> None:
+    """적재된 거래의 진입·청산 마커를 캔들 위에 그린다(존은 그리지 않는다).
+
+    오더블록을 다시 탐지하면 이 탭의 약속("계산이 아니라 조회")이 깨진다 — 존 표시가
+    필요하면 분석 탭이 그 일을 한다. 여기서 필요한 건 **거래가 어디서 났는지**다.
+    """
+    candles = _cached_ohlcv(
+        db_path,
+        fingerprint.symbol,
+        fingerprint.timeframe,
+        fingerprint.start_time,
+        fingerprint.end_time,
+    )
+    if candles.empty:
+        st.warning(
+            "이 실행 창의 캔들이 DB에 없어 차트를 그릴 수 없습니다(거래 표는 그대로 조회됩니다)."
+        )
+        return
+    st.iframe(
+        build_chart_html(
+            candles,
+            [],
+            result,
+            theme=_current_chart_theme(),
+            height=_SAVED_CHART_HEIGHT,
+            focus=focus,
+        ),
+        height=_SAVED_CHART_HEIGHT,
+    )
+    if focus is not None:
+        st.caption(
+            "🔎 선택한 거래 구간을 보고 있습니다. 표에서 선택을 해제하면 전체 구간으로 돌아갑니다."
+        )
+
+
 # --- 운영 상태(Health) 탭 ---------------------------------------------------
 
 
@@ -831,9 +1000,13 @@ def main() -> None:
         )
     run_every = refresh_seconds if (auto_refresh and refresh_seconds > 0) else None
 
-    analysis_tab, paper_tab, health_tab = st.tabs(["분석", "페이퍼 성과", "운영 상태(Health)"])
+    analysis_tab, saved_tab, paper_tab, health_tab = st.tabs(
+        ["분석", "저장된 거래", "페이퍼 성과", "운영 상태(Health)"]
+    )
     with analysis_tab:
         _render_analysis(settings)
+    with saved_tab:
+        _render_saved_trades(settings)
     with paper_tab:
         _render_paper(settings)
     with health_tab:
