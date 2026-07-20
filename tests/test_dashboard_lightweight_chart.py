@@ -7,12 +7,19 @@
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from backtest.engine import run_backtest
 from backtest.models import BacktestConfig
-from dashboard.lightweight_chart import _RSI_LENGTH, build_chart_html
+from dashboard.lightweight_chart import _RSI_LENGTH, BAND_LINE_COLOR, build_chart_html
+from dashboard.live_chart import LiveChartConfig, build_live_config
+from strategy.confluence import ConfluenceStrategy
 from strategy.indicators import ema
 from strategy.models import (
     ConfluenceParams,
@@ -309,3 +316,102 @@ def test_exit_marker_labels_stop_loss_as_order_block_invalidation() -> None:
     text = exit_marker["text"]
     assert "손절 · OB 무효화" in text
     assert "R" in text
+
+
+# --- 볼린저 하단선 + 실시간 갱신 (WAN-147) -----------------------------------
+
+
+def _live_config(df: pd.DataFrame) -> LiveChartConfig:
+    config = build_live_config(
+        df,
+        symbol="BTC/USDT:USDT",
+        timeframe="1h",
+        conf_params=ConfluenceParams(),
+        band_color=BAND_LINE_COLOR,
+    )
+    assert config is not None
+    return config
+
+
+def test_band_points_match_strategy_definition() -> None:
+    """차트에 그리는 밴드 값 == 전략이 실제로 쓰는 `deviation_band_at` (WAN-147)."""
+    df = _df(40)
+    conf_params = ConfluenceParams()
+    filter_params = conf_params.deviation_filter
+    assert filter_params is not None
+
+    payload = _payload(build_chart_html(df, [], conf_params=conf_params))
+    band = payload["band"]
+    assert isinstance(band, dict)
+
+    anchor_vals, width_vals = ConfluenceStrategy.deviation_filter_components(
+        df, filter_params, conf_params.source
+    )
+    for pos, point in enumerate(band["points"]):
+        expected = ConfluenceStrategy.deviation_band_at(pos, 1, anchor_vals, width_vals)
+        if expected is None:
+            assert point is None
+        else:
+            assert point is not None
+            assert point["value"] == pytest.approx(expected, abs=5e-3)
+
+
+def test_band_absent_when_deviation_filter_off() -> None:
+    payload = _payload(
+        build_chart_html(_df(40), [], conf_params=ConfluenceParams(deviation_filter=None))
+    )
+    assert payload["band"] is None
+
+
+def test_live_payload_absent_by_default() -> None:
+    """기존 화면·기존 테스트는 그대로다 — 라이브는 명시적으로 켤 때만 실린다."""
+    payload = _payload(build_chart_html(_df(40), [], conf_params=ConfluenceParams()))
+    assert payload["live"] is None
+
+
+def test_live_payload_carries_stream_and_band_seed() -> None:
+    df = _df(40)
+    payload = _payload(
+        build_chart_html(df, [], conf_params=ConfluenceParams(), live=_live_config(df))
+    )
+    live = payload["live"]
+    assert isinstance(live, dict)
+    assert live["streamUrl"] == "wss://fstream.binance.com/ws/btcusdt@kline_1h"
+    assert live["lastBarOpenMs"] == int(df["open_time"].iloc[-1])
+    assert isinstance(live["bandCloses"], list) and len(live["bandCloses"]) == 19
+    assert live["bandParams"]["directionSign"] == 1
+
+
+def test_live_band_disabled_when_band_line_not_drawn() -> None:
+    """밴드 선을 안 그리는 화면에서는 라이브 밴드 배선도 꺼진다(조용한 실패 방지)."""
+    df = _df(40)
+    payload = _payload(
+        build_chart_html(
+            df,
+            [],
+            conf_params=ConfluenceParams(deviation_filter=None),
+            live=_live_config(df),
+        )
+    )
+    live = payload["live"]
+    assert isinstance(live, dict)
+    assert live["bandCloses"] is None
+    assert live["bandParams"] is None
+    assert payload["band"] is None
+
+
+def test_chart_script_is_valid_javascript() -> None:
+    """템플릿 치환 결과가 파싱 가능한 JS인지 Node로 확인한다(오타 방지)."""
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node가 없어 JS 문법을 검증할 수 없다")
+    df = _df(40)
+    html = build_chart_html(df, [], conf_params=ConfluenceParams(), live=_live_config(df))
+    assert "__LIVE_BAND_JS__" not in html
+    assert "computeLiveBand" in html
+    # 마지막 <script> 블록이 이 모듈이 쓴 코드다(그 앞은 벤더링된 라이브러리).
+    script = html.rsplit("<script>", 1)[1].split("</script>", 1)[0]
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "chart.js"
+        path.write_text(script, encoding="utf-8")
+        subprocess.run([node, "--check", str(path)], check=True, capture_output=True)  # noqa: S603

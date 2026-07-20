@@ -71,6 +71,8 @@ from pathlib import Path
 import pandas as pd
 
 from backtest.models import BacktestResult, ExitReason, PositionSide
+from dashboard.live_chart import LIVE_BAND_JS, LiveChartConfig
+from strategy.confluence import ConfluenceStrategy
 from strategy.indicators import emas as compute_emas
 from strategy.indicators import rsi as compute_rsi
 from strategy.indicators import vwma as compute_vwma
@@ -214,6 +216,10 @@ _EMA_LINE_PALETTE: tuple[str, ...] = (
     "#7cb342",  # olive green
 )
 _VWMA_LINE_COLOR = "#d81b60"  # magenta — VWMA는 항상 이 색으로 고정해 EMA들과 구분.
+
+#: 볼린저 하단선(진입가 기준선) 색. EMA 팔레트·VWMA와 겹치지 않는 시안 계열로 둔다
+#: (WAN-147 — 이 선이 라이브로 움직이는 대상이라 한눈에 구분돼야 한다).
+BAND_LINE_COLOR = "#00e5ff"
 
 _STATIC_DIR = Path(__file__).parent / "static"
 _LIBRARY_JS_PATH = _STATIC_DIR / "lightweight-charts.standalone.production.js"
@@ -502,13 +508,17 @@ _TEMPLATE = """
     lineSeriesList.push({ series: s, points: line.points });
   });
 
-  if (payload.lines && payload.lines.length) {
+  const legendItems = (payload.lines || []).slice();
+  if (payload.band) {
+    legendItems.push({ color: payload.band.color, label: payload.band.label });
+  }
+  if (legendItems.length) {
     const legend = document.createElement("div");
     legend.style.cssText =
       "position:absolute;top:8px;left:8px;z-index:5;background:" + theme.legendBg + ";" +
       "padding:4px 8px;border-radius:4px;font:11px -apple-system,sans-serif;" +
       "line-height:1.6;pointer-events:none;color:" + theme.legendText + ";";
-    payload.lines.forEach(function (line) {
+    legendItems.forEach(function (line) {
       const item = document.createElement("div");
       item.innerHTML =
         '<span style="display:inline-block;width:10px;height:2px;background:' +
@@ -519,6 +529,19 @@ _TEMPLATE = """
     });
     container.style.position = "relative";
     container.appendChild(legend);
+  }
+
+  // 볼린저 하단선(진입가 기준선) — 라이브 갱신 대상이다(WAN-147). EMA/VWMA 토글과
+  // 별개로 payload.band가 있을 때만 그린다.
+  let bandSeries = null;
+  if (payload.band) {
+    bandSeries = chart.addSeries(LightweightCharts.LineSeries, {
+      color: payload.band.color,
+      lineWidth: 2,
+      priceLineVisible: false,
+      lastValueVisible: true,
+      crosshairMarkerVisible: false,
+    }, 0);
   }
 
   let rsiSeries = null;
@@ -548,15 +571,35 @@ _TEMPLATE = """
     LightweightCharts.createSeriesMarkers(candleSeries, payload.markers);
   }
 
+  // 라이브로 받은 봉(형성 중인 봉 + 화면을 연 뒤 확정된 봉)은 payload.candles에 없다.
+  // 좌측 지연 로딩이 setData로 캔버스를 다시 채울 때마다 지워지므로, 시각별로 들고
+  // 있다가 다시 얹는다. 메모리는 화면을 열어 둔 시간에 비례할 뿐이고 어디에도 저장하지
+  // 않는다(브라우저 안에서만 산다).
+  const liveBars = new Map();
+  const liveBandPoints = new Map();
+  function reapplyLive() {
+    Array.from(liveBars.keys()).sort(function (a, b) { return a - b; }).forEach(function (t) {
+      candleSeries.update(liveBars.get(t));
+    });
+    if (!bandSeries) return;
+    Array.from(liveBandPoints.keys()).sort(function (a, b) { return a - b; }).forEach(function (t) {
+      bandSeries.update(liveBandPoints.get(t));
+    });
+  }
+
   let loadedFrom = Math.max(0, payload.candles.length - payload.initialBars);
   function applyFrom(idx) {
     candleSeries.setData(payload.candles.slice(idx));
     if (rsiSeries) {
       rsiSeries.setData(payload.rsi.slice(idx).filter(Boolean));
     }
+    if (bandSeries) {
+      bandSeries.setData(payload.band.points.slice(idx).filter(Boolean));
+    }
     lineSeriesList.forEach(function (entry) {
       entry.series.setData(entry.points.slice(idx).filter(Boolean));
     });
+    reapplyLive();
   }
   applyFrom(loadedFrom);
   chart.timeScale().fitContent();
@@ -574,6 +617,138 @@ _TEMPLATE = """
       loading = false;
     }
   });
+
+  // ---- 실시간 kline (WAN-147) --------------------------------------------
+  // 표시 계층 전용이다: 여기서 갱신되는 건 캔들과 밴드 선뿐이고, 거래 표·성과 지표는
+  // 확정봉 기준 백테스트 결과 그대로다(이 스코프에서 그 값들을 건드리지 않는다).
+  // 받은 데이터는 어디에도 저장하지 않는다 — 흘려보내며 그리기만 한다.
+  __LIVE_BAND_JS__
+  const live = payload.live;
+  if (live) {
+    container.style.position = "relative";
+    const badge = document.createElement("div");
+    badge.style.cssText =
+      "position:absolute;top:8px;right:8px;z-index:6;background:" + theme.legendBg + ";" +
+      "padding:3px 8px;border-radius:4px;font:11px -apple-system,sans-serif;" +
+      "pointer-events:none;color:" + theme.legendText + ";";
+    container.appendChild(badge);
+
+    let bandWindow = live.bandCloses ? live.bandCloses.slice() : null;
+    // 밴드 창은 "차트 마지막 확정봉 다음 봉"에만 유효하다. DB가 오래돼 그 사이에 빈
+    // 봉이 있으면 낡은 창으로 계산한 값을 라이브인 척 그리지 않고 밴드를 멈춘다.
+    let expectedOpenMs = live.lastBarOpenMs + live.intervalMs;
+    let bandStale = false;
+    let lastCandleTime = payload.candles.length
+      ? payload.candles[payload.candles.length - 1].time
+      : null;
+    let connState = "connecting";
+
+    function renderBadge() {
+      const dot = connState === "open" ? "🟢" : (connState === "connecting" ? "🟡" : "🔴");
+      const head = connState === "open" ? "LIVE" :
+        (connState === "connecting" ? "연결 중" : "연결 끊김 · 재연결 중");
+      let tail = "";
+      if (!bandWindow) {
+        tail = " · 캔들만";
+      } else if (bandStale) {
+        tail = " · 밴드 정지(데이터 공백)";
+      }
+      badge.textContent = dot + " " + head + " · " + live.symbol + " " + live.timeframe + tail;
+    }
+    renderBadge();
+
+    function handleKline(k) {
+      const openMs = Number(k.t);
+      if (!Number.isFinite(openMs)) return;
+      const barTime = Math.floor(openMs / 1000);
+      if (lastCandleTime !== null && barTime < lastCandleTime) return;  // 지연 도착 무시
+      const closed = k.x === true;
+      const bar = {
+        time: barTime,
+        open: Number(k.o),
+        high: Number(k.h),
+        low: Number(k.l),
+        close: Number(k.c),
+      };
+      if (!closed) {
+        // 형성 중인 봉은 옅은 몸통으로 그려 확정봉과 구분한다(완료 기준).
+        bar.color = bar.close >= bar.open ? live.liveColors.up : live.liveColors.down;
+        bar.wickColor = bar.color;
+      }
+      candleSeries.update(bar);
+      lastCandleTime = barTime;
+      liveBars.set(barTime, bar);
+
+      if (bandWindow && bandSeries && !bandStale) {
+        if (openMs > expectedOpenMs) {
+          bandStale = true;  // 창과 이어지지 않는다 — 새로고침 전까지 밴드는 확정봉까지만.
+        } else if (openMs === expectedOpenMs) {
+          const value = computeLiveBand(bandWindow, bar.close, live.bandParams);
+          if (value !== null) {
+            const point = { time: barTime, value: value };
+            bandSeries.update(point);
+            liveBandPoints.set(barTime, point);
+          }
+          if (closed) {
+            bandWindow.push(bar.close);
+            bandWindow.shift();
+            expectedOpenMs += live.intervalMs;
+          }
+        }
+      }
+      renderBadge();
+    }
+
+    let socket = null;
+    let retries = 0;
+    let stopped = false;
+    function connect() {
+      connState = "connecting";
+      renderBadge();
+      try {
+        socket = new WebSocket(live.streamUrl);
+      } catch (err) {
+        scheduleReconnect();
+        return;
+      }
+      socket.onopen = function () {
+        retries = 0;
+        connState = "open";
+        renderBadge();
+      };
+      socket.onmessage = function (event) {
+        try {
+          const msg = JSON.parse(event.data);
+          const data = msg.data || msg;
+          if (data && data.k) handleKline(data.k);
+        } catch (err) {
+          // 파싱 실패 메시지는 버린다 — 화면이 깨지는 것보다 한 틱을 놓치는 게 낫다.
+        }
+      };
+      socket.onclose = function () {
+        if (stopped) return;
+        connState = "closed";
+        renderBadge();
+        scheduleReconnect();
+      };
+      socket.onerror = function () {
+        if (socket) socket.close();
+      };
+    }
+    function scheduleReconnect() {
+      // 지수 백오프(최대 30초). 끊김·복구가 반복돼도 화면은 마지막 값을 유지한다.
+      const delay = Math.min(30000, 1000 * Math.pow(2, Math.min(retries, 5)));
+      retries += 1;
+      setTimeout(function () { if (!stopped) connect(); }, delay);
+    }
+    // 심볼·기간을 바꾸면 Streamlit이 이 iframe을 통째로 갈아끼운다 — 그때 소켓을 닫아
+    // 옛 구독이 남지 않게 한다.
+    window.addEventListener("pagehide", function () {
+      stopped = true;
+      if (socket) socket.close();
+    });
+    connect();
+  }
 })();
 </script>
 """
@@ -603,6 +778,44 @@ def _tp_line_series(frame: pd.DataFrame, conf_params: ConfluenceParams) -> dict[
     return cols
 
 
+def _band_points(
+    frame: pd.DataFrame,
+    times_sec: Sequence[int],
+    conf_params: ConfluenceParams,
+    *,
+    direction_sign: int = 1,
+) -> list[dict[str, float] | None] | None:
+    """볼린저 하단선(진입가 기준선) 시계열. 이격 필터가 꺼져 있으면 `None`.
+
+    값은 전략이 실제로 쓰는 함수(`ConfluenceStrategy.deviation_filter_components` +
+    `deviation_band_at`)에서 그대로 가져온다 — 화면에 따로 계산한 선을 그리면 "차트에
+    보이는 선"과 "엔진이 쓰는 값"이 갈라진다.
+
+    ⚠️ 확정봉 시리즈다. 형성 중인 봉의 값은 브라우저가 `computeLiveBand`로 얹는다
+    (`dashboard.live_chart`) — 그 JS가 파이썬 `RealtimeBand`와 같은 값을 냄은 테스트가
+    Node로 검증한다.
+    """
+    filter_params = conf_params.deviation_filter
+    if filter_params is None:
+        return None
+    anchor_vals, width_vals = ConfluenceStrategy.deviation_filter_components(
+        frame, filter_params, conf_params.source
+    )
+    points: list[dict[str, float] | None] = []
+    for pos, time_sec in enumerate(times_sec):
+        # 밴드 봉 기준은 봉 단위 표현이 가능한 것만 쓴다 — `intrabar_live`(채택 기본값)는
+        # 봉 단위에서 `tap`과 같은 값이고(`deviation_band_at` 독스트링), 확정된 봉의
+        # 선을 그리는 이 함수에는 그 접힘이 정확히 맞는다.
+        band_bar = filter_params.band_bar
+        if band_bar == "intrabar_causal":
+            band_bar = "intrabar_live"
+        value = ConfluenceStrategy.deviation_band_at(
+            pos, direction_sign, anchor_vals, width_vals, band_bar=band_bar
+        )
+        points.append(None if value is None else {"time": time_sec, "value": round(value, 2)})
+    return points
+
+
 def _line_color(key: str, ema_index: int) -> str:
     if key.startswith("vwma_"):
         return _VWMA_LINE_COLOR
@@ -620,6 +833,7 @@ def build_chart_html(
     theme: str = DEFAULT_THEME,
     height: int = 700,
     initial_bars: int = _INITIAL_BARS,
+    live: LiveChartConfig | None = None,
 ) -> str:
     """캔들+오더블록+RSI+익절 목표선 패널을 그리는 자족형 HTML을 만든다.
 
@@ -634,6 +848,11 @@ def build_chart_html(
 
     `theme`(`"light"`/`"dark"`, 기본 다크)는 배경·격자·존·마커·RSI 색을 결정한다 —
     Streamlit 테마에 맞춰 호출부에서 넘긴다(WAN-55).
+
+    `conf_params.deviation_filter`가 켜져 있으면 **볼린저 하단선**(진입가 기준선)을 함께
+    그린다. `live`(`dashboard.live_chart.build_live_config`)를 주면 브라우저가 바이낸스
+    웹소켓에 직접 붙어 **형성 중인 봉과 그 밴드 값**을 갱신한다(WAN-147) — 표시 계층
+    전용이라 `backtest` 표·지표는 확정봉 기준 그대로다.
     """
     chart_theme = resolve_theme(theme)
     frame = df.sort_values("open_time").reset_index(drop=True)
@@ -690,6 +909,26 @@ def build_chart_html(
             {"key": key, "label": _line_label(key), "color": color, "points": points}
         )
 
+    band_payload: dict[str, object] | None = None
+    if conf_params is not None and conf_params.deviation_filter is not None:
+        band_points = _band_points(frame, times_sec, conf_params)
+        if band_points is not None:
+            length = conf_params.deviation_filter.sma_length
+            band_payload = {
+                "label": f"볼린저 하단 (SMA{length} 진입 기준선)",
+                "color": BAND_LINE_COLOR,
+                "points": band_points,
+            }
+
+    live_payload: dict[str, object] | None = None
+    if live is not None:
+        live_payload = live.to_payload()
+        if band_payload is None:
+            # 밴드 선 자체를 안 그리는 화면이면 라이브 밴드도 끈다 — 그리지 않는 선을
+            # 갱신하는 배선을 남기면 "켜져 있다고 믿는" 조용한 실패가 된다.
+            live_payload["bandCloses"] = None
+            live_payload["bandParams"] = None
+
     boxes = _zone_boxes(order_blocks, last_bar_ms, chart_theme)
     markers = (
         _entry_exit_markers(backtest, rsi_by_time, signals, tp_lines_by_time, chart_theme)
@@ -703,6 +942,8 @@ def build_chart_html(
         "boxes": boxes,
         "markers": markers,
         "lines": lines_payload,
+        "band": band_payload,
+        "live": live_payload,
         "initialBars": min(initial_bars, len(candles)),
         "priceColors": {"up": _BULL_COLOR, "down": _BEAR_COLOR},
         "rsiColor": chart_theme.rsi_line,
@@ -722,6 +963,7 @@ def build_chart_html(
     html = html.replace("__CONTAINER_ID__", container_id)
     html = html.replace("__HEIGHT__", str(height))
     html = html.replace("__LIBRARY_JS__", _load_library_js())
+    html = html.replace("__LIVE_BAND_JS__", LIVE_BAND_JS)
     html = html.replace("__PAYLOAD_JSON__", json.dumps(payload, separators=(",", ":")))
     html = html.replace("__LINE_STYLE_DASHED__", str(_LINE_STYLE_DASHED))
     html = html.replace("__LINE_STYLE_DOTTED__", str(_LINE_STYLE_DOTTED))
