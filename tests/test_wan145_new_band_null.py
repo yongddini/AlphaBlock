@@ -49,7 +49,6 @@ from backtest.wan145_new_band_null import (
 )
 from strategy.models import ConfluenceParams
 
-
 # ------------------------------------------------------- 1. 밴드를 고정하지 않는다
 
 

@@ -18,14 +18,16 @@ from pathlib import Path
 import pytest
 
 from backtest import wan114_entry_rule_ablation as wan114
-from backtest.harness import LEGACY_BAND_BAR
+from backtest.harness import LEGACY_BAND_BAR, fill_preset
 from backtest.wan145_entry_ablation import (
+    ADDS_OVERRIDES,
     ADOPTED_RUNG_NAME,
     BOLLINGER_STEP,
     LADDER,
     RUNGS,
     RUNGS_BY_NAME,
     AblationRow,
+    adds_of,
     bollinger_verdict,
     build_summary_markdown,
     describe_engine,
@@ -39,7 +41,6 @@ from backtest.wan145_entry_ablation import (
     rung_summary,
 )
 from strategy.models import ConfluenceParams
-
 
 # ------------------------------------------------------- 1. 밴드를 고정하지 않는다
 
@@ -57,7 +58,7 @@ def test_rungs_follow_the_adopted_band_and_are_not_pinned() -> None:
 
 def test_wan114_ladder_is_still_pinned_to_the_old_band() -> None:
     """옛 표는 손대지 않았다 — `tap` 고정이 살아 있어야 그 CSV가 비트 단위로 재현된다."""
-    band = wan114.rung_params(wan114.RUNGS_BY_NAME["L2"], fill=wan114.fill_preset("baseline"))
+    band = wan114.rung_params(wan114.RUNGS_BY_NAME["L2"], fill=fill_preset("baseline"))
     assert band.deviation_filter is not None
     assert band.deviation_filter.band_bar == LEGACY_BAND_BAR
 
@@ -197,3 +198,15 @@ def test_summary_warns_that_l2_is_not_the_adopted_default() -> None:
     assert "# WAN-145 §2" in summary
     assert "`L2`는 채택 기본값이 아니다" in summary
     assert "ETH 제외" in summary
+
+
+def test_stale_wan114_label_is_corrected_in_this_table() -> None:
+    """WAN-114의 `L2` 라벨("= 채택 기본값")은 WAN-123 이후 거짓이다 — 표에서만 고쳐 쓴다.
+
+    설정은 그대로 물려받아야(두 표가 같은 것을 가리켜야) 대조가 성립하므로, 옛 모듈을
+    고치지 않고 **찍히는 문장만** 교정한다.
+    """
+    assert "채택 기본값" in wan114.RUNGS_BY_NAME["L2"].adds  # 옛 라벨은 손대지 않았다.
+    assert adds_of("L2") == ADDS_OVERRIDES["L2"]
+    assert "WAN-122까지" in adds_of("L2")
+    assert adds_of(ADOPTED_RUNG_NAME) == RUNGS_BY_NAME[ADOPTED_RUNG_NAME].adds

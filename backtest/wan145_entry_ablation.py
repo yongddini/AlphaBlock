@@ -100,6 +100,20 @@ RUNGS: tuple[Rung, ...] = (
 RUNGS_BY_NAME: dict[str, Rung] = {r.name: r for r in RUNGS}
 LADDER: tuple[str, ...] = tuple(r.name for r in RUNGS)
 
+#: ⚠️ **라벨 교정** — WAN-114의 `L2.adds`는 "(= 채택 기본값 = 이슈의 L3)"라 적혀 있는데
+#: WAN-123 이후 그 말은 **거짓**이다(게이트가 `first_tap_free`로 고정된 단이다). 설정은
+#: 그대로 물려받되(그래야 두 표가 같은 것을 가리킨다) **표에 찍히는 문장만** 여기서
+#: 고쳐 쓴다 — 옛 모듈을 고치면 그 CSV·결론 문장이 흔들린다.
+ADDS_OVERRIDES: dict[str, str] = {
+    "L2": "+ 볼린저 진입가 재산정 (= WAN-122까지의 채택 기본값)",
+}
+
+
+def adds_of(level: str) -> str:
+    """표에 찍을 「이 단이 새로 켜는 부품」 문장(위 교정을 적용한 것)."""
+    return ADDS_OVERRIDES.get(level, RUNGS_BY_NAME[level].adds)
+
+
 #: 존-단독(하한선). 판정은 이 단과 채택 기본값 단의 격차를 읽는다.
 BASE_RUNG = "L0"
 
@@ -301,7 +315,7 @@ def incremental(symbol_frame: pd.DataFrame) -> pd.DataFrame:
                     "timeframe": timeframe,
                     "segment": segment,
                     "step": f"{prev}→{cur}",
-                    "adds": RUNGS_BY_NAME[cur].adds,
+                    "adds": adds_of(cur),
                     "delta_return": float(delta.mean()),
                     "symbols_up": float((delta > 0).sum()),
                     "symbols": float(len(delta)),
@@ -473,7 +487,7 @@ def ladder_table() -> str:
         records.append(
             {
                 "level": rung.name,
-                "adds": rung.adds,
+                "adds": adds_of(rung.name),
                 "retap_mode": p.retap_mode,
                 "rsi_gate_mode": p.rsi_gate_mode,
                 "deviation_filter": (
