@@ -63,8 +63,8 @@ from __future__ import annotations
 import json
 import math
 import uuid
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 
@@ -120,6 +120,13 @@ class ChartTheme:
     exit_stop_loss: str
     exit_end_of_data: str
     exit_default: str
+    #: 차트 표시선 색(WAN-67). `ema_length_colors`는 **길이**를 키로 하는 고정 매핑이고
+    #: (사용자 스펙: 20 빨강 / 60 주황 / 120 노랑 / 240 초록 / 365 파랑), 스펙에 없는
+    #: 길이가 오면 `_EMA_LINE_PALETTE`(순번 기반)로 폴백한다. `vwma_line`은 EMA 5색과
+    #: 겹치지 않는 색이다. 두 값 모두 테마별로 명도를 달리 잡되 색상(hue)은 스펙을 지킨다.
+    #: `hash=False`는 dict 필드가 `ChartTheme`의 자동 `__hash__`를 깨지 않게 한다.
+    ema_length_colors: Mapping[int, str] = field(hash=False, default_factory=dict)
+    vwma_line: str = "#d81b60"
 
     def exit_marker_colors(self) -> dict[ExitReason, str]:
         return {
@@ -129,6 +136,34 @@ class ChartTheme:
             ExitReason.END_OF_DATA: self.exit_end_of_data,
         }
 
+
+#: 표시선 색 — **길이별 고정 매핑**(WAN-67 사용자 스펙: 20 빨강 / 60 주황 / 120 노랑 /
+#: 240 초록 / 365 파랑). 다크가 기준 테마다(`DEFAULT_THEME = "dark"` · 사용자 지시
+#: "무조건 다크테마로") — 어두운 배경에서 대비가 최대가 되도록 명도를 올린 값이다.
+#: 캔들 몸통색(#26a69a/#ef5350)과 겹치지 않도록 빨강·초록은 톤을 달리 잡았다.
+_EMA_LENGTH_COLORS_DARK: Mapping[int, str] = {
+    20: "#ff5252",  # red
+    60: "#ff9800",  # orange
+    120: "#ffee58",  # yellow
+    240: "#4caf50",  # green
+    365: "#42a5f5",  # blue
+}
+
+#: 라이트 테마용 같은 색상(hue) · 낮은 명도. 흰 배경에서 노랑은 그대로 쓰면 안 보여
+#: 앰버로 내린다(색상 스펙은 유지, 명도만 조정 — 이슈 §작업 범위가 정한 원칙).
+_EMA_LENGTH_COLORS_LIGHT: Mapping[int, str] = {
+    20: "#d32f2f",  # red
+    60: "#ef6c00",  # orange
+    120: "#f9a825",  # yellow(amber)
+    240: "#2e7d32",  # green
+    365: "#1565c0",  # blue
+}
+
+#: VWMA 100 — 다크에서 **흰색**(사용자 스펙 2026-07-20). EMA 5색·볼린저 시안과 겹치지
+#: 않고 어두운 배경에서 대비가 가장 크다. 라이트 배경에서는 흰 선이 사라지므로 같은
+#: 역할(무채색 중립)을 하는 짙은 회색으로 대응한다.
+_VWMA_LINE_COLOR_DARK = "#ffffff"  # white
+_VWMA_LINE_COLOR_LIGHT = "#212121"  # near-black
 
 _LIGHT_THEME = ChartTheme(
     name="light",
@@ -150,6 +185,8 @@ _LIGHT_THEME = ChartTheme(
     exit_stop_loss="#c62828",
     exit_end_of_data="#616161",
     exit_default="#6d4c41",
+    ema_length_colors=_EMA_LENGTH_COLORS_LIGHT,
+    vwma_line=_VWMA_LINE_COLOR_LIGHT,
 )
 
 #: 다크 테마: 트레이딩뷰 기본 다크에 준한다(배경 #131722, 글자 #d1d4dc, 격자
@@ -176,6 +213,8 @@ _DARK_THEME = ChartTheme(
     exit_stop_loss="#ef5350",
     exit_end_of_data="#9e9e9e",
     exit_default="#a1887f",
+    ema_length_colors=_EMA_LENGTH_COLORS_DARK,
+    vwma_line=_VWMA_LINE_COLOR_DARK,
 )
 
 _THEMES: dict[str, ChartTheme] = {"light": _LIGHT_THEME, "dark": _DARK_THEME}
@@ -203,8 +242,10 @@ _RSI_PANE_HEIGHT_RATIO = 0.25
 _LINE_STYLE_DOTTED = 1
 _LINE_STYLE_DASHED = 2
 
-#: 익절 목표선(EMA) 오버레이 색 팔레트. 길이 순서대로 순환 배정한다(WAN-59 후속:
-#: 사용자가 `tp_ema_lengths`를 바꿔도 팔레트가 무너지지 않도록 길이가 아닌 순번으로 매핑).
+#: 표시선(EMA) 오버레이 **폴백** 팔레트. 기본 색은 길이별 고정 매핑
+#: (`ChartTheme.ema_length_colors`, WAN-67)이고, 사용자가 `display_ema_lengths`를 바꿔
+#: **스펙에 없는 길이**가 오면 팔레트가 무너지지 않도록 여기서 순번으로 순환 배정한다
+#: (WAN-59의 순번 매핑 의도를 폴백으로 보존한 것이다).
 #: 밝은/어두운 배경 양쪽에서 식별 가능하도록 중간 채도·명도를 고른다(WAN-55 대비 고려).
 _EMA_LINE_PALETTE: tuple[str, ...] = (
     "#2962ff",  # blue
@@ -215,7 +256,11 @@ _EMA_LINE_PALETTE: tuple[str, ...] = (
     "#00838f",  # teal
     "#7cb342",  # olive green
 )
-_VWMA_LINE_COLOR = "#d81b60"  # magenta — VWMA는 항상 이 색으로 고정해 EMA들과 구분.
+
+#: 표시선 굵기(WAN-67). 1은 캔들 위에서 잘 안 보인다는 사용자 지적이라 2로 올린다 —
+#: 볼린저 하단선(WAN-147)이 이미 쓰는 굵기와 같아 선들이 서로 따로 놀지 않는다. RSI
+#: 패인의 선·가이드는 캔들과 겹치지 않으므로 1 그대로 둔다.
+_MA_LINE_WIDTH = 2
 
 #: 볼린저 하단선(진입가 기준선) 색. EMA 팔레트·VWMA와 겹치지 않는 시안 계열로 둔다
 #: (WAN-147 — 이 선이 라이브로 움직이는 대상이라 한눈에 구분돼야 한다).
@@ -494,13 +539,14 @@ _TEMPLATE = """
     candleSeries.attachPrimitive(new OrderBlockBoxesPrimitive(payload.boxes));
   }
 
-  // 익절 목표선(EMA/VWMA) 오버레이 — 사이드바 토글로 켜진 선만 payload.lines에 담겨
-  // 온다(WAN-59 후속). 캔들 패인(0)에 얇은 LineSeries로 겹쳐 그린다.
+  // 표시선(EMA/VWMA) 오버레이 — 사이드바 토글로 켜진 선만 payload.lines에 담겨
+  // 온다(WAN-59 후속). 캔들 패인(0)에 LineSeries로 겹쳐 그린다. 굵기는 파이썬 쪽
+  // `_MA_LINE_WIDTH`가 정한다(WAN-67 — 두 곳에 숫자를 흩뿌리지 않는다).
   const lineSeriesList = [];
   (payload.lines || []).forEach(function (line) {
     const s = chart.addSeries(LightweightCharts.LineSeries, {
       color: line.color,
-      lineWidth: 1,
+      lineWidth: __MA_LINE_WIDTH__,
       priceLineVisible: false,
       lastValueVisible: false,
       crosshairMarkerVisible: false,
@@ -816,9 +862,29 @@ def _band_points(
     return points
 
 
-def _line_color(key: str, ema_index: int) -> str:
+def _ema_key_length(key: str) -> int | None:
+    """`"ema_60"` → `60`. EMA 키가 아니거나 길이를 못 읽으면 `None`."""
+    if not key.startswith("ema_"):
+        return None
+    suffix = key[len("ema_") :]
+    return int(suffix) if suffix.isdigit() else None
+
+
+def _line_color(key: str, ema_index: int, theme: ChartTheme) -> str:
+    """표시선 색: 길이별 고정 매핑(WAN-67), 스펙 밖 길이는 순번 팔레트로 폴백.
+
+    사용자 스펙은 EMA 20/60/120/240/365 = 빨강/주황/노랑/초록/파랑이다. 그 다섯 길이는
+    `theme.ema_length_colors`에서 **길이를 키로** 꺼내므로 `display_ema_lengths` 순서가
+    바뀌어도 같은 선은 같은 색이다(트레이딩뷰 화면과 눈으로 대조하기 위한 요구). 목록에
+    없는 길이를 사용자가 추가해도 렌더가 깨지지 않도록 옛 순번 팔레트로 떨어뜨린다.
+    """
     if key.startswith("vwma_"):
-        return _VWMA_LINE_COLOR
+        return theme.vwma_line
+    length = _ema_key_length(key)
+    if length is not None:
+        fixed = theme.ema_length_colors.get(length)
+        if fixed is not None:
+            return fixed
     return _EMA_LINE_PALETTE[ema_index % len(_EMA_LINE_PALETTE)]
 
 
@@ -891,7 +957,7 @@ def build_chart_html(
     lines_payload: list[dict[str, object]] = []
     ema_index = 0
     for key, series in tp_lines.items():
-        color = _line_color(key, ema_index)
+        color = _line_color(key, ema_index, chart_theme)
         if not key.startswith("vwma_"):
             ema_index += 1
         if key not in allowed_lines:
@@ -971,4 +1037,5 @@ def build_chart_html(
     html = html.replace("__RSI_MIDLINE__", str(_RSI_MIDLINE))
     html = html.replace("__RSI_OVERSOLD__", str(_RSI_OVERSOLD))
     html = html.replace("__RSI_PANE_HEIGHT_RATIO__", str(_RSI_PANE_HEIGHT_RATIO))
+    html = html.replace("__MA_LINE_WIDTH__", str(_MA_LINE_WIDTH))
     return html
