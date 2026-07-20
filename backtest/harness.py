@@ -48,7 +48,7 @@ from backtest.zone_limit_backtest import (
 from data.funding import FundingRateStore
 from data.models import FundingRate
 from data.storage import OhlcvStore
-from strategy.models import ConfluenceParams, OrderBlockResult, RsiGateMode
+from strategy.models import BandBar, ConfluenceParams, OrderBlockResult, RsiGateMode
 from strategy.order_blocks import OrderBlockDetector
 
 # --------------------------------------------------------------------------- #
@@ -185,6 +185,38 @@ RETAP_MODES: tuple[str, ...] = ("every_tap", "once")
 #: ⚠️ 반대로 **"지금 채택된 것"을 재는 리포트는 고정하지 않는다**(wan88·wan95) — 기본값이
 #: 움직이면 그 수치는 낡은 것이 되어야 맞다.
 LEGACY_RSI_GATE_MODE: RsiGateMode = "first_tap_free"
+
+#: WAN-70~WAN-131 채택 엔진의 이격 밴드 표본 — 탭 봉 **최종 종가**(`band_bar="tap"`).
+#:
+#: **WAN-132가 기본값을 `"intrabar_live"`(봉내 라이브)로 옮겼다.** 그 이전 수치를 결론
+#: 문장에 박아 둔 리포트는 이 값을 **명시 고정**해 당시 엔진의 기록으로 보존한다 —
+#: `band_bar`는 `LEGACY_RSI_GATE_MODE`·`zone_limit_offset_bps`와 달리 **아무 리포트도
+#: 고정해 두지 않았으므로**(WAN-120 §6-2 경고), 고정하지 않으면 기본값을 따라 조용히
+#: 새 밴드로 다시 돌아 본문과 어긋난다. 고정 대상 목록은
+#: [`docs/decisions/wan132.md`](../docs/decisions/wan132.md) §파급이다.
+#:
+#: ⚠️ 반대로 **"지금 채택된 것"을 재는 리포트는 고정하지 않는다**(wan95) — 기본값이
+#: 움직이면 그 수치는 낡은 것이 되어야 맞다.
+#: ⚠️ A안(`entry_mode="close"`)만 도는 리포트에는 **아무 효과가 없다** — 봉 단위에서
+#: `intrabar_live`는 `tap`과 정확히 같은 값이라(`ConfluenceStrategy.deviation_band_at`)
+#: 고정할 것도 움직일 것도 없다.
+LEGACY_BAND_BAR: BandBar = "tap"
+
+
+def pin_band_bar(params: ConfluenceParams, band_bar: BandBar = LEGACY_BAND_BAR) -> ConfluenceParams:
+    """`params`의 이격 밴드 표본 시점만 갈아끼운다(다른 필드는 손대지 않는다).
+
+    `deviation_filter`가 꺼져 있으면(`None`) 밴드 자체가 없으므로 그대로 돌려준다.
+    리포트가 `ConfluenceParams(...)` 한 줄로 조립될 때 중첩 모델 한 필드를 고정하려면
+    `model_copy` 두 번이 필요한데, 그 보일러플레이트를 빠뜨리는 것이 정확히 WAN-120이
+    경고한 조용한 실패라 여기 한 곳에 모은다.
+    """
+    deviation = params.deviation_filter
+    if deviation is None:
+        return params
+    return params.model_copy(
+        update={"deviation_filter": deviation.model_copy(update={"band_bar": band_bar})}
+    )
 
 
 def build_params(

@@ -13,6 +13,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from backtest.harness import pin_band_bar
 from backtest.sweep import default_backtest_config, timeframe_to_ms
 from backtest.synthetic import make_synthetic_ohlcv
 from backtest.wan70_random_control_b import (
@@ -136,9 +137,16 @@ def test_segment_control_matches_real_direction_counts_in_pool_sampling() -> Non
 
 
 def test_no_trades_yields_none_p_value() -> None:
-    """비현실적으로 엄격한 min_rr로 거래가 0건이면 p-value는 None(판정 불가)."""
+    """비현실적으로 엄격한 min_rr로 거래가 0건이면 p-value는 None(판정 불가).
+
+    ⚠️ `min_rr`는 봉내 라이브 밴드(WAN-132 채택 기본값)와 함께 쓸 수 없으므로 — 진입가가
+    봉내에 정해져 탭 봉 시점에 손익비를 판정할 수 없다 — 옛 밴드(`tap`)를 명시 고정한다.
+    이 리포트의 게이트 프리셋(`GATE_PRESETS`)이 고정한 것과 같은 이유다.
+    """
     htf, one_min = _synthetic_pair()
-    params = ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime", min_rr=1000.0)
+    params = pin_band_bar(
+        ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime", min_rr=1000.0)
+    )
     result = run_random_control_b_segment(
         htf,
         one_min,

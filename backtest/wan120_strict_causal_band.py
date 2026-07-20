@@ -70,6 +70,7 @@ import pandas as pd
 
 from backtest.harness import (
     IS_FRACTION,
+    LEGACY_BAND_BAR,
     SEGMENT_IS,
     SEGMENT_OOS,
     FillPreset,
@@ -114,7 +115,11 @@ DEFAULT_END = "2026-07-15"
 SEGMENT_ORDER: tuple[str, ...] = (SEGMENT_IS, SEGMENT_OOS)
 
 #: 채택 기본값의 볼린저(SMA20 ± 2σ). `band_bar`만 갈아끼워 나머지 단을 만든다.
-_BOLLINGER = DeviationFilterParams(anchor="sma", sma_length=20, width_kind="stdev", width_value=2.0)
+#: ⚠️ `band_bar`를 **명시**한다 — WAN-132가 필드 기본값을 `intrabar_live`로 옮겼으므로
+#: 생략하면 이 사다리의 `L2`(= 당시 채택 기본값) 단이 조용히 다른 밴드로 돈다.
+_BOLLINGER = DeviationFilterParams(
+    anchor="sma", sma_length=20, width_kind="stdev", width_value=2.0, band_bar=LEGACY_BAND_BAR
+)
 
 
 # --------------------------------------------------------------------------- #

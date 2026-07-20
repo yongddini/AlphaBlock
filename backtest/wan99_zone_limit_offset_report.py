@@ -71,7 +71,7 @@ from pydantic import BaseModel, ConfigDict
 
 # 평균 R 산식은 공용 골격(WAN-101)으로 옮겼다. 이 모듈의 이름으로도 계속 쓸 수 있게
 # 명시적으로 재수출한다 — 리포트 재현 커맨드와 기존 참조가 그대로 살아 있어야 한다.
-from backtest.harness import LEGACY_RSI_GATE_MODE
+from backtest.harness import LEGACY_RSI_GATE_MODE, pin_band_bar
 from backtest.harness import mean_r as mean_r
 from backtest.models import BacktestConfig
 from backtest.sweep import default_backtest_config
@@ -102,7 +102,9 @@ DEFAULT_OFFSETS_BPS: tuple[float, ...] = (0.0, 2.0, 5.0, 10.0, 20.0)
 #: ⚠️ RSI 게이트는 **명시 고정**한다(WAN-123이 기본값을 `unconditional`로 옮겼다). 이 격자의
 #: 발표 수치는 게이트가 켜진 거래 집합에서 나왔고, 오프셋 0 행이 WAN-95/96 결과와 비트
 #: 단위로 맞물리는 것이 이 리포트의 검산이다 — 기본값을 따라가게 두면 그 검산이 깨진다.
-BASE_PARAMS = ConfluenceParams(rsi_gate_mode=LEGACY_RSI_GATE_MODE)
+#: ⚠️ 밴드 표본(`band_bar`)도 같은 이유로 고정한다(WAN-132 기본값 전환) — 그 검산은
+#: 밴드 정의까지 같아야 성립한다.
+BASE_PARAMS = pin_band_bar(ConfluenceParams(rsi_gate_mode=LEGACY_RSI_GATE_MODE))
 
 #: IS 비중. 앞 2/3에서 오프셋을 고르고 뒤 1/3(OOS)로 검증한다.
 IS_FRACTION = 2.0 / 3.0

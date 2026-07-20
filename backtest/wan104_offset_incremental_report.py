@@ -91,6 +91,7 @@ from backtest.harness import (
     detect_order_blocks,
     load_market_data,
     normalize_symbol,
+    pin_band_bar,
     segments_for,
     slice_market,
 )
@@ -170,10 +171,14 @@ def run_offset(
     리포트의 증분 분해(「2bp가 사는 셋업은 13건인데 세금은 917건 전부에 매겨진다」)는
     게이트가 켜진 셋업 풀에서 센 값이라, 기본값을 따라가면 그 건수가 재현되지 않는다.
     """
-    params = build_params(
-        offset_bps=offset_bps,
-        fill=BASELINE_FILL,
-        base=ConfluenceParams(rsi_gate_mode=LEGACY_RSI_GATE_MODE),
+    # ⚠️ 밴드 표본(`band_bar`)도 같은 이유로 고정한다(WAN-132 기본값 전환) — 봉내 라이브
+    # 밴드에서는 진입가가 서브스텝마다 바뀌어 "오프셋만 다른 두 팔"이라는 축이 깨진다.
+    params = pin_band_bar(
+        build_params(
+            offset_bps=offset_bps,
+            fill=BASELINE_FILL,
+            base=ConfluenceParams(rsi_gate_mode=LEGACY_RSI_GATE_MODE),
+        )
     )
     setup_sink: list[SetupDiagnostic] = []
     candidates, _stats = build_zone_limit_candidates(

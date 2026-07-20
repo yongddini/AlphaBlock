@@ -87,13 +87,14 @@ from backtest.harness import (
     iter_seeds,
     load_market_data,
     normalize_symbol,
+    pin_band_bar,
     render,
     run_once,
     segments_for,
     slice_market,
     write_output,
 )
-from strategy.models import ConfluenceParams, RsiGateMode
+from strategy.models import BandBar, ConfluenceParams, RsiGateMode
 
 # --------------------------------------------------------------------------- #
 # 인자 파싱 헬퍼
@@ -203,6 +204,13 @@ class Grid:
     거래 집합에서 낸 수치를 결론에 박아 둔 리포트**(wan111 등)가 자기 엔진을 고정하는
     용도다(`harness.LEGACY_RSI_GATE_MODE`). 없으면 그런 리포트는 `run_grid`를 통과하는
     순간 새 게이트로 조용히 다시 돈다.
+    """
+    band_bar: BandBar | None = None
+    """이격 밴드 표본 **고정**. None이면 채택 기본값(WAN-132: `intrabar_live`).
+
+    `rsi_gate_mode`와 같은 자리의 핀이다(축이 아니다). WAN-132가 밴드 정본을 옮긴 뒤,
+    **탭 봉 종가 밴드에서 낸 수치를 결론에 박아 둔 리포트**(wan111 등)가 자기 엔진을
+    고정하는 용도다(`harness.LEGACY_BAND_BAR`).
     """
 
     def __post_init__(self) -> None:
@@ -331,6 +339,23 @@ class _CellOutcome:
     logs: tuple[str, ...]
 
 
+def _pinned_base(grid: Grid) -> ConfluenceParams | None:
+    """격자가 **고정**한 전략 필드만 얹은 베이스 파라미터. 고정이 없으면 `None`.
+
+    `None`을 그대로 돌려주는 것이 중요하다 — `build_params(base=None)`가 "채택 기본값에
+    맡긴다"는 뜻이고, 여기서 `ConfluenceParams()`를 지어내면 나중에 기본값이 움직여도
+    이 경로만 옛 값을 물고 도는 조용한 갈라짐이 생긴다(`build_params` 독스트링).
+    """
+    if grid.rsi_gate_mode is None and grid.band_bar is None:
+        return None
+    base = ConfluenceParams()
+    if grid.rsi_gate_mode is not None:
+        base = base.model_copy(update={"rsi_gate_mode": grid.rsi_gate_mode})
+    if grid.band_bar is not None:
+        base = pin_band_bar(base, grid.band_bar)
+    return base
+
+
 def _run_cell(task: _CellTask) -> _CellOutcome:
     """(심볼, TF) 하나를 돌아 그 셀의 모든 조합·구간 행을 낸다.
 
@@ -388,11 +413,7 @@ def _run_cell(task: _CellTask) -> _CellOutcome:
                 seed=combo.seed,
                 retap_mode=combo.retap_mode,
                 short_enabled=grid.short_enabled,
-                base=(
-                    None
-                    if grid.rsi_gate_mode is None
-                    else ConfluenceParams(rsi_gate_mode=grid.rsi_gate_mode)
-                ),
+                base=_pinned_base(grid),
             )
             outcome = run_once(
                 window,

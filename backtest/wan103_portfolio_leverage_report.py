@@ -44,6 +44,7 @@ from backtest.harness import (
     Segment,
     detect_order_blocks,
     load_market_data,
+    pin_band_bar,
     segments_for,
     slice_market,
 )
@@ -71,7 +72,10 @@ DEFAULT_SYMBOLS: tuple[str, ...] = ("BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:
 #: 2bp · 게이트 없음(`unconditional`)이지만 이 리포트의 발표 수치(단일 vs 다중 비교)는
 #: 0bp · 게이트 on에서 나왔다. 기본값을 따라가게 두면 비교의 두 항이 함께 움직여 문서에
 #: 적힌 %p가 재현되지 않는다.
-PARAMS = ConfluenceParams(zone_limit_offset_bps=0.0, rsi_gate_mode=LEGACY_RSI_GATE_MODE)
+#: ⚠️ 밴드 표본(`band_bar`)도 같은 이유로 고정한다(WAN-132 기본값 전환).
+PARAMS = pin_band_bar(
+    ConfluenceParams(zone_limit_offset_bps=0.0, rsi_gate_mode=LEGACY_RSI_GATE_MODE)
+)
 
 #: 고정 레버리지 스윕 축(이슈 완료기준). N배(= peak concurrency)는 여기 없고, 실행 중
 #: 계측한 값을 대입해 **별도 시나리오**로 돈다.

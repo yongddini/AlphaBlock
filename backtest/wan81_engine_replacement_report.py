@@ -65,6 +65,10 @@ OLD_ENGINE_PARAMS = ConfluenceParams(
 #: `short_enabled`는 WAN-87(WAN-86 결정 1)이 `False`로 되돌렸고, `rsi_gate_mode`는
 #: WAN-123(WAN-116 결정 B)이 `unconditional`(게이트 제거)로 옮겼다. 이 리포트가 검증하는
 #: "WAN-81 신 엔진"은 **숏 활성화 + 재탭 RSI 게이트**가 그 정의의 일부이므로 둘 다 고정한다.
+#: ⚠️ WAN-132(밴드 정본 `tap` → `intrabar_live`)는 **이 리포트를 움직이지 않아 고정하지
+#: 않는다** — 이 모듈은 A안(`generate_confluence_signals` + `run_backtest`, 봉 단위)으로
+#: 도는데 봉 단위에서는 `intrabar_live`가 `tap`과 정확히 같은 값이다
+#: (`ConfluenceStrategy.deviation_band_at`). 고정하면 없는 방어를 흉내 내는 셈이라 뺐다.
 NEW_ENGINE_PARAMS = ConfluenceParams(short_enabled=True, rsi_gate_mode=LEGACY_RSI_GATE_MODE)
 
 ENGINE_PRESETS: dict[str, ConfluenceParams] = {

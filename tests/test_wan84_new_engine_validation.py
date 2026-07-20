@@ -14,6 +14,7 @@ from typing import Literal
 import pandas as pd
 import pytest
 
+from backtest.harness import LEGACY_BAND_BAR
 from backtest.sweep import timeframe_to_ms
 from backtest.synthetic import make_synthetic_ohlcv
 from backtest.wan70_random_control_b import RandomControlBResult
@@ -51,12 +52,13 @@ def _synthetic_pair(bars: int = 1200, span: int = 500) -> tuple[pd.DataFrame, pd
 
 def test_new_engine_params_match_confluence_params_defaults_except_wiring() -> None:
     """`NEW_ENGINE_PARAMS`는 B안 배선(entry_mode/rsi_mode)과 **기본값이 이 정의에서
-    멀어진 두 필드**(`short_enabled`·`rsi_gate_mode`)만 명시 고정하고, 나머지는
+    멀어진 세 필드**(`short_enabled`·`rsi_gate_mode`·`band_bar`)만 명시 고정하고, 나머지는
     `ConfluenceParams()`를 그대로 물려받아야 한다(모듈 docstring 핵심 주장).
 
     고정 이유는 같다 — 기본값이 움직여도 이 리포트가 검증하는 "숏 활성화 신 엔진" 정의를
     보존한다: `short_enabled`는 WAN-87(WAN-86 결정 1)이 `False`로 되돌렸고,
-    `rsi_gate_mode`는 WAN-123(WAN-116 결정 B)이 `unconditional`로 옮겼다."""
+    `rsi_gate_mode`는 WAN-123(WAN-116 결정 B)이 `unconditional`로, `band_bar`는
+    WAN-132(사용자 결정)가 `intrabar_live`로 옮겼다."""
     defaults = ConfluenceParams()
     assert NEW_ENGINE_PARAMS.entry_mode == "zone_limit"
     assert NEW_ENGINE_PARAMS.rsi_mode == "realtime"
@@ -66,7 +68,17 @@ def test_new_engine_params_match_confluence_params_defaults_except_wiring() -> N
     assert NEW_ENGINE_PARAMS.take_profit_r == defaults.take_profit_r == 1.5
     assert defaults.short_enabled is False
     assert NEW_ENGINE_PARAMS.short_enabled is True
-    assert NEW_ENGINE_PARAMS.deviation_filter == defaults.deviation_filter is not None
+    # 밴드 표본만 빼면 볼린저 정의(SMA20 ± 2σ)는 기본값 그대로다(WAN-132).
+    assert defaults.deviation_filter is not None
+    assert NEW_ENGINE_PARAMS.deviation_filter == defaults.deviation_filter.model_copy(
+        update={"band_bar": LEGACY_BAND_BAR}
+    )
+    assert NEW_ENGINE_PARAMS.deviation_filter is not None
+    assert (
+        NEW_ENGINE_PARAMS.deviation_filter.band_bar
+        == LEGACY_BAND_BAR
+        != defaults.deviation_filter.band_bar
+    )
 
 
 def test_gates_has_single_new_engine_gate() -> None:

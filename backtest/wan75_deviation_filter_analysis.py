@@ -37,6 +37,7 @@ from unittest.mock import patch
 import pandas as pd
 from pydantic import BaseModel, ConfigDict
 
+from backtest.harness import pin_band_bar
 from backtest.models import BacktestConfig, BacktestMetrics, PositionSide
 from backtest.sweep import default_backtest_config, evaluate
 from backtest.wan68_short_gate_analysis import _split_bars
@@ -120,8 +121,13 @@ def _params(variant: str) -> ConfluenceParams:
     base = (
         _placebo_label_to_base(variant) if variant.endswith("_placebo_shuffled_anchor") else variant
     )
-    return ConfluenceParams(
-        entry_mode="zone_limit", rsi_mode="realtime", deviation_filter=REAL_VARIANTS[base]
+    # ⚠️ `band_bar`는 당시 값(`tap`)으로 명시 고정한다(WAN-132 기본값 전환). 숫자 보존이자
+    # 실행 가능성 문제다 — 봉내 라이브 밴드는 `width_kind="atr"`를 지원하지 않으므로
+    # (`strategy.realtime_band`) 고정하지 않으면 ATR 변형이 `ValueError`로 죽는다.
+    return pin_band_bar(
+        ConfluenceParams(
+            entry_mode="zone_limit", rsi_mode="realtime", deviation_filter=REAL_VARIANTS[base]
+        )
     )
 
 

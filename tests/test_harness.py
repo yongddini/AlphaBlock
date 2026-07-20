@@ -17,6 +17,7 @@ from backtest.harness import (
     BASELINE_FILL,
     FILL_PRESETS,
     IS_FRACTION,
+    LEGACY_BAND_BAR,
     LEGACY_RSI_GATE_MODE,
     SEGMENT_FULL,
     SEGMENT_IS,
@@ -33,6 +34,7 @@ from backtest.harness import (
     iter_seeds,
     mean_r,
     normalize_symbol,
+    pin_band_bar,
     render,
     render_csv,
     render_json,
@@ -142,13 +144,14 @@ def test_explicit_zero_offset_matches_wan99_zero_offset_baseline() -> None:
     깨졌고, 대신 **명시적 0bp가 옛 셀을 계속 재현**한다 — 0bp로 고정한 과거 리포트
     (WAN-88/96/103/110)가 재현되는 근거가 이 등식이다.
 
-    ⚠️ WAN-123부터 되돌릴 것이 **둘**이다: 오프셋(0bp) + RSI 게이트(`first_tap_free`).
-    옛 셀을 재현하려면 그 리포트가 고정한 엔진을 통째로 요청해야 한다.
+    ⚠️ WAN-123/132부터 되돌릴 것이 **셋**이다: 오프셋(0bp) + RSI 게이트(`first_tap_free`)
+    + 밴드 표본(`tap`). 옛 셀을 재현하려면 그 리포트가 고정한 엔진을 통째로 요청해야 한다.
     """
     from backtest.wan99_zone_limit_offset_report import FILL_ASSUMPTIONS
 
     assert build_params(
-        offset_bps=0.0, base=ConfluenceParams(rsi_gate_mode=LEGACY_RSI_GATE_MODE)
+        offset_bps=0.0,
+        base=pin_band_bar(ConfluenceParams(rsi_gate_mode=LEGACY_RSI_GATE_MODE)),
     ) == FILL_ASSUMPTIONS[0].params(offset_bps=0.0, seed=0)
 
 
@@ -160,6 +163,35 @@ def test_default_gate_is_off_and_legacy_pin_differs() -> None:
     """
     assert build_params().rsi_gate_mode == "unconditional"
     assert LEGACY_RSI_GATE_MODE == "first_tap_free" != build_params().rsi_gate_mode
+
+
+def test_default_band_is_intrabar_live_and_legacy_pin_differs() -> None:
+    """채택 기본값 = 봉내 라이브 밴드(WAN-132), 그리고 `LEGACY_BAND_BAR`는 그것과 **다르다**.
+
+    게이트 핀과 같은 이유의 단언이다 — 핀이 기본값과 같아지면 wan84/88/96/99/104/110/111/
+    114/117/126/133/134/137의 "명시 고정"이 한꺼번에 no-op이 되는데, 그 사실이 아무 데서도
+    드러나지 않는다.
+    """
+    band = build_params().deviation_filter
+    assert band is not None and band.band_bar == "intrabar_live"
+    # 핀과 기본값을 `str`로 비교한다 — 리터럴끼리 비교하면 타입 검사기가 "겹치지 않는
+    # 비교"라며 거부하는데, 여기서 재려는 것은 **런타임 값이 갈라져 있다**는 사실이다.
+    assert str(LEGACY_BAND_BAR) == "tap"
+    assert str(LEGACY_BAND_BAR) != str(band.band_bar)
+
+
+def test_legacy_band_pin_flows_through_base() -> None:
+    """`base=`로 준 밴드 핀이 조립을 통과해 살아남는다 — 옛 리포트 고정의 배선 검사."""
+    pinned = build_params(base=pin_band_bar(ConfluenceParams()))
+    assert pinned.deviation_filter is not None
+    assert pinned.deviation_filter.band_bar == LEGACY_BAND_BAR
+    with_axes = build_params(
+        offset_bps=0.0, take_profit_r=2.0, base=pin_band_bar(ConfluenceParams())
+    )
+    assert with_axes.deviation_filter is not None
+    assert with_axes.deviation_filter.band_bar == LEGACY_BAND_BAR
+    assert with_axes.zone_limit_offset_bps == 0.0
+    assert with_axes.take_profit_r == 2.0
 
 
 def test_legacy_gate_pin_flows_through_base() -> None:
@@ -214,7 +246,7 @@ def test_fill_presets_match_wan96_conservatism_levels() -> None:
                 fill=preset,
                 seed=seed,
                 offset_bps=0.0,
-                base=ConfluenceParams(rsi_gate_mode=LEGACY_RSI_GATE_MODE),
+                base=pin_band_bar(ConfluenceParams(rsi_gate_mode=LEGACY_RSI_GATE_MODE)),
             ) == level.params(seed)
 
 
@@ -226,7 +258,7 @@ def test_fill_presets_match_wan99_fill_assumptions() -> None:
     """
     from backtest.wan99_zone_limit_offset_report import FILL_ASSUMPTIONS
 
-    legacy = ConfluenceParams(rsi_gate_mode=LEGACY_RSI_GATE_MODE)
+    legacy = pin_band_bar(ConfluenceParams(rsi_gate_mode=LEGACY_RSI_GATE_MODE))
     for assumption in FILL_ASSUMPTIONS:
         preset = fill_preset(assumption.name)
         assert preset.penetration_bps == assumption.penetration_bps

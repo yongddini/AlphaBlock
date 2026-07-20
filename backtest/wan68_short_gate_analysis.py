@@ -39,6 +39,7 @@ import pandas as pd
 from pydantic import BaseModel, ConfigDict
 
 from backtest.engine import run_backtest
+from backtest.harness import pin_band_bar
 from backtest.models import BacktestConfig, BacktestMetrics
 from backtest.sweep import (
     CLOSE_ENTRY_DEFAULTS,
@@ -316,7 +317,8 @@ def run_variant_comparison(
     is_end = _split_bars(n)
     warmup_bars = min(is_end, max(60, n // 6))
     cfg = backtest_config or default_backtest_config(timeframe)
-    base_params = ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime")
+    # ⚠️ `band_bar`는 당시 값(`tap`)으로 명시 고정한다(WAN-132 기본값 전환).
+    base_params = pin_band_bar(ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime"))
 
     def eval_is(
         params: ConfluenceParams, signal_filter: RegimeLookup | None = None

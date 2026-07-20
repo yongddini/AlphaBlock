@@ -12,9 +12,11 @@ import pytest
 
 from backtest.harness import (
     FILL_PRESETS_BY_NAME,
+    LEGACY_BAND_BAR,
     LEGACY_RSI_GATE_MODE,
     build_params,
     fill_preset,
+    pin_band_bar,
 )
 from backtest.wan114_entry_rule_ablation import (
     ADOPTED_RUNG,
@@ -103,11 +105,15 @@ def test_adopted_rung_is_exactly_the_adoption_default() -> None:
     assert adopted == build_params(
         entry_mode="zone_limit",
         fill=_BASELINE,
-        base=ConfluenceParams(rsi_gate_mode=LEGACY_RSI_GATE_MODE),
+        base=pin_band_bar(ConfluenceParams(rsi_gate_mode=LEGACY_RSI_GATE_MODE)),
     )
-    # 고정한 게이트가 현재 기본값과 **다르다**는 것 자체를 못 박는다 — 같아지면 위
+    # 고정한 게이트·밴드가 현재 기본값과 **다르다**는 것 자체를 못 박는다 — 같아지면 위
     # docstring이 거짓이 되고, 이 사다리가 조용히 새 엔진으로 옮겨 간 것이다.
     assert adopted.rsi_gate_mode == LEGACY_RSI_GATE_MODE != ConfluenceParams().rsi_gate_mode
+    # WAN-132(밴드 정본 전환)가 같은 이유로 고정한 두 번째 필드.
+    default_band = ConfluenceParams().deviation_filter
+    assert adopted.deviation_filter is not None and default_band is not None
+    assert adopted.deviation_filter.band_bar == LEGACY_BAND_BAR != default_band.band_bar
 
 
 def test_ladder_changes_one_component_per_step() -> None:

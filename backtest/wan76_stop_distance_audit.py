@@ -36,6 +36,7 @@ from backtest import wan68_short_gate_analysis as wan68
 from backtest import wan70_random_control_b as wan70
 from backtest import wan73_validation as wan73
 from backtest import wan74_discrepancy_audit as wan74
+from backtest.harness import pin_band_bar
 from backtest.models import BacktestConfig, PositionSide
 from backtest.sweep import default_backtest_config
 from backtest.zone_limit_backtest import (
@@ -55,7 +56,10 @@ DEFAULT_YEARS: float = 3.0
 _YEAR_MS = int(365.25 * 24 * 60 * 60 * 1000)
 
 #: 채택 전략(WAN-68/70/73/74와 동일 정의): B안(존-지정가+실시간 RSI), 그 외 전부 기본값.
-CURRENT_DEFAULT_PARAMS = ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime")
+#: ⚠️ `band_bar`는 당시 값(`tap`)으로 **명시 고정**한다(WAN-132 기본값 전환).
+CURRENT_DEFAULT_PARAMS = pin_band_bar(
+    ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime")
+)
 
 #: 민감도 스윕 대상 하한(이슈 본문 지정).
 SENSITIVITY_FLOORS: tuple[float, ...] = (0.0, 0.003, 0.005, 0.01)

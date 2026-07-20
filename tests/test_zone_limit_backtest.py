@@ -12,6 +12,7 @@ import math
 import pandas as pd
 import pytest
 
+from backtest.harness import LEGACY_BAND_BAR, pin_band_bar
 from backtest.models import BacktestConfig, ExitReason, PositionSide, Trade
 from backtest.sweep import timeframe_to_ms
 from backtest.synthetic import make_synthetic_ohlcv
@@ -255,8 +256,11 @@ def test_short_enabled_false_yields_only_long_trades() -> None:
 
 
 def test_min_rr_gate_does_not_increase_trade_count() -> None:
+    # ⚠️ `min_rr`(WAN-68 옵트인 게이트)는 봉내 라이브 밴드와 함께 쓸 수 없다 — 진입가가
+    # 봉내에 정해지므로 탭 봉 시점에 손익비를 판정할 수 없다. WAN-132로 그 밴드가 기본값이
+    # 됐으므로, 이 게이트를 재는 테스트는 옛 밴드(`tap`)를 명시 고정한다.
     htf, one_min = _synthetic_pair()
-    base = ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime")
+    base = pin_band_bar(ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime"))
     baseline = run_zone_limit_backtest(htf, one_min, "1h", confluence_params=base)
     gated = run_zone_limit_backtest(
         htf, one_min, "1h", confluence_params=base.model_copy(update={"min_rr": 50.0})
@@ -518,20 +522,62 @@ def test_band_bar_prev_closed_is_wired_into_zone_limit_path() -> None:
     assert tap_prices != prev_prices
 
 
-def test_band_bar_default_reproduces_adopted_engine_bit_for_bit() -> None:
-    """WAN-115: 기본값은 불변 — 명시적 `tap`과 기본 `ConfluenceParams()`가 동일 결과.
+def test_band_bar_default_runs_the_intrabar_live_band_not_tap() -> None:
+    """WAN-132: 채택 기본값이 **봉내 라이브 밴드**로 돈다 — 라벨이 아니라 동작으로 고정.
 
-    이 동치가 깨지면 WAN-95/111/114 리포트 셀이 조용히 움직인다(기본값 재-베이스라인은
-    명시적 이슈로만 한다 — CLAUDE.md).
+    라벨만 보는 테스트(`band_bar == "intrabar_live"`)는 WAN-123의 `"none"` vs
+    `"unconditional"` 부류의 조용한 실패를 못 잡는다: 필드는 새 값인데 실행 경로가 옛
+    밴드를 타면 "바꿨다고 믿으면서 `tap`을 도는" 상태가 된다. 그래서 **진입가가 명시적
+    `tap`과 다르고 명시적 `intrabar_live`와 같다**는 것으로 증명한다.
     """
     htf, one_min = _synthetic_pair()
     default = ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime", short_enabled=True)
     assert default.deviation_filter is not None
-    assert default.deviation_filter.band_bar == "tap"
+    assert default.deviation_filter.band_bar == "intrabar_live"
 
-    base = run_zone_limit_backtest(htf, one_min, "1h", confluence_params=default)
-    explicit = run_zone_limit_backtest(htf, one_min, "1h", confluence_params=_bollinger("tap"))
-    assert [t.entry_price for t in base.trades] == [t.entry_price for t in explicit.trades]
+    def setups(params: ConfluenceParams) -> list[SetupDiagnostic]:
+        sink: list[SetupDiagnostic] = []
+        run_zone_limit_backtest_verbose(
+            htf, one_min, "1h", confluence_params=params, setup_sink=sink
+        )
+        return sink
+
+    base = setups(default)
+    live = setups(_bollinger("intrabar_live"))
+    tap = setups(_bollinger("tap"))
+    assert base  # 전제: 판정할 셋업이 있다
+
+    # 봉내 모드는 주문 가격을 서브스텝마다 다시 내므로 탭 봉 시점의 상수가 **없다**
+    # (`limit_price is None`). 정적 모드(`tap`)는 반대로 항상 값이 있다 — 이 차이는
+    # 라벨이 아니라 실행 경로가 만든다.
+    assert all(s.limit_price is None for s in base)
+    assert [s.limit_price for s in base] == [s.limit_price for s in live]
+    assert any(s.limit_price is not None for s in tap)
+
+
+def test_legacy_band_bar_pin_restores_the_pre_wan132_engine() -> None:
+    """WAN-132: `harness.pin_band_bar`가 옛 밴드(`tap`)를 **동작으로** 되돌린다.
+
+    옛 수치를 결론에 박아 둔 리포트(wan84/88/96/99/104/110/111/114/117/126/133/134/137 …)가
+    전부 이 헬퍼 하나에 기대므로, 헬퍼가 조용히 아무것도 안 하면 그 리포트들이 한꺼번에
+    새 밴드로 돈다 — 그 실패를 여기서 막는다.
+    """
+    htf, one_min = _synthetic_pair()
+    pinned = pin_band_bar(
+        ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime", short_enabled=True)
+    )
+    assert pinned.deviation_filter is not None
+    assert pinned.deviation_filter.band_bar == LEGACY_BAND_BAR == "tap"
+
+    got = run_zone_limit_backtest(htf, one_min, "1h", confluence_params=pinned)
+    tap = run_zone_limit_backtest(htf, one_min, "1h", confluence_params=_bollinger("tap"))
+    assert [t.entry_price for t in got.trades] == [t.entry_price for t in tap.trades]
+
+
+def test_pin_band_bar_leaves_a_disabled_deviation_filter_alone() -> None:
+    """볼린저를 끈 파라미터(`deviation_filter=None`)에는 고정할 밴드가 없다 — 그대로 통과."""
+    off = ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime", deviation_filter=None)
+    assert pin_band_bar(off) is off
 
 
 def test_intrabar_live_limit_applies_band_then_offset_in_the_adopted_order() -> None:
@@ -751,10 +797,15 @@ def _offset_setups(**overrides: object) -> list[SetupDiagnostic]:
 
     체결 여부와 무관하게 모든 eligible 셋업의 `limit_price`가 남으므로, 오프셋이 어느
     가격 위에 얹혔는지를 체결 운에 기대지 않고 직접 볼 수 있다.
+
+    ⚠️ 밴드는 **정적 모드(`tap`)로 고정**한다 — WAN-132로 기본값이 봉내 라이브가 된 뒤로는
+    주문 가격이 서브스텝마다 바뀌어 `limit_price`가 `None`으로 기록되므로(상수가 아니다)
+    "어느 가격 위에 얹혔나"를 이 진단으로 볼 수 없다. 봉내 모드의 순서 검증은
+    `test_intrabar_live_limit_applies_band_then_offset_in_the_adopted_order`가 따로 한다.
     """
     htf, one_min = _synthetic_pair()
-    params = ConfluenceParams(
-        entry_mode="zone_limit", rsi_mode="realtime", short_enabled=True
+    params = pin_band_bar(
+        ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime", short_enabled=True)
     ).model_copy(update=overrides)
     sink: list[SetupDiagnostic] = []
     run_zone_limit_backtest_verbose(htf, one_min, "1h", confluence_params=params, setup_sink=sink)

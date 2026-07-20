@@ -339,6 +339,10 @@ class OrderBlockResult(BaseModel):
 
 RsiGateMode = Literal["extreme", "neutral", "none", "first_tap_free", "unconditional"]
 
+#: 이격 밴드의 표본 시점(`DeviationFilterParams.band_bar`). 채택 기본값은
+#: `"intrabar_live"`(WAN-132) — 뜻과 함께 그 필드의 독스트링 참고.
+BandBar = Literal["tap", "prev_closed", "intrabar_live", "intrabar_causal"]
+
 
 def rsi_gate_passes(
     rsi: float,
@@ -409,18 +413,18 @@ class DeviationFilterParams(BaseModel):
     """`width_kind`별 배수/비율. `pct`는 소수(0.02=2%), `stdev`·`atr`는 배수."""
     atr_length: int = Field(default=14, ge=1)
     """`width_kind="atr"`일 때의 ATR 길이."""
-    band_bar: Literal["tap", "prev_closed", "intrabar_live", "intrabar_causal"] = "tap"
-    """밴드의 **20번째 표본에 무엇을 넣나** (WAN-115 · WAN-119 · WAN-120).
+    band_bar: BandBar = "intrabar_live"
+    """밴드의 **20번째 표본에 무엇을 넣나** (WAN-115 · WAN-119 · WAN-120 · **WAN-132**).
 
-    `tap`(기본, 현행 동작 보존): 탭 봉 **최종 종가**. **B안(지정가)에서는 룩어헤드다** —
+    `tap`(WAN-132 이전 기본값): 탭 봉 **최종 종가**. **B안(지정가)에서는 룩어헤드다** —
     그 봉의 종가를 알아야 나오는 SMA20/σ에 그 봉 **내부**에서 체결되기 때문이다
     (A안은 탭 봉 종가에 진입하므로 룩어헤드가 아니다).
     `prev_closed`(WAN-115 교정): **직전 확정봉** 종가. 탭 봉이 열리기 전에 확정돼 있으므로
     지정가를 미리 걸 수 있다 = 룩어헤드 없음. 대신 현재 봉을 통째로 버려 **보수적**이고,
     워밍업이 한 봉 늘어난다(`pos=0`은 판정 불가).
-    `intrabar_live`(WAN-119): **그 순간의 현재가**. 트레이딩뷰가 형성 중인 봉에 밴드를
-    그리는 방식이자 사용자가 실제로 보고 지정가를 거는 값이다 — 룩어헤드 없이 재현
-    가능하다. 밴드가 봉내에 계속 움직이므로 **지정가도 매 서브스텝 재산정**된다
+    `intrabar_live`(WAN-119 · **WAN-132 채택 기본값**): **그 순간의 현재가**. 트레이딩뷰가
+    형성 중인 봉에 밴드를 그리는 방식이자 사용자가 실제로 보고 지정가를 거는 값이다 —
+    룩어헤드 없이 재현 가능하다. 밴드가 봉내에 계속 움직이므로 **지정가도 매 서브스텝 재산정**된다
     (`backtest.substep`의 `LiveLimitProvider`). B안(지정가) 전용 성질이며, A안(탭 봉
     종가 진입)에서는 현재가 = 탭 봉 종가라 `tap`과 **정확히 같은 값**이다
     (`ConfluenceStrategy.deviation_band_at` 참고).
@@ -432,9 +436,16 @@ class DeviationFilterParams(BaseModel):
     B안 전용이며, A안은 이 값을 표현할 수 없어 **거부한다**
     (`ConfluenceStrategy.deviation_band_at`).
 
-    ⚠️ **기본값을 바꾸지 않는 이유**: 바꾸면 WAN-70/84/88/95/111/114 등 이 밴드 위에
-    선 모든 리포트의 엔진 정의가 흔들린다. 재-베이스라인은 명시적 이슈로만 한다
-    (CLAUDE.md). 이 필드는 그 재검을 **측정**하기 위한 옵트인이다."""
+    📌 **WAN-132(사용자 결정)가 기본값을 `tap` → `intrabar_live`로 옮겼다.** 최적화가
+    아니라 **정확성**이다 — `tap`은 그 봉이 어떻게 끝날지 알아야 나오는 가격이라 실거래에서
+    재현할 수 없고, `intrabar_live`는 사용자가 화면에서 보고 지정가를 거는 바로 그 값이다.
+    ⚠️ **「수익이 올라서 바꿨다」로 읽지 말 것**(15m OOS +0.50%p지만 1h OOS는 −1.62%p다) ·
+    ⚠️ **「엣지 없음」(WAN-84/88/111/114/124)은 그대로**다. 근거는
+    [`docs/decisions/wan132.md`](../docs/decisions/wan132.md).
+
+    ⚠️ 그 이전 수치를 결론 문장에 박아 둔 리포트는 `harness.LEGACY_BAND_BAR`(= `"tap"`)로
+    **명시 고정**해 당시 엔진의 기록으로 보존한다 — 고정하지 않으면 기본값을 따라 조용히
+    새 밴드로 다시 돌아 본문과 어긋난다(WAN-112·WAN-123과 같은 패턴)."""
 
 
 def deviation_entry_price(direction_sign: int, ob: OrderBlock, band: float) -> float | None:

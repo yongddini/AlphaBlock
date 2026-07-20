@@ -66,7 +66,7 @@ import pandas as pd
 from pydantic import BaseModel, ConfigDict
 
 from backtest import ab_walkforward
-from backtest.harness import LEGACY_RSI_GATE_MODE
+from backtest.harness import LEGACY_RSI_GATE_MODE, pin_band_bar
 from backtest.models import BacktestConfig, PositionSide
 from backtest.sweep import default_backtest_config
 from backtest.wan68_short_gate_analysis import _split_bars
@@ -107,11 +107,15 @@ _DEFAULT_SEED = 84
 #: `unconditional`(게이트 제거)로 옮겼다. 이 리포트가 검증하는 "숏 활성화 신 엔진"은
 #: **재탭 RSI 게이트**를 포함하는 정의이고, 그 위에서 낸 「엣지 없음」 판정이 문서의
 #: 결론이다 — 게이트를 빼면 거래 집합이 달라져 같은 검정이 아니다.
-NEW_ENGINE_PARAMS = ConfluenceParams(
-    entry_mode="zone_limit",
-    rsi_mode="realtime",
-    short_enabled=True,
-    rsi_gate_mode=LEGACY_RSI_GATE_MODE,
+#: WAN-132(밴드 정본 `tap` → `intrabar_live`)가 **세 번째 고정 필드**를 더한다 — 이 표의
+#: 「엣지 없음」 판정은 탭 봉 종가 밴드 위에서 나왔다.
+NEW_ENGINE_PARAMS = pin_band_bar(
+    ConfluenceParams(
+        entry_mode="zone_limit",
+        rsi_mode="realtime",
+        short_enabled=True,
+        rsi_gate_mode=LEGACY_RSI_GATE_MODE,
+    )
 )
 
 #: 매칭 널 게이트. 신 엔진 하나뿐이다(모듈 docstring "신 엔진 게이트 정의" 참고).

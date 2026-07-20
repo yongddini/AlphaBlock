@@ -546,7 +546,8 @@ def run_ablation_cell(market: harness.MarketData) -> list[AblationRow]:
     """
     if market.empty or market.df_1m.empty:
         return []
-    params = harness.build_params()  # 채택 기본값. 두 팔 공통(진입 규칙은 combine_obs와 무관).
+    # 채택 기본값 + 밴드만 WAN-132 이전 값(`tap`) 고정. 두 팔 공통(진입 규칙은 combine_obs와 무관).
+    params = harness.pin_band_bar(harness.build_params())
     cfg = harness.build_config(market.timeframe)
     rows: list[AblationRow] = []
     for segment in harness.segments_for(oos=True):
@@ -734,7 +735,7 @@ def run_experiment(
     skip_ablation: bool = False,
 ) -> ExperimentResult:
     """6심볼 × {15m,1h}: 라벨링 → 병합 대조 → 폭 통제 → 거래량 → ablation."""
-    params = ConfluenceParams()  # 채택 기본값.
+    params = harness.pin_band_bar(ConfluenceParams())  # 채택 기본값 + 밴드 고정(WAN-132).
     start_ms, end_ms = parse_date_ms(start), parse_date_ms(end)
     labeled: list[MergeTrade] = []
     ablation: list[AblationRow] = []
