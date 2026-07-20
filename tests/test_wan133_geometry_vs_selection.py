@@ -23,10 +23,14 @@ from backtest.synthetic import make_synthetic_ohlcv
 from backtest.wan133_geometry_vs_selection import (
     ARM_DEFAULT,
     ARM_FILTER,
+    STOP_BUCKETS,
+    STOP_GUARD_FRACTION,
     PnlRow,
+    _bucket_of,
     atr_by_tap_time,
     degeneracy_note,
     make_atr_stop_override,
+    pnl_symbol_mean,
 )
 from backtest.zone_limit_backtest import (
     StopLossContext,
@@ -237,3 +241,54 @@ def test_degeneracy_note_passes_real_split() -> None:
 def test_degeneracy_note_handles_empty() -> None:
     """후보가 없으면 지어내지 않고 판정 불가로 둔다."""
     assert "판정 불가" in degeneracy_note([], timeframe="15m", segment="oos")
+
+
+# --------------------------------------------------------------------------- #
+# 20건 게이트 · 사이징 바닥 진단 (WAN-79 충돌)
+# --------------------------------------------------------------------------- #
+
+
+def _pnl_row_n(sym: str, arm: str, trades: int, ret: float) -> PnlRow:
+    return PnlRow(
+        symbol=sym,
+        timeframe="15m",
+        segment="oos",
+        arm=arm,
+        num_candidates=trades * 3,
+        num_trades=trades,
+        total_return=ret,
+        max_drawdown=0.05,
+        win_rate=0.5,
+    )
+
+
+def test_pnl_symbol_mean_excludes_thin_cells() -> None:
+    """거래 20건 미만 셀은 심볼평균에서 빠진다 — 표본 붕괴 셀이 1/N을 차지하면 안 된다."""
+    rows = [
+        _pnl_row_n("A", ARM_FILTER, 100, 0.10),
+        _pnl_row_n("B", ARM_FILTER, 100, 0.10),
+        _pnl_row_n("C", ARM_FILTER, 13, 5.00),  # 13건짜리 대박 — 빠져야 한다.
+    ]
+    gated = pnl_symbol_mean(rows, timeframe="15m", segment="oos", arm=ARM_FILTER)
+    assert gated["n_symbols"] == 2
+    assert gated["n_excluded"] == 1
+    assert gated["total_return"] == pytest.approx(0.10)
+    # gated=False면 원값(13건 셀이 평균을 끌어올린다) — 대조용 경로가 살아 있어야 한다.
+    raw = pnl_symbol_mean(rows, timeframe="15m", segment="oos", arm=ARM_FILTER, gated=False)
+    assert raw["n_symbols"] == 3
+    assert raw["total_return"] == pytest.approx((0.10 + 0.10 + 5.00) / 3)
+
+
+def test_stop_guard_fraction_matches_engine_default() -> None:
+    """진단 상수가 엔진 기본값과 갈라지면 표가 조용히 거짓말을 한다 — 동작으로 묶는다."""
+    from execution.sizing import PositionSizingParams
+
+    assert PositionSizingParams().min_stop_distance_fraction == STOP_GUARD_FRACTION
+
+
+def test_stop_buckets_split_on_guard_boundary() -> None:
+    """버킷 경계가 가드(0.3%)와 정확히 일치해야 「미만/이상」 집계가 뜻을 갖는다."""
+    below = [hi for lo, hi, _ in STOP_BUCKETS if lo < STOP_GUARD_FRACTION]
+    assert max(below) == pytest.approx(STOP_GUARD_FRACTION)
+    assert _bucket_of(0.0029) == "0.2~0.3%"
+    assert _bucket_of(0.0031) == "0.3~0.5%"

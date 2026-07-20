@@ -374,6 +374,139 @@ def leave_one_out_corr(
     return out
 
 
+STOP_GUARD_FRACTION = 0.003
+"""`RiskSizingParams.min_stop_distance_fraction` 기본값(0.3%)의 사본 — 진단 표시용.
+
+⚠️ **이 값은 WAN-133이 정한 게 아니라 WAN-79가 정했다**(`execution/sizing.py`, 커밋
+`6d4da9b`, 2026-07-14). 근거는 왕복 체결 비용 ≈0.11%(슬리피지 5bp + 테이커 4bp + 메이커
+2bp) 대비 약 3배 여유를 둬 "손절폭이 체결 비용에 묻히는" 거래를 사이징에서 배제하는 것이다
+(WAN-76 감사 권고). 손절 거리가 진입가의 이 비율 미만이면 `position_size`가 `0`을 반환해
+**그 셋업은 거래가 되지 않는다**.
+
+📌 **이 이슈가 그 가드와 정면으로 부딪힌다** — WAN-133 필터는 「좁은 존」을 고르는데 좁은
+존이 바로 이 바닥에 걸리는 대상이다. 아래 진단이 그 규모와 방향을 잰다. 여기서는 **읽기만
+하고 절대 바꾸지 않는다**(가드 변경은 WAN-79/76을 되돌리는 재-베이스라인 = 사용자 결정)."""
+
+#: 손절 거리(진입가 대비 분수) 버킷. 가드(0.3%) 경계가 버킷 경계와 일치하도록 잡는다.
+STOP_BUCKETS: tuple[tuple[float, float, str], ...] = (
+    (0.0, 0.002, "<0.2%"),
+    (0.002, 0.003, "0.2~0.3%"),
+    (0.003, 0.005, "0.3~0.5%"),
+    (0.005, 0.01, "0.5~1%"),
+    (0.01, 0.02, "1~2%"),
+    (0.02, 1.0, ">2%"),
+)
+
+
+class GuardRow(BaseModel):
+    """한 (심볼, TF, 구간)에서 사이징 가드 미만인 후보의 수·비율."""
+
+    model_config = ConfigDict(frozen=True)
+
+    symbol: str
+    timeframe: str
+    segment: str
+    n_candidates: int
+    n_below_guard: int
+    frac_below_guard: float
+    median_stop_fraction: float
+
+
+class StopBucketRow(BaseModel):
+    """손절 거리 버킷별 뚫림률(6심볼 풀링) — 가드가 무엇을 버리는지 잰다."""
+
+    model_config = ConfigDict(frozen=True)
+
+    timeframe: str
+    segment: str
+    bucket: str
+    below_guard: bool
+    n: int
+    broke_rate: float
+
+
+def _stop_fraction(cand: _Candidate) -> float | None:
+    """손절 거리 / 진입가. 진입가가 0 이하면 None."""
+    if cand.entry_price <= 0:
+        return None
+    return abs(cand.entry_price - cand.stop_price) / cand.entry_price
+
+
+def _bucket_of(frac: float) -> str:
+    for lo, hi, label in STOP_BUCKETS:
+        if lo <= frac < hi:
+            return label
+    return STOP_BUCKETS[-1][2]
+
+
+def guard_rows(cells: Sequence[CellResult]) -> list[GuardRow]:
+    """(심볼, TF, 구간)별 사이징 가드 미만 후보 수·비율."""
+    out: list[GuardRow] = []
+    for cell in cells:
+        for segment in (SEGMENT_IS, SEGMENT_OOS):
+            fracs = [
+                f
+                for cand in cell.default_candidates
+                if (cand.trigger_time < cell.is_boundary) == (segment == SEGMENT_IS)
+                and (f := _stop_fraction(cand)) is not None
+            ]
+            if not fracs:
+                continue
+            below = sum(1 for f in fracs if f < STOP_GUARD_FRACTION)
+            out.append(
+                GuardRow(
+                    symbol=cell.symbol,
+                    timeframe=cell.timeframe,
+                    segment=segment,
+                    n_candidates=len(fracs),
+                    n_below_guard=below,
+                    frac_below_guard=below / len(fracs),
+                    median_stop_fraction=float(pd.Series(fracs).median()),
+                )
+            )
+    return out
+
+
+def stop_bucket_rows(cells: Sequence[CellResult]) -> list[StopBucketRow]:
+    """손절 거리 버킷별 뚫림률(6심볼 풀링, END_OF_DATA 제외).
+
+    ⚠️ **시퀀싱·사이징 이전의 전 후보**를 센다 — 가드에 걸려 거래가 되지 못한 셋업도
+    시뮬레이터는 청산까지 계산해 뒀으므로(`reason`), "가드가 버린 것들이 실제로 어땠는가"를
+    사후에 볼 수 있다. 이것이 이 표의 존재 이유다.
+    """
+    acc: dict[tuple[str, str, str], list[bool]] = defaultdict(list)
+    for cell in cells:
+        for cand in cell.default_candidates:
+            if cand.reason is ExitReason.END_OF_DATA:
+                continue
+            frac = _stop_fraction(cand)
+            if frac is None:
+                continue
+            segment = SEGMENT_IS if cand.trigger_time < cell.is_boundary else SEGMENT_OOS
+            acc[(cell.timeframe, segment, _bucket_of(frac))].append(
+                cand.reason is ExitReason.STOP_LOSS
+            )
+    out: list[StopBucketRow] = []
+    for timeframe in DEFAULT_TIMEFRAMES:
+        for segment in (SEGMENT_IS, SEGMENT_OOS):
+            for lo, _hi, label in STOP_BUCKETS:
+                key = (timeframe, segment, label)
+                vals = acc.get(key, [])
+                if not vals:
+                    continue
+                out.append(
+                    StopBucketRow(
+                        timeframe=timeframe,
+                        segment=segment,
+                        bucket=label,
+                        below_guard=lo < STOP_GUARD_FRACTION,
+                        n=len(vals),
+                        broke_rate=sum(vals) / len(vals),
+                    )
+                )
+    return out
+
+
 class AtrControlRow(BaseModel):
     """ATR을 통제한 뒤의 `zone_width_atr`↔뚫림 연관 (교란 검정).
 
@@ -585,6 +718,15 @@ class PnlRow(BaseModel):
 ARM_FILTER = "filter_bot3"
 """존폭 하위 1/3분위만 진입(IS 문턱, OOS 적용)."""
 
+MIN_TRADES_FOR_PNL = _MIN_TRADES_FOR_VERDICT
+"""손익 셀의 유효 표본 하한(20건, WAN-70/77/84와 같은 기준).
+
+⚠️ **이 게이트가 필요한 이유는 WAN-133이 발견한 사이징 바닥 충돌 때문이다**(아래
+`STOP_GUARD_FRACTION`). 필터가 고르는 좁은 존이 `min_stop_distance_fraction`(0.3%)에 걸려
+사이징에서 탈락하므로, 저변동성 심볼의 필터 셀은 거래가 20건 아래로 내려앉는다(TRX 15m OOS
+= 13건). 그 셀의 수익률을 심볼평균에 그대로 넣으면 표본 13건짜리 값이 6심볼 평균의 1/6을
+차지한다 — 판정에서 제외하고 병기만 한다."""
+
 
 def _is_threshold(cell: CellResult) -> float | None:
     """IS 기본 후보의 zone_width_atr 하위 1/3 문턱. IS 표본이 없으면 None."""
@@ -638,18 +780,33 @@ def pnl_rows_for_cell(cell: CellResult, market: MarketData) -> list[PnlRow]:
 
 
 def pnl_symbol_mean(
-    rows: Sequence[PnlRow], *, timeframe: str, segment: str, arm: str
+    rows: Sequence[PnlRow], *, timeframe: str, segment: str, arm: str, gated: bool = True
 ) -> dict[str, float | None]:
-    """6심볼 심볼평균(total_return·MDD는 단순평균, 거래수는 합)."""
+    """6심볼 심볼평균(total_return·MDD는 단순평균, 거래수는 합).
+
+    `gated=True`(기본)면 **거래 20건 미만 셀을 평균에서 뺀다**(`MIN_TRADES_FOR_PNL`) —
+    사이징 바닥에 걸려 표본이 무너진 셀(TRX 15m 필터 = 13건)이 6심볼 평균의 1/6을 차지하는
+    것을 막는다. `n_excluded`로 몇 셀이 빠졌는지 병기한다. `gated=False`는 원값(대조용).
+    """
     sub = [r for r in rows if r.timeframe == timeframe and r.segment == segment and r.arm == arm]
+    excluded = [r for r in sub if r.num_trades < MIN_TRADES_FOR_PNL]
+    if gated:
+        sub = [r for r in sub if r.num_trades >= MIN_TRADES_FOR_PNL]
     if not sub:
-        return {"total_return": None, "max_drawdown": None, "num_trades": None, "n_symbols": 0}
+        return {
+            "total_return": None,
+            "max_drawdown": None,
+            "num_trades": None,
+            "n_symbols": 0,
+            "n_excluded": float(len(excluded)),
+        }
     n = len(sub)
     return {
         "total_return": sum(r.total_return for r in sub) / n,
         "max_drawdown": sum(r.max_drawdown for r in sub) / n,
         "num_trades": float(sum(r.num_trades for r in sub)),
         "n_symbols": n,
+        "n_excluded": float(len(excluded)),
     }
 
 
@@ -736,6 +893,8 @@ class ExperimentResult:
     quantile_by_arm: dict[str, list[QuantileRow]] = field(default_factory=dict)
     pnl_rows: list[PnlRow] = field(default_factory=list)
     atr_control: list[AtrControlRow] = field(default_factory=list)
+    guard: list[GuardRow] = field(default_factory=list)
+    stop_buckets: list[StopBucketRow] = field(default_factory=list)
 
 
 def run_experiment(
@@ -818,6 +977,8 @@ def run_experiment(
         quantile_by_arm=quantile_by_arm,
         pnl_rows=pnl_rows,
         atr_control=atr_control,
+        guard=guard_rows(cells),
+        stop_buckets=stop_bucket_rows(cells),
     )
 
 
@@ -1007,6 +1168,54 @@ def build_summary_markdown(result: ExperimentResult) -> str:
                     f"{_winrate(result.pnl_rows, timeframe, segment, arm)} |"
                 )
     lines.append("")
+    lines.append(
+        f"⚠️ **심볼평균은 거래 {MIN_TRADES_FOR_PNL}건 미만 셀을 제외한 값이다** — 사이징 바닥"
+        "(아래 Part C) 때문에 저변동성 심볼의 필터 셀이 표본 붕괴를 겪는다. 제외 셀 수는 "
+        "괄호로 병기한다.\n"
+    )
+
+    # 심볼별 분해 -------------------------------------------------------------
+    lines.append("### 심볼별 분해 (OOS)\n")
+    lines.append(
+        f"⚠️ 거래 {MIN_TRADES_FOR_PNL}건 미만은 **판정 제외**(표시 ⚠️). 심볼평균이 한 심볼에 "
+        "얹혀 있는지 보려면 ETH 제외 평균을 함께 본다.\n"
+    )
+    lines.append("| TF | 심볼 | 기본 거래/수익/MDD | 필터 거래/수익/MDD |\n| -- | -- | -- | -- |")
+    for timeframe in DEFAULT_TIMEFRAMES:
+        for symbol in DEFAULT_SYMBOLS:
+            cells_ = {
+                r.arm: r
+                for r in result.pnl_rows
+                if r.timeframe == timeframe and r.segment == SEGMENT_OOS and r.symbol == symbol
+            }
+            b, f = cells_.get(ARM_DEFAULT), cells_.get(ARM_FILTER)
+            if b is None or f is None:
+                continue
+            fw = " ⚠️" if f.num_trades < MIN_TRADES_FOR_PNL else ""
+            lines.append(
+                f"| {timeframe} | {_bare(symbol)} | "
+                f"{b.num_trades} / {b.total_return * 100:+.2f}% / {b.max_drawdown * 100:.2f}% | "
+                f"{f.num_trades} / {f.total_return * 100:+.2f}% / "
+                f"{f.max_drawdown * 100:.2f}%{fw} |"
+            )
+    lines.append("")
+    lines.append("**ETH 제외 심볼평균(OOS total_return):**\n")
+    for timeframe in DEFAULT_TIMEFRAMES:
+        parts = []
+        for arm in (ARM_DEFAULT, ARM_FILTER):
+            sub = [
+                r
+                for r in result.pnl_rows
+                if r.timeframe == timeframe
+                and r.segment == SEGMENT_OOS
+                and r.arm == arm
+                and _bare(r.symbol) != "ETH"
+                and r.num_trades >= MIN_TRADES_FOR_PNL
+            ]
+            avg = sum(r.total_return for r in sub) / len(sub) if sub else None
+            parts.append(f"{arm} {'—' if avg is None else f'{avg * 100:+.2f}%'}({len(sub)}심볼)")
+        lines.append(f"* {timeframe}: {' vs '.join(parts)}")
+    lines.append("")
     lines.append("**거래 수 오염 게이트(WAN-126):**\n")
     for timeframe in DEFAULT_TIMEFRAMES:
         for segment in (SEGMENT_IS, SEGMENT_OOS):
@@ -1024,6 +1233,79 @@ def build_summary_markdown(result: ExperimentResult) -> str:
         loo_pnl = pnl_leave_one_out(result.pnl_rows, timeframe=timeframe, arm=ARM_FILTER)
         lines.append(f"* {timeframe}: {loo_pnl}")
     lines.append("")
+
+    # Part C: 사이징 바닥 충돌 -------------------------------------------------
+    lines.append(
+        "## Part C: 사이징 바닥(WAN-79, 0.3%)과의 충돌 — 필터가 고르는 존을 엔진이 거절한다\n"
+    )
+    lines.append(
+        "📌 **이 절은 WAN-133이 실행 중 발견한 제약이다.** `RiskSizingParams."
+        f"min_stop_distance_fraction`(기본 **{STOP_GUARD_FRACTION:.1%}**)은 손절 거리가 진입가의 "
+        "그 비율 미만이면 `position_size`가 0을 반환해 **그 셋업을 거래에서 통째로 뺀다**. "
+        "⚠️ **이 값은 WAN-133이 정한 게 아니라 WAN-79가 정했다**(왕복 체결 비용 ≈0.11% 대비 3배 "
+        "여유 · WAN-76 감사 권고). 그런데 이 이슈의 필터는 **좁은 존**을 고르므로 정면으로 "
+        "부딪힌다.\n"
+    )
+    lines.append("### C-1. 가드 미만 후보의 수·비율 (기본 팔, 시퀀싱 이전)\n")
+    lines.append(
+        "| TF | 심볼 | 구간 | 후보 | 가드미만 | 비율 | 중앙 손절% |\n"
+        "| -- | -- | -- | -- | -- | -- | -- |"
+    )
+    for timeframe in DEFAULT_TIMEFRAMES:
+        for gr in result.guard:
+            if gr.timeframe != timeframe:
+                continue
+            lines.append(
+                f"| {timeframe} | {_bare(gr.symbol)} | {gr.segment} | {gr.n_candidates} | "
+                f"{gr.n_below_guard} | {gr.frac_below_guard * 100:.1f}% | "
+                f"{gr.median_stop_fraction * 100:.3f}% |"
+            )
+    for timeframe in DEFAULT_TIMEFRAMES:
+        gsub = [gr for gr in result.guard if gr.timeframe == timeframe]
+        tot = sum(gr.n_candidates for gr in gsub)
+        bel = sum(gr.n_below_guard for gr in gsub)
+        if tot:
+            lines.append(
+                f"\n* **{timeframe} 전체: {tot}건 중 {bel}건({bel / tot * 100:.1f}%)이 가드 미만.**"
+            )
+    lines.append("")
+    lines.append("### C-2. 손절 거리 버킷별 뚫림률 — 가드가 무엇을 버리는가\n")
+    lines.append(
+        "⚠️ **시퀀싱·사이징 이전의 전 후보**를 센다(END_OF_DATA 제외) — 가드에 걸려 거래가 되지 "
+        "못한 셋업도 시뮬레이터가 청산까지 계산해 뒀으므로 「버려진 것들이 실제로 어땠는가」를 "
+        "볼 수 있다.\n"
+    )
+    lines.append("| TF | 구간 | 손절폭 | 가드 | n | 뚫림률 |\n| -- | -- | -- | -- | -- | -- |")
+    for sb in result.stop_buckets:
+        mark = "미만" if sb.below_guard else "이상"
+        lines.append(
+            f"| {sb.timeframe} | {sb.segment} | {sb.bucket} | {mark} | {sb.n} | "
+            f"{sb.broke_rate * 100:.1f}% |"
+        )
+    lines.append("")
+    for timeframe in DEFAULT_TIMEFRAMES:
+        lo = [b for b in result.stop_buckets if b.timeframe == timeframe and b.below_guard]
+        hi = [b for b in result.stop_buckets if b.timeframe == timeframe and not b.below_guard]
+        if not lo or not hi:
+            continue
+        ln, hn = sum(b.n for b in lo), sum(b.n for b in hi)
+        lr = sum(b.broke_rate * b.n for b in lo) / ln
+        hr = sum(b.broke_rate * b.n for b in hi) / hn
+        lines.append(
+            f"* **{timeframe}**: 가드미만 n={ln} 뚫림 **{lr * 100:.1f}%** vs "
+            f"가드이상 n={hn} 뚫림 {hr * 100:.1f}% → **{(lr - hr) * 100:+.1f}%p**"
+        )
+    lines.append(
+        "\n📌 **가드 미만이 오히려 덜 뚫린다** — 즉 가드는 「나쁜 거래」가 아니라 **가장 잘 "
+        "버티는 구간**을 버리고 있다. 이는 이 이슈의 결론(좁을수록 잘 버틴다)을 **전혀 다른 축**"
+        "(ATR 정규화가 아니라 진입가 대비 절대 %)에서 재확인한 것이기도 하다.\n"
+        "🚨 **단 이것을 「가드를 없애라」로 읽지 말 것 — 뚫림률과 손익은 다르다.** WAN-79의 논리는 "
+        "「뚫림률이 높다」가 아니라 **「손절폭이 왕복비용(≈0.11%)에 묻힌다」**였다. 손절폭 0.2%면 "
+        "비용이 그 절반을 먹어 1.5R 익절이 실질 1.0R로, −1R 손절이 실질 −1.5R로 변형된다 — "
+        "**승률이 높아도 기대값은 마이너스일 수 있다.** 이 표는 뚫림률만 셌고 **비용 반영 손익은 "
+        "재지 않았다**. 따라서 이 표는 「가드가 틀렸다」의 증거가 아니라 **「가드가 무엇을 대가로 "
+        "지불하는지」의 계량**이다. 판단은 별도 이슈 소관이다(§후속).\n"
+    )
 
     # 결론 --------------------------------------------------------------------
     lines.append("## 결론\n")
@@ -1132,6 +1414,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--atr-control-out", type=Path, default=REPORTS_DIR / "wan133_atr_control.csv"
     )
+    parser.add_argument("--guard-out", type=Path, default=REPORTS_DIR / "wan133_guard.csv")
+    parser.add_argument(
+        "--stop-bucket-out", type=Path, default=REPORTS_DIR / "wan133_stop_buckets.csv"
+    )
     parser.add_argument("--summary-out", type=Path, default=REPORTS_DIR / "wan133_summary.md")
     args = parser.parse_args(argv)
 
@@ -1147,7 +1433,11 @@ def main(argv: list[str] | None = None) -> int:
     _write_csv(_quantile_frame(result.quantile_by_arm), args.quantile_out)
     _write_csv(_rows_to_frame(result.pnl_rows), args.pnl_out)
     _write_csv(_rows_to_frame(result.atr_control), args.atr_control_out)
+    _write_csv(_rows_to_frame(result.guard), args.guard_out)
+    _write_csv(_rows_to_frame(result.stop_buckets), args.stop_bucket_out)
     print(f"[wan133] atr_control → {args.atr_control_out}")
+    print(f"[wan133] guard → {args.guard_out}")
+    print(f"[wan133] stop_buckets → {args.stop_bucket_out}")
     print(f"[wan133] permutation → {args.perm_out}")
     print(f"[wan133] quantile → {args.quantile_out}")
     print(f"[wan133] pnl → {args.pnl_out}")
