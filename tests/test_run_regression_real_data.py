@@ -28,9 +28,9 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from backtest.harness import LEGACY_RSI_GATE_MODE, RunRow, load_market_data
+from backtest.harness import LEGACY_BAND_BAR, LEGACY_RSI_GATE_MODE, RunRow, load_market_data
 from backtest.run import JOBS_AUTO, RunOptions, build_parser, grid_from_args, run_grid
-from strategy.models import RsiGateMode
+from strategy.models import BandBar, RsiGateMode
 
 _WAN95_CSV = Path("backtest/reports/wan95_zone_limit_recompute.csv")
 _WAN99_CSV = Path("backtest/reports/wan99_zone_limit_offset.csv")
@@ -59,17 +59,24 @@ def _require_real_data() -> None:
         pytest.skip(f"{_SYMBOL} {_TIMEFRAME} 실데이터가 없어 회귀 대조를 건너뜁니다(CI 기본).")
 
 
-def _run(argv: list[str], *, rsi_gate_mode: RsiGateMode | None = None) -> RunRow:
+def _run(
+    argv: list[str],
+    *,
+    rsi_gate_mode: RsiGateMode | None = None,
+    band_bar: BandBar | None = None,
+) -> RunRow:
     """CLI 인자로 한 셀을 돌려 그 행을 낸다.
 
     데이터 유무는 픽스처가 이미 확인했으므로, 여기서 0행이 나오면 그건 진짜 배선 버그다.
 
-    `rsi_gate_mode`는 CLI 축이 아니라 핀이라 인자로 못 준다(WAN-123) — 옛 리포트 셀과
-    대조할 때만 여기서 되돌려 요청한다.
+    `rsi_gate_mode`(WAN-123)·`band_bar`(WAN-132)는 CLI 축이 아니라 핀이라 인자로 못 준다 —
+    옛 리포트 셀과 대조할 때만 여기서 되돌려 요청한다.
     """
     grid = grid_from_args(build_parser().parse_args(argv))
     if rsi_gate_mode is not None:
         grid = replace(grid, rsi_gate_mode=rsi_gate_mode)
+    if band_bar is not None:
+        grid = replace(grid, band_bar=band_bar)
     rows = run_grid(grid, RunOptions(years=_YEARS), log=False)
     assert len(rows) == 1, f"대조는 한 셀이어야 합니다: {len(rows)}행"
     return rows[0]
@@ -118,10 +125,15 @@ def test_cli_reproduces_wan99_pen_5bp_cell() -> None:
     `unconditional`(게이트 제거)이 되면서 CLI 기본 실행의 거래 집합이 13~14% 넓어졌다.
     게이트는 격자 축이 아니라 핀이므로 CLI 플래그가 없다 — `Grid.rsi_gate_mode`로 직접
     요청한다(그쪽 필드가 존재하는 이유가 이것이다).
+
+    ⚠️ **밴드 표본도 마찬가지다**(WAN-132): 채택 기본값이 `intrabar_live`(봉내 라이브)가
+    되면서 진입가가 서브스텝마다 재산정된다. WAN-99 격자는 탭 봉 종가 밴드에서 나왔으므로
+    `Grid.band_bar`로 되돌려 요청한다.
     """
     row = _run(
         ["--symbol", "BTCUSDT", "--tf", _TIMEFRAME, "--fill", "pen_5bp", "--offset-bps", "0"],
         rsi_gate_mode=LEGACY_RSI_GATE_MODE,
+        band_bar=LEGACY_BAND_BAR,
     )
     cell = _report_cell(
         _WAN99_CSV,

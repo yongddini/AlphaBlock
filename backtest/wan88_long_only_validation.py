@@ -76,11 +76,13 @@ import pandas as pd
 from pydantic import BaseModel, ConfigDict
 
 from backtest.harness import (
+    LEGACY_BAND_BAR,
     LEGACY_RSI_GATE_MODE,
     FillPreset,
     build_config,
     build_params,
     fill_preset,
+    pin_band_bar,
 )
 from backtest.models import BacktestConfig, Trade
 from backtest.wan68_short_gate_analysis import _split_bars
@@ -139,6 +141,11 @@ PINNED_OFFSET_BPS = 0.0
 #: 두 엔진의 표를 하나의 md에 섞지 않도록).
 PINNED_RSI_GATE_MODE = LEGACY_RSI_GATE_MODE
 
+#: WAN-132가 밴드 정본을 `intrabar_live`로 옮기기 전의 값(탭 봉 종가). 이 표의 「엣지
+#: 없음」 판정과 「`baseline` 유의 4셀이 `pen_5bp`에 전멸」이라는 관찰은 전부 그 밴드
+#: 위에서 나왔다 — 고정하지 않으면 조용히 새 밴드로 다시 돈다.
+PINNED_BAND_BAR = LEGACY_BAND_BAR
+
 
 def adopted_params(fill: FillPreset) -> ConfluenceParams:
     """WAN-88 당시 채택 기본값 + 체결 가정만 얹은 파라미터.
@@ -146,12 +153,16 @@ def adopted_params(fill: FillPreset) -> ConfluenceParams:
     `harness.build_params`를 거치는 이유는 `entry_mode`/`rsi_mode`를 한 세트로 묶는
     규칙(WAN-41/95)을 이 모듈이 따로 재구현하지 않기 위해서다. 전략 필드는 하나도
     바꾸지 않는다 — 이 이슈는 검증 전용이고 파라미터 탐색은 금지다. 당시 값으로 명시
-    고정하는 것은 오프셋(`PINNED_OFFSET_BPS`)과 RSI 게이트(`PINNED_RSI_GATE_MODE`) 둘이다.
+    고정하는 것은 오프셋(`PINNED_OFFSET_BPS`)·RSI 게이트(`PINNED_RSI_GATE_MODE`)와
+    밴드 표본(`PINNED_BAND_BAR`, WAN-132) 셋이다.
     """
-    return build_params(
-        fill=fill,
-        offset_bps=PINNED_OFFSET_BPS,
-        base=ConfluenceParams(rsi_gate_mode=PINNED_RSI_GATE_MODE),
+    return pin_band_bar(
+        build_params(
+            fill=fill,
+            offset_bps=PINNED_OFFSET_BPS,
+            base=ConfluenceParams(rsi_gate_mode=PINNED_RSI_GATE_MODE),
+        ),
+        PINNED_BAND_BAR,
     )
 
 
@@ -161,14 +172,18 @@ def describe_engine() -> str:
     `ConfluenceParams()`(= 지금의 채택 기본값)가 아니라 **고정한 엔진**을 찍는다. 지문이
     실행과 어긋나면 지문이 아니라 장식이다.
     """
-    p = ConfluenceParams(
-        zone_limit_offset_bps=PINNED_OFFSET_BPS, rsi_gate_mode=PINNED_RSI_GATE_MODE
+    p = pin_band_bar(
+        ConfluenceParams(
+            zone_limit_offset_bps=PINNED_OFFSET_BPS, rsi_gate_mode=PINNED_RSI_GATE_MODE
+        ),
+        PINNED_BAND_BAR,
     )
+    band_bar = p.deviation_filter.band_bar if p.deviation_filter else "—"
     return (
         f"entry_mode={p.entry_mode}, rsi_mode={p.rsi_mode}, short_enabled={p.short_enabled}, "
         f"take_profit_mode={p.take_profit_mode}, take_profit_r={p.take_profit_r}, "
         f"rsi_gate_mode={p.rsi_gate_mode}, retap_mode={p.retap_mode}, "
-        f"zone_limit_offset_bps={p.zone_limit_offset_bps}"
+        f"zone_limit_offset_bps={p.zone_limit_offset_bps}, band_bar={band_bar}"
     )
 
 

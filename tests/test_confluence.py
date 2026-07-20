@@ -1162,9 +1162,11 @@ def test_deviation_filter_default_is_bollinger() -> None:
     assert filt.sma_length == 20
     assert filt.width_kind == "stdev"
     assert filt.width_value == pytest.approx(2.0)
-    # WAN-115: 밴드 봉 기준의 기본값은 `tap`(탭 봉) — 룩어헤드 교정은 옵트인이다.
-    # 이 기본값이 움직이면 WAN-70/84/88/95/111/114 리포트의 엔진 정의가 통째로 흔들린다.
-    assert filt.band_bar == "tap"
+    # WAN-132(사용자 결정): 밴드 표본의 기본값은 **`intrabar_live`**(봉내 라이브)다 —
+    # 사용자가 화면에서 보고 지정가를 거는 그 값이고, 옛 기본값 `tap`은 그 봉의 최종
+    # 종가를 알아야 나오는 재현 불가능한 가격이었다. 옛 수치를 결론에 박아 둔 리포트는
+    # `harness.LEGACY_BAND_BAR`로 명시 고정한다.
+    assert filt.band_bar == "intrabar_live"
     # 명시적으로 끄면(구 엔진) 필드 자체가 없던 이전 동작으로 돌아간다.
     assert ConfluenceParams(deviation_filter=None).deviation_filter is None
 

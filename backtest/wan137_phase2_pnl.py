@@ -343,7 +343,9 @@ def run_cell(
     if seg_market.empty or seg_market.df_1m.empty:
         return []
     obr = _detect(seg_market)
-    params = harness.build_params(entry_mode="zone_limit")
+    # ⚠️ 밴드는 WAN-132 이전 값(`tap`)으로 고정한다 — 숫자 보존이자 실행 가능성 문제다:
+    # 봉내 라이브 밴드는 `take_profit_override`(이 리포트의 저항 팔)를 지원하지 않는다.
+    params = harness.pin_band_bar(harness.build_params(entry_mode="zone_limit"))
     cfg = harness.build_config(seg_market.timeframe)
 
     self_provider = indexed_zone_provider({seg_market.timeframe: obr}, combine=False)

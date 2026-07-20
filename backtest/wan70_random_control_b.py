@@ -73,6 +73,7 @@ from typing import Literal
 import pandas as pd
 from pydantic import BaseModel, ConfigDict
 
+from backtest.harness import pin_band_bar
 from backtest.models import BacktestConfig, PositionSide
 from backtest.sweep import default_backtest_config, timeframe_to_ms
 from backtest.wan68_short_gate_analysis import _split_bars
@@ -102,14 +103,21 @@ Segment = Literal["IS", "OOS"]
 
 #: WAN-68이 도입한 세 게이트를 끈/켠 대표 프리셋(WAN-70). "켠" 값은 그리드 최적화
 #: 결과가 아니라 방향성 검증용 대표값이다(모듈 docstring 참고).
+#:
+#: ⚠️ `band_bar`는 **당시 값(`tap`)으로 고정**한다(WAN-132가 기본값을 `intrabar_live`로
+#: 옮겼다). 이 리포트에서는 숫자 보존을 넘어 **실행 가능성**의 문제이기도 하다 — 봉내
+#: 라이브 밴드는 `min_rr` 게이트를 지원하지 않으므로("on" 프리셋의 1.5) 고정하지 않으면
+#: 이 모듈이 `ValueError`로 죽는다.
 GATE_PRESETS: dict[str, ConfluenceParams] = {
-    "off": ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime"),
-    "on": ConfluenceParams(
-        entry_mode="zone_limit",
-        rsi_mode="realtime",
-        min_rr=1.5,
-        long_max_deviation=-0.03,
-        short_enabled=False,
+    "off": pin_band_bar(ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime")),
+    "on": pin_band_bar(
+        ConfluenceParams(
+            entry_mode="zone_limit",
+            rsi_mode="realtime",
+            min_rr=1.5,
+            long_max_deviation=-0.03,
+            short_enabled=False,
+        )
     ),
 }
 

@@ -11,7 +11,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from backtest.harness import LEGACY_RSI_GATE_MODE
+from backtest.harness import LEGACY_RSI_GATE_MODE, pin_band_bar
 from backtest.models import PositionSide
 from backtest.substep import SubStep, ZoneLimitStatus
 from backtest.sweep import timeframe_to_ms
@@ -82,18 +82,26 @@ def test_baseline_level_is_the_pinned_pre_wan112_engine() -> None:
     보수화 필드가 기준선에 스며들면 이 리포트의 기준선이 WAN-95와 달라져 비교 자체가
     무의미해진다.
 
-    ⚠️ WAN-112(오프셋 0bp→2bp)·WAN-123(게이트 제거)으로 이 기준선은 더 이상
-    `ConfluenceParams()`가 아니다. 이 리포트의 발표 수치는 **0bp + 게이트 on에서 나왔고**,
-    그 엔진을 `BASE_PARAMS`가 명시 고정한다 — 즉 이 리포트는 이제 **당시 엔진의 기록**이다.
+    ⚠️ WAN-112(오프셋 0bp→2bp)·WAN-123(게이트 제거)·WAN-132(밴드 전환)로 이 기준선은 더
+    이상 `ConfluenceParams()`가 아니다. 이 리포트의 발표 수치는 **0bp + 게이트 on + 탭 봉
+    밴드에서 나왔고**, 그 엔진을 `BASE_PARAMS`가 명시 고정한다 — 즉 이 리포트는 이제
+    **당시 엔진의 기록**이다.
     """
     assert (
-        ConfluenceParams(zone_limit_offset_bps=0.0, rsi_gate_mode=LEGACY_RSI_GATE_MODE)
+        pin_band_bar(
+            ConfluenceParams(zone_limit_offset_bps=0.0, rsi_gate_mode=LEGACY_RSI_GATE_MODE)
+        )
         == BASE_PARAMS
     )
     assert BASE_PARAMS.zone_limit_offset_bps == 0.0
     assert BASE_PARAMS.rsi_gate_mode == "first_tap_free"
+    assert BASE_PARAMS.deviation_filter is not None
+    assert BASE_PARAMS.deviation_filter.band_bar == "tap"
+    default_band = ConfluenceParams().deviation_filter
     assert ConfluenceParams().zone_limit_offset_bps == 2.0, "채택 기본값과 갈라졌음이 의도다"
     assert ConfluenceParams().rsi_gate_mode == "unconditional", "게이트도 갈라졌음이 의도다"
+    assert default_band is not None
+    assert default_band.band_bar == "intrabar_live", "밴드도 갈라졌음이 의도다"
     baseline = CONSERVATISM_LEVELS[0]
     assert baseline.name == "baseline"
     assert baseline.params(seed=0) == BASE_PARAMS

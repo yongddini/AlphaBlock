@@ -52,6 +52,7 @@ from pathlib import Path
 import pandas as pd
 
 from backtest.harness import (
+    LEGACY_BAND_BAR,
     LEGACY_RSI_GATE_MODE,
     SEGMENT_FULL,
     SEGMENT_IS,
@@ -119,6 +120,12 @@ def build_grid(symbols: Sequence[str], gate: RsiGateMode, timeframes: Sequence[s
     익절 R·오프셋을 `build_params()`에서 읽는 이유는 WAN-111/114와 같다: 값을 상수로 박아
     두면 기본값이 재-베이스라인으로 움직일 때 이 리포트만 혼자 옛 엔진을 돈다. 이 표에서
     **게이트만이 축**이어야 그 이동을 게이트의 몫으로 읽을 수 있다.
+
+    ⚠️ **밴드 표본(`band_bar`)만은 예외로 당시 값(`tap`)에 고정한다**(WAN-132가 기본값을
+    `intrabar_live`로 옮겼다). 위 원칙과 어긋나 보이지만 이 팔들의 검산이 그걸 요구한다 —
+    `first_tap_free` 팔이 `wan111_symbol_universe.csv`와 **비트 단위로 일치**하는 것이
+    「이동이 게이트의 몫」이라는 주장의 근거이고, 그쪽 CSV는 탭 봉 종가 밴드에서 나왔다.
+    새 밴드에서의 게이트 재검은 별도 이슈 소관이다(WAN-132 §후속).
     """
     defaults = build_params()
     return Grid(
@@ -128,6 +135,7 @@ def build_grid(symbols: Sequence[str], gate: RsiGateMode, timeframes: Sequence[s
         take_profit_rs=(defaults.take_profit_r,),
         offsets_bps=(defaults.zone_limit_offset_bps,),
         fills=tuple(fill_preset(name) for name in LENS_NAMES),
+        band_bar=LEGACY_BAND_BAR,
         rsi_gate_mode=gate,
     )
 

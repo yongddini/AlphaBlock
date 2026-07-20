@@ -115,6 +115,7 @@ from backtest.harness import (
     iter_seeds,
     load_market_data,
     normalize_symbol,
+    pin_band_bar,
     segments_for,
     slice_market,
 )
@@ -186,8 +187,16 @@ def adopted_params(fill: FillPreset, seed: int) -> ConfluenceParams:
     있는가"를 묻는 리포트는 기본값을 고정하지 **않는다** — 기본값이 움직이면 이 수치는
     낡은 것이 되어야 맞다. 고정하는 쪽은 결론을 옛 엔진 수치에 박아 둔 리포트다
     (`harness.LEGACY_RSI_GATE_MODE`).
+
+    ⚠️ **밴드 표본(`band_bar`)만은 그 원칙의 예외로 당시 값(`tap`)에 고정한다** —
+    WAN-132가 기본값을 `intrabar_live`로 옮겼는데, 이 모듈의 실제 팔이 `wan123_fill_
+    conservatism`의 채택 팔과 **48셀 차이 0.00e+00**으로 맞물리는 것이 두 모듈의 상호
+    검산이고 그쪽은 `wan111` CSV와의 비트 일치 때문에 `tap`에 묶여 있다. 즉 여기만
+    새 밴드를 따라가면 WAN-124가 낸 판정(볼린저 축 11셀 유의)의 검산이 통째로 끊긴다.
+    새 밴드에서의 널 재검은 **별도 이슈**다(WAN-132 §후속) — 이 표를 조용히 다른 밴드로
+    돌려 옛 결론 옆에 새 숫자를 두는 것보다 낫다.
     """
-    return build_params(fill=fill, seed=seed)
+    return pin_band_bar(build_params(fill=fill, seed=seed))
 
 
 def neutralized_pool_params(fill: FillPreset, seed: int) -> ConfluenceParams:
@@ -200,8 +209,12 @@ def neutralized_pool_params(fill: FillPreset, seed: int) -> ConfluenceParams:
 
 
 def describe_engine() -> str:
-    """이 리포트가 검정한 엔진의 지문 — CSV·md만 봐도 어떤 정의로 돌았는지 드러나게."""
-    p = ConfluenceParams()
+    """이 리포트가 검정한 엔진의 지문 — CSV·md만 봐도 어떤 정의로 돌았는지 드러나게.
+
+    `adopted_params`가 실제로 조립하는 것을 그대로 찍는다(밴드 고정 포함) — 지문이
+    실행과 어긋나면 지문이 아니라 장식이다(WAN-88 `describe_engine`과 같은 규칙).
+    """
+    p = pin_band_bar(ConfluenceParams())
     return (
         f"entry_mode={p.entry_mode}, rsi_mode={p.rsi_mode}, short_enabled={p.short_enabled}, "
         f"take_profit_mode={p.take_profit_mode}, take_profit_r={p.take_profit_r}, "

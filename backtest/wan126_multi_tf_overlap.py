@@ -49,6 +49,7 @@ from backtest.harness import (
     load_market_data,
     mean_r,
     normalize_symbol,
+    pin_band_bar,
     segments_for,
     slice_market,
 )
@@ -179,7 +180,10 @@ def _run_cell(
     take_profit_r: float,
 ) -> tuple[OverlapRow, int, int]:
     """한 팔·한 구간을 돌려 행 + (거래수, 시퀀싱된 후보 오염 비교용 거래수)를 낸다."""
-    params = build_params(entry_mode="zone_limit")
+    # ⚠️ 밴드는 WAN-132 이전 값(`tap`)으로 고정한다 — 이 표의 겹침 판정 수치가 그
+    # 밴드에서 나왔고, 봉내 라이브 밴드는 진입가를 서브스텝마다 다시 내므로 팔 간
+    # 비교의 축(겹침 정의)이 흐려진다.
+    params = pin_band_bar(build_params(entry_mode="zone_limit"))
     cfg = build_config(market.timeframe)
     candidates, stats = build_zone_limit_candidates(
         market.htf_df,

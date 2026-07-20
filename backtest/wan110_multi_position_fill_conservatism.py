@@ -54,12 +54,14 @@ from pydantic import BaseModel, ConfigDict
 
 from backtest.harness import (
     DEFAULT_YEARS,
+    LEGACY_BAND_BAR,
     FillPreset,
     build_params,
     detect_order_blocks,
     fill_preset,
     load_market_data,
     mean_r,
+    pin_band_bar,
     segments_for,
     slice_market,
 )
@@ -71,7 +73,7 @@ from backtest.zone_limit_backtest import (
     build_result_from_trades,
     sequence_with_candidates,
 )
-from strategy.models import ConfluenceParams
+from strategy.models import BandBar, ConfluenceParams
 
 #: 이 리포트가 고정한 오프셋(bp) — **WAN-103과 같은 셋업 풀**을 봐야 하므로 그쪽 엔진에서
 #: 그대로 가져온다(WAN-112 이후 채택 기본값 2bp를 따라가면 안 된다). 이 재검의 질문은
@@ -82,6 +84,12 @@ PINNED_OFFSET_BPS = PARAMS.zone_limit_offset_bps
 #: 옮겼다). 게이트 제거는 오프셋과 달리 **셋업 풀 자체를 13~14% 넓히므로**, 따라가게 두면
 #: 이 재검이 WAN-103과 다른 풀을 보게 되어 "같은 풀에 렌즈만 조인다"는 전제가 깨진다.
 PINNED_RSI_GATE_MODE = PARAMS.rsi_gate_mode
+
+#: 밴드 표본도 마찬가지다(WAN-132가 기본값을 `intrabar_live`로 옮겼다) — 밴드 정의가
+#: 다르면 진입가가 달라져 WAN-103과 **다른 셋업 풀**을 보게 된다.
+PINNED_BAND_BAR: BandBar = (
+    PARAMS.deviation_filter.band_bar if PARAMS.deviation_filter else LEGACY_BAND_BAR
+)
 
 DEFAULT_SYMBOLS: tuple[str, ...] = ("BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT")
 
@@ -265,7 +273,10 @@ def run_report(
                                 fill=preset,
                                 seed=seed,
                                 offset_bps=PINNED_OFFSET_BPS,
-                                base=ConfluenceParams(rsi_gate_mode=PINNED_RSI_GATE_MODE),
+                                base=pin_band_bar(
+                                    ConfluenceParams(rsi_gate_mode=PINNED_RSI_GATE_MODE),
+                                    PINNED_BAND_BAR,
+                                ),
                             ),
                             order_blocks=order_blocks,
                         )

@@ -101,8 +101,12 @@ def build_grid(symbols: Sequence[str]) -> Grid:
     사다리의 `L2` 행이 이 CSV의 `baseline` 행과 **비트 단위로 일치**하는 것이 두 리포트의
     상호 검산인데, 그쪽 사다리는 게이트를 `first_tap_free`로 고정하고 있다 — 여기만
     따라가면 그 검산이 깨진다. 게이트 제거 뒤의 심볼 유니버스 판정은 `wan123_*` 소관이다.
+
+    ⚠️ **밴드 표본(`band_bar`)도 같은 이유로 고정한다**(WAN-132가 기본값을
+    `intrabar_live`로 옮겼다). 봉내 라이브 밴드는 진입가를 서브스텝마다 다시 내므로
+    거래 집합과 가격이 함께 움직이고, WAN-114 사다리와의 비트 일치 검산도 깨진다.
     """
-    from backtest.harness import LEGACY_RSI_GATE_MODE, build_params
+    from backtest.harness import LEGACY_BAND_BAR, LEGACY_RSI_GATE_MODE, build_params
 
     defaults = build_params()
     return Grid(
@@ -113,6 +117,7 @@ def build_grid(symbols: Sequence[str]) -> Grid:
         offsets_bps=(defaults.zone_limit_offset_bps,),
         fills=tuple(fill_preset(name) for name in LENS_NAMES),
         rsi_gate_mode=LEGACY_RSI_GATE_MODE,
+        band_bar=LEGACY_BAND_BAR,
     )
 
 

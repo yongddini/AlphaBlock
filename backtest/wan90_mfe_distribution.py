@@ -55,11 +55,13 @@ import pandas as pd
 from backtest.harness import (
     BASELINE_FILL,
     DB_PATH,
+    LEGACY_BAND_BAR,
     RunRow,
     build_config,
     detect_order_blocks,
     load_market_data,
     normalize_symbol,
+    pin_band_bar,
     segments_for,
     slice_market,
 )
@@ -230,7 +232,10 @@ def _trade_rows_for_cell(
     if market.empty or market.df_1m.empty:
         return []
     cfg = build_config(timeframe, funding_enabled=False)
-    params = _uncensored_params(ConfluenceParams())
+    # ⚠️ 밴드는 WAN-132 이전 값(`tap`)으로 고정한다 — 이 분포·R 스윕이 낸 판정(1.5R 유지)은
+    # 탭 봉 종가 밴드의 1R 위에서 나왔고, 익절만 끈 변형은 `take_profit_override` 경로라
+    # 봉내 라이브 밴드에서 아예 돌지 않는다.
+    params = _uncensored_params(pin_band_bar(ConfluenceParams()))
     htf_ms = timeframe_to_ms(timeframe)
     rows: list[dict[str, object]] = []
     for segment in segments_for(oos=oos):
@@ -322,6 +327,7 @@ def run_sweep(
         take_profit_rs=R_SWEEP,
         offsets_bps=(ConfluenceParams().zone_limit_offset_bps,),
         fills=(BASELINE_FILL,),
+        band_bar=LEGACY_BAND_BAR,
     )
     options = RunOptions(start_ms=start_ms, end_ms=end_ms, oos=True)
     rows = run_grid(grid, options, log=True, jobs=jobs)

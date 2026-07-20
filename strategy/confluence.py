@@ -21,13 +21,13 @@ from __future__ import annotations
 import logging
 import math
 from enum import StrEnum
-from typing import Literal
 
 import pandas as pd
 from pydantic import BaseModel, ConfigDict
 
 from strategy.indicators import atr, emas, rsi, sma, stdev, vwma
 from strategy.models import (
+    BandBar,
     ConfluenceParams,
     DeviationFilterParams,
     OrderBlock,
@@ -297,7 +297,10 @@ class ConfluenceStrategy:
         direction_sign: int,
         anchor_vals: list[float],
         width_vals: list[float],
-        band_bar: Literal["tap", "prev_closed", "intrabar_live", "intrabar_causal"] = "tap",
+        # 기본 `"tap"`은 채택 기본값(`"intrabar_live"`, WAN-132)과 **같은 분기**로 접힌다
+        # — 봉 단위인 이 함수에서 두 모드는 정의상 한 값이다(아래 독스트링). 즉 여기서만은
+        # 기본값이 갈라져도 조용한 실패가 생기지 않는다.
+        band_bar: BandBar = "tap",
     ) -> float | None:
         """탭 봉 `pos`에서 쓸 밴드 값(`anchor - direction_sign*width`). 판정 불가면 `None`.
 

@@ -16,7 +16,7 @@ import inspect
 import pandas as pd
 import pytest
 
-from backtest.harness import FILL_PRESETS_BY_NAME, build_params, fill_preset
+from backtest.harness import FILL_PRESETS_BY_NAME, build_params, fill_preset, pin_band_bar
 from backtest.models import ExitReason, PositionSide
 from backtest.sweep import default_backtest_config
 from backtest.wan103_portfolio_leverage_report import PARAMS, _Cell, build_cell
@@ -24,6 +24,7 @@ from backtest.wan110_multi_position_fill_conservatism import (
     HEADLINE_SCENARIO,
     LENS_NAMES,
     MULTI_LEVERAGES,
+    PINNED_BAND_BAR,
     PINNED_OFFSET_BPS,
     PINNED_RSI_GATE_MODE,
     SCENARIO_SINGLE,
@@ -113,12 +114,18 @@ def test_baseline_lens_is_the_pinned_wan103_engine() -> None:
             fill=fill_preset("baseline"),
             seed=0,
             offset_bps=PINNED_OFFSET_BPS,
-            base=ConfluenceParams(rsi_gate_mode=PINNED_RSI_GATE_MODE),
+            base=pin_band_bar(
+                ConfluenceParams(rsi_gate_mode=PINNED_RSI_GATE_MODE), PINNED_BAND_BAR
+            ),
         )
         == PARAMS
     )
     assert PINNED_OFFSET_BPS == 0.0
     assert PINNED_RSI_GATE_MODE == "first_tap_free" != ConfluenceParams().rsi_gate_mode
+    # WAN-132(밴드 정본 전환)로 고정 필드가 셋이 됐다.
+    default_band = ConfluenceParams().deviation_filter
+    assert default_band is not None
+    assert PINNED_BAND_BAR == "tap" != default_band.band_bar
 
 
 # --------------------------------------------------------------------------- #
@@ -159,7 +166,7 @@ def test_build_cell_lens_params_differ_from_default() -> None:
         fill=fill_preset("pen_5bp"),
         seed=0,
         offset_bps=PINNED_OFFSET_BPS,
-        base=ConfluenceParams(rsi_gate_mode=PINNED_RSI_GATE_MODE),
+        base=pin_band_bar(ConfluenceParams(rsi_gate_mode=PINNED_RSI_GATE_MODE), PINNED_BAND_BAR),
     )
     assert lens != PARAMS
     assert lens.fill_penetration_bps == 5.0
@@ -302,15 +309,19 @@ def test_rows_to_frame_keeps_column_order() -> None:
 def test_default_params_untouched_by_this_report() -> None:
     """이 리포트는 채택 기본값을 바꾸지 않는다(기본값 불변 — 이슈 완료기준).
 
-    ⚠️ 이 리포트의 엔진은 **두 필드**(오프셋 · RSI 게이트)에서 채택 기본값과 **의도적으로**
-    갈라져 있다(WAN-112 · WAN-123). 그건 이 리포트가 기본값을 바꿔서가 아니라 **WAN-103의
-    셋업 풀에 고정**돼 있어서다 — 체결 가정 노브는 여전히 기본값을 건드리지 않는다.
+    ⚠️ 이 리포트의 엔진은 **세 필드**(오프셋 · RSI 게이트 · 밴드 표본)에서 채택 기본값과
+    **의도적으로** 갈라져 있다(WAN-112 · WAN-123 · WAN-132). 그건 이 리포트가 기본값을
+    바꿔서가 아니라 **WAN-103의 셋업 풀에 고정**돼 있어서다 — 체결 가정 노브는 여전히
+    기본값을 건드리지 않는다.
     """
     assert ConfluenceParams().fill_penetration_bps == 0.0
     assert ConfluenceParams().fill_dropout_rate == 0.0
     assert (
-        ConfluenceParams(
-            zone_limit_offset_bps=PINNED_OFFSET_BPS, rsi_gate_mode=PINNED_RSI_GATE_MODE
+        pin_band_bar(
+            ConfluenceParams(
+                zone_limit_offset_bps=PINNED_OFFSET_BPS, rsi_gate_mode=PINNED_RSI_GATE_MODE
+            ),
+            PINNED_BAND_BAR,
         )
         == PARAMS
     )

@@ -103,6 +103,7 @@ from backtest.harness import (
     iter_seeds,
     load_market_data,
     normalize_symbol,
+    pin_band_bar,
     run_once,
     slice_market,
 )
@@ -212,8 +213,13 @@ def rung_params(rung: Rung, *, fill: FillPreset, seed: int = 0) -> ConfluencePar
     `build_params(base=...)`로 조립하므로 진입 방식(`entry_mode`)·RSI 판정 기준
     (`rsi_mode`)·체결 가정이 CLI·다른 리포트와 **같은 규칙**으로 묶인다(WAN-41/95 한 세트).
     오프셋·익절 R을 넘기지 않으므로 둘 다 채택 기본값(2bp · 1.5R)을 따라간다.
+
+    ⚠️ **밴드 표본(`band_bar`)만은 당시 값(`tap`)으로 고정한다** — WAN-132가 기본값을
+    `intrabar_live`로 옮겼는데, 이 사다리의 결론(「볼린저만 플러스 부품」·15m OOS
+    +16.20%p)은 탭 봉 종가 밴드 위에서 나왔고 `wan111`/`wan115`/`wan119`/`wan120` CSV와의
+    비트 일치 검산도 그 밴드를 전제한다. 새 밴드에서의 분해는 별도 이슈 소관이다.
     """
-    base = ConfluenceParams().model_copy(update=dict(rung.updates))
+    base = pin_band_bar(ConfluenceParams().model_copy(update=dict(rung.updates)))
     return build_params(entry_mode="zone_limit", fill=fill, seed=seed, base=base)
 
 

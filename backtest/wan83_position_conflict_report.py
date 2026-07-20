@@ -68,6 +68,7 @@ from backtest.harness import (
     Segment,
     detect_order_blocks,
     load_market_data,
+    pin_band_bar,
     segments_for,
     slice_market,
 )
@@ -86,7 +87,10 @@ DEFAULT_TIMEFRAMES: tuple[str, ...] = ("15m", "1h", "4h", "1d")
 #: ⚠️ 오프셋·RSI 게이트를 **명시 고정**한다(WAN-112 / WAN-123): 채택 기본값은 이제 오프셋
 #: 2bp · 게이트 없음(`unconditional`)이지만 이 리포트의 발표 수치는 0bp · 게이트 on에서
 #: 나왔다. 기본값을 따라가게 두면 숫자가 조용히 움직여 본문과 어긋난다.
-PARAMS = ConfluenceParams(zone_limit_offset_bps=0.0, rsi_gate_mode=LEGACY_RSI_GATE_MODE)
+#: WAN-132(밴드 정본 `tap` → `intrabar_live`)도 같은 이유로 고정 대상에 더한다.
+PARAMS = pin_band_bar(
+    ConfluenceParams(zone_limit_offset_bps=0.0, rsi_gate_mode=LEGACY_RSI_GATE_MODE)
+)
 
 SCOPE_SERIES = "series"
 SCOPE_GLOBAL = "global"

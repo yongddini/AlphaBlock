@@ -62,7 +62,7 @@ from pathlib import Path
 import pandas as pd
 from pydantic import BaseModel, ConfigDict
 
-from backtest.harness import LEGACY_RSI_GATE_MODE
+from backtest.harness import LEGACY_RSI_GATE_MODE, pin_band_bar
 from backtest.models import BacktestConfig, PositionSide
 from backtest.substep import SubStep, build_substeps
 from backtest.sweep import default_backtest_config, timeframe_to_ms
@@ -96,7 +96,11 @@ DEFAULT_TIMEFRAMES: tuple[str, ...] = ("15m", "1h")
 #: 이 리포트의 핵심 관찰인 **거래-수익 비대칭**("`pen_5bp`는 거래를 4.7%만 줄이는데 수익은
 #: 사라진다")은 게이트가 켜진 거래 집합에서 잰 값이다. 게이트 제거 뒤의 관통 민감도는
 #: `wan123_*`이 새로 낸다.
-BASE_PARAMS = ConfluenceParams(zone_limit_offset_bps=0.0, rsi_gate_mode=LEGACY_RSI_GATE_MODE)
+#: ⚠️ 밴드 표본(`band_bar`)도 같은 이유로 고정한다 — WAN-132가 기본값을 `intrabar_live`로
+#: 옮겼고, 그 밴드에서는 진입가가 봉내에 움직여 이 표의 거래 집합 자체가 달라진다.
+BASE_PARAMS = pin_band_bar(
+    ConfluenceParams(zone_limit_offset_bps=0.0, rsi_gate_mode=LEGACY_RSI_GATE_MODE)
+)
 
 
 @dataclass(frozen=True)
