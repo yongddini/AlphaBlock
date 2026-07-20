@@ -18,8 +18,8 @@ from datetime import UTC, datetime
 import pandas as pd
 import streamlit as st
 
-from backtest.models import BacktestConfig, BacktestMetrics
-from backtest.report import trades_to_dataframe
+from backtest.models import BacktestConfig, BacktestMetrics, BacktestResult
+from backtest.report import trades_to_dataframe, trades_to_display_frame
 from backtest.sweep import default_backtest_config
 from config import get_settings
 from config.settings import Settings
@@ -43,6 +43,12 @@ from dashboard.health_data import HealthView, OpenPositionView, build_health_vie
 from dashboard.lightweight_chart import BAND_LINE_COLOR, build_chart_html
 from dashboard.live_chart import LIVE_INTERVALS, build_live_config
 from dashboard.pipeline import PipelineResult, run_pipeline
+from dashboard.trade_table import (
+    engine_label_caption,
+    parse_selected_rows,
+    selected_trade_window,
+    style_trade_frame,
+)
 from live.runtime_state import EventRecord
 from paper.parity import build_parity_report
 from paper.performance import build_performance
@@ -262,6 +268,49 @@ def _render_run_config_badge(
         st.caption(f"⚙️ {text}")
 
 
+#: 거래 표 위젯 key. 차트가 표보다 **위에** 그려지므로, 선택된 행을 알려면 위젯을 만들기
+#: 전에 지난 실행의 선택 상태를 `st.session_state`에서 꺼내야 한다(WAN-146).
+_TRADE_TABLE_KEY = "trade_table_selection"
+
+
+def _selected_trade_rows() -> list[int]:
+    """거래 표에서 선택된 행 위치. 아직 표가 없거나 선택이 없으면 빈 목록."""
+    return parse_selected_rows(st.session_state.get(_TRADE_TABLE_KEY))
+
+
+def _render_trade_table(
+    backtest: BacktestResult,
+    conf_params: ConfluenceParams,
+    ob_params: OrderBlockParams,
+    bt_config: BacktestConfig,
+) -> None:
+    """거래 표 (WAN-146) — KST 시각·진입금액·시드 변화 + 행 선택 → 차트 점프.
+
+    표의 내용은 `trades_to_display_frame`(대시보드와 CSV 내보내기 공용)이 만들고, 여기서는
+    Streamlit 위젯으로 그리기만 한다. 매 행에서 값이 같던 엔진 라벨 6개는 표 본문에서
+    빼되 아래 expander에 원본 컬럼 전체와 함께 **보존**한다(WAN-65 — 삭제가 아니다).
+    """
+    st.subheader("거래 목록")
+    st.caption(
+        "시각은 **한국시간(KST)** 입니다(내부 계산·저장은 UTC 그대로). "
+        "행을 누르면 위 차트가 그 거래의 진입~청산 구간으로 이동합니다."
+    )
+    st.dataframe(
+        style_trade_frame(trades_to_display_frame(backtest)),
+        use_container_width=True,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        key=_TRADE_TABLE_KEY,
+    )
+    with st.expander("실행 설정 · 원본 컬럼(모든 거래 공통)"):
+        st.caption(f"⚙️ {engine_label_caption(backtest, conf_params, ob_params, bt_config)}")
+        st.dataframe(
+            trades_to_dataframe(backtest, confluence=conf_params, order_block=ob_params),
+            use_container_width=True,
+        )
+
+
 def _render_analysis(settings: Settings) -> None:
     db_path = settings.db_path
 
@@ -446,6 +495,13 @@ def _render_analysis(settings: Settings) -> None:
         else None
     )
 
+    # 거래 표에서 고른 행 → 차트 이동 구간(WAN-146). 표는 차트보다 아래에 그려지므로
+    # 지난 실행의 선택 상태를 읽는다. 시점 재생 중이면(거래 마커 자체를 안 그린다) 이동도
+    # 하지 않고, 선택된 거래가 현재 기간 밖이면 빈 화면으로 뛰지 않게 무시한다.
+    focus = selected_trade_window(backtest, _selected_trade_rows()) if replay_ms is None else None
+    if focus is not None and not (start_ms <= focus[0] <= end_ms):
+        focus = None
+
     st.subheader(f"{symbol} · {timeframe}")
     _render_run_config_badge(conf_params, ob_params, bt_config, backtest.metrics)
     chart_height = 700
@@ -460,9 +516,14 @@ def _render_analysis(settings: Settings) -> None:
             theme=chart_theme,
             height=chart_height,
             live=live_config,
+            focus=focus,
         ),
         height=chart_height,
     )
+    if focus is not None:
+        st.caption(
+            "🔎 선택한 거래 구간을 보고 있습니다. 표에서 선택을 해제하면 전체 구간으로 돌아갑니다."
+        )
     if live_config is not None:
         st.caption(
             "🟢 실시간: 형성 중인 봉과 볼린저 하단선만 옅은 색으로 라이브 갱신됩니다"
@@ -485,8 +546,7 @@ def _render_analysis(settings: Settings) -> None:
 
     st.plotly_chart(build_equity_chart(backtest, theme=chart_theme), use_container_width=True)
 
-    st.subheader("거래 목록")
-    st.dataframe(trades_to_dataframe(backtest), use_container_width=True)
+    _render_trade_table(backtest, conf_params, ob_params, bt_config)
 
 
 # --- 운영 상태(Health) 탭 ---------------------------------------------------

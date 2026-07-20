@@ -6,11 +6,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from datetime import UTC, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from backtest.models import BacktestResult, PositionSide
+from backtest.models import BacktestResult, ExitReason, PositionSide, TradeFill
 from strategy.models import ConfluenceParams, OrderBlockParams
 
 
@@ -87,6 +90,146 @@ def trades_to_dataframe(
         "funding_coverage",
     ]
     return pd.DataFrame(rows, columns=columns)
+
+
+# --- 사람이 읽는 거래 표 (WAN-146 · WAN-106 공용) -----------------------------
+#
+# 화면(대시보드)과 파일(CSV 내보내기)이 **같은 함수**를 쓰게 하려고 여기에 둔다.
+# 각자 구현하면 두 곳의 숫자가 갈라지고, 이 저장소는 그 부류의 사고(WAN-91/95/100/112)로
+# 여러 번 결론이 뒤집혔다. `trades_to_dataframe`(엔진 원본 컬럼)은 그대로 두고, 이
+# 함수가 그 위에 **표시용 파생 컬럼**(KST 시각·명목금액·시드 변화·한글 사유)을 얹는다.
+
+#: 표시 전용 시간대. ⚠️ **저장·계산은 UTC 그대로다** — 데이터에 로컬 시각을 섞으면
+#: 백테스트 재현이 깨진다. 변환은 이 표시 계층에서만 일어난다.
+KST = ZoneInfo("Asia/Seoul")
+
+#: 청산 사유 한글 라벨. 원문(`stop_loss`)은 사용자가 읽는 표에 그대로 나가면 안 된다.
+EXIT_REASON_LABELS: Mapping[ExitReason, str] = {
+    ExitReason.TAKE_PROFIT: "익절",
+    ExitReason.PARTIAL_TAKE_PROFIT: "부분익절",
+    ExitReason.STOP_LOSS: "손절",
+    ExitReason.END_OF_DATA: "기간종료",
+}
+
+SIDE_LABELS: Mapping[PositionSide, str] = {
+    PositionSide.LONG: "롱",
+    PositionSide.SHORT: "숏",
+}
+
+COL_NO = "#"
+COL_SIDE = "방향"
+COL_ENTRY_KST = "진입시각(KST)"
+COL_EXIT_KST = "청산시각(KST)"
+COL_ENTRY_UTC = "진입시각(UTC)"
+COL_EXIT_UTC = "청산시각(UTC)"
+COL_HOLDING_HOURS = "보유(시간)"
+COL_ENTRY_PRICE = "진입가"
+COL_EXIT_PRICE = "청산가"
+COL_NUM_EXITS = "청산횟수"
+COL_QUANTITY = "수량"
+COL_NOTIONAL = "진입금액"
+COL_NOTIONAL_PCT = "시드대비%"
+COL_EXIT_REASON = "청산사유"
+COL_PNL = "손익"
+COL_RETURN_PCT = "수익률%"
+COL_EQUITY_BEFORE = "시드(전)"
+COL_EQUITY_AFTER = "시드(후)"
+
+
+def _fmt_time_kst(ms: int) -> str:
+    return datetime.fromtimestamp(ms / 1000, tz=KST).strftime("%Y-%m-%d %H:%M")
+
+
+def _fmt_time_utc(ms: int) -> str:
+    return datetime.fromtimestamp(ms / 1000, tz=UTC).strftime("%Y-%m-%d %H:%M")
+
+
+def _avg_exit_price(result_trade_exits: list[TradeFill]) -> float:
+    """부분 청산이 있으면 수량 가중 평균 체결가. 청산이 없으면 NaN(있을 수 없는 값)."""
+    total_qty = sum(f.quantity for f in result_trade_exits)
+    if total_qty <= 0:
+        return float("nan")
+    return sum(f.price * f.quantity for f in result_trade_exits) / total_qty
+
+
+def trades_to_display_frame(result: BacktestResult, *, include_utc: bool = False) -> pd.DataFrame:
+    """거래 목록을 **사람이 읽는** 표로 (WAN-146 · WAN-106 공용).
+
+    `trades_to_dataframe`가 엔진 원본 컬럼을 그대로 내보내는 반면, 이 함수는 사용자가
+    표에서 답을 찾는 세 질문("언제 샀나 · 얼마 넣었나 · 내 돈이 어떻게 변했나")에 맞춰
+    컬럼을 고르고 파생값을 만든다:
+
+    * **시각은 KST**(`Asia/Seoul`). 표시 계층 전용이고 내부는 UTC 그대로다.
+      `include_utc=True`면 UTC 열을 함께 싣는다(파일 내보내기 — WAN-106).
+    * **진입금액** = 진입 체결가 × 진입 수량(명목). 그 시점 시드 대비 비중도 함께.
+    * **시드 변화** = `시드(전)` → `시드(후)`. 초기자본에서 시작해 거래별 순손익을
+      누적한 값이라 **마지막 행의 `시드(후)`는 `metrics.final_equity`와 같다**
+      (엔진의 현금 잔고가 곧 초기자본 + 실현손익 누계이기 때문 — 테스트로 고정).
+    * **청산사유는 한글**(익절/부분익절/손절/기간종료).
+
+    `청산가`는 부분 청산이 있으면 **수량 가중 평균** 체결가이고, `청산사유`는 마지막
+    청산의 사유다(`청산횟수`로 부분 청산 여부를 함께 드러낸다).
+
+    매 행에서 값이 같은 엔진 라벨(`entry_mode` 등)은 **싣지 않는다** — 표를 밀어내기
+    때문이며, 대신 호출부가 표 밖(캡션·expander)에 보존한다(WAN-65의 요구는 "그 파일만
+    봐도 설정을 안다"이지 "매 행에 반복한다"가 아니다).
+    """
+    rows: list[dict[str, object]] = []
+    equity = result.metrics.initial_capital
+    for no, tr in enumerate(result.trades, start=1):
+        equity_before = equity
+        equity_after = equity_before + tr.realized_pnl
+        equity = equity_after
+        notional = tr.entry_price * tr.quantity
+        row: dict[str, object] = {
+            COL_NO: no,
+            COL_SIDE: SIDE_LABELS[tr.side],
+            COL_ENTRY_KST: _fmt_time_kst(tr.entry_time),
+            COL_EXIT_KST: _fmt_time_kst(tr.exit_time),
+            COL_HOLDING_HOURS: (tr.exit_time - tr.entry_time) / 3_600_000,
+            COL_ENTRY_PRICE: tr.entry_price,
+            COL_EXIT_PRICE: _avg_exit_price(tr.exits),
+            COL_NUM_EXITS: len(tr.exits),
+            COL_QUANTITY: tr.quantity,
+            COL_NOTIONAL: notional,
+            COL_NOTIONAL_PCT: (notional / equity_before * 100.0) if equity_before else 0.0,
+            COL_EXIT_REASON: EXIT_REASON_LABELS.get(tr.exits[-1].reason, tr.exits[-1].reason.value),
+            COL_PNL: tr.realized_pnl,
+            COL_RETURN_PCT: tr.return_pct * 100.0,
+            COL_EQUITY_BEFORE: equity_before,
+            COL_EQUITY_AFTER: equity_after,
+        }
+        if include_utc:
+            row[COL_ENTRY_UTC] = _fmt_time_utc(tr.entry_time)
+            row[COL_EXIT_UTC] = _fmt_time_utc(tr.exit_time)
+        rows.append(row)
+    return pd.DataFrame(rows, columns=list(display_columns(include_utc=include_utc)))
+
+
+def display_columns(*, include_utc: bool = False) -> tuple[str, ...]:
+    """`trades_to_display_frame`의 컬럼 순서. 거래가 0건이어도 표 골격이 같아야 한다."""
+    columns = [
+        COL_NO,
+        COL_SIDE,
+        COL_ENTRY_KST,
+        COL_EXIT_KST,
+        COL_HOLDING_HOURS,
+        COL_ENTRY_PRICE,
+        COL_EXIT_PRICE,
+        COL_NUM_EXITS,
+        COL_QUANTITY,
+        COL_NOTIONAL,
+        COL_NOTIONAL_PCT,
+        COL_EXIT_REASON,
+        COL_PNL,
+        COL_RETURN_PCT,
+        COL_EQUITY_BEFORE,
+        COL_EQUITY_AFTER,
+    ]
+    if include_utc:
+        columns.insert(columns.index(COL_EXIT_KST) + 1, COL_ENTRY_UTC)
+        columns.insert(columns.index(COL_ENTRY_UTC) + 1, COL_EXIT_UTC)
+    return tuple(columns)
 
 
 def equity_to_dataframe(result: BacktestResult) -> pd.DataFrame:

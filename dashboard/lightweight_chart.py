@@ -402,6 +402,13 @@ def _exit_marker_text(
 ) -> str:
     """청산 마커 텍스트: 사유(익절/손절/강제청산) · 닿은 선(익절) · 손익%· R 배수.
 
+    ⚠️ **화면에는 더 이상 그리지 않는다**(WAN-146 사용자 스펙: 마커는 화살표만) — 긴
+    문자열이 거래가 몰린 구간에서 서로 겹쳐 읽을 수 없었다. 그 정보는 거래 표가 컬럼으로
+    보여준다(차트는 눈으로 훑고, 표는 숫자를 읽는다). 함수를 남기는 이유는 여기 담긴
+    **R 배수의 계약**(리스크 기준 = 오더블록 무효화 경계 = `BacktestEngine._sizing_stop_price`와
+    동일 규칙) 때문이다 — 지우면 그 지식이 사라지고, 나중에 툴팁·표 컬럼으로 되살릴
+    여지도 남는다.
+
     R 배수의 리스크 기준은 오더블록 무효화 경계(`BacktestEngine._sizing_stop_price`와
     동일 규칙 — 롱은 존 하단, 숏은 존 상단)다. 체결가는 슬리피지·수수료가 반영된
     값이라 손익%는 근사치(수수료 제외 가격 기준)다.
@@ -431,44 +438,75 @@ def _exit_marker_text(
 
 def _entry_exit_markers(
     backtest: BacktestResult,
-    rsi_by_time: dict[int, float],
-    signals: Sequence[OrderBlockSignal],
-    tp_lines_by_time: dict[str, dict[int, float]],
     theme: ChartTheme,
 ) -> list[dict[str, object]]:
-    """진입/청산 마커. 진입 마커는 방향·RSI를, 청산 마커는 사유·닿은 선·손익%·R을 담는다."""
-    signal_by_entry = _signals_by_trigger_time(signals)
+    """진입/청산 마커 — **화살표만**(WAN-146 사용자 스펙).
+
+    텍스트는 전부 뺐다. 진입의 `"롱 RSI28"`도, 청산의
+    `"익절 · EMA60 @ 43,250.5 · +1.82% · R+1.51"`도 거래가 몰린 구간에서 서로 겹쳐
+    차트를 읽을 수 없게 만들었다. 그 숫자들은 거래 표가 컬럼으로 보여준다.
+
+    모양은 **전부 화살표**다(청산의 `circle`도 화살표로 바꿨다). 위치는 그대로 둔다 —
+    진입은 캔들 밑(`belowBar`), 청산은 캔들 위(`aboveBar`, 숏은 반대). 위아래로 갈려
+    있어야 어느 쪽인지 안 헷갈린다는 사용자 판단이라 `position` 로직은 건드리지 않았고,
+    그래서 화살표 방향은 **붙는 쪽을 가리키게** 잡는다(밑에서 위를 찌르는 `arrowUp`,
+    위에서 아래를 찌르는 `arrowDown`).
+
+    색도 그대로다 — 진입 파랑 / 익절 초록 / 손절 빨강(테마 필드 `entry_marker`·
+    `exit_take_profit`·`exit_stop_loss`).
+    """
     exit_colors = theme.exit_marker_colors()
     markers: list[dict[str, object]] = []
     for trade in backtest.trades:
         is_long = trade.side is PositionSide.LONG
-        rsi_value = _rsi_at(rsi_by_time, trade.entry_time)
-        rsi_text = f"{rsi_value:.0f}" if rsi_value is not None else "—"
         markers.append(
             {
                 "time": trade.entry_time // 1000,
                 "position": "belowBar" if is_long else "aboveBar",
                 "color": theme.entry_marker,
                 "shape": "arrowUp" if is_long else "arrowDown",
-                "text": f"{'롱' if is_long else '숏'} RSI{rsi_text}",
             }
         )
-        signal = signal_by_entry.get(trade.entry_time)
         for fill in trade.exits:
-            text = _exit_marker_text(
-                fill.price, fill.reason, trade.side, trade.entry_price, signal, tp_lines_by_time
-            )
             markers.append(
                 {
                     "time": fill.time // 1000,
                     "position": "aboveBar" if is_long else "belowBar",
                     "color": exit_colors.get(fill.reason, theme.exit_default),
-                    "shape": "circle",
-                    "text": text,
+                    "shape": "arrowDown" if is_long else "arrowUp",
                 }
             )
     markers.sort(key=lambda m: int(m["time"]))  # type: ignore[call-overload]
     return markers
+
+
+#: 표 행을 눌러 이동한 구간의 좌우 여유 — 구간 길이 대비 비율과 최소 봉 수 중 큰 쪽
+#: (WAN-146). 손절 시점 한 점만 보여주면 왜 손절됐는지 맥락이 안 보이고, 짧은 거래
+#: (진입·청산이 같은 봉)는 비율만으로는 여유가 0이 된다.
+_FOCUS_PAD_RATIO = 0.3
+_FOCUS_PAD_MIN_BARS = 12
+
+
+def _bar_interval_ms(times_ms: Sequence[int]) -> int:
+    """봉 간격(ms). 봉이 하나뿐이면 0 — 호출부가 여유 계산에서 알아서 접힌다."""
+    if len(times_ms) < 2:
+        return 0
+    diffs = [b - a for a, b in zip(times_ms, times_ms[1:], strict=False) if b > a]
+    if not diffs:
+        return 0
+    return sorted(diffs)[len(diffs) // 2]
+
+
+def _focus_range(times_ms: Sequence[int], focus: tuple[int, int]) -> dict[str, int]:
+    """(진입 ms, 청산 ms) → 차트에 보여줄 (from, to) 초 단위 구간 + 좌우 여유.
+
+    거래 **전체**가 화면에 들어와야 "왜 여기서 손절됐지"에 답이 된다 — 점이 아니라 구간으로
+    잡고, 앞뒤로 여유를 둔다.
+    """
+    start_ms, end_ms = (focus[0], focus[1]) if focus[0] <= focus[1] else (focus[1], focus[0])
+    interval = _bar_interval_ms(times_ms)
+    pad = max(int((end_ms - start_ms) * _FOCUS_PAD_RATIO), interval * _FOCUS_PAD_MIN_BARS)
+    return {"from": (start_ms - pad) // 1000, "to": (end_ms + pad) // 1000}
 
 
 _TEMPLATE = """
@@ -492,7 +530,14 @@ _TEMPLATE = """
       horzLines: { color: theme.gridColor },
     },
     rightPriceScale: { borderVisible: false },
-    timeScale: { borderVisible: false, timeVisible: true, secondsVisible: false },
+    timeScale: {
+      borderVisible: false,
+      timeVisible: true,
+      secondsVisible: false,
+      // 과거 거래를 보고 있는데(payload.focus) 라이브로 새 봉이 들어와 화면이 최신으로
+      // 끌려가면 안 된다(WAN-146 × WAN-147).
+      shiftVisibleRangeOnNewBar: !payload.focus,
+    },
   });
 
   // 상승 하양 / 하락 빨강(WAN-67). 흰 몸통은 라이트 배경에서 사라지므로 그 테마에서만
@@ -663,6 +708,8 @@ _TEMPLATE = """
 
   let loadedFrom = Math.max(0, payload.candles.length - payload.initialBars);
   function applyFrom(idx) {
+    loadedFrom = Math.max(0, idx);
+    idx = loadedFrom;
     candleSeries.setData(payload.candles.slice(idx));
     if (rsiSeries) {
       rsiSeries.setData(payload.rsi.slice(idx).filter(Boolean));
@@ -676,7 +723,20 @@ _TEMPLATE = """
     reapplyLive();
   }
   applyFrom(loadedFrom);
-  chart.timeScale().fitContent();
+
+  // 표에서 고른 거래로 점프(WAN-146). 그 구간이 아직 안 실렸으면 **먼저 로드 범위를
+  // 넓힌다** — 지연 로딩 때문에 1년 전 손절 거래를 누르면 빈 화면으로 점프하기 때문이다.
+  // 넓히는 수단은 좌측 스크롤이 쓰는 것과 같은 `applyFrom` 하나다(로직 이중화 금지).
+  if (payload.focus) {
+    let target = loadedFrom;
+    while (target > 0 && payload.candles[target].time > payload.focus.from) {
+      target = Math.max(0, target - payload.initialBars);
+    }
+    if (target !== loadedFrom) applyFrom(target);
+    chart.timeScale().setVisibleRange({ from: payload.focus.from, to: payload.focus.to });
+  } else {
+    chart.timeScale().fitContent();
+  }
 
   let loading = false;
   chart.timeScale().subscribeVisibleLogicalRangeChange(function (range) {
@@ -684,9 +744,7 @@ _TEMPLATE = """
     if (range.from < 20) {
       loading = true;
       const savedRange = chart.timeScale().getVisibleRange();
-      const newFrom = Math.max(0, loadedFrom - payload.initialBars);
-      loadedFrom = newFrom;
-      applyFrom(loadedFrom);
+      applyFrom(loadedFrom - payload.initialBars);
       if (savedRange) chart.timeScale().setVisibleRange(savedRange);
       loading = false;
     }
@@ -928,6 +986,7 @@ def build_chart_html(
     height: int = 700,
     initial_bars: int = _INITIAL_BARS,
     live: LiveChartConfig | None = None,
+    focus: tuple[int, int] | None = None,
 ) -> str:
     """캔들+오더블록+RSI+익절 목표선 패널을 그리는 자족형 HTML을 만든다.
 
@@ -936,9 +995,12 @@ def build_chart_html(
 
     `conf_params`를 주면 `display_ema_lengths`(차트 표시선)/`tp_vwma_length` 선을
     캔들 패널에 오버레이하고(익절 판정선 `tp_ema_lengths`와 별개 — WAN-66)
-    (`visible_lines`로 표시할 키만 필터, `None`이면 전부), `backtest`가 있으면 청산
-    마커에 사유(익절/손절)·닿은 선·손익%·R 배수를 담는다. `signals`는 각 거래를 발생시킨
-    시그널(오더블록·계획 청산)을 역추적하는 데 쓰인다(WAN-59 후속).
+    (`visible_lines`로 표시할 키만 필터, `None`이면 전부), `backtest`가 있으면 진입·청산
+    **화살표 마커**를 얹는다(색만으로 구분 — 진입 파랑 / 익절 초록 / 손절 빨강).
+
+    ⚠️ **마커에 텍스트는 없다**(WAN-146) — 사유·손익%·R 배수는 거래 표가 컬럼으로
+    보여준다. `signals`는 그 텍스트를 만들던 `_exit_marker_text` 경로의 입력이라
+    시그니처에 남겨 뒀지만 **지금 렌더에는 쓰이지 않는다**(WAN-59 후속에서 도입).
 
     `theme`(`"light"`/`"dark"`, 기본 다크)는 배경·격자·존·마커·RSI 색을 결정한다 —
     Streamlit 테마에 맞춰 호출부에서 넘긴다(WAN-55).
@@ -947,6 +1009,11 @@ def build_chart_html(
     그린다. `live`(`dashboard.live_chart.build_live_config`)를 주면 브라우저가 바이낸스
     웹소켓에 직접 붙어 **형성 중인 봉과 그 밴드 값**을 갱신한다(WAN-147) — 표시 계층
     전용이라 `backtest` 표·지표는 확정봉 기준 그대로다.
+
+    `focus`(진입 ms, 청산 ms)를 주면 그 거래 구간(+앞뒤 여유)으로 화면을 맞춘다
+    (WAN-146 — 거래 표에서 행을 고른 경우). 그 구간이 지연 로딩 범위 밖이면 캔들을 먼저
+    더 실은 뒤 이동하므로 오래된 거래를 골라도 빈 화면이 되지 않는다. 이동은 **보는
+    구간만** 바꾼다 — 거래·지표 계산에는 전혀 관여하지 않는다.
     """
     chart_theme = resolve_theme(theme)
     frame = df.sort_values("open_time").reset_index(drop=True)
@@ -968,9 +1035,6 @@ def build_chart_html(
     ]
 
     rsi_full = compute_rsi(frame, length=_RSI_LENGTH)
-    rsi_by_time: dict[int, float] = dict(
-        zip(frame["open_time"].tolist(), rsi_full.tolist(), strict=True)
-    )
     rsi_points: list[dict[str, float] | None] = [
         None if (v is None or math.isnan(v)) else {"time": t, "value": round(v, 4)}
         for t, v in zip(times_sec, rsi_full.tolist(), strict=True)
@@ -978,9 +1042,6 @@ def build_chart_html(
 
     tp_lines = _tp_line_series(frame, conf_params) if conf_params is not None else {}
     times_ms: list[int] = frame["open_time"].tolist()
-    tp_lines_by_time: dict[str, dict[int, float]] = {
-        key: dict(zip(times_ms, series.tolist(), strict=True)) for key, series in tp_lines.items()
-    }
     allowed_lines = tp_lines.keys() if visible_lines is None else visible_lines
     lines_payload: list[dict[str, object]] = []
     ema_index = 0
@@ -993,8 +1054,8 @@ def build_chart_html(
         # 소수점 2자리로 반올림한다(가격 표시 정밀도로 충분 — `_fmt_price`와 동일).
         # EMA/VWMA는 부동소수점 나눗셈 결과라 반올림 없이는 유효숫자가 15~17자리까지
         # 늘어나 6개 선 전체(3년 15m ≈ 10만 봉)를 실으면 페이로드가 크게 불어난다.
-        # 매칭(`_touched_line_label`)은 이 반올림값이 아니라 `tp_lines_by_time`의
-        # 원본 정밀도 값을 쓰므로 정확도에 영향 없다.
+        # (`_touched_line_label`이 선을 되짚을 때는 이 반올림값이 아니라 원본 정밀도
+        # 시리즈를 쓴다 — 그 경로는 지금 화면에 안 그려진다, WAN-146.)
         points: list[dict[str, float] | None] = [
             None if math.isnan(v) else {"time": t, "value": round(v, 2)}
             for t, v in zip(times_sec, series.tolist(), strict=True)
@@ -1030,11 +1091,8 @@ def build_chart_html(
             live_payload["bandParams"] = None
 
     boxes = _zone_boxes(order_blocks, last_bar_ms, chart_theme)
-    markers = (
-        _entry_exit_markers(backtest, rsi_by_time, signals, tp_lines_by_time, chart_theme)
-        if backtest is not None
-        else []
-    )
+    markers = _entry_exit_markers(backtest, chart_theme) if backtest is not None else []
+    focus_payload = _focus_range(times_ms, focus) if focus is not None else None
 
     payload: dict[str, object] = {
         "candles": candles,
@@ -1044,6 +1102,7 @@ def build_chart_html(
         "lines": lines_payload,
         "band": band_payload,
         "live": live_payload,
+        "focus": focus_payload,
         "initialBars": min(initial_bars, len(candles)),
         "priceColors": {
             "up": chart_theme.bull_candle,

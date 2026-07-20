@@ -16,14 +16,16 @@ import pandas as pd
 import pytest
 
 from backtest.engine import run_backtest
-from backtest.models import BacktestConfig
+from backtest.models import BacktestConfig, ExitReason, PositionSide
 from dashboard.lightweight_chart import (
     _BAND_LINE_WIDTH,
     _EMA_LENGTH_COLORS_DARK,
     _EMA_LINE_PALETTE,
+    _INITIAL_BARS,
     _MA_LINE_WIDTH,
     _RSI_LENGTH,
     BAND_LINE_COLOR,
+    _exit_marker_text,
     build_chart_html,
 )
 from dashboard.live_chart import LiveChartConfig, build_live_config
@@ -138,7 +140,8 @@ def test_build_chart_html_one_box_per_zone_no_consolidation() -> None:
     assert len(payload["boxes"]) == 50  # type: ignore[arg-type]
 
 
-def test_build_chart_html_adds_entry_marker_with_rsi_in_text() -> None:
+def test_markers_are_text_free_arrows() -> None:
+    """WAN-146: 마커는 화살표만 — 진입의 RSI 문구도, 청산의 손익 문구도 없다."""
     df = _df(30)
     signal = OrderBlockSignal(
         direction=OrderBlockDirection.BULLISH,
@@ -152,10 +155,13 @@ def test_build_chart_html_adds_entry_marker_with_rsi_in_text() -> None:
     payload = _payload(build_chart_html(df, [], backtest))
 
     markers = payload["markers"]
-    assert len(markers) >= 1  # type: ignore[arg-type]
-    entry = markers[0]  # type: ignore[index]
-    assert "롱" in entry["text"]
-    assert "RSI" in entry["text"]
+    assert isinstance(markers, list)
+    assert len(markers) >= 2
+    assert all("text" not in m for m in markers)
+    # 롱: 진입은 캔들 밑에서 위를 찌르고(현행 위치 유지), 청산은 캔들 위에서 아래를 찌른다.
+    entry, exit_marker = markers[0], markers[-1]
+    assert (entry["position"], entry["shape"]) == ("belowBar", "arrowUp")
+    assert (exit_marker["position"], exit_marker["shape"]) == ("aboveBar", "arrowDown")
 
 
 def test_build_chart_html_no_markers_without_backtest() -> None:
@@ -220,9 +226,9 @@ def test_build_chart_html_visible_lines_filters_overlay() -> None:
     assert keys == {"ema_20"}
 
 
-def test_exit_marker_labels_touched_ema_line_and_pnl() -> None:
+def test_exit_marker_text_still_labels_touched_ema_line_and_pnl() -> None:
+    """WAN-146: 화면에서는 뺐지만 텍스트 조립 함수(와 그 R 배수 계약)는 살아 있다."""
     df = _df(30)
-    conf_params = ConfluenceParams(display_ema_lengths=(20,), tp_vwma_length=None)
     frame = df.sort_values("open_time").reset_index(drop=True)
     ema_20 = ema(frame, length=20)
     exit_time = 25 * _STEP
@@ -238,14 +244,16 @@ def test_exit_marker_labels_touched_ema_line_and_pnl() -> None:
             time=exit_time, price=tp_price, reason=SignalExitReason.TAKE_PROFIT
         ),
     )
-    backtest = run_backtest(df, [signal], BacktestConfig())
 
-    payload = _payload(build_chart_html(df, [], backtest, [signal], conf_params=conf_params))
+    text = _exit_marker_text(
+        tp_price,
+        ExitReason.TAKE_PROFIT,
+        PositionSide.LONG,
+        100.0,
+        signal,
+        {"ema_20": {exit_time: tp_price}},
+    )
 
-    markers = payload["markers"]
-    assert len(markers) >= 1  # type: ignore[arg-type]
-    exit_marker = markers[-1]  # type: ignore[index]
-    text = exit_marker["text"]
     assert "익절 · EMA 20" in text
     assert "%" in text
 
@@ -434,8 +442,7 @@ def test_markers_follow_theme() -> None:
     assert light_entry["color"] == "#1e88e5"
 
 
-def test_exit_marker_labels_stop_loss_as_order_block_invalidation() -> None:
-    df = _df(30)
+def test_exit_marker_text_labels_stop_loss_as_order_block_invalidation() -> None:
     ob = _order_block(top=95.0, bottom=90.0)
     signal = OrderBlockSignal(
         direction=OrderBlockDirection.BULLISH,
@@ -445,16 +452,12 @@ def test_exit_marker_labels_stop_loss_as_order_block_invalidation() -> None:
         status="active",
         planned_exit=PlannedExit(time=15 * _STEP, price=92.0, reason=SignalExitReason.STOP_LOSS),
     )
-    backtest = run_backtest(df, [signal], BacktestConfig())
 
-    payload = _payload(build_chart_html(df, [], backtest, [signal]))
+    text = _exit_marker_text(92.0, ExitReason.STOP_LOSS, PositionSide.LONG, 100.0, signal, {})
 
-    markers = payload["markers"]
-    assert len(markers) >= 1  # type: ignore[arg-type]
-    exit_marker = markers[-1]  # type: ignore[index]
-    text = exit_marker["text"]
     assert "손절 · OB 무효화" in text
-    assert "R" in text
+    # R 배수의 리스크 기준은 오더블록 무효화 경계(롱=존 하단 90) — 진입가 100 대비 10%.
+    assert "R-0.80" in text
 
 
 # --- 볼린저 하단선 + 실시간 갱신 (WAN-147) -----------------------------------
@@ -537,6 +540,79 @@ def test_live_band_disabled_when_band_line_not_drawn() -> None:
     assert live["bandCloses"] is None
     assert live["bandParams"] is None
     assert payload["band"] is None
+
+
+# --- 표 행 선택 → 차트 구간 점프 (WAN-146) -----------------------------------
+
+
+def test_focus_absent_by_default() -> None:
+    payload = _payload(build_chart_html(_df(10), []))
+
+    assert payload["focus"] is None
+
+
+def test_focus_spans_the_trade_with_padding_on_both_sides() -> None:
+    """점(點)이 아니라 구간이다 — 진입~청산 전체 + 앞뒤 여유가 화면에 들어와야 한다."""
+    df = _df(30)
+
+    payload = _payload(build_chart_html(df, [], focus=(10 * _STEP, 14 * _STEP)))
+
+    focus = payload["focus"]
+    assert isinstance(focus, dict)
+    assert focus["from"] < 10 * _STEP // 1000
+    assert focus["to"] > 14 * _STEP // 1000
+
+
+def test_focus_pads_even_when_entry_and_exit_share_a_bar() -> None:
+    """같은 봉에서 진입·청산한 거래도 여유가 0이 되면 안 된다(빈 구간 점프 방지)."""
+    df = _df(30)
+
+    payload = _payload(build_chart_html(df, [], focus=(10 * _STEP, 10 * _STEP)))
+
+    focus = payload["focus"]
+    assert isinstance(focus, dict)
+    assert focus["to"] - focus["from"] >= 2 * _STEP // 1000
+
+
+def test_focus_older_than_initial_render_window_still_has_candles_loaded() -> None:
+    """🚨 지연 로딩 범위 밖(오래된) 거래를 골라도 빈 화면이 되면 안 된다.
+
+    캔들은 처음부터 전량 임베드되고 초기 렌더만 `initialBars`로 제한되므로, JS가
+    `payload.focus.from`까지 로드 범위를 넓힐 수 있어야 한다 — 그 구간의 캔들이
+    페이로드에 실제로 들어 있는지(그리고 초기 창 밖인지) 확인한다.
+    """
+    df = _df(60)
+    initial_bars = 10
+    focus_ms = 5 * _STEP
+
+    payload = _payload(
+        build_chart_html(df, [], initial_bars=initial_bars, focus=(focus_ms, 6 * _STEP))
+    )
+
+    candles = payload["candles"]
+    assert isinstance(candles, list)
+    assert payload["initialBars"] == initial_bars
+    first_rendered = candles[len(candles) - initial_bars]["time"]
+    assert first_rendered > focus_ms // 1000  # 초기 창 밖 = 확장이 필요한 상황
+    assert candles[0]["time"] <= focus_ms // 1000  # 그래도 캔들은 실려 있다
+
+
+def test_focus_freezes_auto_shift_on_new_live_bar() -> None:
+    """과거 구간을 보는 중에 라이브 새 봉이 화면을 최신으로 끌어가면 안 된다."""
+    df = _df(30)
+
+    focused = build_chart_html(df, [], focus=(5 * _STEP, 6 * _STEP))
+    plain = build_chart_html(df, [])
+
+    assert "shiftVisibleRangeOnNewBar: !payload.focus" in focused
+    assert _payload(focused)["focus"] is not None
+    assert _payload(plain)["focus"] is None
+
+
+def test_default_initial_bars_constant_is_used_when_not_overridden() -> None:
+    payload = _payload(build_chart_html(_df(3), []))
+
+    assert payload["initialBars"] == min(_INITIAL_BARS, 3)
 
 
 def test_chart_script_is_valid_javascript() -> None:
