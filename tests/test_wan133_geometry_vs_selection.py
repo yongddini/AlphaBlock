@@ -130,10 +130,9 @@ def test_stop_override_none_return_excludes_setup() -> None:
     assert stats.filled == 0
 
 
-def test_stop_override_rejected_on_live_band() -> None:
-    """봉내 라이브 밴드는 1R을 체결 순간에 내므로 손절 오버라이드를 거부한다."""
-    htf, one_min = _synthetic_pair()
-    params = ConfluenceParams(
+def _live_band_params() -> ConfluenceParams:
+    """채택 기본값의 밴드(WAN-132 `intrabar_live`)를 쓰는 합성 파라미터."""
+    return ConfluenceParams(
         entry_mode="zone_limit",
         rsi_mode="realtime",
         short_enabled=True,
@@ -142,13 +141,46 @@ def test_stop_override_rejected_on_live_band() -> None:
         ),
     )
 
-    def any_stop(ctx: StopLossContext) -> float | None:
-        return ctx.entry_price
 
-    with pytest.raises(ValueError, match="stop_loss_override"):
-        build_zone_limit_candidates(
-            htf, one_min, "1h", params=params, cfg=_cfg(), stop_loss_override=any_stop
-        )
+def test_overrides_are_accepted_on_live_band() -> None:  # WAN-143 §0
+    """봉내 라이브 밴드가 두 오버라이드를 **더 이상 거부하지 않는다**.
+
+    WAN-132가 진입가 정본을 `intrabar_live`로 옮긴 뒤 두 훅은 `ValueError`로 막혀 있었다
+    — WAN-143 §0(사용자 결정 `배선-새밴드`)이 훅을 체결 순간으로 옮겨 그 차단을 풀었다.
+    훅이 **체결 순간의 진입가로 불리는지**는 공급자 단위(`_IntrabarLiveLimit.resolve_exits`,
+    `tests/test_zone_limit_backtest.py`)와 시뮬레이터 단위(`tests/test_substep.py`)가
+    본다 — 이 합성 데이터셋은 라이브 밴드에서 체결이 나지 않아 여기서는 **수락**만 고정한다.
+    """
+    htf, one_min = _synthetic_pair()
+    params = _live_band_params()
+
+    def any_stop(ctx: StopLossContext) -> float | None:
+        return ctx.entry_price * 0.99
+
+    _, stats = build_zone_limit_candidates(
+        htf, one_min, "1h", params=params, cfg=_cfg(), stop_loss_override=any_stop
+    )
+    assert stats.eligible >= 0  # 예외 없이 끝난다는 것이 이 테스트의 주장이다.
+
+
+def test_live_band_default_is_unchanged_by_none_overrides() -> None:  # WAN-143 §0
+    """오버라이드를 안 주면 라이브 밴드 결과가 비트 단위로 그대로다(기존 CSV 재현 계약)."""
+    htf, one_min = _synthetic_pair()
+    params = _live_band_params()
+    base, base_stats = build_zone_limit_candidates(htf, one_min, "1h", params=params, cfg=_cfg())
+    explicit, exp_stats = build_zone_limit_candidates(
+        htf,
+        one_min,
+        "1h",
+        params=params,
+        cfg=_cfg(),
+        stop_loss_override=None,
+        take_profit_override=None,
+    )
+    assert [(c.entry_time, c.exit_time, c.exit_price, c.stop_price, c.reason) for c in base] == [
+        (c.entry_time, c.exit_time, c.exit_price, c.stop_price, c.reason) for c in explicit
+    ]
+    assert (base_stats.eligible, base_stats.filled) == (exp_stats.eligible, exp_stats.filled)
 
 
 # --------------------------------------------------------------------------- #

@@ -104,11 +104,17 @@ class LiveLimitProvider(Protocol):
         """
         ...
 
-    def take_profit_price(self, limit_price: float) -> float | None:
-        """체결가가 정해진 **그 순간** 산출하는 익절 목표가.
+    def resolve_exits(self, limit_price: float) -> tuple[float, float | None] | None:
+        """체결가가 정해진 **그 순간** 산출하는 `(손절 참조가, 익절 목표가)`.
 
         진입가가 봉내에 정해지므로 1R(진입가→무효화 경계)도, 그 배수인 고정 R 익절
-        목표도 체결 전에는 알 수 없다.
+        목표도 체결 전에는 알 수 없다. 익절이 `None`이면 목표 없음(무효화까지 홀딩)이고,
+        **반환값 전체가 `None`이면** 이 셋업은 유효한 청산 규칙을 못 만든다는 뜻이라
+        진입하지 않는다(WAN-143: `stop_loss_override`가 장벽을 못 낼 때).
+
+        ⚠️ 손절과 익절을 **한 번에** 내는 이유는 순서 의존을 없애기 위해서다 — 익절
+        오버라이드(WAN-137/143)는 손절가를 문맥으로 받으므로 손절이 먼저 정해져야
+        하는데, 두 메서드로 나누면 호출 순서가 조용한 계약이 된다.
         """
         ...
 
@@ -142,6 +148,13 @@ class ZoneLimitOutcome:
 
     롱이면 `(구간 최저가 − 진입가) / 1R`, 숏이면 `(진입가 − 구간 최고가) / 1R`. 통상
     0 이하이며, 손절로 청산된 거래는 손절선을 관통했다면 −1R 아래로도 내려갈 수 있다.
+    """
+    stop_price: float | None = None
+    """이 거래에 **실제로 적용된** 손절 참조가 (WAN-143). 체결됐을 때만 값이 있다.
+
+    보통은 호출부가 넘긴 `stop_price` 그대로다. `live_limit`(봉내 라이브 밴드)에서
+    `stop_loss_override`가 걸려 있으면 손절이 **체결 순간**에 정해지므로, 호출부가
+    1R 사이징에 쓸 값을 여기로 돌려준다 — 지어내지 않게 하려는 것이다.
     """
     order_rested: bool = True
     """이 셋업에 주문이 **한 번이라도 주문판에 걸렸는지** (WAN-119).
@@ -236,6 +249,12 @@ def simulate_zone_limit_trade(
     하나로 준다. `live_limit`을 쓰면 익절 목표도 체결 순간에 그 계약이 내므로
     `take_profit_price`를 함께 줄 수 없다 — 둘 다 주면 어느 쪽이 이겼는지 결과만 보고는
     알 수 없어(WAN-95의 "라벨과 실제 실행이 갈라진다") 조용히 무시하지 않고 거부한다.
+
+    `live_limit`이면 **손절 참조가도 체결 순간에** 그 계약이 낼 수 있다(WAN-143
+    `resolve_exits`). 인자 `stop_price`는 그때까지의 기본값(존 무효화 경계)이고, 계약이
+    다른 값을 내면 그것이 청산·MFE/MAE 기준이 되며 `ZoneLimitOutcome.stop_price`로
+    돌려준다. 계약이 `None`을 내면 유효한 청산 규칙이 없다는 뜻이라 체결시키지 않고
+    `CANCELLED_CONDITION_FAILED`로 끝낸다(정적 경로가 탭 봉에서 셋업을 빼는 것의 봉내 판(版)).
     """
     if not substeps:
         # 서브스텝이 없으면 live 밴드는 값을 낼 기회조차 없었다 = 주문이 걸린 적 없다.
@@ -261,7 +280,7 @@ def simulate_zone_limit_trade(
         """추적한 극값으로 (MFE_R, MAE_R)을 낸다. 1R을 못 재면 (None, None)."""
         if hold_high is None or hold_low is None or entry_price is None:
             return None, None
-        risk = abs(entry_price - stop_price)
+        risk = abs(entry_price - active_stop)
         if risk <= 0:
             return None, None
         if is_long:
@@ -275,8 +294,9 @@ def simulate_zone_limit_trade(
 
     # 상수 지정가면 문턱도 상수다(`live_limit`이면 서브스텝마다 다시 낸다).
     static_trigger = None if limit_price is None else _fill_trigger(limit_price)
-    # 청산 판정에 쓰는 익절 목표. `live_limit`이면 체결 순간에 정해진다.
+    # 청산 판정에 쓰는 익절 목표·손절선. `live_limit`이면 둘 다 체결 순간에 정해진다(WAN-143).
     active_tp = take_profit_price
+    active_stop = stop_price
 
     # 상수 지정가는 탭 봉부터 이미 주문판에 걸려 있다. live는 밴드가 값을 낸 순간부터다.
     order_rested = live_limit is None
@@ -347,13 +367,20 @@ def simulate_zone_limit_trade(
                     )
                 )
                 if condition:
+                    if live_limit is not None:
+                        # 1R = 진입가→무효화 경계라 체결가가 정해진 지금에야 손절·익절이
+                        # 나온다(WAN-143: 오버라이드가 걸려 있으면 그 규칙이 낸다).
+                        exits = live_limit.resolve_exits(current_limit)
+                        if exits is None:
+                            return ZoneLimitOutcome(
+                                status=ZoneLimitStatus.CANCELLED_CONDITION_FAILED,
+                                order_rested=order_rested,
+                            )
+                        active_stop, active_tp = exits
                     position_open = True
                     entry_time = step.time
                     entry_price = current_limit
                     entry_rsi = live_rsi
-                    if live_limit is not None:
-                        # 1R = 진입가→무효화 경계라 체결가가 정해진 지금에야 익절 목표가 나온다.
-                        active_tp = live_limit.take_profit_price(current_limit)
                     # 관통 방지: 같은 스텝에서 손절/익절을 곧바로 재판정한다(아래로 진행).
                 elif cancel_on_condition_fail:
                     return ZoneLimitOutcome(
@@ -366,7 +393,7 @@ def simulate_zone_limit_trade(
             # 청산을 판정한다 — 청산 봉의 범위까지가 보유 구간이고 그 이후는 보지 않는다.
             hold_high = step.high if hold_high is None else max(hold_high, step.high)
             hold_low = step.low if hold_low is None else min(hold_low, step.low)
-            stop_hit = step.low <= stop_price if is_long else step.high >= stop_price
+            stop_hit = step.low <= active_stop if is_long else step.high >= active_stop
             tp_hit = active_tp is not None and (
                 step.high >= active_tp if is_long else step.low <= active_tp
             )
@@ -378,10 +405,11 @@ def simulate_zone_limit_trade(
                     entry_price=entry_price,
                     entry_rsi=entry_rsi,
                     exit_time=step.time,
-                    exit_price=stop_price,
+                    exit_price=active_stop,
                     exit_reason=SignalExitReason.STOP_LOSS,
                     mfe_r=mfe_r,
                     mae_r=mae_r,
+                    stop_price=active_stop,
                     order_rested=order_rested,
                 )
             if tp_hit:
@@ -396,6 +424,7 @@ def simulate_zone_limit_trade(
                     exit_reason=SignalExitReason.TAKE_PROFIT,
                     mfe_r=mfe_r,
                     mae_r=mae_r,
+                    stop_price=active_stop,
                     order_rested=order_rested,
                 )
 
@@ -408,6 +437,7 @@ def simulate_zone_limit_trade(
             entry_rsi=entry_rsi,
             mfe_r=mfe_r,
             mae_r=mae_r,
+            stop_price=active_stop,
             order_rested=order_rested,
         )
     return ZoneLimitOutcome(status=ZoneLimitStatus.NO_TOUCH, order_rested=order_rested)
