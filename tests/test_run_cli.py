@@ -15,6 +15,7 @@ import pandas as pd
 import pytest
 
 from backtest.harness import MarketData, RunRow
+from backtest.portfolio import PortfolioParams
 from backtest.run import (
     JOBS_AUTO,
     Combo,
@@ -35,6 +36,7 @@ from backtest.run import (
 )
 from backtest.sweep import timeframe_to_ms
 from backtest.synthetic import make_synthetic_ohlcv
+from backtest.zone_limit_backtest import run_zone_limit_portfolio_backtest
 from data.models import Candle, FundingRate
 from data.storage import OhlcvStore
 from strategy.models import ConfluenceParams
@@ -174,6 +176,40 @@ def test_retap_mode_rejects_unknown_value() -> None:
         _grid_from(["--retap-mode", "twice"])
 
 
+def test_positions_axis_defaults_to_the_adopted_single_position_path() -> None:
+    """WAN-130: `--positions`를 안 주면 축이 열리지 않는다(채택 기본값 = 동시 1포지션)."""
+    grid = _grid_from([])
+    assert grid.portfolio_leverages == (None,)
+    (combo,) = iter_combos(grid)
+    assert combo.portfolio_leverage is None
+    assert combo.portfolio is None  # 포트폴리오 경로를 타지 않는다.
+
+
+def test_positions_axis_expands_single_and_multi_arms() -> None:
+    """WAN-130: `--positions single,3`이 단일·다중 두 팔을 한 표에 낸다."""
+    grid = _grid_from(["--positions", "single,3"])
+    assert grid.portfolio_leverages == (None, 3.0)
+    combos = iter_combos(grid)
+    assert [c.portfolio_leverage for c in combos] == [None, 3.0]
+    multi = combos[1].portfolio
+    assert multi is not None
+    # WAN-103/108이 발표 수치를 낸 설정 그대로여야 비교 대상이 같다.
+    assert (multi.leverage, multi.max_concurrent, multi.one_per_zone) == (3.0, None, True)
+
+
+def test_positions_rejects_unknown_and_non_positive_values() -> None:
+    with pytest.raises(ValueError, match="--positions"):
+        _grid_from(["--positions", "multi"])
+    with pytest.raises(ValueError, match="0보다 커야"):
+        _grid_from(["--positions", "0"])
+
+
+def test_close_entry_rejects_multi_position() -> None:
+    """다중 포지션 회계는 B안 전용 — 종가 팔에 섞으면 라벨만 붙는다(WAN-95의 교훈)."""
+    with pytest.raises(ValueError, match="--positions"):
+        _grid_from(["--entry-mode", "close", "--positions", "3"])
+
+
 def test_comma_values_expand_to_cartesian_product() -> None:
     """완료기준: `--tp-r 1.0,1.5,2.0,3.0 --tf 15m,1h` 형태가 조합별 1행을 낸다."""
     grid = _grid_from(["--tf", "15m,1h", "--tp-r", "1.0,1.5,2.0,3.0", "--offset-bps", "0,5"])
@@ -264,6 +300,41 @@ def test_run_grid_routes_entry_modes_to_their_engines(synthetic_loader: None) ->
     assert set(by_mode) == {"close", "zone_limit"}
     assert by_mode["close"].fill_rate is None  # 종가는 미체결 개념이 없다.
     assert by_mode["zone_limit"].fill_rate is not None
+
+
+def test_run_grid_multi_position_arm_routes_to_the_portfolio_engine(
+    synthetic_loader: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """WAN-130: 다중 팔은 **실제로** 포트폴리오 엔진(WAN-103)을 타고, 단일 팔은 안 탄다.
+
+    라벨이 아니라 동작으로 고정한다 — `position_mode="multi"` 문자열만 붙고 실제로는
+    단일 시퀀서가 돌면 "다중을 확인했다"는 표가 거짓이 된다(WAN-95/112/123 부류).
+    """
+    seen: list[PortfolioParams] = []
+    original = run_zone_limit_portfolio_backtest
+
+    def _spy(*args: object, **kwargs: object) -> object:
+        portfolio = kwargs["portfolio"]
+        assert isinstance(portfolio, PortfolioParams)
+        seen.append(portfolio)
+        return original(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("backtest.harness.run_zone_limit_portfolio_backtest", _spy)
+
+    baseline_rows = run_grid(_grid_from(["--symbol", "BTCUSDT"]), RunOptions(), log=False)
+    assert seen == []  # 단일 팔은 포트폴리오 경로를 건드리지 않는다.
+
+    rows = run_grid(
+        _grid_from(["--symbol", "BTCUSDT", "--positions", "single,3"]), RunOptions(), log=False
+    )
+    single, multi = rows
+    assert (single.position_mode, single.portfolio_leverage) == ("single", None)
+    assert (multi.position_mode, multi.portfolio_leverage) == ("multi", 3.0)
+    assert [p.leverage for p in seen] == [3.0]  # 다중 팔에서만 한 번.
+    # 단일 팔은 `--positions` 이전과 비트 단위로 같다.
+    assert single.model_dump() == baseline_rows[0].model_dump()
+    # 두 팔은 같은 셋업 풀에서 나온다 — 다른 건 배치 회계뿐이다.
+    assert multi.eligible_setups == single.eligible_setups
 
 
 def test_run_grid_oos_split_produces_full_is_oos_segments(synthetic_loader: None) -> None:

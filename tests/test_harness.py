@@ -469,6 +469,90 @@ def test_run_once_close_entry_fair_window_limits_to_1m_coverage() -> None:
     assert all(t.entry_time >= start for t in windowed.result.trades)
 
 
+def test_run_once_portfolio_matches_the_multi_position_engine() -> None:
+    """WAN-130: 하네스의 다중 포지션 경로 == WAN-103 엔진 직접 호출."""
+    from backtest.portfolio import PortfolioParams
+    from backtest.zone_limit_backtest import run_zone_limit_portfolio_backtest
+
+    market = _market()
+    cfg = build_config(_TIMEFRAME)
+    params = build_params()
+    ob_result = detect_order_blocks(market)
+    portfolio = PortfolioParams(leverage=3.0)
+
+    outcome = run_once(
+        market, params=params, cfg=cfg, order_block_result=ob_result, portfolio=portfolio
+    )
+    expected, expected_stats, _pf = run_zone_limit_portfolio_backtest(
+        market.htf_df,
+        market.df_1m,
+        _TIMEFRAME,
+        portfolio=portfolio,
+        confluence_params=params,
+        backtest_config=cfg,
+        order_block_result=ob_result,
+        funding_rates=market.funding_rates,
+    )
+    assert outcome.result.metrics == expected.metrics
+    assert outcome.stats == expected_stats
+
+
+def test_run_once_portfolio_rejects_close_entry() -> None:
+    """다중 포지션 회계는 B안 전용 — A안에 붙이면 조용히 무시하지 않고 거부한다."""
+    from backtest.portfolio import PortfolioParams
+
+    market = _market()
+    with pytest.raises(ValueError, match="다중 포지션"):
+        run_once(
+            market,
+            params=build_params(entry_mode="close"),
+            cfg=build_config(_TIMEFRAME),
+            portfolio=PortfolioParams(leverage=2.0),
+        )
+
+
+def test_run_row_survives_csv_round_trip_with_empty_leverage() -> None:
+    """단일 포지션 행의 빈 레버리지 칸이 `--from-csv` 왕복에서 `NaN`으로 돌아오지 않는다."""
+    import io
+
+    market = _market()
+    params = build_params()
+    row = build_row(
+        run_once(market, params=params, cfg=build_config(_TIMEFRAME)),
+        market,
+        segment=Segment(SEGMENT_FULL, 0, 0.0, 1.0),
+        params=params,
+        fill_name="baseline",
+    )
+    frame = pd.read_csv(io.StringIO(render_csv([row])))
+    restored = RunRow.model_validate(frame.to_dict(orient="records")[0])
+    assert restored.portfolio_leverage is None
+    assert (restored.position_mode, restored.retap_mode) == (row.position_mode, row.retap_mode)
+
+
+def test_build_row_labels_position_mode_from_the_portfolio_object() -> None:
+    """행의 `position_mode`가 실제로 넘긴 포트폴리오에서 나온다(라벨 조작 불가)."""
+    from backtest.portfolio import PortfolioParams
+
+    market = _market()
+    cfg = build_config(_TIMEFRAME)
+    params = build_params()
+    segment = Segment(SEGMENT_FULL, 0, 0.0, 1.0)
+    outcome = run_once(market, params=params, cfg=cfg)
+
+    single = build_row(outcome, market, segment=segment, params=params, fill_name="baseline")
+    multi = build_row(
+        outcome,
+        market,
+        segment=segment,
+        params=params,
+        fill_name="baseline",
+        portfolio=PortfolioParams(leverage=2.5),
+    )
+    assert (single.position_mode, single.portfolio_leverage) == ("single", None)
+    assert (multi.position_mode, multi.portfolio_leverage) == ("multi", 2.5)
+
+
 def test_run_once_zone_limit_without_1m_data_fails_loudly() -> None:
     """1분봉 없이 지정가를 돌리라는 요구는 조용히 종가로 되돌리지 않고 거부한다."""
     market = _market()
