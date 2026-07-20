@@ -40,7 +40,8 @@ from dashboard.health import (
     SeriesFreshness,
 )
 from dashboard.health_data import HealthView, OpenPositionView, build_health_view
-from dashboard.lightweight_chart import build_chart_html
+from dashboard.lightweight_chart import BAND_LINE_COLOR, build_chart_html
+from dashboard.live_chart import LIVE_INTERVALS, build_live_config
 from dashboard.pipeline import PipelineResult, run_pipeline
 from live.runtime_state import EventRecord
 from paper.parity import build_parity_report
@@ -383,6 +384,22 @@ def _render_analysis(settings: Settings) -> None:
             if show_all_archive:
                 st.warning("전체 아카이브는 존이 매우 많아 렌더가 느릴 수 있습니다.")
 
+        st.subheader("실시간")
+        live_supported = timeframe in LIVE_INTERVALS
+        live_on = st.checkbox(
+            "실시간 캔들 갱신",
+            value=live_supported,
+            disabled=not live_supported,
+            help=(
+                "브라우저가 바이낸스 웹소켓에 직접 붙어 형성 중인 봉과 볼린저 하단선을 "
+                "갱신합니다(트레이딩뷰와 같은 방식). 표시 계층 전용이라 아래 거래 표·"
+                "성과 지표는 확정봉 기준 백테스트 결과 그대로이고, 받은 데이터는 "
+                "저장하지 않습니다."
+            ),
+        )
+        if not live_supported:
+            st.caption(f"{timeframe}은 바이낸스 kline 스트림이 지원하지 않는 인터벌입니다.")
+
         st.subheader("차트 표시선 (EMA/VWMA)")
         st.caption(
             "차트에 그리는 선입니다. 익절 판정은 이 중 EMA "
@@ -411,6 +428,24 @@ def _render_analysis(settings: Settings) -> None:
     # 시점 재생은 그 시점 화면 재현이 목적이라 미래 거래 마커를 겹치지 않는다.
     chart_backtest = None if replay_ms is not None else backtest
 
+    # 실시간 차트(WAN-147) — 표시 계층 전용이다. 브라우저가 바이낸스 웹소켓에 직접 붙어
+    # 형성 중인 봉과 볼린저 하단선만 갱신하고, 아래 거래 표·성과 지표는 확정봉 기준
+    # 백테스트 결과 그대로다(실시간 값이 섞이지 않는다). 시점 재생 중이거나 기간을
+    # 과거로 잘라 본 화면에서는 켜지 않는다 — 지나간 구간에 현재 봉을 붙이면 화면이
+    # "그때 무엇을 봤나"를 더는 재현하지 못한다.
+    showing_tail = end_ms >= int(full_df["open_time"].max())
+    live_config = (
+        build_live_config(
+            chart_df,
+            symbol=symbol,
+            timeframe=timeframe,
+            conf_params=conf_params,
+            band_color=BAND_LINE_COLOR,
+        )
+        if live_on and replay_ms is None and showing_tail
+        else None
+    )
+
     st.subheader(f"{symbol} · {timeframe}")
     _render_run_config_badge(conf_params, ob_params, bt_config, backtest.metrics)
     chart_height = 700
@@ -424,9 +459,18 @@ def _render_analysis(settings: Settings) -> None:
             visible_lines=frozenset(visible_lines),
             theme=chart_theme,
             height=chart_height,
+            live=live_config,
         ),
         height=chart_height,
     )
+    if live_config is not None:
+        st.caption(
+            "🟢 실시간: 형성 중인 봉과 볼린저 하단선만 옅은 색으로 라이브 갱신됩니다"
+            "(바이낸스 웹소켓 직접 구독 · 저장하지 않음). **아래 거래 표·성과 지표는 "
+            "확정봉 기준 백테스트 결과**라 실시간 값에 영향받지 않습니다."
+        )
+    elif live_on:
+        st.caption("⚪ 실시간 갱신 꺼짐: 시점 재생 중이거나 기간 끝을 과거로 잘라 본 화면입니다.")
 
     metrics = backtest.metrics
     cols = st.columns(6)
