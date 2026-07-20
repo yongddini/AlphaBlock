@@ -85,9 +85,13 @@ from strategy.models import (
     SignalExitReason,
 )
 
-#: 캔들 몸통(강세/약세) 색. 트레이딩뷰 기본값이라 밝은/어두운 배경 양쪽에서 잘 보여
-#: 테마와 무관하게 공유한다.
-_BULL_COLOR = "#26a69a"
+#: 캔들 몸통(강세/약세) 색 — **상승 하양 / 하락 빨강**(WAN-67 사용자 스펙 2026-07-20).
+#: 흰 몸통은 어두운 배경을 전제한 색이라(`DEFAULT_THEME = "dark"`) 라이트에서는 몸통을
+#: 흰색으로 두되 **테두리를 켜서** 배경과 가른다(고전적인 할로우 캔들). 그래서 캔들
+#: 색은 테마별 값(`ChartTheme.bull_candle` 등)이고, 아래 상수는 그 기본값이다.
+#: ⚠️ 옛 값(트레이딩뷰 기본 `#26a69a`/`#ef5350`)은 존 채움색으로 여전히 쓰인다 —
+#: 존은 강세/약세 오더블록을 구분하는 별개 축이라 캔들 스펙을 따라가지 않는다.
+_BULL_COLOR = "#ffffff"
 _BEAR_COLOR = "#ef5350"
 
 
@@ -127,6 +131,16 @@ class ChartTheme:
     #: `hash=False`는 dict 필드가 `ChartTheme`의 자동 `__hash__`를 깨지 않게 한다.
     ema_length_colors: Mapping[int, str] = field(hash=False, default_factory=dict)
     vwma_line: str = "#d81b60"
+    #: 캔들 몸통·테두리·형성 중인 봉 색(WAN-67 — 상승 하양 / 하락 빨강). 흰 몸통이
+    #: 배경에 묻히는 라이트 테마에서만 테두리를 켜 가른다(`candle_border_visible`).
+    bull_candle: str = _BULL_COLOR
+    bear_candle: str = _BEAR_COLOR
+    candle_border_visible: bool = False
+    bull_candle_border: str = _BULL_COLOR
+    bear_candle_border: str = _BEAR_COLOR
+    #: 형성 중인 봉(라이브)은 같은 색을 옅게 — 확정봉과 구분해야 한다(WAN-147).
+    bull_candle_live: str = "rgba(255, 255, 255, 0.45)"
+    bear_candle_live: str = "rgba(239, 83, 80, 0.45)"
 
     def exit_marker_colors(self) -> dict[ExitReason, str]:
         return {
@@ -187,6 +201,13 @@ _LIGHT_THEME = ChartTheme(
     exit_default="#6d4c41",
     ema_length_colors=_EMA_LENGTH_COLORS_LIGHT,
     vwma_line=_VWMA_LINE_COLOR_LIGHT,
+    # 흰 배경 + 흰 몸통이라 테두리 없이는 상승봉이 사라진다. 몸통은 스펙(하양)대로
+    # 두고 회색 테두리로 가른다 — 색을 바꾸는 대신 형태로 대응한 것이다.
+    candle_border_visible=True,
+    bull_candle_border="#787b86",
+    bear_candle_border="#c62828",
+    bull_candle_live="rgba(120, 123, 134, 0.35)",
+    bear_candle_live="rgba(239, 83, 80, 0.45)",
 )
 
 #: 다크 테마: 트레이딩뷰 기본 다크에 준한다(배경 #131722, 글자 #d1d4dc, 격자
@@ -257,10 +278,13 @@ _EMA_LINE_PALETTE: tuple[str, ...] = (
     "#7cb342",  # olive green
 )
 
-#: 표시선 굵기(WAN-67). 1은 캔들 위에서 잘 안 보인다는 사용자 지적이라 2로 올린다 —
-#: 볼린저 하단선(WAN-147)이 이미 쓰는 굵기와 같아 선들이 서로 따로 놀지 않는다. RSI
-#: 패인의 선·가이드는 캔들과 겹치지 않으므로 1 그대로 둔다.
+#: 표시선(EMA/VWMA) 굵기(WAN-67). 1은 캔들 위에서 잘 안 보인다는 사용자 지적이라 2로
+#: 올린다. RSI 패인의 선·가이드는 캔들과 겹치지 않으므로 1 그대로 둔다.
 _MA_LINE_WIDTH = 2
+
+#: 볼린저 하단선 굵기(WAN-67 사용자 지시 2026-07-20: "좀 얇게"). 이동평균선보다 얇게 둬
+#: 진입 기준선이 표시선 다발에 묻히지 않으면서도 캔들을 덜 가린다.
+_BAND_LINE_WIDTH = 1
 
 #: 볼린저 하단선(진입가 기준선) 색. EMA 팔레트·VWMA와 겹치지 않는 시안 계열로 둔다
 #: (WAN-147 — 이 선이 라이브로 움직이는 대상이라 한눈에 구분돼야 한다).
@@ -471,12 +495,16 @@ _TEMPLATE = """
     timeScale: { borderVisible: false, timeVisible: true, secondsVisible: false },
   });
 
+  // 상승 하양 / 하락 빨강(WAN-67). 흰 몸통은 라이트 배경에서 사라지므로 그 테마에서만
+  // 테두리를 켠다 — payload가 테마별로 색·on/off를 다 실어 온다.
   const candleSeries = chart.addSeries(LightweightCharts.CandlestickSeries, {
     upColor: payload.priceColors.up,
     downColor: payload.priceColors.down,
-    borderVisible: false,
-    wickUpColor: payload.priceColors.up,
-    wickDownColor: payload.priceColors.down,
+    borderVisible: payload.priceColors.borderVisible,
+    borderUpColor: payload.priceColors.borderUp,
+    borderDownColor: payload.priceColors.borderDown,
+    wickUpColor: payload.priceColors.borderUp,
+    wickDownColor: payload.priceColors.borderDown,
   }, 0);
 
   class OrderBlockBoxesPrimitive {
@@ -583,7 +611,7 @@ _TEMPLATE = """
   if (payload.band) {
     bandSeries = chart.addSeries(LightweightCharts.LineSeries, {
       color: payload.band.color,
-      lineWidth: 2,
+      lineWidth: __BAND_LINE_WIDTH__,
       priceLineVisible: false,
       lastValueVisible: true,
       crosshairMarkerVisible: false,
@@ -989,6 +1017,12 @@ def build_chart_html(
     live_payload: dict[str, object] | None = None
     if live is not None:
         live_payload = live.to_payload()
+        # 형성 중인 봉 색은 캔들 색을 따라간다(WAN-67) — `live_chart`는 테마를 모르므로
+        # 여기서 덮어쓴다. 두 곳에 색을 두면 캔들만 바꿨을 때 라이브 봉이 옛 색으로 남는다.
+        live_payload["liveColors"] = {
+            "up": chart_theme.bull_candle_live,
+            "down": chart_theme.bear_candle_live,
+        }
         if band_payload is None:
             # 밴드 선 자체를 안 그리는 화면이면 라이브 밴드도 끈다 — 그리지 않는 선을
             # 갱신하는 배선을 남기면 "켜져 있다고 믿는" 조용한 실패가 된다.
@@ -1011,7 +1045,13 @@ def build_chart_html(
         "band": band_payload,
         "live": live_payload,
         "initialBars": min(initial_bars, len(candles)),
-        "priceColors": {"up": _BULL_COLOR, "down": _BEAR_COLOR},
+        "priceColors": {
+            "up": chart_theme.bull_candle,
+            "down": chart_theme.bear_candle,
+            "borderVisible": chart_theme.candle_border_visible,
+            "borderUp": chart_theme.bull_candle_border,
+            "borderDown": chart_theme.bear_candle_border,
+        },
         "rsiColor": chart_theme.rsi_line,
         "guideColor": chart_theme.rsi_guide,
         "theme": {
@@ -1038,4 +1078,5 @@ def build_chart_html(
     html = html.replace("__RSI_OVERSOLD__", str(_RSI_OVERSOLD))
     html = html.replace("__RSI_PANE_HEIGHT_RATIO__", str(_RSI_PANE_HEIGHT_RATIO))
     html = html.replace("__MA_LINE_WIDTH__", str(_MA_LINE_WIDTH))
+    html = html.replace("__BAND_LINE_WIDTH__", str(_BAND_LINE_WIDTH))
     return html

@@ -56,7 +56,11 @@ LIVE_INTERVALS: frozenset[str] = frozenset(
 
 #: 형성 중인 봉 색(옅은 몸통) — 확정봉과 시각적으로 구분하기 위한 값. 사용자가 확정된
 #: 것과 진행 중인 것을 헷갈리지 않아야 한다(WAN-147 완료 기준).
-LIVE_BULL_COLOR = "rgba(38, 166, 154, 0.45)"
+#: ⚠️ 이 모듈은 차트 테마를 모른다. `build_chart_html`이 테마의
+#: `bull_candle_live`/`bear_candle_live`로 **덮어쓰므로** 화면에 실제로 나가는 값은
+#: 그쪽이다(WAN-67 — 캔들 색을 바꿨을 때 라이브 봉만 옛 색으로 남지 않게).
+#: 여기 값은 테마 없이 페이로드만 만들 때의 기본값이고 다크 기준(상승 하양)이다.
+LIVE_BULL_COLOR = "rgba(255, 255, 255, 0.45)"
 LIVE_BEAR_COLOR = "rgba(239, 83, 80, 0.45)"
 
 

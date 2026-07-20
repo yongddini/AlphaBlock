@@ -18,6 +18,7 @@ import pytest
 from backtest.engine import run_backtest
 from backtest.models import BacktestConfig
 from dashboard.lightweight_chart import (
+    _BAND_LINE_WIDTH,
     _EMA_LENGTH_COLORS_DARK,
     _EMA_LINE_PALETTE,
     _MA_LINE_WIDTH,
@@ -355,6 +356,53 @@ def test_display_line_width_is_bumped() -> None:
     assert _MA_LINE_WIDTH >= 2
     assert "__MA_LINE_WIDTH__" not in html
     assert f"lineWidth: {_MA_LINE_WIDTH}," in html
+
+
+def test_band_line_is_thinner_than_moving_averages() -> None:
+    """WAN-67 사용자 지시: 볼린저 하단선은 이동평균선보다 얇게."""
+    html = build_chart_html(_df(5), [])
+
+    assert _BAND_LINE_WIDTH < _MA_LINE_WIDTH
+    assert "__BAND_LINE_WIDTH__" not in html
+
+
+def test_candles_are_white_up_red_down_on_dark() -> None:
+    """WAN-67 사용자 스펙: 상승 캔들 하양 · 하락 캔들 빨강."""
+    payload = _payload(build_chart_html(_df(5), []))
+
+    colors = payload["priceColors"]
+    assert isinstance(colors, dict)
+    assert colors["up"] == "#ffffff"
+    assert colors["down"] == "#ef5350"
+    # 다크 배경에서는 흰 몸통이 그대로 보이므로 테두리를 켜지 않는다.
+    assert colors["borderVisible"] is False
+
+
+def test_light_theme_keeps_white_body_but_adds_border() -> None:
+    """흰 배경 + 흰 몸통이라 테두리 없이는 상승봉이 사라진다 — 색이 아니라 형태로 대응."""
+    colors = _payload(build_chart_html(_df(5), [], theme="light"))["priceColors"]
+
+    assert isinstance(colors, dict)
+    assert colors["up"] == "#ffffff"  # 몸통 색 스펙은 라이트에서도 유지
+    assert colors["borderVisible"] is True
+    assert colors["borderUp"] != colors["up"]
+
+
+def test_live_bar_colors_follow_candle_theme() -> None:
+    """형성 중인 봉도 캔들 색을 따라간다 — 확정봉과 색이 갈리면 안 된다(WAN-147 유지)."""
+    df = _df(30)
+    config = _live_config(df)  # 아래 WAN-147 절의 헬퍼(호출 시점에 해석된다)
+
+    dark = _payload(build_chart_html(df, [], live=config))["live"]
+    light = _payload(build_chart_html(df, [], live=config, theme="light"))["live"]
+
+    assert isinstance(dark, dict) and isinstance(light, dict)
+    assert dark["liveColors"] == {
+        "up": "rgba(255, 255, 255, 0.45)",
+        "down": "rgba(239, 83, 80, 0.45)",
+    }
+    # 라이트에서는 옅은 흰색이 배경에 묻히므로 회색으로 내린다.
+    assert light["liveColors"]["up"] != dark["liveColors"]["up"]
 
 
 def test_zone_fill_follows_theme() -> None:
