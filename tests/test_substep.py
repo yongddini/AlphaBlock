@@ -486,9 +486,17 @@ class _StubLiveLimit:
     다시 묻고**, 봉 마감에 `commit`하고, 체결 순간의 가격으로 익절을 잡는지만 본다.
     """
 
-    def __init__(self, prices: list[float | None], tp: float | None = _TP) -> None:
+    def __init__(
+        self,
+        prices: list[float | None],
+        tp: float | None = _TP,
+        stop: float | None = _STOP,
+        exits_none: bool = False,
+    ) -> None:
         self._prices = list(prices)
         self._tp = tp
+        self._stop = stop
+        self._exits_none = exits_none
         self.asked: list[float] = []
         self.committed: list[float] = []
         self.tp_called_with: list[float] = []
@@ -500,9 +508,12 @@ class _StubLiveLimit:
         self.asked.append(live_price)
         return self._prices.pop(0) if self._prices else None
 
-    def take_profit_price(self, limit_price: float) -> float | None:
+    def resolve_exits(self, limit_price: float) -> tuple[float, float | None] | None:
         self.tp_called_with.append(limit_price)
-        return self._tp
+        if self._exits_none:
+            return None
+        assert self._stop is not None
+        return self._stop, self._tp
 
 
 def _simulate_live(steps: list[SubStep], provider: _StubLiveLimit) -> ZoneLimitOutcome:
@@ -582,6 +593,33 @@ def test_live_take_profit_is_resolved_from_the_realized_entry_price() -> None:
     assert out.status is ZoneLimitStatus.FILLED_EXITED
     assert out.exit_price == 105.0
     assert out.exit_reason is SignalExitReason.TAKE_PROFIT
+
+
+def test_live_stop_is_resolved_at_fill_and_reported(  # WAN-143
+) -> None:
+    """봉내 경로도 손절을 체결 순간에 받는다 — 그 값으로 청산하고 결과에 실어 돌려준다.
+
+    `stop_loss_override`가 걸린 팔에서 1R 사이징이 시뮬레이터가 실제로 쓴 손절선과
+    어긋나면 "라벨과 실행이 갈라지는" WAN-95 부류의 조용한 실패가 된다.
+    """
+    steps = [
+        _step(0, high=101, low=98, close=98),
+        _step(60_000, high=100, low=98.2, close=98.3),
+    ]
+    provider = _StubLiveLimit([98.5], tp=None, stop=98.25)
+    out = _simulate_live(steps, provider)
+    assert out.status is ZoneLimitStatus.FILLED_EXITED
+    assert out.exit_reason is SignalExitReason.STOP_LOSS
+    assert out.exit_price == 98.25  # 인자 _STOP(95)이 아니라 체결 순간에 정해진 손절선
+    assert out.stop_price == 98.25
+
+
+def test_live_exits_none_cancels_instead_of_filling() -> None:  # WAN-143
+    """유효한 청산 규칙을 못 만들면 체결시키지 않는다(정적 경로의 셋업 제외에 대응)."""
+    steps = [_step(0, high=101, low=98, close=98)]
+    out = _simulate_live(steps, _StubLiveLimit([98.5], exits_none=True))
+    assert out.status is ZoneLimitStatus.CANCELLED_CONDITION_FAILED
+    assert out.entry_time is None
 
 
 def test_live_limit_commits_closed_bars_like_the_rsi_state() -> None:

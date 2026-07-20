@@ -258,6 +258,10 @@ class _IntrabarLiveLimit:
     ⚠️ **인과 모드는 호출부가 `limit_price`를 서브스텝마다 정확히 한 번, 시간 순서대로
     부른다는 계약에 기댄다** — 지연선(delay line)이 그 호출로 굴러가기 때문이다.
     `simulate_zone_limit_trade`의 미체결 루프가 그 계약이고, 테스트가 고정한다.
+
+    WAN-143: 손절·익절 오버라이드(`stop_loss_override`·`take_profit_override`)를 받으면
+    `resolve_exits`가 **체결 순간의 진입가**로 그 훅을 부른다 — 정적 경로가 탭 봉에서
+    하던 것과 같은 규칙이고, 다른 건 진입가가 그때야 정해진다는 것뿐이다.
     """
 
     band: RealtimeBand
@@ -265,7 +269,12 @@ class _IntrabarLiveLimit:
     is_long: bool
     params: ConfluenceParams
     stop_price: float
+    """오버라이드가 없을 때의 손절 참조가(존 무효화 경계) — 탭 봉에서 이미 정해진다."""
     lines: list[float]
+    trigger_time: int = 0
+    """이 셋업의 탭 시각. 오버라이드 문맥(`TakeProfitContext`·`StopLossContext`)의 키다."""
+    take_profit_override: TakeProfitOverride | None = None
+    stop_loss_override: StopLossOverride | None = None
     pending_price: float | None = None
     """인과 모드의 지연선: 다음 `limit_price` 호출이 밴드 표본으로 쓸 가격.
 
@@ -299,10 +308,41 @@ class _IntrabarLiveLimit:
             return None  # WAN-75 규칙 3: 밴드가 존 전체보다 불리 — 지금은 주문이 없다.
         return self.params.apply_zone_limit_offset(price, is_long=self.is_long)
 
-    def take_profit_price(self, limit_price: float) -> float | None:
-        return _resolve_take_profit(
-            self.params, self.is_long, limit_price, self.stop_price, self.lines
-        )
+    def resolve_exits(self, limit_price: float) -> tuple[float, float | None] | None:
+        """체결 순간의 (손절 참조가, 익절 목표가). None이면 이 셋업은 진입하지 않는다.
+
+        오버라이드가 없으면(기본) 손절은 존 무효화 경계 그대로이고 익절은
+        `_resolve_take_profit`(고정 R)이라 WAN-119/120/132 수치가 비트 단위로 재현된다.
+        """
+        stop_price = self.stop_price
+        if self.stop_loss_override is not None:
+            new_stop = self.stop_loss_override(
+                StopLossContext(
+                    is_long=self.is_long,
+                    entry_price=limit_price,
+                    default_stop=stop_price,
+                    trigger_time=self.trigger_time,
+                    order_block=self.order_block,
+                )
+            )
+            if new_stop is None:
+                return None  # 유효 장벽 불가 — 정적 경로의 `continue`에 대응한다.
+            stop_price = new_stop
+        if self.take_profit_override is not None:
+            tp_price = self.take_profit_override(
+                TakeProfitContext(
+                    is_long=self.is_long,
+                    entry_price=limit_price,
+                    stop_price=stop_price,
+                    trigger_time=self.trigger_time,
+                    order_block=self.order_block,
+                )
+            )
+        else:
+            tp_price = _resolve_take_profit(
+                self.params, self.is_long, limit_price, stop_price, self.lines
+            )
+        return stop_price, tp_price
 
 
 @dataclass(frozen=True)
@@ -322,8 +362,8 @@ class TakeProfitContext:
     order_block: OrderBlock
 
 
-#: 셋업 문맥 → 익절 목표가(없으면 None = 익절 목표 없음, 무효화까지 홀딩). 정적 지정가
-#: 경로 전용 — 봉내 라이브 밴드는 익절을 체결 순간에 내므로 이 훅을 걸 지점이 없다(가드가 거부).
+#: 셋업 문맥 → 익절 목표가(없으면 None = 익절 목표 없음, 무효화까지 홀딩). 정적 경로는 탭
+#: 봉에서, 봉내 라이브 밴드는 **체결 순간**에 부른다(WAN-143) — 규칙은 같고 시점만 다르다.
 TakeProfitOverride = Callable[["TakeProfitContext"], float | None]
 
 
@@ -352,7 +392,7 @@ class StopLossContext:
 
 
 #: 셋업 문맥 → 손절 참조가(1R 기준). None이면 이 셋업을 제외한다(유효 장벽을 못 만듦).
-#: 정적 지정가 경로 전용 — 봉내 라이브 밴드는 손절·익절을 체결 순간에 내므로 훅 지점이 없다.
+#: 봉내 라이브 밴드에서는 **체결 순간**에 부르고, None이면 그 주문은 체결되지 않는다(WAN-143).
 StopLossOverride = Callable[["StopLossContext"], float | None]
 
 
@@ -627,7 +667,16 @@ def build_zone_limit_candidates(
     않으므로**(체결은 지정가 터치·RSI 게이트로만) 체결 셋업 집합(`filled`·`ZoneLimitStats`)은
     기본과 **비트 단위로 같고**, 달라지는 건 청산(손절선·거기서 파생되는 고정 R 익절 목표·
     뚫림/버팀)과 1R 사이징뿐이다. 콜러블이 None을 돌려주면(유효 장벽 불가) 그 셋업만
-    제외한다. None이면(기본) 이 경로도 비활성이라 엔진이 예전과 같다."""
+    제외한다. None이면(기본) 이 경로도 비활성이라 엔진이 예전과 같다.
+
+    ⚠️ **두 훅은 봉내 라이브 밴드(`intrabar_live`/`intrabar_causal`)에서도 동작한다**
+    (WAN-143 §0 = 구 WAN-144, 사용자 결정 `배선-새밴드`). 그 밴드는 진입가가 봉 안에서
+    정해져 탭 봉 시점에 훅을 걸 지점이 없으므로, 훅을 **체결 순간**으로 옮겼다
+    (`_IntrabarLiveLimit.resolve_exits` → 시뮬레이터가 체결 스텝에서 부른다). 정적 경로와
+    규칙은 같고 시점만 다르다. 다만 `stop_loss_override`가 `None`을 돌려줄 때의 처리가
+    갈린다: 정적 경로는 탭 봉에서 셋업을 빼(분모에도 안 들어간다), 봉내 경로는 이미 주문이
+    걸린 뒤라 `CANCELLED_CONDITION_FAILED`(미체결)로 끝난다 — 오버라이드를 안 주면 두
+    경로 모두 예전과 비트 단위로 같다."""
     if overlap is not None and overlap.arm != "A" and zone_provider is None:
         raise ValueError(
             "overlap.arm이 'B'/'C'면 zone_provider가 필요합니다 — 하위TF 겹침 존을 "
@@ -675,19 +724,6 @@ def build_zone_limit_candidates(
                 "서브스텝이 공급하는 현재가는 체결 가격이라 hl2 같은 합성 소스의 "
                 "실시간 대응값이 없습니다."
             )
-    if take_profit_override is not None and live_band_mode:
-        raise ValueError(
-            "take_profit_override는 정적 지정가 경로 전용입니다 — 봉내 라이브 밴드"
-            "(intrabar_live/intrabar_causal)는 익절을 체결 순간에 산출하므로(WAN-119) "
-            "탭 봉 시점에 오버라이드를 걸 지점이 없습니다. 채택 기본값(band_bar='tap')은 "
-            "정적 경로라 여기 걸린다."
-        )
-    if stop_loss_override is not None and live_band_mode:
-        raise ValueError(
-            "stop_loss_override는 정적 지정가 경로 전용입니다 — 봉내 라이브 밴드"
-            "(intrabar_live/intrabar_causal)는 1R을 체결 순간에 산출하므로(WAN-119) "
-            "탭 봉 시점에 손절 오버라이드를 걸 지점이 없습니다."
-        )
 
     filter_components: tuple[list[float], list[float]] | None = None
     if deviation is not None and not live_band_mode:
@@ -792,8 +828,10 @@ def build_zone_limit_candidates(
         stop_price = seed_ob.bottom if is_long else seed_ob.top
         if stop_loss_override is not None and limit_price is not None:
             # WAN-133: 손절 참조가를 존 무효화 경계에서 떼어 외부 규칙(예: ATR 고정 거리)이
-            # 정한다. 위 라이브 밴드 가드가 limit_price is not None을 보장한다. None이면
-            # 유효한 장벽을 못 만든 것이라 이 셋업을 제외한다.
+            # 정한다. 여기는 **정적 경로**(탭 봉에 진입가가 확정된 경우)이고, 봉내 라이브
+            # 밴드는 `limit_price is None`이라 이 블록을 건너뛴 뒤 체결 순간에 같은 훅을
+            # 부른다(WAN-143 `_IntrabarLiveLimit.resolve_exits`). None이면 유효한 장벽을
+            # 못 만든 것이라 이 셋업을 제외한다.
             new_stop = stop_loss_override(
                 StopLossContext(
                     is_long=is_long,
@@ -842,6 +880,9 @@ def build_zone_limit_candidates(
                 params=params,
                 stop_price=stop_price,
                 lines=lines,
+                trigger_time=signal.trigger_time,
+                take_profit_override=take_profit_override,
+                stop_loss_override=stop_loss_override,
                 pending_price=pending,
                 causal=causal_band_mode,
             )
@@ -937,7 +978,9 @@ def build_zone_limit_candidates(
                 exit_time=exit_time,
                 exit_price=exit_price,
                 reason=reason,
-                stop_price=stop_price,
+                # WAN-143: live 밴드는 손절도 체결 순간에 정해질 수 있다(오버라이드).
+                # 시뮬레이터가 실제로 쓴 값을 돌려주므로 1R 사이징이 그것과 일치한다.
+                stop_price=outcome.stop_price if outcome.stop_price is not None else stop_price,
                 penetration=penetration,
                 order_block=ob,
                 tap_index=signal.tap_index,

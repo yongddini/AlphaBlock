@@ -18,6 +18,8 @@ from backtest.sweep import timeframe_to_ms
 from backtest.synthetic import make_synthetic_ohlcv
 from backtest.zone_limit_backtest import (
     SetupDiagnostic,
+    StopLossContext,
+    TakeProfitContext,
     _Candidate,
     _IncrementalRsiSeeder,
     _IntrabarLiveLimit,
@@ -703,6 +705,86 @@ def _live_provider(*, causal: bool, pending_price: float | None = None) -> _Intr
         pending_price=pending_price,
         causal=causal,
     )
+
+
+def _tp_provider(
+    *,
+    take_profit_override: object = None,
+    stop_loss_override: object = None,
+) -> _IntrabarLiveLimit:
+    """고정 1.5R 익절이 켜진 봉내 공급자 — WAN-143 훅 배선을 재는 최소 셋업."""
+    ob = OrderBlock(
+        direction=OrderBlockDirection.BULLISH,
+        top=100.0,
+        bottom=90.0,
+        start_time=0,
+        confirmed_time=0,
+        ob_volume=1.0,
+        ob_low_volume=1.0,
+        ob_high_volume=1.0,
+    )
+    filt = DeviationFilterParams(anchor="sma", sma_length=20, width_kind="stdev", width_value=2.0)
+    return _IntrabarLiveLimit(
+        band=RealtimeBand.seed_from_closed([95.0] * 19, filt),
+        order_block=ob,
+        is_long=True,
+        params=ConfluenceParams(
+            entry_mode="zone_limit",
+            rsi_mode="realtime",
+            take_profit_mode="fixed_r",
+            take_profit_r=1.5,
+        ),
+        stop_price=90.0,
+        lines=[],
+        trigger_time=1_700_000_000_000,
+        take_profit_override=take_profit_override,  # type: ignore[arg-type]
+        stop_loss_override=stop_loss_override,  # type: ignore[arg-type]
+    )
+
+
+def test_live_resolve_exits_without_overrides_is_the_adopted_rule() -> None:  # WAN-143 §0
+    """훅을 안 주면 손절은 존 경계, 익절은 고정 1.5R 그대로 — 기존 수치 재현의 계약."""
+    stop, tp = _tp_provider().resolve_exits(96.0) or (None, None)
+    assert stop == 90.0
+    assert tp == pytest.approx(96.0 + 1.5 * (96.0 - 90.0))
+
+
+def test_live_take_profit_override_is_called_with_the_fill_price() -> None:  # WAN-143 §0
+    """익절 훅이 **체결 순간의 진입가**로 불린다(탭 봉 가격이면 옛 배선이다)."""
+    seen: list[TakeProfitContext] = []
+
+    def override(ctx: TakeProfitContext) -> float | None:
+        seen.append(ctx)
+        return ctx.entry_price + 2.0
+
+    resolved = _tp_provider(take_profit_override=override).resolve_exits(96.0)
+    assert resolved == (90.0, 98.0)
+    assert [(c.entry_price, c.stop_price, c.trigger_time) for c in seen] == [
+        (96.0, 90.0, 1_700_000_000_000)
+    ]
+
+
+def test_live_stop_override_feeds_the_take_profit_context() -> None:  # WAN-143 §0
+    """손절 훅이 먼저 돌고, 익절은 **그 손절**로 계산된다(순서 의존을 한 메서드에 가둔다)."""
+
+    def stop_override(ctx: StopLossContext) -> float | None:
+        assert ctx.default_stop == 90.0
+        return ctx.entry_price - 2.0  # 1R을 6.0 → 2.0으로 좁힌다.
+
+    resolved = _tp_provider(stop_loss_override=stop_override).resolve_exits(96.0)
+    assert resolved is not None
+    stop, tp = resolved
+    assert stop == 94.0
+    assert tp == pytest.approx(96.0 + 1.5 * 2.0)
+
+
+def test_live_stop_override_none_means_no_entry() -> None:  # WAN-143 §0
+    """유효 장벽을 못 만들면 `None` — 시뮬레이터가 이걸 보고 체결시키지 않는다."""
+
+    def stop_override(ctx: StopLossContext) -> float | None:
+        return None
+
+    assert _tp_provider(stop_loss_override=stop_override).resolve_exits(96.0) is None
 
 
 def test_intrabar_causal_band_lags_live_by_exactly_one_substep() -> None:
