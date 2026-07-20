@@ -428,8 +428,32 @@ def leave_one_out(
     return " · ".join(parts)
 
 
+MIN_TRADES_PER_SYMBOL = 20
+"""WAN-84 유효 기준 — OOS 심볼당 거래가 이보다 적으면 판정하지 않는다.
+
+WAN-107/130이 4h를 「보류(표본 부족)」로 둔 자로, 심볼당 15.7거래(WAN-107)·18.3거래
+(WAN-130)가 이 문턱을 못 넘었다. 승률↓·크기↑ 교환의 부호를 재는 이 이슈에서 표본이
+모자라면 우연이 결론을 만든다.
+"""
+
+
+def trades_per_symbol(frame: pd.DataFrame, timeframe: str, segment: str = SEGMENT_OOS) -> float:
+    """그 (TF, 구간)의 기준점 팔 기준 심볼당 거래 수 — 표본 게이트의 입력."""
+    cell = pooled(frame, timeframe, segment, TP_ENTRY, GUARD_ON)
+    trades, symbols = cell.get("num_trades"), cell.get("n_symbols")
+    if not cell or trades is None or not symbols:
+        return 0.0
+    return trades / symbols
+
+
 def verdict(frame: pd.DataFrame, timeframe: str) -> str:
-    """공식 렌즈 OOS 심볼평균으로 4조합을 가른다 — 가드 축을 갈라 읽는 것이 핵심이다."""
+    """공식 렌즈 OOS 심볼평균으로 4조합을 가른다 — 가드 축을 갈라 읽는 것이 핵심이다.
+
+    ⚠️ **표본이 WAN-84 기준(심볼당 20거래)에 못 미치면 판정하지 않는다** — 숫자는 그대로
+    내되 문장 앞에 「판정 불가(대조군)」를 박는다. 4h가 정확히 그 자리다(WAN-107/130의
+    「보류」). 게이트가 없으면 대조군 열이 판정문을 갖게 되고, 그 문장은 다음 이슈에서
+    근거로 재인용된다 — 이 저장소가 여러 번 겪은 실패다.
+    """
     cells = {
         (rule, guard): pooled(frame, timeframe, SEGMENT_OOS, rule, guard)
         for rule in TP_RULES
@@ -444,7 +468,14 @@ def verdict(frame: pd.DataFrame, timeframe: str) -> str:
 
     on_delta = ret(TP_ZONE, GUARD_ON) - ret(TP_ENTRY, GUARD_ON)
     off_delta = ret(TP_ZONE, GUARD_OFF) - ret(TP_ENTRY, GUARD_OFF)
-    if on_delta > 0 and off_delta > 0:
+    per_symbol = trades_per_symbol(frame, timeframe)
+    if per_symbol < MIN_TRADES_PER_SYMBOL:
+        tag = (
+            f"⚠️ **판정 불가(대조군)** — OOS 심볼당 {per_symbol:.1f}거래로 WAN-84 유효 기준"
+            f"({MIN_TRADES_PER_SYMBOL}건) 미달이다(WAN-107/130의 4h 「보류」와 같은 자리). "
+            "아래 숫자는 방향을 보는 참고값이지 채택 근거가 아니다"
+        )
+    elif on_delta > 0 and off_delta > 0:
         tag = "(a) 익절-존높이기준이 두 가드 모두에서 이긴다"
     elif on_delta <= 0 and off_delta <= 0:
         tag = "(b) 익절-존높이기준이 어느 가드에서도 못 이긴다 → 현행 유지"
@@ -636,7 +667,10 @@ def write_summary(frame: pd.DataFrame, path: Path) -> None:
             _symbol_table(frame, timeframe, SEGMENT_OOS),
             "",
         ]
-        if has_sweep:
+        # 스윕은 **그 TF에서 실제로 여러 배수를 돌린 경우에만** 낸다 — 배수가 하나뿐인 TF에
+        # "최적 1.5R"이라 적으면 재보지도 않은 값을 고른 것처럼 읽힌다.
+        tf_multiples = set(frame[frame["timeframe"] == timeframe]["r_multiple"].astype(float))
+        if has_sweep and len(tf_multiples) > 1:
             lines += [
                 "### R 배수 스윕 (`zone_height + guard_off`)",
                 "",
@@ -644,6 +678,14 @@ def write_summary(frame: pd.DataFrame, path: Path) -> None:
                 f"- OOS: {best_r(frame, timeframe, SEGMENT_OOS, TP_ZONE, GUARD_OFF)}",
                 "",
                 "⚠️ IS가 고르는 R이 OOS에서 무너지는지가 관전 포인트다(WAN-90 진입가 축의 재현).",
+                "",
+            ]
+        elif has_sweep:
+            lines += [
+                f"### R 배수 스윕 — {timeframe}은 돌리지 않았다",
+                "",
+                f"이 TF는 `{sorted(tf_multiples)[0]:.1f}R` 한 배수만 돌았다(비용). "
+                "후속 이슈 몫이다.",
                 "",
             ]
     lines += [
