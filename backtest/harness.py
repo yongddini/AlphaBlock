@@ -270,6 +270,7 @@ def build_params(
     seed: int = 0,
     short_enabled: bool | None = None,
     retap_mode: str | None = None,
+    max_zone_width_atr: float | None = None,
     base: ConfluenceParams | None = None,
 ) -> ConfluenceParams:
     """CLI 인자를 `ConfluenceParams`로 조립한다.
@@ -301,6 +302,11 @@ def build_params(
                 f"체결 가정(--fill {fill.name})은 종가 진입(--entry-mode close)에 적용되지 "
                 "않습니다. 탭이 곧 진입이라 미체결이라는 개념이 없습니다."
             )
+        if max_zone_width_atr is not None:
+            raise ValueError(
+                "존폭 필터(--max-zone-width-atr)는 종가 진입(--entry-mode close)에 적용되지 "
+                "않습니다. 필터는 지정가 후보를 거르는 B안 경로에만 배선돼 있습니다(WAN-158)."
+            )
 
     update: dict[str, object] = {
         "entry_mode": entry_mode,
@@ -325,6 +331,10 @@ def build_params(
             supported = ", ".join(RETAP_MODES)
             raise ValueError(f"알 수 없는 재탭 정책: {retap_mode!r} (지원: {supported})")
         update["retap_mode"] = retap_mode
+    if max_zone_width_atr is not None:
+        # `None`은 "손대지 않는다"(= 채택 기본값 = 꺼짐)이지 "끄라"가 아니다 —
+        # `offset_bps`와 같은 규약이라 `base`가 켜 둔 필터를 여기서 말없이 끄지 않는다.
+        update["max_zone_width_atr"] = max_zone_width_atr
     return (base or ConfluenceParams()).model_copy(update=update)
 
 
@@ -770,6 +780,11 @@ class RunRow(BaseModel):
     **실제로 탐지에 넘어간 값**이지 요청 라벨이 아니다(`build_row`가 `OrderBlockParams`를
     받아 그대로 싣는다) — "분리로 돌고 병합 라벨이 붙는" WAN-95 부류를 막는다. 기본값이
     채택 기본값이라 이 축이 생기기 전 행 생성부(옛 픽스처)는 그대로 유효하다."""
+    max_zone_width_atr: float | None = None
+    """존폭 필터 문턱(WAN-158, ATR 배수). `None` = 채택 기본값(꺼짐 = 전부 매매).
+
+    `portfolio_leverage`와 같은 자리 — "안 씀"과 숫자를 가르려고 0이 아니라 `None`이다.
+    **실제로 엔진에 넘어간 `params.max_zone_width_atr`**를 싣는다(요청 라벨이 아니다)."""
     fill: str
     seed: int
     start_time: int | None
@@ -787,7 +802,7 @@ class RunRow(BaseModel):
     num_filled: int | None
     funding_coverage: float | None
 
-    @field_validator("portfolio_leverage", mode="before")
+    @field_validator("portfolio_leverage", "max_zone_width_atr", mode="before")
     @classmethod
     def _empty_leverage_is_none(cls, value: object) -> object:
         """CSV 왕복에서 빈 칸(→ `NaN`)을 `None`으로 되돌린다.
@@ -835,6 +850,7 @@ def build_row(
         position_mode="single" if portfolio is None else "multi",
         portfolio_leverage=None if portfolio is None else portfolio.leverage,
         combine_obs=(order_block or OrderBlockParams()).combine_obs,
+        max_zone_width_atr=params.max_zone_width_atr,
         fill=fill_name,
         seed=params.fill_dropout_seed,
         start_time=market.start_ms if not market.empty else None,
@@ -889,6 +905,7 @@ _AXIS_COLUMNS: tuple[tuple[str, str], ...] = (
     ("pos", "position_mode"),
     ("lev", "portfolio_leverage"),
     ("merge", "combine_obs"),
+    ("zw_atr", "max_zone_width_atr"),
     ("fill", "fill"),
     ("seed", "seed"),
 )

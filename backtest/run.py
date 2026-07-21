@@ -273,6 +273,16 @@ class Grid:
     `_run_cell`이 이 값별로 탐지 결과를 따로 캐시한다. 옛 수치를 결론에 박아 둔
     리포트는 `(harness.LEGACY_COMBINE_OBS,)`로 고정한다.
     """
+    max_zone_widths_atr: tuple[float | None, ...] = (None,)
+    """존폭 필터 축(WAN-158, 옵트인). `None` = 채택 기본값(꺼짐 = 전부 매매), 숫자 =
+    존폭 ÷ ATR가 그 값 이하인 셋업만 진입.
+
+    **진짜 축이다**(`combine_obs`와 같은 자리, `band_bar` 같은 핀이 아니다) — 필터 on/off를
+    한 표에 나란히 놓고 보라고 여는 것이 이 이슈의 목적이다(WAN-158 결정 B = 옵트인).
+    기본값 `(None,)`이라 인자를 안 주면 예전과 **비트 단위로 같은 행**이 나온다.
+
+    ⚠️ 단위는 **ATR 배수**지 퍼센트가 아니다(권고 문턱 15m 1.24 · 1h 1.32).
+    """
     band_bar: BandBar | None = None
     """이격 밴드 표본 **고정**. None이면 채택 기본값(WAN-132: `intrabar_live`).
 
@@ -308,6 +318,12 @@ class Grid:
                     "--entry-mode close와 --positions(다중 포지션)를 같이 줄 수 없습니다. "
                     "동시 다중 포지션 회계는 지정가(B안) 경로에만 있습니다(WAN-103)."
                 )
+            if self.max_zone_widths_atr != (None,):
+                raise ValueError(
+                    "--entry-mode close와 --max-zone-width-atr(존폭 필터)를 같이 줄 수 "
+                    "없습니다. 필터는 지정가 후보를 거르는 B안 경로에만 배선돼 "
+                    "있습니다(WAN-158)."
+                )
 
     @property
     def needs_1m(self) -> bool:
@@ -328,6 +344,7 @@ class Combo:
     retap_mode: str
     portfolio_leverage: float | None
     combine_obs: bool | None
+    max_zone_width_atr: float | None
     fill: FillPreset
     seed: int
 
@@ -364,20 +381,22 @@ def iter_combos(grid: Grid) -> list[Combo]:
                 for offset_bps in grid.offsets_bps:
                     for leverage in grid.portfolio_leverages:
                         for combine_obs in grid.combine_obs:
-                            for fill in grid.fills:
-                                for seed in iter_seeds(fill, grid.seeds):
-                                    combos.append(
-                                        Combo(
-                                            entry_mode=entry_mode,
-                                            take_profit_r=take_profit_r,
-                                            offset_bps=offset_bps,
-                                            retap_mode=retap_mode,
-                                            portfolio_leverage=leverage,
-                                            combine_obs=combine_obs,
-                                            fill=fill,
-                                            seed=seed,
+                            for zone_width in grid.max_zone_widths_atr:
+                                for fill in grid.fills:
+                                    for seed in iter_seeds(fill, grid.seeds):
+                                        combos.append(
+                                            Combo(
+                                                entry_mode=entry_mode,
+                                                take_profit_r=take_profit_r,
+                                                offset_bps=offset_bps,
+                                                retap_mode=retap_mode,
+                                                portfolio_leverage=leverage,
+                                                combine_obs=combine_obs,
+                                                max_zone_width_atr=zone_width,
+                                                fill=fill,
+                                                seed=seed,
+                                            )
                                         )
-                                    )
     return combos
 
 
@@ -552,6 +571,7 @@ def _run_cell(task: _CellTask) -> _CellOutcome:
                 seed=combo.seed,
                 retap_mode=combo.retap_mode,
                 short_enabled=grid.short_enabled,
+                max_zone_width_atr=combo.max_zone_width_atr,
                 base=_pinned_base(grid),
             )
             portfolio = combo.portfolio
@@ -784,6 +804,15 @@ def build_parser() -> argparse.ArgumentParser:
             "안 주면 채택 기본값(false = 원본 존 단위 분리)"
         ),
     )
+    strategy.add_argument(
+        "--max-zone-width-atr",
+        help=(
+            "존폭 필터 축(WAN-158, 옵트인). 존폭÷ATR가 이 값 이하인 셋업만 진입. "
+            "콤마 복수 = 격자이며 none = 필터 없음(채택 기본값). "
+            "단위는 ATR 배수지 퍼센트가 아니다(권고: 15m 1.24 · 1h 1.32). "
+            "예: --max-zone-width-atr none,1.24"
+        ),
+    )
     strategy.add_argument("--fill-dropout-rate", type=float, help="--fill 대신 탈락률을 직접 지정")
     strategy.add_argument("--seeds", help="탈락 추첨 시드(콤마 복수). 기본은 프리셋 시드")
 
@@ -901,6 +930,7 @@ def grid_from_args(args: argparse.Namespace) -> Grid:
         fills=_fills_from_args(args),
         portfolio_leverages=_positions_from_args(args),
         combine_obs=_combine_obs_from_args(args),
+        max_zone_widths_atr=_zone_widths_from_args(args),
         seeds=split_ints(args.seeds, label="--seeds") if args.seeds else None,
         short_enabled=short_enabled,
     )
@@ -936,6 +966,41 @@ def _combine_obs_from_args(args: argparse.Namespace) -> tuple[bool | None, ...]:
             values.append(value)
     if not values:
         raise ValueError("--combine-obs가 비어 있습니다.")
+    return tuple(values)
+
+
+#: `--max-zone-width-atr`에서 "필터 없음(채택 기본값)"을 가리키는 토큰. 0으로 표현하지
+#: 않는 이유는 `--positions single`과 같다 — 0은 "존폭 0 이하만" 이라는 다른 뜻이 되고,
+#: 필드가 `gt=0`이라 값으로도 못 쓴다.
+NO_ZONE_WIDTH_TOKEN = "none"
+
+
+def _zone_widths_from_args(args: argparse.Namespace) -> tuple[float | None, ...]:
+    """`--max-zone-width-atr none,1.24` → `(None, 1.24)`. 안 주면 `(None,)`(채택 기본값).
+
+    ⚠️ 값은 **ATR 배수**다. 퍼센트로 착각한 값(0.01 등)도 문법상 유효하므로 여기서
+    막을 수는 없다 — `--help`와 문서가 단위를 못 박는다(WAN-112 단위 함정).
+    """
+    if not args.max_zone_width_atr:
+        return (None,)
+    values: list[float | None] = []
+    for token in split_list(args.max_zone_width_atr):
+        if token.lower() == NO_ZONE_WIDTH_TOKEN:
+            value: float | None = None
+        else:
+            try:
+                value = float(token)
+            except ValueError as exc:
+                raise ValueError(
+                    f"--max-zone-width-atr에 알 수 없는 값이 있습니다: {token!r} "
+                    f"({NO_ZONE_WIDTH_TOKEN} 또는 ATR 배수 숫자)"
+                ) from exc
+            if value <= 0:
+                raise ValueError(f"--max-zone-width-atr의 문턱은 0보다 커야 합니다: {token!r}")
+        if value not in values:
+            values.append(value)
+    if not values:
+        raise ValueError("--max-zone-width-atr가 비어 있습니다.")
     return tuple(values)
 
 

@@ -169,6 +169,12 @@ def _require_close_entry(confluence_params: ConfluenceParams | None) -> None:
             "backtest.zone_limit_backtest.run_zone_limit_backtest()를 쓰세요. "
             '이 경로를 의도했다면 entry_mode="close"를 명시하세요(WAN-95).'
         )
+    if params.max_zone_width_atr is not None:
+        raise ValueError(
+            "존폭 필터(max_zone_width_atr)는 종가 진입(A안)에 적용되지 않습니다 — "
+            "필터는 지정가 후보를 거르는 B안 경로에만 배선돼 있습니다(WAN-158). "
+            "조용히 무시하면 필터를 켠 줄 아는 표에 라벨만 붙습니다(WAN-95)."
+        )
 
 
 def evaluate(
