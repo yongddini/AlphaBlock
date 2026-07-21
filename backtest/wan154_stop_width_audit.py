@@ -583,30 +583,32 @@ def guard_verdict(rows: Sequence[PnlRow], *, barrier: str) -> Judgement:
     detail = " / ".join(per_tf)
     if not ret_deltas:
         return Judgement("indeterminate", f"`{barrier}`: ⚠️ 판정 불가 — {detail}")
-    if all(abs(d) < 1e-6 for d in ret_deltas) and all(abs(d) < 1e-6 for d in ra_deltas):
+    # ±0.1%p 미만은 「효과 없음」으로 읽는다 — 0을 어느 한쪽 부호로 세면 「무영향 + 이득」이
+    # 「TF에 갈린다」로 둔갑한다(부호 함정, WAN-115/120이 겪은 부류).
+    eps = 0.001
+    pos = [d for d in ret_deltas if d > eps]
+    neg = [d for d in ret_deltas if d < -eps]
+    if not pos and not neg:
         return Judgement(
             "no_effect",
-            f"`{barrier}`: **(c) 중립(무영향)** — 가드를 끄나 켜나 결과가 같다({detail}). "
-            "이 장벽의 손절 거리가 전부 가드(0.3%)보다 멀어 **가드에 걸리는 거래가 없다**는 "
-            "뜻이다.",
+            f"`{barrier}`: **(c) 중립(무영향)** — 가드를 끄나 켜나 결과가 사실상 같다"
+            f"({detail}). 이 장벽에서는 가드(0.3%)에 걸리는 거래가 거의 없다는 뜻이다.",
         )
-    all_pos = all(d > 0 for d in ret_deltas)
-    all_neg = all(d < 0 for d in ret_deltas)
-    ra_pos = all(d > 0 for d in ra_deltas) if ra_deltas else False
-    ra_neg = all(d < 0 for d in ra_deltas) if ra_deltas else False
-    if all_pos and ra_pos:
+    ra_ok = all(d > -1e-9 for d in ra_deltas) if ra_deltas else False
+    if not neg and ra_ok:
+        note = "(나머지 TF는 무영향)" if len(pos) < len(ret_deltas) else ""
         return Judgement(
             "benefit",
-            f"`{barrier}`: **(a) 가드가 이득** — 두 작업 TF 모두 수익·위험조정이 함께 오른다"
-            f"({detail}).",
+            f"`{barrier}`: **(a) 가드가 이득{note}** — 수익이 내리는 TF가 없고 위험조정도 "
+            f"내려가지 않는다({detail}).",
         )
-    if all_neg and ra_neg:
+    if not pos and all(d < 1e-9 for d in ra_deltas):
         return Judgement(
             "harm",
-            f"`{barrier}`: **(b) 가드가 손해** — 두 작업 TF 모두 수익·위험조정이 함께 내린다"
-            f"({detail}).",
+            f"`{barrier}`: **(b) 가드가 손해** — 수익이 오르는 TF가 없고 위험조정도 오르지 "
+            f"않는다({detail}).",
         )
-    if not (all_pos or all_neg):
+    if pos and neg:
         return Judgement(
             "neutral",
             f"`{barrier}`: **(c) 중립(TF에 갈린다)** — 수익 방향이 TF마다 다르다({detail}). "

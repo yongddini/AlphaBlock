@@ -540,7 +540,7 @@ def test_guard_verdict_no_effect_when_guard_never_binds() -> None:
     )
     got = guard_verdict(rows, barrier=BARRIER_ATR)
     assert got.kind == "no_effect"
-    assert "걸리는 거래가 없다" in got.text
+    assert "걸리는 거래가 거의 없다" in got.text
 
 
 def test_pen_verdict_kept_and_lost() -> None:
