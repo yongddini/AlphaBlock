@@ -298,6 +298,22 @@ def _hand_made_cell(n: int = 60) -> tuple[GeoCell, MarketData]:
     return cell, MarketData(_SYMBOL, _TIMEFRAME, pd.DataFrame(), pd.DataFrame(), [])
 
 
+def test_matched_draw_is_shared_across_all_three_barriers() -> None:
+    """같은 시드가 세 장벽에서 같은 셋업(같은 후보 수)을 뽑는다 — WAN-152 검정의 3장벽 판."""
+    cell, market = _hand_made_cell()
+    rows = pnl_rows_for_cell(cell, market)
+    for segment in (SEGMENT_IS, SEGMENT_OOS):
+        for seed in MATCH_SEEDS:
+            picked = {
+                r.barrier: r
+                for r in rows
+                if r.arm == ARM_MATCHED and r.seed == seed and r.segment == segment
+            }
+            assert set(picked) == set(BARRIERS)
+            counts = {r.num_candidates for r in picked.values()}
+            assert len(counts) == 1  # 세 장벽이 같은 개수(= 같은 인덱스)를 뽑았다.
+
+
 def test_guard_axis_default_value_reproduces_the_main_run() -> None:
     """가드 격자의 0.3% 행 == 기본 실행 행 — 격자와 본 표가 서로를 검산한다."""
     cell, market = _hand_made_cell()
