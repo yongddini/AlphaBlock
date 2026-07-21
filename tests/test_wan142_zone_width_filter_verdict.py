@@ -16,6 +16,10 @@
 5. **존폭 분포가 존 단위다** — 탭이 많은 존이 분포를 여러 번 차지하면 「존폭 분포」가 아니라
    「탭 분포」다.
 6. **판정 문장이 표본 부족을 삼키지 않는다**.
+7. **결론 문단이 판정과 어긋나지 않는다** — (a)/(b)/(c)/판정불가 네 분기가 각각 의도한
+   입력에서 나온다. 문장 부분문자열로 분기하던 시절 §판정은 (a)인데 §결론만 「판정 불가」를
+   찍는 사고가 실제로 났다(PM 지적) — 그래서 분기를 `VerdictKind` 열거형으로 옮기고 이
+   절이 그 동작을 고정한다.
 """
 
 from __future__ import annotations
@@ -41,6 +45,7 @@ from backtest.wan142_zone_width_filter_verdict import (
     SEED_AGGREGATE,
     ExperimentResult,
     PnlRow,
+    VerdictKind,
     build_cell,
     build_summary_markdown,
     matched_test_row,
@@ -196,11 +201,12 @@ def _row(
     trades: float = 100.0,
     ret: float = 0.0,
     mdd: float = 0.10,
+    timeframe: str = _TIMEFRAME,
 ) -> PnlRow:
     return PnlRow(
         lens=LENS_PRIMARY,
         symbol=symbol,
-        timeframe=_TIMEFRAME,
+        timeframe=timeframe,
         segment=SEGMENT_OOS,
         arm=arm,
         seed=seed,
@@ -212,14 +218,22 @@ def _row(
     )
 
 
-def _synthetic_pnl(*, filter_mdd: float, matched_mdd: float, symbols: int = 6) -> list[PnlRow]:
+def _synthetic_pnl(
+    *,
+    filter_mdd: float,
+    matched_mdd: float,
+    symbols: int = 6,
+    timeframe: str = _TIMEFRAME,
+) -> list[PnlRow]:
     rows: list[PnlRow] = []
     for i in range(symbols):
         sym = f"S{i}/USDT:USDT"
-        rows.append(_row(sym, ARM_DEFAULT, mdd=0.20))
-        rows.append(_row(sym, ARM_FILTER, mdd=filter_mdd, ret=0.05))
+        rows.append(_row(sym, ARM_DEFAULT, mdd=0.20, timeframe=timeframe))
+        rows.append(_row(sym, ARM_FILTER, mdd=filter_mdd, ret=0.05, timeframe=timeframe))
         for seed in MATCH_SEEDS:
-            rows.append(_row(sym, ARM_MATCHED, seed=seed, mdd=matched_mdd, ret=0.05))
+            rows.append(
+                _row(sym, ARM_MATCHED, seed=seed, mdd=matched_mdd, ret=0.05, timeframe=timeframe)
+            )
     return rows
 
 
@@ -283,7 +297,9 @@ def test_trade_residual_is_reported_and_warned_in_verdict() -> None:
             rows.append(_row(sym, ARM_MATCHED, seed=seed, mdd=0.15, ret=0.05, trades=130.0))
     test = matched_test_row(rows, lens=LENS_PRIMARY, timeframe=_TIMEFRAME, segment=SEGMENT_OOS)
     assert test.trade_gap_pct == pytest.approx(30.0)
-    text = verdict([test], timeframe=_TIMEFRAME)
+    got = verdict([test], timeframe=_TIMEFRAME)
+    assert got.kind is VerdictKind.SELECTIVE
+    text = got.text
     assert "거래 수가 +30.0% 어긋난다" in text
     assert "할인해 읽어야 한다" in text
 
@@ -296,7 +312,7 @@ def test_verdict_always_flags_the_geometry_alternative() -> None:
     """
     rows = _synthetic_pnl(filter_mdd=0.05, matched_mdd=0.15)
     tests = [matched_test_row(rows, lens=LENS_PRIMARY, timeframe=_TIMEFRAME, segment=SEGMENT_OOS)]
-    text = verdict(tests, timeframe=_TIMEFRAME)
+    text = verdict(tests, timeframe=_TIMEFRAME).text
     assert "기하" in text
     assert "채택이 아니다" in text
 
@@ -394,13 +410,17 @@ def test_verdict_refuses_on_thin_symbol_coverage() -> None:
     """유효 심볼이 3개 미만이면 (a)/(b) 대신 「판정 불가」를 낸다(WAN-143 게이트와 같은 취지)."""
     rows = _synthetic_pnl(filter_mdd=0.01, matched_mdd=0.20, symbols=2)
     tests = [matched_test_row(rows, lens=LENS_PRIMARY, timeframe=_TIMEFRAME, segment=SEGMENT_OOS)]
-    assert "판정 불가" in verdict(tests, timeframe=_TIMEFRAME)
+    got = verdict(tests, timeframe=_TIMEFRAME)
+    assert got.kind is VerdictKind.INDETERMINATE
+    assert "판정 불가" in got.text
 
 
 def test_verdict_reads_selection_when_filter_beats_matched() -> None:
     rows = _synthetic_pnl(filter_mdd=0.05, matched_mdd=0.15)
     tests = [matched_test_row(rows, lens=LENS_PRIMARY, timeframe=_TIMEFRAME, segment=SEGMENT_OOS)]
-    text = verdict(tests, timeframe=_TIMEFRAME)
+    got = verdict(tests, timeframe=_TIMEFRAME)
+    assert got.kind is VerdictKind.SELECTIVE
+    text = got.text
     assert "(a) 표본 축소로는 환원되지 않는다" in text
     assert "채택이 아니다" in text  # 판정이 곧 채택으로 읽히지 않도록.
 
@@ -408,7 +428,9 @@ def test_verdict_reads_selection_when_filter_beats_matched() -> None:
 def test_verdict_reads_sample_reduction_when_matched_reproduces() -> None:
     rows = _synthetic_pnl(filter_mdd=0.10, matched_mdd=0.09)
     tests = [matched_test_row(rows, lens=LENS_PRIMARY, timeframe=_TIMEFRAME, segment=SEGMENT_OOS)]
-    assert "(b) 표본 축소" in verdict(tests, timeframe=_TIMEFRAME)
+    got = verdict(tests, timeframe=_TIMEFRAME)
+    assert got.kind is VerdictKind.SAMPLE_REDUCTION
+    assert "(b) 표본 축소" in got.text
 
 
 def test_summary_labels_the_symbols_it_actually_ran() -> None:
@@ -423,3 +445,64 @@ def test_summary_labels_the_symbols_it_actually_ran() -> None:
     text = build_summary_markdown(result, timeframes=(_TIMEFRAME,))
     assert "2심볼(S0/S1)" in text
     assert "6심볼(BTC/ETH/SOL/BNB/XRP/TRX)" not in text
+
+
+# --------------------------------------------------------------------------- #
+# 7. 결론 문단이 판정과 어긋나지 않는다 (네 분기 전부)
+# --------------------------------------------------------------------------- #
+
+
+def _summary_for(cells: dict[str, tuple[float, float]], *, symbols: int = 6) -> str:
+    """TF별 (필터 MDD, 매칭 MDD)로 요약 마크다운을 만든다."""
+    rows: list[PnlRow] = []
+    for timeframe, (filter_mdd, matched_mdd) in cells.items():
+        rows += _synthetic_pnl(
+            filter_mdd=filter_mdd,
+            matched_mdd=matched_mdd,
+            symbols=symbols,
+            timeframe=timeframe,
+        )
+    tests = [
+        matched_test_row(rows, lens=LENS_PRIMARY, timeframe=tf, segment=SEGMENT_OOS) for tf in cells
+    ]
+    result = ExperimentResult(pnl_rows=rows, matched_tests=tests)
+    return build_summary_markdown(result, timeframes=tuple(cells))
+
+
+_FALLBACK = "어느 작업 TF에서도 매칭 검정이 유효 표본을 얻지 못했다"
+
+
+def test_conclusion_is_selective_when_every_tf_reads_a() -> None:
+    """(a)가 나온 입력에서 결론 문단이 **폴백이 아니다**.
+
+    🚨 이 테스트가 존재하는 이유: `_conclusion()`이 판정 문장의 부분문자열(`"(a) 선별"`)로
+    분기하는 동안, `verdict()`의 실제 출력은 `"(a) 표본 축소로는 환원되지 않는다"`였다.
+    그래서 **§판정은 (a)를 찍는데 §결론만 「판정 불가」를 찍었다** — 네 셀 전부 p=0.048이
+    나온 격자에서 결론이 "유효 표본을 얻지 못했다"고 말했다. 이 저장소에서 나중에 인용되는
+    것은 결론 문단이므로, 다음 이슈가 "WAN-142는 판정 못 냈다"로 인용하게 됐을 것이다.
+    라벨이 아니라 **동작**으로 고정한다.
+    """
+    text = _summary_for({"15m": (0.05, 0.15), "1h": (0.05, 0.15)})
+    assert "**(a) 두 작업 TF(15m, 1h) 모두" in text
+    assert _FALLBACK not in text
+
+
+def test_conclusion_is_sample_reduction_when_every_tf_reads_b() -> None:
+    """(b)가 나온 입력에서는 「표본 축소의 산물」 결론이 나온다(같은 취약성을 함께 덮는다)."""
+    text = _summary_for({"15m": (0.10, 0.09), "1h": (0.10, 0.09)})
+    assert "**(b) 존폭 필터의 MDD 개선은 표본 축소의 산물이다" in text
+    assert _FALLBACK not in text
+
+
+def test_conclusion_is_split_when_tfs_disagree() -> None:
+    """TF마다 판정이 갈리면 (c) — 「TF마다 다른 필터」는 새 자유 파라미터다."""
+    text = _summary_for({"15m": (0.05, 0.15), "1h": (0.10, 0.09)})
+    assert "**(c) TF에 갈린다" in text
+    assert _FALLBACK not in text
+
+
+def test_conclusion_falls_back_only_when_no_tf_is_decidable() -> None:
+    """폴백은 **판정이 실제로 불가능할 때만** 나온다 — 유효 심볼이 3개 미만인 셀."""
+    text = _summary_for({"15m": (0.05, 0.15), "1h": (0.05, 0.15)}, symbols=2)
+    assert "⚠️ 판정 불가 — 채택 권고 없음." in text
+    assert _FALLBACK in text

@@ -64,6 +64,7 @@ import argparse
 import random
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
 
 import pandas as pd
@@ -563,8 +564,38 @@ def contamination_note(rows: Sequence[PnlRow], *, lens: str, timeframe: str, seg
 # --------------------------------------------------------------------------- #
 
 
-def verdict(tests: Sequence[MatchedTestRow], *, timeframe: str, lens: str = LENS_PRIMARY) -> str:
-    """한 TF의 (a) 선별 / (b) 표본 축소 판정 — OOS 매칭 검정으로 낸다."""
+class VerdictKind(StrEnum):
+    """한 TF의 판정 종류 — **문장이 아니라 이 값이 정본이다**.
+
+    ⚠️ 판정 분기를 문장 부분문자열로 다시 찾지 말 것(`"(a) 선별" in text`). 그 방식은 판정
+    문구를 한 글자만 손대도 **조용히 폴백으로 떨어진다** — 실제로 §판정은 (a)를 찍는데
+    §결론만 「판정 불가」를 찍는 사고가 났다(PM 지적, 이 저장소의 WAN-91/95/100/112/123
+    「라벨과 동작이 어긋난다」 부류). 렌더링만 문자열이고 분기는 이 열거형으로 한다.
+    """
+
+    SELECTIVE = "selective"  # (a) 표본 축소로는 환원되지 않는다
+    SAMPLE_REDUCTION = "sample_reduction"  # (b) 표본 축소 효과
+    INDETERMINATE = "indeterminate"  # ⚠️ 판정 불가(유효 표본·대조군 부족)
+
+
+@dataclass(frozen=True)
+class Verdict:
+    """판정 = 종류(분기용) + 문장(렌더링용)."""
+
+    kind: VerdictKind
+    text: str
+
+    def __str__(self) -> str:  # 표에 그대로 끼워 넣을 수 있게
+        return self.text
+
+
+def verdict(
+    tests: Sequence[MatchedTestRow], *, timeframe: str, lens: str = LENS_PRIMARY
+) -> Verdict:
+    """한 TF의 (a) 표본 축소로 환원되지 않음 / (b) 표본 축소 효과 판정.
+
+    OOS 매칭 검정으로 낸다. 반환은 **구조체**이고 호출부는 `.kind`로 분기한다.
+    """
     row = next(
         (
             t
@@ -574,11 +605,15 @@ def verdict(tests: Sequence[MatchedTestRow], *, timeframe: str, lens: str = LENS
         None,
     )
     if row is None or row.filter_mdd is None or row.p_mdd is None or row.matched_mdd_mean is None:
-        return f"**{timeframe}**: ⚠️ 판정 불가 — 유효 표본(거래 {MIN_TRADES_FOR_PNL}건) 셀이 없다."
+        return Verdict(
+            VerdictKind.INDETERMINATE,
+            f"**{timeframe}**: ⚠️ 판정 불가 — 유효 표본(거래 {MIN_TRADES_FOR_PNL}건) 셀이 없다.",
+        )
     if row.n_symbols < 3:
-        return (
+        return Verdict(
+            VerdictKind.INDETERMINATE,
             f"**{timeframe}**: ⚠️ 판정 불가(대조군) — 필터 팔의 유효 심볼이 "
-            f"{row.n_symbols}개뿐이라 심볼평균이 의사결정 가치를 갖지 못한다."
+            f"{row.n_symbols}개뿐이라 심볼평균이 의사결정 가치를 갖지 못한다.",
         )
     share = "—" if row.sample_share is None else f"{row.sample_share * 100:.0f}%"
     p_ret = "—" if row.p_return is None else f"{row.p_return:.3f}"
@@ -598,7 +633,8 @@ def verdict(tests: Sequence[MatchedTestRow], *, timeframe: str, lens: str = LENS
                 "할인해 읽어야 한다**. 후보 수는 정확히 맞췄지만 동시 1포지션 시퀀서가 두 팔을 "
                 "다르게 깎았고, 그 방향이 하필 필터에 유리하다."
             )
-        return (
+        return Verdict(
+            VerdictKind.SELECTIVE,
             f"**{timeframe}**: **(a) 표본 축소로는 환원되지 않는다** — 같은 수의 거래를 "
             f"무작위로 뽑은 대조군보다 MDD가 유의하게 낮다({detail}).{residual} "
             "🚨 **「선별 알파를 찾았다」로 읽지 말 것 — 이 표는 「선별」과 「기하」를 가르지 "
@@ -607,7 +643,7 @@ def verdict(tests: Sequence[MatchedTestRow], *, timeframe: str, lens: str = LENS
             "즉 이 대조군이 배제한 것은 **표본 축소** 하나이고, 기하 경로는 열려 있다"
             "(WAN-133이 k·ATR 장벽으로 그 관문을 통과시켰지만 그건 **옛 엔진**(`tap` 밴드 + "
             "병합 존) 위의 판정이라 이 표와 같은 자리에서 재확인된 적이 없다). "
-            "**채택이 아니다** — 재-베이스라인은 사용자 결정이다."
+            "**채택이 아니다** — 재-베이스라인은 사용자 결정이다.",
         )
     mostly = row.sample_share is not None and row.sample_share >= SAMPLE_SHARE_BAR
     bar_note = (
@@ -616,11 +652,12 @@ def verdict(tests: Sequence[MatchedTestRow], *, timeframe: str, lens: str = LENS
         else " (크기 지표인 「표본축소 몫」은 이 셀에서 그 기준 미만이거나 뜻을 잃었다 —"
         " 판정의 주 근거는 시드 순위 p값이다.)"
     )
-    return (
+    return Verdict(
+        VerdictKind.SAMPLE_REDUCTION,
         f"**{timeframe}**: **(b) 표본 축소 효과** — 같은 수의 거래를 **무작위로** 뽑아도 "
         f"MDD 개선이 재현된다({detail}).{bar_note} WAN-133의 「존폭 필터는 알파가 아니라 "
         "위험의 모양만 바꾼다」를 확정 기록한다 — 좁은 존을 고르는 규칙이 아니라 "
-        "**덜 베팅하는 것**이 MDD를 줄인 것이다."
+        "**덜 베팅하는 것**이 MDD를 줄인 것이다.",
     )
 
 
@@ -745,7 +782,7 @@ def build_summary_markdown(result: ExperimentResult, *, timeframes: Sequence[str
 
     lines.append("## 판정\n")
     for timeframe in timeframes:
-        lines.append(f"* {verdict(result.matched_tests, timeframe=timeframe)}")
+        lines.append(f"* {verdict(result.matched_tests, timeframe=timeframe).text}")
     lines.append("")
 
     lines.append(_zone_width_section(result, timeframes))
@@ -991,9 +1028,11 @@ def _lens_flip_note(result: ExperimentResult, *, timeframe: str) -> str:
 
 
 def _conclusion(result: ExperimentResult, timeframes: Sequence[str]) -> str:
+    # ⚠️ 분기는 열거형으로만 한다 — 문장 부분문자열 매칭은 문구를 손대는 순간 조용히
+    # 폴백으로 떨어진다(그 사고가 실제로 났다, `VerdictKind` docstring 참고).
     verdicts = {tf: verdict(result.matched_tests, timeframe=tf) for tf in timeframes}
-    selective = [tf for tf, v in verdicts.items() if "(a) 선별" in v]
-    reduced = [tf for tf, v in verdicts.items() if "(b) 표본" in v]
+    selective = [tf for tf, v in verdicts.items() if v.kind is VerdictKind.SELECTIVE]
+    reduced = [tf for tf, v in verdicts.items() if v.kind is VerdictKind.SAMPLE_REDUCTION]
     tail = (
         "🚨 **어느 쪽이든 「엣지 찾았다」로 인용 금지** — 이 표는 `baseline`(닿으면 체결) 위의 "
         "값이고(§2가 `pen_5bp`로 재검한다), 이 저장소의 모든 플러스가 그렇듯 심볼 편중을 "
