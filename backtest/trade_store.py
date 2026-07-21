@@ -67,6 +67,7 @@ from backtest.models import (
     TradeFill,
 )
 from backtest.zone_limit_backtest import SetupDiagnostic, ZoneLimitStats, build_result_from_trades
+from data.sqlite_util import configure_connection
 
 #: 저장 포맷·복원 규칙의 버전. **엔진의 거래 의미가 바뀌면 손으로 올린다** — 지문에
 #: 들어가므로 값을 올리면 옛 적재분과 키가 갈라져 새로 적재된다(옛 행은 남는다).
@@ -368,6 +369,7 @@ class BacktestRunStore:
             Path(self._path).parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(self._path, check_same_thread=False)
+        configure_connection(self._conn)  # WAL + busy_timeout (WAN-156 §4)
         with self._conn:
             self._conn.executescript(_SCHEMA)
 

@@ -15,6 +15,18 @@
 한 시리즈를 처음 볼 때(워터마크 없음)는 현재까지의 과거 신호를 모두 "처리됨"으로
 간주해 조용히 워터마크만 최신 봉으로 올리고 아무것도 보내지 않는다. 이후 새로 닫힌
 봉에서 발생하는 신호부터 알림을 보낸다.
+
+## 🚨 창 연속성 거부 (WAN-156 §3)
+
+평가 창은 `df.tail(N)`으로 만드는데 이건 **「마지막 N개 행」이지 「최근 N개 봉 기간」이
+아니다.** 수집에 구멍이 있으면 멀리 떨어진 두 봉이 나란히 붙고, 볼린저 SMA20·RSI는
+그걸 **연속된 봉으로 취급해** 에러도 경고도 없이 그럴듯한 숫자를 낸다. 이 저장소에서
+볼린저는 단순 필터가 아니라 **지정가를 얼마에 걸지 정하는 값**(WAN-132
+`intrabar_live`)이라, 그 결과는 **틀린 가격에 주문을 거는 것**이다.
+
+그래서 러너는 창에 구멍이 있으면 **평가를 거부한다**(로그로 알리고 그 시리즈를
+건너뛴다). 조용히 틀린 값을 내는 것보다 아무 값도 안 내는 것이 낫다 — 구멍은
+`alphablock backfill`(갭 복구)로 메우면 다음 폴링부터 정상 평가된다.
 """
 
 from __future__ import annotations
@@ -29,6 +41,7 @@ from pathlib import Path
 
 from common.telegram import build_telegram_client
 from config.settings import Settings, get_settings
+from data.freshness import window_gap_summary
 from data.funding import FundingRateStore
 from data.storage import OhlcvStore
 from execution.engine import build_execution_engine
@@ -120,6 +133,7 @@ class SignalRunner:
         """한 시리즈를 한 번 평가하고 새로 발생한 신호를 처리·반환한다.
 
         프라이밍(첫 관측) 시에는 아무것도 보내지 않고 워터마크만 최신으로 올린다.
+        평가 창에 구멍이 있으면 **평가하지 않고 건너뛴다**(모듈 독스트링 참고).
         """
         df = self._store.load(symbol, timeframe)
         if df.empty:
@@ -129,6 +143,21 @@ class SignalRunner:
         if closed.empty:
             return []
         last_closed_time = int(closed["open_time"].iloc[-1])
+
+        # 지표를 계산하기 전에 창이 연속인지 본다 — 구멍이 있으면 볼린저·RSI가
+        # 조용히 틀린 값을 내고, 그 값이 곧 주문 가격이다(WAN-156 §3).
+        discontinuity = window_gap_summary(
+            [int(t) for t in recent["open_time"].tolist()], timeframe
+        )
+        if discontinuity is not None:
+            _logger.error(
+                "%s %s: %s — 지표가 틀린 값을 내므로 평가를 건너뜁니다. "
+                "`alphablock backfill`로 갭을 메우세요.",
+                symbol,
+                timeframe,
+                discontinuity,
+            )
+            return []
 
         result = self._strategy.run(recent)
         events = collect_events(result, symbol, timeframe)

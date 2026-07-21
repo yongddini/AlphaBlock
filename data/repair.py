@@ -12,6 +12,12 @@
   않도록 오류를 `SeriesRepair.error`에 담아 계속 진행한다. 상위(오케스트레이션)는
   오류가 있으면 WAN-32 텔레그램 경고 경로로 알린다.
 
+⚠️ **갭 0이 「이상 없음」은 아니다 (WAN-156)**: `find_gaps`는 봉과 봉 **사이**만 보므로
+시리즈가 통째로 멈춘 「꼬리 정지」를 구조적으로 못 잡는다. 그래서 이 모듈은 복구와
+별개로 `data.freshness`의 신선도 판정을 함께 돌려 `RepairSummary.stale_series`에
+싣는다 — **`gaps_found: 0`이어도 정지가 보고서에 뜬다.** 펀딩비 시리즈도 같은 자로
+본다(OHLCV 백필이 채우지 않는 별도 경로라 같이 밀린다).
+
 복구 결과(`RepairSummary`)는 JSON 상태 파일로 남겨 Health 뷰(WAN-30)와 CLI
 `status`가 "마지막 복구에서 시리즈별 몇 봉을 채웠는지"를 보여줄 수 있게 한다.
 """
@@ -30,6 +36,13 @@ from common.telegram import build_telegram_client
 from config.settings import Settings, get_settings
 from data.backfill import DEFAULT_LIMIT, FetchOHLCV
 from data.backfill import backfill_symbol as _backfill_symbol
+from data.freshness import (
+    DEFAULT_STALE_MULTIPLIER,
+    StaleSeries,
+    find_stale_funding,
+    find_stale_series,
+    format_stale,
+)
 from data.gaps import find_gaps, total_missing
 from data.models import timeframe_to_ms
 from data.storage import OhlcvStore
@@ -66,6 +79,11 @@ class RepairSummary(BaseModel):
 
     ran_at_ms: int
     series: list[SeriesRepair] = []
+    stale_series: list[StaleSeries] = []
+    """꼬리가 멈춘 시리즈(WAN-156). 갭 복구로는 메울 수 없는 결함이라 별도로 싣는다.
+
+    비어 있는 것이 정상이고, 여기에 뭔가 있으면 `gaps_found: 0`이어도 이상이다.
+    """
 
     @property
     def total_filled(self) -> int:
@@ -83,6 +101,20 @@ class RepairSummary(BaseModel):
     @property
     def has_error(self) -> bool:
         return any(s.error for s in self.series)
+
+    @property
+    def has_stale(self) -> bool:
+        """꼬리가 멈춘 시리즈가 하나라도 있으면 참."""
+        return bool(self.stale_series)
+
+    @property
+    def has_defect(self) -> bool:
+        """오류 또는 정지 — 「이번 복구 결과가 이상 없음인가」의 정본 판정.
+
+        `has_error`만 보면 WAN-156 사고(전 시리즈 `gaps_found: 0` · 오류 없음 ·
+        그런데 5일 정지)를 그대로 다시 놓친다.
+        """
+        return self.has_error or self.has_stale
 
 
 # -- 상태 영속화 ---------------------------------------------------------------
@@ -210,12 +242,19 @@ def repair_all(
     backoff_base: float = 1.0,
     sleeper: Callable[[float], None] = time.sleep,
     now_ms: Callable[[], int] = lambda: int(time.time() * 1000),
+    stale_multiplier: float = DEFAULT_STALE_MULTIPLIER,
+    funding_last_times: Sequence[tuple[str, int | None]] = (),
 ) -> RepairSummary:
-    """저장된 모든(또는 지정한) 시리즈의 갭을 탐지·복구한다.
+    """저장된 모든(또는 지정한) 시리즈의 갭을 탐지·복구하고 꼬리 신선도를 판정한다.
 
     `series`가 None이면 저장소에 실제로 존재하는 시리즈(`store.list_series()`)를
     대상으로 한다. 이 목록은 네이티브 저장 TF만 포함하므로, 리샘플 파생 TF(2h 등)는
     복구 대상에서 자연히 제외된다(원본 1h를 복구하면 파생도 정확해진다).
+
+    복구가 끝난 **뒤** 각 시리즈의 마지막 봉으로 신선도를 판정해
+    `RepairSummary.stale_series`에 담는다(WAN-156). 복구 후에 재는 이유는, 갭 복구가
+    꼬리까지 채웠다면 정지가 아니기 때문이다. `funding_last_times`를 주면 펀딩비
+    시리즈도 같은 자로 본다 — 비워 두면(기본) OHLCV만 판정한다.
     """
     targets = list(series) if series is not None else store.list_series()
     results = [
@@ -232,30 +271,59 @@ def repair_all(
         )
         for symbol, timeframe in targets
     ]
-    return RepairSummary(ran_at_ms=now_ms(), series=results)
+    ran_at = now_ms()
+    stale = find_stale_series(
+        [(symbol, tf, store.last_open_time(symbol, tf)) for symbol, tf in targets],
+        now_ms=ran_at,
+        stale_multiplier=stale_multiplier,
+    )
+    stale += find_stale_funding(
+        list(funding_last_times),
+        now_ms=ran_at,
+        stale_multiplier=stale_multiplier,
+    )
+    if stale:
+        logger.warning(
+            "꼬리 정지 시리즈 %d건 — 갭 복구로는 메울 수 없습니다:\n%s",
+            len(stale),
+            "\n".join(f"  {format_stale(s)}" for s in stale),
+        )
+    return RepairSummary(ran_at_ms=ran_at, series=results, stale_series=stale)
 
 
 # -- 오케스트레이션 (설정 배선 + 텔레그램 경고) --------------------------------
 
 
 def alert_on_failure(summary: RepairSummary, settings: Settings) -> bool:
-    """복구 중 오류가 있었으면 WAN-32 텔레그램 경로로 경고한다.
+    """복구 중 오류가 있었거나 꼬리가 멈춘 시리즈가 있으면 텔레그램으로 경고한다.
 
-    보낼 게 있었고 실제로 전송했으면 True. 오류가 없거나 텔레그램 미설정이면
+    보낼 게 있었고 실제로 전송했으면 True. 이상이 없거나 텔레그램 미설정이면
     False(로그만). 이 경로는 WAN-25/32의 `TelegramClient`를 재사용한다.
+
+    ⚠️ 정지(`stale_series`)도 경고 대상이다 — WAN-156 사고에서 복구는 매번 「오류
+    없음」으로 끝났고, 정지를 아는 유일한 장치(`live.health_watch`)는 텔레그램 출구가
+    막혀 침묵했다. 복구 경로가 스스로 말하게 해 두 장치가 동시에 조용해지지 않게 한다.
     """
     failed = [s for s in summary.series if s.error]
-    if not failed:
+    if not failed and not summary.stale_series:
         return False
 
-    lines = ["⚠️ *갭 복구 실패*"]
-    for s in failed:
-        lines.append(f"`{s.symbol}` `{s.timeframe}` — {s.error}")
+    lines: list[str] = []
+    if failed:
+        lines.append("⚠️ *갭 복구 실패*")
+        for s in failed:
+            lines.append(f"`{s.symbol}` `{s.timeframe}` — {s.error}")
+    if summary.stale_series:
+        if lines:
+            lines.append("")
+        lines.append("🚨 *수집 정지(꼬리 신선도)* — 갭 복구로는 메울 수 없습니다")
+        for stale in summary.stale_series:
+            lines.append(f"`{stale.symbol}` `{stale.timeframe}` — {format_stale(stale)}")
     text = "\n".join(lines)
 
     telegram = build_telegram_client(settings)
     if telegram is None:
-        logger.warning("텔레그램 미설정 — 갭 복구 실패 경고를 로그로만 남깁니다:\n%s", text)
+        logger.warning("텔레그램 미설정 — 데이터 이상 경고를 로그로만 남깁니다:\n%s", text)
         return False
     return telegram.send_message(text)
 
@@ -268,27 +336,42 @@ def run_repair(
     """단발 갭 복구(`alphablock backfill --repair`).
 
     거래소·저장소를 만들어 저장된 모든 시리즈의 갭을 복구하고, 요약을 상태 파일에
-    남긴 뒤 반환한다. 오류가 있으면(그리고 `dry_run`이 아니면) 텔레그램 경고를
-    보낸다.
+    남긴 뒤 반환한다. 오류나 꼬리 정지가 있으면(그리고 `dry_run`이 아니면) 텔레그램
+    경고를 보낸다.
+
+    신선도 판정에는 **설정에 등록된 심볼 전부**의 펀딩비도 포함한다(WAN-156 §5) —
+    OHLCV 백필은 펀딩비를 채우지 않으므로 따로 밀릴 수 있다.
     """
     settings = settings or get_settings()
 
     from data.exchange import create_exchange
+    from data.funding import FundingRateStore
 
     exchange = create_exchange(settings)
     store = OhlcvStore(settings.db_path)
+    funding_store = FundingRateStore(settings.db_path)
     try:
-        summary = repair_all(exchange, store)
+        funding_last = [
+            (symbol, funding_store.last_funding_time(symbol)) for symbol in settings.symbols
+        ]
+        summary = repair_all(
+            exchange,
+            store,
+            stale_multiplier=settings.health_stale_multiplier,
+            funding_last_times=funding_last,
+        )
     finally:
+        funding_store.close()
         store.close()
 
     RepairStateStore(settings.repair_state_path).save(summary)
     logger.info(
-        "갭 복구 완료: %d 시리즈 점검, %d 시리즈에서 %d봉 채움%s",
+        "갭 복구 완료: %d 시리즈 점검, %d 시리즈에서 %d봉 채움%s%s",
         len(summary.series),
         len(summary.repaired_series),
         summary.total_filled,
         f", {summary.total_remaining}봉 잔여" if summary.total_remaining else "",
+        f", 🚨 정지 {len(summary.stale_series)}건" if summary.has_stale else "",
     )
     if not dry_run:
         alert_on_failure(summary, settings)

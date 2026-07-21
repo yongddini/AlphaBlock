@@ -18,6 +18,7 @@ import pandas as pd
 
 from data.models import Candle, timeframe_to_ms
 from data.resample import resample_ohlcv
+from data.sqlite_util import configure_connection
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +90,9 @@ class OhlcvStore:
         # 같은 커넥션을 사용해도 안전하도록 모든 접근을 self._lock으로 직렬화한다.
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(self._path, check_same_thread=False)
+        # 락은 **이 프로세스 안**만 직렬화한다 — 수집기·러너·대시보드·백테스트는
+        # 별개 프로세스라 SQLite 파일 락으로 부딪힌다(WAN-156 §4).
+        configure_connection(self._conn)
         self._conn.execute(_SCHEMA)
         self._conn.commit()
         # 심볼×TF 전체(start_ms/end_ms 없는) `load()`용 parquet 캐시(WAN-78 성능).

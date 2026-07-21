@@ -28,6 +28,7 @@ from data.models import (
     funding_from_ccxt_current,
     funding_from_ccxt_history,
 )
+from data.sqlite_util import configure_connection
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +110,7 @@ class FundingRateStore:
         # check_same_thread=False: 주기적 최신화 루프가 asyncio.to_thread(직렬 실행)로
         # 워커 스레드에서 저장소를 사용한다. 동시 접근은 없으므로 안전하다.
         self._conn = sqlite3.connect(self._path, check_same_thread=False)
+        configure_connection(self._conn)  # WAL + busy_timeout (WAN-156 §4)
         self._conn.execute(_SCHEMA)
         self._conn.commit()
 
