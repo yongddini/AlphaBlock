@@ -28,7 +28,13 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from backtest.harness import LEGACY_BAND_BAR, LEGACY_RSI_GATE_MODE, RunRow, load_market_data
+from backtest.harness import (
+    LEGACY_BAND_BAR,
+    LEGACY_COMBINE_OBS,
+    LEGACY_RSI_GATE_MODE,
+    RunRow,
+    load_market_data,
+)
 from backtest.run import JOBS_AUTO, RunOptions, build_parser, grid_from_args, run_grid
 from strategy.models import BandBar, RsiGateMode
 
@@ -64,6 +70,7 @@ def _run(
     *,
     rsi_gate_mode: RsiGateMode | None = None,
     band_bar: BandBar | None = None,
+    combine_obs: bool | None = None,
 ) -> RunRow:
     """CLI 인자로 한 셀을 돌려 그 행을 낸다.
 
@@ -77,6 +84,8 @@ def _run(
         grid = replace(grid, rsi_gate_mode=rsi_gate_mode)
     if band_bar is not None:
         grid = replace(grid, band_bar=band_bar)
+    if combine_obs is not None:
+        grid = replace(grid, combine_obs=(combine_obs,))
     rows = run_grid(grid, RunOptions(years=_YEARS), log=False)
     assert len(rows) == 1, f"대조는 한 셀이어야 합니다: {len(rows)}행"
     return rows[0]
@@ -129,11 +138,18 @@ def test_cli_reproduces_wan99_pen_5bp_cell() -> None:
     ⚠️ **밴드 표본도 마찬가지다**(WAN-132): 채택 기본값이 `intrabar_live`(봉내 라이브)가
     되면서 진입가가 서브스텝마다 재산정된다. WAN-99 격자는 탭 봉 종가 밴드에서 나왔으므로
     `Grid.band_bar`로 되돌려 요청한다.
+
+    ⚠️ **존 병합도 되돌린다**(WAN-149): 채택 기본값이 `combine_obs=False`(원본 존 단위
+    분리)가 되면서 존 집합 자체가 달라졌다 — 겹치는 존이 접히지 않으니 진입 후보가 늘고
+    손절 거리(1R)가 좁아진다. WAN-99 격자는 병합 엔진에서 나왔으므로 되돌려 요청한다.
+    이쪽은 **축이라 CLI 플래그(`--combine-obs`)가 있지만**, 이 대조는 "옛 엔진을 요청한다"는
+    사실이 코드에 드러나야 하므로 다른 두 핀과 같은 자리에서 명시한다.
     """
     row = _run(
         ["--symbol", "BTCUSDT", "--tf", _TIMEFRAME, "--fill", "pen_5bp", "--offset-bps", "0"],
         rsi_gate_mode=LEGACY_RSI_GATE_MODE,
         band_bar=LEGACY_BAND_BAR,
+        combine_obs=LEGACY_COMBINE_OBS,
     )
     cell = _report_cell(
         _WAN99_CSV,

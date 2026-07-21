@@ -363,7 +363,7 @@ def diagnose_cell(market: harness.MarketData) -> list[DiagRow]:
     cfg = DIAG_ARM.config(market.timeframe)
     frame = market.htf_df.reset_index(drop=True)
     boundary = _is_boundary(frame)
-    ob_result = harness.detect_order_blocks(market)
+    ob_result = harness.detect_order_blocks(market, harness.LEGACY_OB_PARAMS)
 
     # 분모: 볼린저를 끈 팔. 규칙 3(진입 없음)이 사라지므로 커버된 탭이 전부 eligible이다.
     no_band = params.model_copy(update={"deviation_filter": None})
@@ -499,7 +499,7 @@ def pnl_rows_for_cell(market: harness.MarketData, arms: Sequence[Arm] = ARMS) ->
         window = harness.slice_market(market, segment)
         if window.empty or window.df_1m.empty:
             continue
-        ob_result = harness.detect_order_blocks(window)
+        ob_result = harness.detect_order_blocks(window, harness.LEGACY_OB_PARAMS)
         buy_hold = _buy_hold(window.htf_df)
         for arm in arms:
             params = arm.params()

@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from backtest.harness import LEGACY_RSI_GATE_MODE
+from backtest.harness import LEGACY_OB_PARAMS, LEGACY_RSI_GATE_MODE
 from backtest.sweep import default_backtest_config
 from backtest.wan81_engine_replacement_report import (
     _CACHE_DIR,
@@ -76,7 +76,7 @@ def run_report(
             if df.empty:
                 continue
             cfg = default_backtest_config(timeframe)
-            ob_result = OrderBlockDetector().run(df)
+            ob_result = OrderBlockDetector(LEGACY_OB_PARAMS).run(df)
             for engine_name, params in ENGINE_PRESETS.items():
                 row = run_engine(
                     df,

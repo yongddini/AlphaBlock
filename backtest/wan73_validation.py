@@ -31,7 +31,7 @@ from pathlib import Path
 import pandas as pd
 from pydantic import BaseModel, ConfigDict
 
-from backtest.harness import pin_band_bar
+from backtest.harness import LEGACY_OB_PARAMS, pin_band_bar
 from backtest.models import BacktestConfig, PositionSide
 from backtest.sweep import default_backtest_config
 from backtest.wan70_random_control_b import (
@@ -221,7 +221,7 @@ def run_experiment(
                     )
 
                 cfg = default_backtest_config(timeframe)
-                ob_result = OrderBlockDetector().run(htf_win)
+                ob_result = OrderBlockDetector(LEGACY_OB_PARAMS).run(htf_win)
                 fr = compute_fill_rate_expectancy(
                     htf_win,
                     one_min_win,

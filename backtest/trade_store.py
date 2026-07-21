@@ -165,13 +165,30 @@ class RunFingerprint(BaseModel):
         payload = json.dumps(self.model_dump(), sort_keys=True, ensure_ascii=False)
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
 
+    @property
+    def combine_obs(self) -> bool | None:
+        """이 실행의 존 병합 여부. 지문에 안 실려 있으면 `None`.
+
+        `order_block_json`에서 **읽어 낸다** — 별도 필드로 두면 그 필드와 실제 파라미터가
+        갈라질 수 있고, 그때 화면은 실제로 돌린 것과 다른 배지를 단다(WAN-95 부류).
+        """
+        value = json.loads(self.order_block_json).get("combine_obs")
+        return value if isinstance(value, bool) else None
+
     def label(self) -> str:
-        """화면 배지용 한 줄 요약 — 지금 보고 있는 게 어느 엔진의 거래인지."""
+        """화면 배지용 한 줄 요약 — 지금 보고 있는 게 어느 엔진의 거래인지.
+
+        ⚠️ **존 병합을 반드시 드러낸다**(WAN-149 §5): 병합 시절 적재분과 분리 이후 적재분은
+        `run_id`가 자동으로 달라 섞이지는 않지만, 화면에서 옛 실행을 고르면 **병합 시절
+        거래가 그대로 보인다**. 배지가 말해 주지 않으면 사용자는 그 표를 오늘의 엔진
+        성적으로 읽는다.
+        """
         entry = "B안(존-지정가)" if self.entry_mode == "zone_limit" else "A안(봉 마감 종가)"
         segment = self.segment if self.window == 0 else f"{self.segment}#{self.window}"
+        merge = {True: "병합 ON", False: "병합 OFF", None: "병합 ?"}[self.combine_obs]
         return (
             f"{self.symbol} · {self.timeframe} · {segment} · {entry} · fill={self.fill} · "
-            f"pos={self.position_mode} · {self.engine_version}@{self.revision}"
+            f"pos={self.position_mode} · {merge} · {self.engine_version}@{self.revision}"
         )
 
 

@@ -77,6 +77,7 @@ from pydantic import BaseModel, ConfigDict
 
 from backtest.harness import (
     LEGACY_BAND_BAR,
+    LEGACY_OB_PARAMS,
     LEGACY_RSI_GATE_MODE,
     FillPreset,
     build_config,
@@ -420,7 +421,7 @@ def run_symbol_timeframe(
     symbol: str,
     timeframe: str,
     funding_rates: Sequence[FundingRate] | None = None,
-    order_block_params: OrderBlockParams | None = None,
+    order_block_params: OrderBlockParams | None = LEGACY_OB_PARAMS,
     backtest_config: BacktestConfig | None = None,
     iterations: int = _BOOTSTRAP_ITERATIONS,
     seed: int = _DEFAULT_SEED,

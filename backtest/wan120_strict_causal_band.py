@@ -71,6 +71,7 @@ import pandas as pd
 from backtest.harness import (
     IS_FRACTION,
     LEGACY_BAND_BAR,
+    LEGACY_OB_PARAMS,
     SEGMENT_IS,
     SEGMENT_OOS,
     FillPreset,
@@ -253,7 +254,7 @@ def run_report(
                 window = slice_market(market, segment)
                 if window.empty:
                     continue
-                ob_result = detect_order_blocks(window)
+                ob_result = detect_order_blocks(window, LEGACY_OB_PARAMS)
                 for rung in RUNGS:
                     for fill in fills:
                         for seed in iter_seeds(fill):

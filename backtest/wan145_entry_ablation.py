@@ -184,7 +184,7 @@ def run_cell(task: _Task, *, log: bool = True) -> list[AblationRow]:
         window = harness.slice_market(market, segment)
         if window.empty or window.df_1m.empty:
             continue
-        ob_result = harness.detect_order_blocks(window)
+        ob_result = harness.detect_order_blocks(window, harness.LEGACY_OB_PARAMS)
         for level in task.levels:
             params = rung_params(RUNGS_BY_NAME[level])
             outcome = harness.run_once(window, params=params, cfg=cfg, order_block_result=ob_result)

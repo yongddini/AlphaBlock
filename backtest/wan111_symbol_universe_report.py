@@ -106,7 +106,12 @@ def build_grid(symbols: Sequence[str]) -> Grid:
     `intrabar_live`로 옮겼다). 봉내 라이브 밴드는 진입가를 서브스텝마다 다시 내므로
     거래 집합과 가격이 함께 움직이고, WAN-114 사다리와의 비트 일치 검산도 깨진다.
     """
-    from backtest.harness import LEGACY_BAND_BAR, LEGACY_RSI_GATE_MODE, build_params
+    from backtest.harness import (
+        LEGACY_BAND_BAR,
+        LEGACY_COMBINE_OBS,
+        LEGACY_RSI_GATE_MODE,
+        build_params,
+    )
 
     defaults = build_params()
     return Grid(
@@ -118,6 +123,7 @@ def build_grid(symbols: Sequence[str]) -> Grid:
         fills=tuple(fill_preset(name) for name in LENS_NAMES),
         rsi_gate_mode=LEGACY_RSI_GATE_MODE,
         band_bar=LEGACY_BAND_BAR,
+        combine_obs=(LEGACY_COMBINE_OBS,),
     )
 
 

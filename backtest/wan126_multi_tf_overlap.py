@@ -43,6 +43,7 @@ import pandas as pd
 from pydantic import BaseModel, ConfigDict
 
 from backtest.harness import (
+    LEGACY_OB_PARAMS,
     MarketData,
     build_config,
     build_params,
@@ -160,7 +161,7 @@ def detect_ltf_archives(
         ).htf_df
         if df.empty:
             continue  # 데이터 없는 칸(예: 과거 5m 결측)은 사다리에서 조용히 빠진다.
-        result = OrderBlockDetector().run(df)
+        result = OrderBlockDetector(LEGACY_OB_PARAMS).run(df)
         archives[tf] = result
         if cache is not None:
             cache.parent.mkdir(parents=True, exist_ok=True)
@@ -261,7 +262,7 @@ def run_report(
                 seg_market = slice_market(market, segment)
                 if seg_market.empty or seg_market.df_1m.empty:
                     continue
-                htf_obr = OrderBlockDetector().run(seg_market.htf_df)
+                htf_obr = OrderBlockDetector(LEGACY_OB_PARAMS).run(seg_market.htf_df)
                 configs: list[MultiTfOverlapParams | None] = [None]
                 for definition in OVERLAP_DEFINITIONS:
                     configs.append(

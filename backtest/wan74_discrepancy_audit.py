@@ -46,6 +46,7 @@ from typing import Literal
 import pandas as pd
 from pydantic import BaseModel, ConfigDict
 
+from backtest.harness import LEGACY_OB_PARAMS
 from backtest.models import BacktestConfig, PositionSide
 from backtest.sweep import default_backtest_config
 from backtest.wan70_random_control_b import DEFAULT_SYMBOLS, DEFAULT_YEARS
@@ -505,7 +506,7 @@ def run_experiment(
                 if len(htf_win) < 30:
                     continue
 
-                ob_result = OrderBlockDetector().run(htf_win)
+                ob_result = OrderBlockDetector(LEGACY_OB_PARAMS).run(htf_win)
                 cfg = default_backtest_config(timeframe)
 
                 naive = naive_trades(

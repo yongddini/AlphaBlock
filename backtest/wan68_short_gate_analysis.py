@@ -39,7 +39,7 @@ import pandas as pd
 from pydantic import BaseModel, ConfigDict
 
 from backtest.engine import run_backtest
-from backtest.harness import pin_band_bar
+from backtest.harness import LEGACY_OB_PARAMS, pin_band_bar
 from backtest.models import BacktestConfig, BacktestMetrics
 from backtest.sweep import (
     CLOSE_ENTRY_DEFAULTS,
@@ -303,7 +303,7 @@ def run_variant_comparison(
     *,
     symbol: str,
     timeframe: str,
-    order_block_params: OrderBlockParams | None = None,
+    order_block_params: OrderBlockParams | None = LEGACY_OB_PARAMS,
     backtest_config: BacktestConfig | None = None,
 ) -> list[VariantRow]:
     """숏 3안((가)/(나)/(다)) + 무게이트 기준선을 같은 IS/OOS 분할로 비교한다."""
@@ -458,7 +458,7 @@ def run_random_entry_control(
     symbol: str,
     timeframe: str,
     confluence_params: ConfluenceParams | None = None,
-    order_block_params: OrderBlockParams | None = None,
+    order_block_params: OrderBlockParams | None = LEGACY_OB_PARAMS,
     backtest_config: BacktestConfig | None = None,
     iterations: int = _BOOTSTRAP_ITERATIONS,
     seed: int = 68,

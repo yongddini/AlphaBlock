@@ -56,6 +56,8 @@ from backtest.harness import (
     BASELINE_FILL,
     DB_PATH,
     LEGACY_BAND_BAR,
+    LEGACY_COMBINE_OBS,
+    LEGACY_OB_PARAMS,
     RunRow,
     build_config,
     detect_order_blocks,
@@ -242,7 +244,7 @@ def _trade_rows_for_cell(
         window = slice_market(market, segment)
         if window.empty or window.df_1m.empty:
             continue
-        ob_result = detect_order_blocks(window)
+        ob_result = detect_order_blocks(window, LEGACY_OB_PARAMS)
         substeps = build_substeps(window.df_1m, htf_ms)
         substep_times = [s.time for s in substeps]
         candidates, _ = build_zone_limit_candidates(
@@ -328,6 +330,7 @@ def run_sweep(
         offsets_bps=(ConfluenceParams().zone_limit_offset_bps,),
         fills=(BASELINE_FILL,),
         band_bar=LEGACY_BAND_BAR,
+        combine_obs=(LEGACY_COMBINE_OBS,),
     )
     options = RunOptions(start_ms=start_ms, end_ms=end_ms, oos=True)
     rows = run_grid(grid, options, log=True, jobs=jobs)

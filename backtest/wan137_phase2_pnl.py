@@ -323,7 +323,7 @@ def build_row(symbol: str, entry_tf: str, segment: str, arm: str, outcome: ArmOu
 
 
 def _detect(market: MarketData) -> OrderBlockResult:
-    return OrderBlockDetector().run(market.htf_df)
+    return OrderBlockDetector(harness.LEGACY_OB_PARAMS).run(market.htf_df)
 
 
 def run_cell(

@@ -55,6 +55,7 @@ from pydantic import BaseModel, ConfigDict
 from backtest.harness import (
     DEFAULT_YEARS,
     LEGACY_BAND_BAR,
+    LEGACY_OB_PARAMS,
     FillPreset,
     build_params,
     detect_order_blocks,
@@ -261,7 +262,7 @@ def run_report(
                 window = slice_market(market, segment)
                 if window.empty or window.df_1m.empty:
                     continue
-                order_blocks = detect_order_blocks(window)
+                order_blocks = detect_order_blocks(window, LEGACY_OB_PARAMS)
                 for preset in presets:
                     for seed in _lens_seeds(preset):
                         cell = build_cell(

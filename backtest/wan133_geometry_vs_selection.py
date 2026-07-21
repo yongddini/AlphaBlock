@@ -282,7 +282,7 @@ def label_cell(market: MarketData, *, params: ConfluenceParams) -> CellResult:
 
     # 오더블록은 컨플루언스 파라미터·손절 규칙과 무관하므로 한 번만 탐지해 네 팔이 공유한다
     # (네 build_zone_limit_candidates가 같은 오더블록으로 비교되도록).
-    obr = harness.detect_order_blocks(market)
+    obr = harness.detect_order_blocks(market, harness.LEGACY_OB_PARAMS)
 
     # 기본 팔(오버라이드 없음) — WAN-117 label_cell과 비트 단위로 같은 후보·라벨.
     default_candidates, _ = build_zone_limit_candidates(

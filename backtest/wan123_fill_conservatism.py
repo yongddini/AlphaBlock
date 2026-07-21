@@ -53,6 +53,7 @@ import pandas as pd
 
 from backtest.harness import (
     LEGACY_BAND_BAR,
+    LEGACY_COMBINE_OBS,
     LEGACY_RSI_GATE_MODE,
     SEGMENT_FULL,
     SEGMENT_IS,
@@ -136,6 +137,7 @@ def build_grid(symbols: Sequence[str], gate: RsiGateMode, timeframes: Sequence[s
         offsets_bps=(defaults.zone_limit_offset_bps,),
         fills=tuple(fill_preset(name) for name in LENS_NAMES),
         band_bar=LEGACY_BAND_BAR,
+        combine_obs=(LEGACY_COMBINE_OBS,),
         rsi_gate_mode=gate,
     )
 

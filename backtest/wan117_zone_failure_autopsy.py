@@ -334,6 +334,7 @@ def label_cell(market: harness.MarketData, *, params: ConfluenceParams) -> list[
         market.timeframe,
         params=params,
         cfg=cfg,
+        order_block_params=harness.LEGACY_OB_PARAMS,
     )
     if not candidates:
         return []

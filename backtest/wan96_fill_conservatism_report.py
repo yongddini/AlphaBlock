@@ -62,7 +62,7 @@ from pathlib import Path
 import pandas as pd
 from pydantic import BaseModel, ConfigDict
 
-from backtest.harness import LEGACY_RSI_GATE_MODE, pin_band_bar
+from backtest.harness import LEGACY_OB_PARAMS, LEGACY_RSI_GATE_MODE, pin_band_bar
 from backtest.models import BacktestConfig, PositionSide
 from backtest.substep import SubStep, build_substeps
 from backtest.sweep import default_backtest_config, timeframe_to_ms
@@ -374,7 +374,7 @@ def collect_rows(
             window_1m = df_1m[df_1m["open_time"] >= start_ms]
             if window_1m.empty:
                 continue
-            ob_result = OrderBlockDetector().run(htf_df)
+            ob_result = OrderBlockDetector(LEGACY_OB_PARAMS).run(htf_df)
             cell_rows, bias = run_cell(
                 htf_df,
                 window_1m,

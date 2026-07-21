@@ -237,7 +237,7 @@ def run_cell(task: _Task, *, log: bool = True) -> list[NullRow]:
         window = harness.slice_market(market, segment)
         if window.empty or window.df_1m.empty:
             continue
-        ob_result = harness.detect_order_blocks(window)
+        ob_result = harness.detect_order_blocks(window, harness.LEGACY_OB_PARAMS)
         buy_hold = _buy_hold(window.htf_df)
 
         for arm_name in task.arm_names:

@@ -37,7 +37,7 @@ from unittest.mock import patch
 import pandas as pd
 from pydantic import BaseModel, ConfigDict
 
-from backtest.harness import pin_band_bar
+from backtest.harness import LEGACY_OB_PARAMS, pin_band_bar
 from backtest.models import BacktestConfig, BacktestMetrics, PositionSide
 from backtest.sweep import default_backtest_config, evaluate
 from backtest.wan68_short_gate_analysis import _split_bars
@@ -327,7 +327,7 @@ def run_symbol_timeframe(
     *,
     symbol: str,
     timeframe: str,
-    order_block_params: OrderBlockParams | None = None,
+    order_block_params: OrderBlockParams | None = LEGACY_OB_PARAMS,
     iterations: int = _BOOTSTRAP_ITERATIONS,
     seed: int = 75,
 ) -> tuple[list[DecompositionRow], list[MatchedNullRow]]:
@@ -444,7 +444,7 @@ def run_a_engine_crosscheck(
     빠르게 "방향성이 B안과 일치하는가"만 확인하는 경량 교차검증이다.
     """
     cfg = _config(timeframe)
-    ob_result = OrderBlockDetector().run(htf_df)
+    ob_result = OrderBlockDetector(LEGACY_OB_PARAMS).run(htf_df)
     rows: list[AEngineRow] = []
     for variant, filter_params in REAL_VARIANTS.items():
         # A안(종가 진입) 교차검증 경로임을 명시(WAN-95).
