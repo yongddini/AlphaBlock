@@ -49,6 +49,7 @@ from pydantic import BaseModel, ConfigDict
 from common.costs import CostModel, Liquidity
 from data.funding import Direction, FundingRateStore, cumulative_funding_cost
 from data.models import FundingRate
+from data.sqlite_util import configure_connection
 from execution.models import Position
 from live.paper import ClosedTrade
 from strategy.models import OrderBlockDirection, SignalExitReason
@@ -341,6 +342,7 @@ class PaperTradeStore:
             Path(self._path).parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(self._path, check_same_thread=False)
+        configure_connection(self._conn)  # WAL + busy_timeout (WAN-156 §4)
         self._conn.execute(_SCHEMA)
         self._conn.execute(_OPEN_POSITIONS_SCHEMA)
         self._migrate()

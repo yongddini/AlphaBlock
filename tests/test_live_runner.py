@@ -241,3 +241,51 @@ def test_empty_series_when_no_symbols() -> None:
 
     settings = Settings(live_signal_symbols=[], live_signal_timeframes=["1h"])
     assert build_series(settings) == []
+
+
+def test_discontinuous_window_is_refused_not_silently_evaluated(
+    store: OhlcvStore, tmp_path: Path
+) -> None:
+    """🚨 WAN-156 §3: 창에 구멍이 있으면 전략을 아예 호출하지 않는다.
+
+    `df.tail(N)`은 「마지막 N개 행」이라 구멍이 있어도 봉이 나란히 붙는다. 그 상태로
+    지표를 계산하면 볼린저 SMA20이 멀리 떨어진 봉을 이웃으로 취급해 **틀린 진입가**를
+    낸다(이 저장소에서 볼린저는 필터가 아니라 지정가를 정하는 값이다). 그래서 조용히
+    틀린 값을 내는 대신 거부한다 — 라벨이 아니라 **전략 호출 0회**로 고정한다.
+    """
+    store.upsert_candles([_candle(0), _candle(HOUR_MS)])
+    strategy = _StubStrategy()
+    recorder = _Recorder()
+    runner = _make_runner(store, strategy, tmp_path / "state.json", recorder)
+    runner.poll_once()  # 프라이밍(연속 창)
+    assert strategy.calls == 1
+
+    # 5일 구멍 뒤에 새 봉이 붙는다 — 갭 검사가 잡는 그 모양.
+    store.upsert_candles([_candle(HOUR_MS + 120 * HOUR_MS)])
+    strategy.result = ConfluenceResult(
+        params=ConfluenceParams(), entries=[_entry(HOUR_MS + 120 * HOUR_MS)], exits=[]
+    )
+
+    emitted = runner.poll_once()
+
+    assert strategy.calls == 1, "구멍 뚫린 창으로 전략을 평가했다"
+    assert emitted == []
+    assert recorder.messages == []
+
+
+def test_contiguous_window_is_still_evaluated(store: OhlcvStore, tmp_path: Path) -> None:
+    """거부가 과하지 않은지 — 연속 창은 평소대로 평가된다(거부 로직의 반대 방향)."""
+    store.upsert_candles([_candle(0), _candle(HOUR_MS)])
+    strategy = _StubStrategy()
+    recorder = _Recorder()
+    runner = _make_runner(store, strategy, tmp_path / "state.json", recorder)
+    runner.poll_once()
+
+    store.upsert_candles([_candle(2 * HOUR_MS)])
+    strategy.result = ConfluenceResult(
+        params=ConfluenceParams(), entries=[_entry(2 * HOUR_MS)], exits=[]
+    )
+    emitted = runner.poll_once()
+
+    assert strategy.calls == 2
+    assert [e.time for e in emitted] == [2 * HOUR_MS]

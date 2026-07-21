@@ -10,6 +10,10 @@
 3. **상위 TF 정합성**: 1분봉을 상위 TF(15m/1h/4h/1d)로 리샘플한 결과가 거래소에서
    직접 받아 저장한 상위 TF 봉과 (샘플 구간에서) OHLCV까지 일치하는지 본다.
    1m 커버리지가 온전한 버킷만 리샘플되므로, 갭 때문에 생기는 오탐은 없다.
+4. **꼬리 신선도**(WAN-156): 시리즈의 마지막 봉이 TF 주기 대비 크게 지연됐는지.
+   1~3은 **저장된 봉들 사이**만 보므로 시리즈가 통째로 멈춘 정지를 통과시킨다 —
+   실제로 5일 멈춘 시리즈가 전 TF `갭 0`으로 「이상 없음」이었다. `data.freshness`가
+   그 구멍을 메운다.
 
 모두 순수 검증(읽기 전용)이라 부수효과가 없다. CLI(`alphablock verify`)와 테스트가
 공유한다.
@@ -17,9 +21,11 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
+from data.freshness import DEFAULT_STALE_MULTIPLIER, StaleSeries, find_stale_series
 from data.gaps import Gap, find_gaps, total_missing
 from data.storage import OhlcvStore
 
@@ -91,19 +97,33 @@ class VerifyReport:
 
     series: list[SeriesReport]
     parity: list[ParityReport]
+    stale: list[StaleSeries] = field(default_factory=list)
+    """꼬리가 멈춘 시리즈(WAN-156). 갭·중복·정합성이 전부 깨끗해도 여기가 비지 않을 수 있다."""
 
     @property
     def ok(self) -> bool:
         """하드 실패(중복·역순·정합성 불일치)가 하나도 없으면 참.
 
         갭은 거래소 원인일 수 있어 하드 실패로 보지 않는다(`strict_ok` 참고).
+        ⚠️ **정지도 여기 포함되지 않는다** — 신선도는 「저장된 데이터가 맞는가」가
+        아니라 「수집이 돌고 있는가」의 문제라 성격이 다르다. 운영 판정은
+        `sound`(= 정지까지 본 판정)를 쓴다. CLI는 `sound`로 종료 코드를 낸다.
         """
         return all(s.integrity_ok for s in self.series) and all(p.ok for p in self.parity)
 
     @property
+    def has_stale(self) -> bool:
+        return bool(self.stale)
+
+    @property
+    def sound(self) -> bool:
+        """`ok`이면서 꼬리가 멈춘 시리즈도 없을 때만 참(운영 판정의 정본)."""
+        return self.ok and not self.has_stale
+
+    @property
     def strict_ok(self) -> bool:
-        """`ok`이면서 어떤 시리즈에도 갭이 없을 때만 참."""
-        return self.ok and not any(s.has_gaps for s in self.series)
+        """`sound`이면서 어떤 시리즈에도 갭이 없을 때만 참."""
+        return self.sound and not any(s.has_gaps for s in self.series)
 
     @property
     def total_gaps(self) -> int:
@@ -206,12 +226,18 @@ def verify_all(
     parity_source: str = "1m",
     parity_targets: Sequence[str] = ("15m", "1h", "4h", "1d"),
     sample_buckets: int = 500,
+    now_ms: int | None = None,
+    stale_multiplier: float = DEFAULT_STALE_MULTIPLIER,
 ) -> VerifyReport:
-    """지정한 심볼×TF의 시리즈 검증 + 1m→상위 TF 정합성 검증을 모아 반환한다.
+    """지정한 심볼×TF의 시리즈 검증 + 정합성 검증 + 꼬리 신선도 판정을 모아 반환한다.
 
     정합성 검증은 `parity_source`(기본 1m)를 가진 심볼에 대해서만, 그 심볼이
     저장하고 있는 `parity_targets` TF와 대조한다.
+
+    신선도(WAN-156)는 `now_ms` 기준으로 판정한다. None이면 현재 시각을 쓴다 —
+    「지금 수집이 돌고 있는가」를 묻는 질문이라 기준 시각 없이는 답이 없다.
     """
+    reference_ms = int(time.time() * 1000) if now_ms is None else now_ms
     series: list[SeriesReport] = [
         verify_series(store, symbol, tf) for symbol in symbols for tf in timeframes
     ]
@@ -231,4 +257,10 @@ def verify_all(
                     sample_buckets=sample_buckets,
                 )
             )
-    return VerifyReport(series=series, parity=parity)
+    # 봉이 하나도 없는 시리즈(last_ms=None)는 정지가 아니라 미시작이라 판정에서 빠진다.
+    stale = find_stale_series(
+        [(s.symbol, s.timeframe, s.last_ms) for s in series],
+        now_ms=reference_ms,
+        stale_multiplier=stale_multiplier,
+    )
+    return VerifyReport(series=series, parity=parity, stale=stale)

@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -55,12 +56,32 @@ def _fmt_lag(lag_ms: int | None) -> str:
     return f"{hours / 24:.1f}일"
 
 
-def format_status(view: HealthView) -> str:
-    """Health 뷰를 사람이 읽는 여러 줄 텍스트로 요약한다(순수 함수, 테스트용)."""
+def format_status(view: HealthView, *, configured_symbols: Sequence[str] | None = None) -> str:
+    """Health 뷰를 사람이 읽는 여러 줄 텍스트로 요약한다(순수 함수, 테스트용).
+
+    `configured_symbols`(설정의 수집 대상)를 주면 **설정과 실제를 나란히 찍는다**
+    (WAN-156 §6). 이번 사고의 본질은 「설정은 6종목인데 실제로 도는 건 3종목」이
+    아무 화면에도 안 보였던 것이다 — `.env`가 코드 기본값을 덮어써도, 수집기를
+    재시작하지 않아 옛 설정으로 돌고 있어도, 여기서 어긋남이 보인다.
+    """
     lines: list[str] = []
     lines.append(f"AlphaBlock 운영 상태  ·  기준 {_fmt_time(view.now_ms)}")
     lines.append(f"종합: {_LEVEL_TEXT[view.overall.level]} {view.overall.label}")
     lines.append("")
+
+    if configured_symbols is not None:
+        lines.append(f"수집 대상 심볼(설정): {len(configured_symbols)}종목")
+        for symbol in configured_symbols:
+            lines.append(f"  · {symbol}")
+        stored = {f.symbol for f in view.freshness}
+        missing = [s for s in configured_symbols if s not in stored]
+        extra = sorted(stored - set(configured_symbols))
+        if missing:
+            lines.append(f"  ⚠️ 설정에 있으나 저장된 봉이 없음: {', '.join(missing)}")
+        if extra:
+            lines.append(f"  ⚠️ 저장돼 있으나 수집 대상이 아님(낡습니다): {', '.join(extra)}")
+        lines.append("  ℹ️ `.env`를 고쳐도 이미 돌던 수집기는 옛 목록으로 돕니다 — 재시작하세요.")
+        lines.append("")
 
     lines.append("수집기:")
     if not view.collector.ran:
@@ -136,7 +157,11 @@ def cmd_collect(args: argparse.Namespace, settings: Settings) -> int:
 
 
 def cmd_backfill(args: argparse.Namespace, settings: Settings) -> int:
-    """`alphablock backfill --repair` — 저장된 시리즈의 내부 갭을 1회 복구(WAN-35)."""
+    """`alphablock backfill --repair` — 내부 갭 복구 + 꼬리 신선도 판정(WAN-35/156).
+
+    갭이 없어도 시리즈가 통째로 멈춰 있으면 종료 코드 1로 알린다.
+    """
+    from data.freshness import format_stale
     from data.repair import run_repair
 
     summary = run_repair(settings, dry_run=args.dry_run)
@@ -150,7 +175,13 @@ def cmd_backfill(args: argparse.Namespace, settings: Settings) -> int:
             f"  {s.symbol} {s.timeframe}: 갭 {s.gaps_found}개 → {s.bars_filled}봉 채움,"
             f" {s.bars_remaining}봉 잔여{suffix}"
         )
-    return 0
+    if summary.stale_series:
+        # 갭 복구로는 못 메우는 결함이라 「채운 봉 0」과 나란히 찍혀야 한다(WAN-156).
+        print(f"🚨 수집 정지 {len(summary.stale_series)}건 — 갭 복구로는 메울 수 없습니다:")
+        for stale in summary.stale_series:
+            print(f"  {format_stale(stale)}")
+        print("  → `alphablock history --days N` 으로 밀린 구간을 먼저 채우세요.")
+    return 1 if summary.has_defect else 0
 
 
 def cmd_history(args: argparse.Namespace, settings: Settings) -> int:
@@ -178,6 +209,8 @@ def cmd_history(args: argparse.Namespace, settings: Settings) -> int:
 
 def format_verify_report(report: VerifyReport) -> str:
     """검증 리포트를 사람이 읽는 여러 줄 텍스트로 요약한다(순수 함수, 테스트용)."""
+    from data.freshness import format_stale
+
     lines: list[str] = ["OHLCV 무결성 검증", ""]
     lines.append("시리즈 (봉수 · 갭 · 중복):")
     for s in report.series:
@@ -210,8 +243,20 @@ def format_verify_report(report: VerifyReport) -> str:
         lines.append("  비교 대상 없음(1m 또는 상위TF 미보유)")
 
     lines.append("")
-    verdict = "통과" if report.ok else "실패"
-    lines.append(f"판정: {verdict} (하드 실패 없음={report.ok}, 갭 총 {report.total_gaps}개)")
+    lines.append("꼬리 신선도(수집 정지):")
+    if report.stale:
+        # 갭·중복·정합성이 전부 깨끗해도 여기가 비지 않을 수 있다 — 그게 WAN-156이다.
+        for stale in report.stale:
+            lines.append(f"  🚨 {format_stale(stale)}")
+    else:
+        lines.append("  OK — 정지한 시리즈 없음")
+
+    lines.append("")
+    verdict = "통과" if report.sound else "실패"
+    lines.append(
+        f"판정: {verdict} (하드 실패 없음={report.ok}, 정지 {len(report.stale)}건,"
+        f" 갭 총 {report.total_gaps}개)"
+    )
     return "\n".join(lines)
 
 
@@ -229,11 +274,13 @@ def cmd_verify(args: argparse.Namespace, settings: Settings) -> int:
             symbols,
             timeframes,
             sample_buckets=args.sample_buckets,
+            stale_multiplier=settings.health_stale_multiplier,
         )
     finally:
         store.close()
     print(format_verify_report(report))
-    ok = report.strict_ok if args.strict else report.ok
+    # 정지는 `sound`에 포함된다 — 「갭 0이라 통과」로 끝나 5일을 날린 것이 WAN-156이다.
+    ok = report.strict_ok if args.strict else report.sound
     return 0 if ok else 1
 
 
@@ -252,7 +299,7 @@ def cmd_live(args: argparse.Namespace, settings: Settings) -> int:
 
 def cmd_status(args: argparse.Namespace, settings: Settings) -> int:
     """`alphablock status` — 운영 상태 요약을 출력."""
-    print(format_status(_build_health_view(settings)))
+    print(format_status(_build_health_view(settings), configured_symbols=settings.symbols))
     return 0
 
 

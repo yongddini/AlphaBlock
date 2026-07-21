@@ -132,13 +132,17 @@ def test_resample_parity_flags_mismatch(store: OhlcvStore) -> None:
 def test_verify_all_aggregates(store: OhlcvStore) -> None:
     store.upsert_candles(_one_minute(30))
     _seed_native_higher_tf(store, "15m")
+    # 이 픽스처의 봉은 에폭 0에서 시작하므로 벽시계 기준으로는 **실제로 정지 상태**다
+    # (WAN-156 신선도 판정). 무결성만 보려는 테스트라 기준 시각을 창 끝에 고정한다.
     report = verify_all(
         store,
         [SYMBOL],
         ["1m", "15m"],
         parity_targets=("15m",),
+        now_ms=30 * TF_MS,
     )
     assert report.ok
+    assert not report.has_stale
     assert report.strict_ok  # 갭 없음
     assert len(report.series) == 2
     assert len(report.parity) == 1

@@ -14,6 +14,9 @@ wheels/
 
 # Data artifacts
 data/*.db
+# WAL 저널 부산물 (WAN-156 §4) — `data/*.db` 글롭이 잡지 못한다
+data/*.db-wal
+data/*.db-shm
 data/*.parquet
 data/*.json
 
