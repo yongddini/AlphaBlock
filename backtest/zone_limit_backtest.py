@@ -68,7 +68,7 @@ from data.funding import Direction, cumulative_funding_cost, funding_coverage
 from data.models import FundingRate
 from execution.sizing import position_size
 from strategy.confluence import ConfluenceStrategy, entry_candidate_signals
-from strategy.indicators import emas, vwma
+from strategy.indicators import atr, emas, vwma
 from strategy.models import (
     ConfluenceParams,
     OrderBlock,
@@ -732,6 +732,15 @@ def build_zone_limit_candidates(
         )
     line_snapshots = _line_snapshots(params, htf_df)
 
+    # 존폭 필터(WAN-158, 옵트인). 꺼져 있으면(기본) ATR을 아예 계산하지 않으므로 기본
+    # 실행은 예전과 비트 단위로 같다. 프레임은 `_prepare_htf`가 정렬한 것 그대로라
+    # 측정 모듈(`wan117._FeatureExtractor`)이 읽는 위치와 pos가 일치한다.
+    zone_width_atr14: list[float] | None = None
+    if params.max_zone_width_atr is not None:
+        zone_width_atr14 = [
+            float(v) for v in atr(frame, length=params.zone_width_atr_length).tolist()
+        ]
+
     effective_oversold = params.rsi_oversold if rsi_oversold is None else rsi_oversold
     effective_overbought = params.rsi_overbought if rsi_overbought is None else rsi_overbought
     effective_gate_mode = params.rsi_gate_mode if rsi_gate_mode is None else rsi_gate_mode
@@ -813,6 +822,15 @@ def build_zone_limit_candidates(
                 pos, closes, deviation_ema.tolist(), params.long_max_deviation
             ):
                 continue  # WAN-68: 롱 이격도 게이트.
+        if zone_width_atr14 is not None:
+            # WAN-158(옵트인): 존폭 ÷ ATR가 문턱보다 넓은 셋업은 주문을 걸지 않는다.
+            # ATR은 **직전 확정봉**(pos-1)에서 읽는다 — 탭 봉 자신의 ATR은 그 봉 종가를
+            # 알아야 나오므로 룩어헤드다(측정 모듈 `wan117._FeatureExtractor`와 같은 규칙).
+            # 판정 대상은 `ob`가 아니라 **`seed_ob`**다: 겹침 캐스케이드 팔 `C`(WAN-126)는
+            # 하위TF 존으로 진입·손절하므로 그 존의 폭이 실제로 감수하는 폭이다.
+            width_atr = zone_width_atr14[pos - 1] if pos >= 1 else None
+            if not params.zone_width_filter_passes(seed_ob, width_atr):
+                continue
 
         # 이 셋업의 서브스텝: 탭 봉부터 데이터 끝까지. 단, **탭 봉이 1분봉으로
         # 커버돼야** 한다 — 탭 봉의 상위TF 슬롯에 1분봉이 없으면(미커버·갭) 이
