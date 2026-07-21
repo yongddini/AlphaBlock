@@ -18,6 +18,15 @@
 싣는다 — **`gaps_found: 0`이어도 정지가 보고서에 뜬다.** 펀딩비 시리즈도 같은 자로
 본다(OHLCV 백필이 채우지 않는 별도 경로라 같이 밀린다).
 
+📌 **수집 대상이 아닌 TF는 결함이 아니라 「미추적」이다 (WAN-157)**: 저장소에는 예전에
+받아 둔 뒤 `ALPHABLOCK_TIMEFRAMES`에서 빠진 TF(5m)가 남아 있다. 그 시리즈는 **고장이
+아니라 설정**이라 고칠 계획이 없는데, 신선도 판정에 넣으면 매 실행이 종료 코드 1 +
+텔레그램 경고가 되어 **사람이 경고를 무시하게 된다** — 그게 정확히 WAN-156 사고(5일간
+아무도 몰랐다)의 재발 경로다. 그래서 판정 대상을 `list_series()` ∩ 설정 TF로 좁히되,
+🚨 **빠진 시리즈를 조용히 지우지 않고** `RepairSummary.untracked_series`로 계속 보인다
+(설정과 실제의 어긋남을 감추면 WAN-156과 같은 종류의 침묵을 다시 만든다). 미추적은
+`has_defect`에 안 들어가고 텔레그램도 안 탄다 — **보이되 울지 않는다.**
+
 복구 결과(`RepairSummary`)는 JSON 상태 파일로 남겨 Health 뷰(WAN-30)와 CLI
 `status`가 "마지막 복구에서 시리즈별 몇 봉을 채웠는지"를 보여줄 수 있게 한다.
 """
@@ -72,6 +81,23 @@ class SeriesRepair(BaseModel):
     """복구 중 발생한 오류 요약(없으면 None)."""
 
 
+class UntrackedSeries(BaseModel):
+    """저장돼 있으나 수집 대상(설정 TF)이 아닌 시리즈 하나 (WAN-157).
+
+    결함이 아니라 **설정과 실제의 어긋남**이다. 판정(`has_defect`)에는 안 들어가지만
+    보고서·CLI에는 계속 찍혀야 한다 — 감추면 WAN-156과 같은 종류의 침묵이 된다.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    symbol: str
+    timeframe: str
+    last_ms: int | None
+    """마지막으로 저장된 봉의 시각(저장된 봉이 없으면 None)."""
+    lag_ms: int | None
+    """`now_ms - last_ms`. 낡은 정도를 사람이 읽을 수 있게 함께 싣는다."""
+
+
 class RepairSummary(BaseModel):
     """한 번의 복구 실행 전체 요약(상태 파일로 영속화)."""
 
@@ -83,6 +109,13 @@ class RepairSummary(BaseModel):
     """꼬리가 멈춘 시리즈(WAN-156). 갭 복구로는 메울 수 없는 결함이라 별도로 싣는다.
 
     비어 있는 것이 정상이고, 여기에 뭔가 있으면 `gaps_found: 0`이어도 이상이다.
+    """
+    untracked_series: list[UntrackedSeries] = []
+    """저장돼 있으나 수집 대상 TF가 아닌 시리즈(WAN-157).
+
+    ⚠️ **결함이 아니다** — `has_defect`에 안 들어가고 텔레그램도 안 탄다. 다만
+    「보이지 않게」 하지는 않는다: 설정에서 뺀 TF가 DB에 남아 낡아 가는 사실은
+    사람이 알아야 하고, 그게 이 필드가 존재하는 이유다.
     """
 
     @property
@@ -244,6 +277,7 @@ def repair_all(
     now_ms: Callable[[], int] = lambda: int(time.time() * 1000),
     stale_multiplier: float = DEFAULT_STALE_MULTIPLIER,
     funding_last_times: Sequence[tuple[str, int | None]] = (),
+    tracked_timeframes: Sequence[str] | None = None,
 ) -> RepairSummary:
     """저장된 모든(또는 지정한) 시리즈의 갭을 탐지·복구하고 꼬리 신선도를 판정한다.
 
@@ -255,8 +289,19 @@ def repair_all(
     `RepairSummary.stale_series`에 담는다(WAN-156). 복구 후에 재는 이유는, 갭 복구가
     꼬리까지 채웠다면 정지가 아니기 때문이다. `funding_last_times`를 주면 펀딩비
     시리즈도 같은 자로 본다 — 비워 두면(기본) OHLCV만 판정한다.
+
+    `tracked_timeframes`(= 설정의 수집 대상 TF)를 주면 그 목록에 없는 TF를 **복구·
+    신선도 판정에서 빼고** `RepairSummary.untracked_series`에 따로 싣는다(WAN-157).
+    안 주면(기본) 예전처럼 저장된 전부를 판정하므로 기존 호출부는 그대로 동작한다.
     """
-    targets = list(series) if series is not None else store.list_series()
+    stored = list(series) if series is not None else store.list_series()
+    if tracked_timeframes is None:
+        targets = stored
+        untracked_pairs: list[tuple[str, str]] = []
+    else:
+        tracked = set(tracked_timeframes)
+        targets = [(sym, tf) for sym, tf in stored if tf in tracked]
+        untracked_pairs = [(sym, tf) for sym, tf in stored if tf not in tracked]
     results = [
         repair_series(
             exchange,
@@ -288,7 +333,31 @@ def repair_all(
             len(stale),
             "\n".join(f"  {format_stale(s)}" for s in stale),
         )
-    return RepairSummary(ran_at_ms=ran_at, series=results, stale_series=stale)
+
+    untracked: list[UntrackedSeries] = []
+    for symbol, timeframe in untracked_pairs:
+        last = store.last_open_time(symbol, timeframe)
+        untracked.append(
+            UntrackedSeries(
+                symbol=symbol,
+                timeframe=timeframe,
+                last_ms=last,
+                lag_ms=None if last is None else ran_at - last,
+            )
+        )
+    if untracked:
+        # 결함이 아니므로 warning이 아니라 info다 — 그래도 조용히 사라지지는 않는다.
+        logger.info(
+            "저장돼 있으나 수집 대상이 아닌 시리즈 %d건(낡습니다): %s",
+            len(untracked),
+            ", ".join(f"{u.symbol} {u.timeframe}" for u in untracked),
+        )
+    return RepairSummary(
+        ran_at_ms=ran_at,
+        series=results,
+        stale_series=stale,
+        untracked_series=untracked,
+    )
 
 
 # -- 오케스트레이션 (설정 배선 + 텔레그램 경고) --------------------------------
@@ -303,6 +372,10 @@ def alert_on_failure(summary: RepairSummary, settings: Settings) -> bool:
     ⚠️ 정지(`stale_series`)도 경고 대상이다 — WAN-156 사고에서 복구는 매번 「오류
     없음」으로 끝났고, 정지를 아는 유일한 장치(`live.health_watch`)는 텔레그램 출구가
     막혀 침묵했다. 복구 경로가 스스로 말하게 해 두 장치가 동시에 조용해지지 않게 한다.
+
+    ⚠️ 반면 미추적 시리즈(`untracked_series`)는 **보내지 않는다**(WAN-157) — 고칠
+    계획이 없는 항목을 매번 울리면 진짜 경고까지 무시하게 된다. 그쪽은 보고서·CLI·
+    `alphablock status`에서 눈으로 본다.
     """
     failed = [s for s in summary.series if s.error]
     if not failed and not summary.stale_series:
@@ -341,6 +414,10 @@ def run_repair(
 
     신선도 판정에는 **설정에 등록된 심볼 전부**의 펀딩비도 포함한다(WAN-156 §5) —
     OHLCV 백필은 펀딩비를 채우지 않으므로 따로 밀릴 수 있다.
+
+    판정 대상 TF는 **설정의 수집 대상**(`settings.timeframes`)으로 좁힌다(WAN-157).
+    거기서 빠진 TF는 고장이 아니라 설정이므로 종료 코드·텔레그램을 흔들지 않되,
+    `RepairSummary.untracked_series`로 계속 보인다.
     """
     settings = settings or get_settings()
 
@@ -359,6 +436,7 @@ def run_repair(
             store,
             stale_multiplier=settings.health_stale_multiplier,
             funding_last_times=funding_last,
+            tracked_timeframes=settings.timeframes,
         )
     finally:
         funding_store.close()
@@ -373,6 +451,12 @@ def run_repair(
         f", {summary.total_remaining}봉 잔여" if summary.total_remaining else "",
         f", 🚨 정지 {len(summary.stale_series)}건" if summary.has_stale else "",
     )
+    if summary.untracked_series:
+        logger.info(
+            "판정 제외(수집 대상 TF 아님) %d 시리즈 — 설정: %s",
+            len(summary.untracked_series),
+            ", ".join(settings.timeframes),
+        )
     if not dry_run:
         alert_on_failure(summary, settings)
     return summary

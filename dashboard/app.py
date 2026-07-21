@@ -842,6 +842,14 @@ def _render_repair(view: HealthView) -> None:
         st.caption("마지막 점검에서 갭이 없었습니다.")
     if rep.has_error:
         st.error("일부 시리즈 갭 복구에 실패했습니다 — 로그/텔레그램 경고를 확인하세요.")
+    if rep.untracked_series:
+        # 판정에서 뺐다고 화면에서까지 지우면 WAN-156과 같은 침묵이 된다(WAN-157).
+        names = ", ".join(f"{u.symbol} {u.timeframe}" for u in rep.untracked_series)
+        st.warning(
+            f"저장돼 있으나 수집 대상이 아님(낡습니다): {names}"
+            " — 판정에서 제외했습니다. 계속 쓸 TF면 `ALPHABLOCK_TIMEFRAMES`에 넣고"
+            " 수집기를 재시작하세요."
+        )
 
 
 def _render_health_body(settings: Settings) -> None:

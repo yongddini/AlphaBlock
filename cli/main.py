@@ -126,6 +126,10 @@ def format_status(view: HealthView, *, configured_symbols: Sequence[str] | None 
         if rep.has_error:
             detail += " ⚠️ 복구 오류"
         lines.append(f"마지막 갭 복구: {_fmt_time(rep.ran_at_ms)} — {detail}")
+        if rep.untracked_series:
+            # 판정에서 뺐다고 화면에서까지 지우면 WAN-156과 같은 침묵이 된다(WAN-157).
+            names = ", ".join(f"{u.symbol} {u.timeframe}" for u in rep.untracked_series)
+            lines.append(f"  ⚠️ 저장돼 있으나 수집 대상이 아님(낡습니다): {names}")
 
     return "\n".join(lines)
 
@@ -160,6 +164,10 @@ def cmd_backfill(args: argparse.Namespace, settings: Settings) -> int:
     """`alphablock backfill --repair` — 내부 갭 복구 + 꼬리 신선도 판정(WAN-35/156).
 
     갭이 없어도 시리즈가 통째로 멈춰 있으면 종료 코드 1로 알린다.
+
+    ⚠️ 수집 대상(`ALPHABLOCK_TIMEFRAMES`)이 아닌 TF는 **종료 코드를 흔들지 않는다**
+    (WAN-157) — 고장이 아니라 설정이라 매번 빨간불로 찍으면 진짜 이상까지 무시하게
+    된다. 대신 「저장돼 있으나 수집 대상이 아님(낡습니다)」로 계속 찍는다.
     """
     from data.freshness import format_stale
     from data.repair import run_repair
@@ -181,6 +189,21 @@ def cmd_backfill(args: argparse.Namespace, settings: Settings) -> int:
         for stale in summary.stale_series:
             print(f"  {format_stale(stale)}")
         print("  → `alphablock history --days N` 으로 밀린 구간을 먼저 채우세요.")
+    if summary.untracked_series:
+        # 결함이 아니라 설정과 실제의 어긋남 — 보이되 종료 코드는 흔들지 않는다(WAN-157).
+        print(
+            f"ℹ️ 저장돼 있으나 수집 대상이 아님(낡습니다) {len(summary.untracked_series)}건"
+            f" — 판정에서 제외했습니다:"
+        )
+        for untracked in summary.untracked_series:
+            print(
+                f"  {untracked.symbol} {untracked.timeframe}:"
+                f" 최신 {_fmt_time(untracked.last_ms)} (지연 {_fmt_lag(untracked.lag_ms)})"
+            )
+        print(
+            "  → 계속 쓸 TF면 `ALPHABLOCK_TIMEFRAMES`에 넣고 수집기를 재시작하세요"
+            " (안 쓸 TF면 그대로 두어도 무해합니다)."
+        )
     return 1 if summary.has_defect else 0
 
 
