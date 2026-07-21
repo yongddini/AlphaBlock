@@ -533,6 +533,16 @@ def test_guard_verdict_benefit_and_harm_and_split() -> None:
     assert "갈린다" in got.text
 
 
+def test_guard_verdict_no_effect_when_guard_never_binds() -> None:
+    """가드를 끄나 켜나 결과가 같으면 「무영향」 — 「TF에 갈린다」로 오판하지 않는다."""
+    rows = _guard_pair(BARRIER_ATR, "15m", on_ret=0.1, off_ret=0.1) + _guard_pair(
+        BARRIER_ATR, "1h", on_ret=0.05, off_ret=0.05
+    )
+    got = guard_verdict(rows, barrier=BARRIER_ATR)
+    assert got.kind == "no_effect"
+    assert "걸리는 거래가 없다" in got.text
+
+
 def test_pen_verdict_kept_and_lost() -> None:
     base = [_test_row(b, p_return=0.048) for b in BARRIERS]
     pen_kept = [_test_row(b, p_return=0.048) for b in BARRIERS]

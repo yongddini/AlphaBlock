@@ -583,6 +583,13 @@ def guard_verdict(rows: Sequence[PnlRow], *, barrier: str) -> Judgement:
     detail = " / ".join(per_tf)
     if not ret_deltas:
         return Judgement("indeterminate", f"`{barrier}`: ⚠️ 판정 불가 — {detail}")
+    if all(abs(d) < 1e-6 for d in ret_deltas) and all(abs(d) < 1e-6 for d in ra_deltas):
+        return Judgement(
+            "no_effect",
+            f"`{barrier}`: **(c) 중립(무영향)** — 가드를 끄나 켜나 결과가 같다({detail}). "
+            "이 장벽의 손절 거리가 전부 가드(0.3%)보다 멀어 **가드에 걸리는 거래가 없다**는 "
+            "뜻이다.",
+        )
     all_pos = all(d > 0 for d in ret_deltas)
     all_neg = all(d < 0 for d in ret_deltas)
     ra_pos = all(d > 0 for d in ra_deltas) if ra_deltas else False
