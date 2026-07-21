@@ -402,6 +402,12 @@ class MatchedTestRow(BaseModel):
     default_mdd: float | None
     sample_share: float | None
     """`default→filter` MDD 개선분 중 `default→matched`가 재현하는 비율(표본 축소의 몫)."""
+    filter_trades: float | None
+    matched_trades: float | None
+    trade_gap_pct: float | None
+    """두 팔의 **최종 거래 수** 격차(%). 후보는 정확히 맞췄어도 동시 1포지션 시퀀서가 두 팔을
+    다르게 깎으므로 0이 아니다. 양수면 매칭이 더 많이 거래한다 = 노출이 커 MDD가 부풀려진다
+    = **필터에 유리한 잔차**이고, 이 값이 크면 MDD 비교를 그만큼 할인해 읽어야 한다."""
 
 
 def matched_test_row(
@@ -422,6 +428,9 @@ def matched_test_row(
         p_mdd=None,
         default_mdd=None,
         sample_share=None,
+        filter_trades=None,
+        matched_trades=None,
+        trade_gap_pct=None,
     )
 
     def _pick(arm: str, seed: int) -> dict[str, PnlRow]:
@@ -448,8 +457,10 @@ def matched_test_row(
 
     f_ret, f_mdd = _avg(filt, "total_return"), _avg(filt, "max_drawdown")
     d_mdd = _avg(base, "max_drawdown")
+    f_trades = _avg(filt, "num_trades")
     seed_ret: list[float] = []
     seed_mdd: list[float] = []
+    seed_trades: list[float] = []
     for seed in MATCH_SEEDS:
         picked = _pick(ARM_MATCHED, seed)
         r, m = _avg(picked, "total_return"), _avg(picked, "max_drawdown")
@@ -457,6 +468,9 @@ def matched_test_row(
             continue
         seed_ret.append(r)
         seed_mdd.append(m)
+        t = _avg(picked, "num_trades")
+        if t is not None:
+            seed_trades.append(t)
     if not seed_ret or f_ret is None or f_mdd is None:
         return empty
 
@@ -471,6 +485,10 @@ def matched_test_row(
         gap = d_mdd - f_mdd
         # 개선이 없거나(≤0) 무시할 만큼 작으면 비율이 뜻을 잃는다(0으로 나누기·부호 함정).
         share = (d_mdd - m_mdd) / gap if gap > 1e-9 else None
+    m_trades = sum(seed_trades) / len(seed_trades) if seed_trades else None
+    gap_pct: float | None = None
+    if f_trades and m_trades is not None:
+        gap_pct = (m_trades - f_trades) / f_trades * 100.0
     return MatchedTestRow(
         lens=lens,
         timeframe=timeframe,
@@ -485,6 +503,9 @@ def matched_test_row(
         p_mdd=p_mdd,
         default_mdd=d_mdd,
         sample_share=share,
+        filter_trades=f_trades,
+        matched_trades=m_trades,
+        trade_gap_pct=gap_pct,
     )
 
 
@@ -568,11 +589,25 @@ def verdict(tests: Sequence[MatchedTestRow], *, timeframe: str, lens: str = LENS
         f"표본 축소가 설명하는 MDD 개선 {share} · {row.n_symbols}심볼"
     )
     if row.p_mdd <= ALPHA:
+        # 잔차가 크고 매칭 쪽이 더 많이 거래하면 MDD 비교가 그만큼 필터에 유리하게 기운다.
+        residual = ""
+        if row.trade_gap_pct is not None and row.trade_gap_pct > 5.0:
+            residual = (
+                f" 🚨 **단 이 셀은 최종 거래 수가 {row.trade_gap_pct:+.1f}% 어긋난다**(매칭이 "
+                "더 많이 거래한다) — 노출이 큰 쪽의 MDD가 부풀려지므로 **MDD 우위를 그만큼 "
+                "할인해 읽어야 한다**. 후보 수는 정확히 맞췄지만 동시 1포지션 시퀀서가 두 팔을 "
+                "다르게 깎았고, 그 방향이 하필 필터에 유리하다."
+            )
         return (
-            f"**{timeframe}**: **(a) 선별 근거 있음** — 같은 수의 거래를 무작위로 뽑은 "
-            f"대조군보다 MDD가 유의하게 낮다({detail}). 즉 MDD 개선이 표본 축소만으로는 "
-            "재현되지 않는다. 🚨 **그래도 채택이 아니다** — 재-베이스라인은 사용자 결정이고, "
-            "아래 경고(심볼 편중 · 체결 보수화 · 사이징 바닥)를 함께 넘긴다."
+            f"**{timeframe}**: **(a) 표본 축소로는 환원되지 않는다** — 같은 수의 거래를 "
+            f"무작위로 뽑은 대조군보다 MDD가 유의하게 낮다({detail}).{residual} "
+            "🚨 **「선별 알파를 찾았다」로 읽지 말 것 — 이 표는 「선별」과 「기하」를 가르지 "
+            "못한다.** 필터 팔은 손절을 존 무효화 경계에 그대로 두므로, 좁은 존을 고르면 1R이 "
+            "작아지고 고정 1.5R 익절이 절대가격 기준으로 가까워진다 — 승률 상승이 그 서명이다. "
+            "즉 이 대조군이 배제한 것은 **표본 축소** 하나이고, 기하 경로는 열려 있다"
+            "(WAN-133이 k·ATR 장벽으로 그 관문을 통과시켰지만 그건 **옛 엔진**(`tap` 밴드 + "
+            "병합 존) 위의 판정이라 이 표와 같은 자리에서 재확인된 적이 없다). "
+            "**채택이 아니다** — 재-베이스라인은 사용자 결정이다."
         )
     mostly = row.sample_share is not None and row.sample_share >= SAMPLE_SHARE_BAR
     bar_note = (
@@ -778,7 +813,7 @@ def _matched_section(result: ExperimentResult, timeframes: Sequence[str]) -> str
     )
     lines.append(
         "| TF | 구간 | 심볼 | 필터 수익 | 매칭 수익 | p(수익) | 필터 MDD | 매칭 MDD | "
-        "p(MDD) | 기본 MDD | 표본축소 몫 |\n" + "| -- " * 11 + "|"
+        "p(MDD) | 기본 MDD | 표본축소 몫 | 거래 잔차 |\n" + "| -- " * 12 + "|"
     )
     for timeframe in timeframes:
         for segment in (SEGMENT_IS, SEGMENT_OOS):
@@ -793,6 +828,11 @@ def _matched_section(result: ExperimentResult, timeframes: Sequence[str]) -> str
             if t is None:
                 continue
             share = "—" if t.sample_share is None else f"{t.sample_share * 100:.0f}%"
+            if t.trade_gap_pct is None:
+                gap = "—"
+            else:
+                warn = " 🚨" if t.trade_gap_pct > 5.0 else ""
+                gap = f"{t.trade_gap_pct:+.1f}%{warn}"
             lines.append(
                 f"| {timeframe} | {segment} | {t.n_symbols} | "
                 f"{_pct(t.filter_return, signed=True)} | "
@@ -800,7 +840,7 @@ def _matched_section(result: ExperimentResult, timeframes: Sequence[str]) -> str
                 f"{'—' if t.p_return is None else f'{t.p_return:.3f}'} | "
                 f"{_pct(t.filter_mdd)} | {_pct(t.matched_mdd_mean)} | "
                 f"{'—' if t.p_mdd is None else f'{t.p_mdd:.3f}'} | "
-                f"{_pct(t.default_mdd)} | {share} |"
+                f"{_pct(t.default_mdd)} | {share} | {gap} |"
             )
     lines.append("")
     lines.append("**거래 수 정합 확인(WAN-126 게이트를 세 팔 모두에):**\n")
@@ -975,11 +1015,17 @@ def _conclusion(result: ExperimentResult, timeframes: Sequence[str]) -> str:
         )
     if selective and not reduced:
         return (
-            f"**(a) 두 작업 TF({', '.join(selective)}) 모두 선별 근거가 남았다 — 다만 채택이 "
-            "아니라 「재-베이스라인 결정 이슈」 제안이다.** 같은 수의 거래를 무작위로 뽑은 "
-            "대조군보다 필터의 MDD가 유의하게 낮으므로 개선을 표본 축소로 환원할 수 없다. "
-            "**개발자 임의 착수 금지** — 진입 규칙을 바꾸는 것은 사용자 결정이다(WAN-112/123/"
-            "132/149와 같은 부류). " + tail
+            f"**(a) 두 작업 TF({', '.join(selective)}) 모두 「표본 축소」로는 환원되지 않는다 — "
+            "다만 채택 권고가 아니다.** 같은 수의 거래를 무작위로 뽑은 대조군보다 필터의 MDD가 "
+            "유의하게 낮으므로, WAN-133 손익 표를 막고 있던 **거래 수 오염 구멍은 닫힌다**. "
+            "🚨 **그러나 이 표가 배제한 대안은 하나(표본 축소)뿐이고 「기하」는 열려 있다** — "
+            "필터가 좁은 존을 고르면 1R이 작아져 고정 1.5R 익절이 가까워지므로, 승률 상승"
+            "(48%→58%)은 선별의 서명이자 동시에 기하의 서명이다. WAN-133이 k·ATR 장벽으로 그 "
+            "관문을 통과시킨 것은 **옛 엔진**(`tap` 밴드 + 병합 존) 위의 판정이고, 오늘의 "
+            "엔진에서 같은 관문을 다시 세운 적은 없다 — **그 재검이 채택 논의의 선행 조건**이다"
+            "(후속 이슈 소관). 그전까지 재-베이스라인 결정 이슈를 제안하지 않는다. "
+            "**개발자 임의 착수 금지** — 진입 규칙 변경은 사용자 결정이다(WAN-112/123/132/149와 "
+            "같은 부류). " + tail
         )
     if not selective and not reduced:
         return (

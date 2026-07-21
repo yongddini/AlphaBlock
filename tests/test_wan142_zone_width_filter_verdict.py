@@ -267,6 +267,40 @@ def test_sample_share_is_none_when_there_is_no_improvement() -> None:
     assert test.sample_share is None
 
 
+def test_trade_residual_is_reported_and_warned_in_verdict() -> None:
+    """후보를 맞춰도 시퀀서가 남기는 **거래 수 잔차**가 판정 문장에 드러난다.
+
+    잔차가 양수면 매칭이 더 많이 거래한다 = 노출이 커 MDD가 부풀려진다 = 필터에 유리하다.
+    이걸 안 적으면 「MDD가 유의하게 낮다」가 잔차의 산물일 때 독자가 알 수 없다.
+    """
+    rows: list[PnlRow] = []
+    for i in range(6):
+        sym = f"S{i}/USDT:USDT"
+        rows.append(_row(sym, ARM_DEFAULT, mdd=0.20, trades=200.0))
+        rows.append(_row(sym, ARM_FILTER, mdd=0.05, ret=0.05, trades=100.0))
+        for seed in MATCH_SEEDS:
+            # 매칭이 30% 더 거래한다 — 필터에 유리한 잔차.
+            rows.append(_row(sym, ARM_MATCHED, seed=seed, mdd=0.15, ret=0.05, trades=130.0))
+    test = matched_test_row(rows, lens=LENS_PRIMARY, timeframe=_TIMEFRAME, segment=SEGMENT_OOS)
+    assert test.trade_gap_pct == pytest.approx(30.0)
+    text = verdict([test], timeframe=_TIMEFRAME)
+    assert "거래 수가 +30.0% 어긋난다" in text
+    assert "할인해 읽어야 한다" in text
+
+
+def test_verdict_always_flags_the_geometry_alternative() -> None:
+    """(a) 판정은 「선별 알파」로 읽히면 안 된다 — 기하 경로가 열려 있음을 항상 적는다.
+
+    이 모듈의 대조군이 배제하는 것은 **표본 축소** 하나뿐이다. 좁은 존은 1R이 작아 고정
+    1.5R 익절이 가까워지므로, 같은 결과가 기하로도 설명된다(WAN-133 계열의 반복 교훈).
+    """
+    rows = _synthetic_pnl(filter_mdd=0.05, matched_mdd=0.15)
+    tests = [matched_test_row(rows, lens=LENS_PRIMARY, timeframe=_TIMEFRAME, segment=SEGMENT_OOS)]
+    text = verdict(tests, timeframe=_TIMEFRAME)
+    assert "기하" in text
+    assert "채택이 아니다" in text
+
+
 def test_symbol_mean_gate_excludes_small_cells() -> None:
     rows = _synthetic_pnl(filter_mdd=0.05, matched_mdd=0.15, symbols=3)
     rows.append(_row("S9/USDT:USDT", ARM_FILTER, trades=1.0, ret=99.0, mdd=0.0))
@@ -367,7 +401,7 @@ def test_verdict_reads_selection_when_filter_beats_matched() -> None:
     rows = _synthetic_pnl(filter_mdd=0.05, matched_mdd=0.15)
     tests = [matched_test_row(rows, lens=LENS_PRIMARY, timeframe=_TIMEFRAME, segment=SEGMENT_OOS)]
     text = verdict(tests, timeframe=_TIMEFRAME)
-    assert "(a) 선별" in text
+    assert "(a) 표본 축소로는 환원되지 않는다" in text
     assert "채택이 아니다" in text  # 판정이 곧 채택으로 읽히지 않도록.
 
 
