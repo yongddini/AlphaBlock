@@ -53,6 +53,28 @@ class PositionSnapshot(BaseModel):
         )
 
 
+class PendingOrderSnapshot(BaseModel):
+    """대기 중인 존-지정가 주문 한 건의 스냅샷 (WAN-45).
+
+    존-지정가 러너가 매 폴링마다 주문 장부(`LimitOrderBook`)를 통째로 스냅샷해,
+    "지금 어떤 주문이 얼마에 걸려 있는지"를 대시보드·사람이 파일로 확인할 수 있게 한다.
+    `limit_price`는 **마지막으로 주문판에 걸려 있던 가격**이다 — 봉내 라이브 밴드
+    (WAN-132)에서는 지정가가 틱마다 움직이고, 워밍업·기각 구간에는 None일 수 있다.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    symbol: str
+    timeframe: str
+    direction: OrderBlockDirection
+    limit_price: float | None = None
+    stop_price: float | None = None
+    placed_ms: int | None = None
+    bars_elapsed: int = 0
+    limit_valid_bars: int | None = None
+    tap_index: int = 0
+
+
 class EventRecord(BaseModel):
     """최근 신호/알림 이력 한 건."""
 
@@ -89,6 +111,8 @@ class RunnerRuntimeState(BaseModel):
     last_notification_at: int | None = None
     #: 현재 오픈 중인 페이퍼 포지션.
     open_positions: list[PositionSnapshot] = Field(default_factory=list)
+    #: 현재 대기 중인 존-지정가 주문(WAN-45, 존-지정가 러너 전용 — A안 러너는 빈 목록).
+    pending_orders: list[PendingOrderSnapshot] = Field(default_factory=list)
     #: 최근 신호 이력(오래된→최신 순). `DEFAULT_MAX_EVENTS`로 상한.
     recent_events: list[EventRecord] = Field(default_factory=list)
 
@@ -126,13 +150,14 @@ class RuntimeStateStore:
         now_ms: int,
         open_positions: list[PaperPosition],
         new_events: list[SignalEvent],
+        pending_orders: list[PendingOrderSnapshot] | None = None,
     ) -> RunnerRuntimeState:
         """이번 폴링 결과를 반영해 상태를 갱신·저장하고 반환한다.
 
         - `updated_at`(하트비트)을 `now_ms`로 올린다.
         - `new_events`가 있으면 이력에 누적(상한 초과분은 오래된 것부터 버림)하고
           `last_notification_at`을 갱신한다.
-        - 현재 오픈 포지션을 스냅샷으로 통째로 교체한다.
+        - 현재 오픈 포지션·대기 주문(WAN-45)을 스냅샷으로 통째로 교체한다.
         """
         events = list(self._state.recent_events)
         events.extend(EventRecord.from_event(e) for e in new_events)
@@ -143,6 +168,7 @@ class RuntimeStateStore:
             updated_at=now_ms,
             last_notification_at=(now_ms if new_events else self._state.last_notification_at),
             open_positions=[PositionSnapshot.from_position(p) for p in open_positions],
+            pending_orders=list(pending_orders) if pending_orders is not None else [],
             recent_events=events,
         )
         self._flush()

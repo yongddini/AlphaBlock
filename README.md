@@ -744,7 +744,33 @@ uv run python scripts/walkforward_report.py --synthetic --timeframes 1h
 - 룩어헤드 방지는 `tests/test_walkforward.py`에서 한 윈도우의 `oos_end` 이후 데이터를
   바꿔도 그 윈도우의 결과가 완전히 동일함을 테스트로 검증한다.
 
-## 실시간 시그널 러너 + 텔레그램 알림 (WAN-25, 페이퍼)
+## 존-지정가 페이퍼 러너 — 체결률 실측 (WAN-45, 기본값)
+
+📌 **`python -m live.runner`는 채택 기본값(`entry_mode="zone_limit"`)에서 존-지정가
+페이퍼 러너로 위임한다.** 활성 오더블록의 탭을 감지해 채택 규칙 그대로(존 근단 →
+볼린저 봉내 재산정(WAN-132) → 오프셋 2bp) 지정가를 걸어두고, 1분봉 틱(수집기 웹소켓
+→ 저장소 경유)으로 체결/만료/무효화를 굴린다. **1순위 목적은 체결률 실측**이다 —
+모든 백테스트 판정이 서 있는 `baseline`("닿으면 체결") 낙관 가정을 실제 시장에서
+확인한다(걸린/체결/만료·취소, 예약→체결 소요, 관통 폭을 `live_limit_orders` 테이블에
+누적). 백테스트와 **같은 부품**(`IntrabarLiveLimit`·`RealtimeRsi`·`RealtimeBand`)을
+공유하며 테스트가 `is`로 고정한다.
+
+```bash
+# 상시 페이퍼 러너(수집 데몬이 함께 돌아야 1분봉 틱이 들어온다)
+uv run python -m live.runner
+
+# 체결률 실측 요약 표(백테스트 baseline 가정과 나란히 읽는 표)
+uv run python -m live.fill_report
+```
+
+러너 세션(가동 시간)도 장부에 남는다 — 로컬 맥 운영이라 생기는 중단 구간을 체결률
+분모에서 걸러 읽기 위해서다(재시작 시 이전 대기 주문은 복원하지 않고 `discarded_restart`로
+마감). 페이퍼 한정: 실주문 API는 부르지 않는다(`ALPHABLOCK_LIVE_TRADING=false` 불변).
+
+## 실시간 시그널 러너 + 텔레그램 알림 (WAN-25, 페이퍼 · A안 경로)
+
+⚠️ **아래 A안(봉 마감 종가) 러너는 `ALPHABLOCK_CONFLUENCE__ENTRY_MODE=close`로 명시했을
+때만 돈다** — 채택 기본값에서는 위 존-지정가 러너가 기본이다(WAN-122가 A안 경로 폐기 예정).
 
 WAN-23 컨플루언스 전략을 저장소(WAN-6 수집분)에 **주기적으로 재평가**해, 새 진입/
 청산 신호가 뜨면 **텔레그램**으로 폰에 알림을 보내는 **페이퍼(무주문) 러너**다.
