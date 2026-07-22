@@ -234,8 +234,19 @@ def run_signal_runner(
     - `test_message=True`: 텔레그램 연결 확인용 메시지 1건만 보내고 종료.
     - `dry_run=True`: 텔레그램 전송 없이 로그로만 출력.
     - `once=True`: 한 번만 폴링하고 종료(그 외에는 무한 폴링 루프).
+
+    📌 **채택 기본값(`entry_mode="zone_limit"`)에서는 존-지정가 페이퍼 러너(WAN-45)로
+    위임한다** — WAN-95 이후 사용자의 실매매는 지정가인데 이 A안 폴링 러너는 봉 마감
+    종가 시그널을 내므로, 기본값에서 옛 경로가 도는 것이 비정상이다(이슈 배너 1번).
+    A안 경로는 `entry_mode="close"`로 명시했을 때만 돈다(WAN-122가 폐기 예정).
     """
     settings = settings or get_settings()
+
+    if settings.confluence.entry_mode == "zone_limit" and not test_message:
+        from live.zone_limit_runner import run_zone_limit_runner
+
+        run_zone_limit_runner(settings, once=once)
+        return
 
     telegram = None if dry_run else build_telegram_client(settings)
     if test_message:
