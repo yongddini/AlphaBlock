@@ -35,16 +35,34 @@ from backtest.harness import (
     RunRow,
     load_market_data,
 )
-from backtest.run import JOBS_AUTO, RunOptions, build_parser, grid_from_args, run_grid
+from backtest.run import (
+    JOBS_AUTO,
+    RunOptions,
+    build_parser,
+    grid_from_args,
+    parse_date_ms,
+    run_grid,
+)
 from strategy.models import BandBar, RsiGateMode
 
-_WAN95_CSV = Path("backtest/reports/wan95_zone_limit_recompute.csv")
 _WAN99_CSV = Path("backtest/reports/wan99_zone_limit_offset.csv")
 
 #: 대조 심볼·TF. 1분봉 로딩이 실행 시간을 지배하므로 1셀로 좁힌다.
 _SYMBOL = "BTC/USDT:USDT"
 _TIMEFRAME = "1h"
 _YEARS = 3.0
+
+#: **못 박은 대조 창(WAN-162)**. `--years 3`은 마지막 봉 기준으로 창을 자르므로 데이터가
+#: 쌓이면 창이 미끄러지고(`harness.load_recent`), 옛 리포트 셀과의 대조가 날짜에 따라
+#: 어긋난다 — 실제로 WAN-99 셀의 `eligible_setups` 분모가 창 경계에서 598→595로 밀려
+#: 실패했다(나머지 지표는 전부 비트 단위로 일치 = **순수 창 미끄러짐, 엔진 무변**). 저장소
+#: 표준 창(2023-07-15~2026-07-15, WAN-111 이래)으로 못 박으면 두 경계 모두 과거라 새 봉이
+#: 들어와도 움직이지 않고, WAN-99 **동결** CSV가 비트 단위로 재현된다. 창을 바꾸면 옛 셀과
+#: 안 맞으니 `--start`/`--end`로 못 박은 것이지 임의 값이 아니다.
+_START = "2023-07-15"
+_END = "2026-07-15"
+_START_MS = parse_date_ms(_START)
+_END_MS = parse_date_ms(_END)
 
 #: `--jobs` 대조용(WAN-121). fan-out 단위가 (심볼, TF)라 **심볼이 2개는 돼야** 워커가
 #: 실제로 둘로 갈린다(1셀이면 `resolve_jobs`가 1로 접어 직렬과 같은 경로를 탄다 —
@@ -60,7 +78,9 @@ def _require_real_data() -> None:
 
     1분봉은 읽지 않는다 — 존재 확인에 수백 MB를 읽을 이유가 없다.
     """
-    market = load_market_data(_SYMBOL, _TIMEFRAME, years=_YEARS, need_1m=False, funding=False)
+    market = load_market_data(
+        _SYMBOL, _TIMEFRAME, start_ms=_START_MS, end_ms=_END_MS, need_1m=False, funding=False
+    )
     if market.empty:
         pytest.skip(f"{_SYMBOL} {_TIMEFRAME} 실데이터가 없어 회귀 대조를 건너뜁니다(CI 기본).")
 
@@ -86,7 +106,9 @@ def _run(
         grid = replace(grid, band_bar=band_bar)
     if combine_obs is not None:
         grid = replace(grid, combine_obs=(combine_obs,))
-    rows = run_grid(grid, RunOptions(years=_YEARS), log=False)
+    # 창을 못 박는다(WAN-162) — `start_ms`/`end_ms`가 있으면 `load_market_data`가 `_YEARS`
+    # 대신 이 창을 쓴다. 날짜가 지나도 대조가 흔들리지 않게 하는 핵심이다.
+    rows = run_grid(grid, RunOptions(years=_YEARS, start_ms=_START_MS, end_ms=_END_MS), log=False)
     assert len(rows) == 1, f"대조는 한 셀이어야 합니다: {len(rows)}행"
     return rows[0]
 
@@ -107,16 +129,39 @@ def _assert_matches(row: RunRow, cell: pd.Series, columns: list[str]) -> None:
         )
 
 
-@pytest.mark.skipif(not _WAN95_CSV.exists(), reason="WAN-95 리포트 CSV 없음")
+#: 현행 채택 기본값(지정가 + 롱 온리 + 1.5R + 오프셋 2bp + intrabar_live + unconditional +
+#: combine_obs=False + max_zone_width_atr=1.28) 셀을 **못 박은 창에서** 산출한 기준값.
+#:
+#: ⚠️ 여기만 CSV 셀이 아니라 상수를 쓰는 이유: `wan95_zone_limit_recompute.csv`는 재-베이스
+#: 라인마다 `--years 3`으로 재산출되는 **살아있는** 문서라(WAN-159가 마지막) 그 창이 "지금"을
+#: 따라다녀 **날짜 독립 참조가 못 된다**(오늘 창에서 117거래, 못 박은 창에서 118거래로 경계
+#: 1거래가 갈린다). 그래서 CSV 대신 못 박은 창의 값을 참조로 고정한다.
+#:
+#: 🚨 이 상수는 "실제값을 기대값으로 덮어쓴" 것이 아니다 — 원인이 **창 미끄러짐**임을 아래
+#: WAN-99 테스트가 **같은 창에서 동결 CSV를 비트 단위로 재현**해 증명한다(= 엔진 무변). 값을
+#: 다시 낼 때는 그 WAN-99 재현이 먼저 통과하는지 확인할 것(엔진이 실제로 바뀌었다면 WAN-99도
+#: 같이 깨진다).
+_WAN95_PINNED = {
+    "total_return": 0.21260412169057855,
+    "win_rate": 0.576271186440678,
+    "max_drawdown": 0.05088037368038523,
+    "num_trades": 118,
+    "fill_rate": 0.6798418972332015,
+}
+
+
 def test_cli_defaults_reproduce_wan95_zone_limit_cell() -> None:
-    """인자 없는 기본 실행 == WAN-95 채택 기준선(지정가 + 롱 온리 + 1.5R) 셀."""
+    """인자 없는 기본 실행(현행 채택 기본값) == 못 박은 창의 WAN-95 기준값.
+
+    이 테스트가 **현행 기본 엔진**을 실데이터로 도는 유일한 축이다 — 아래 WAN-99 테스트는
+    옛 엔진을 핀(오프셋 0 · tap 밴드 · first_tap_free · 병합 존)으로 되돌려 돌기 때문이다.
+    """
     row = _run(["--symbol", "BTCUSDT", "--tf", _TIMEFRAME])
-    cell = _report_cell(_WAN95_CSV, symbol=_SYMBOL, timeframe=_TIMEFRAME, entry_mode="zone_limit")
-    _assert_matches(
-        row,
-        cell,
-        ["total_return", "win_rate", "max_drawdown", "num_trades", "fill_rate"],
-    )
+    for column, expected in _WAN95_PINNED.items():
+        actual = getattr(row, column)
+        assert actual == pytest.approx(float(expected), abs=1e-9), (
+            f"{column}: CLI {actual} != 못 박은 창 기준 {expected}"
+        )
 
 
 @pytest.mark.skipif(not _WAN99_CSV.exists(), reason="WAN-99 리포트 CSV 없음")
@@ -125,6 +170,13 @@ def test_cli_reproduces_wan99_pen_5bp_cell() -> None:
 
     `mean_r`·`fill_rate`까지 맞아야 한다 — 거래 수만 같고 손익이 다르면 비용·사이징
     배선이 갈린 것이고, 그건 표를 나란히 읽는 순간 드러나지 않는 종류의 오차다.
+
+    ⚠️ **못 박은 창에서 돈다**(WAN-162, `_run`이 `_START`/`_END`로 고정): WAN-99 CSV는
+    다시 산출되지 않는 **동결** 아티팩트라, 저장소 표준 창으로 못 박으면 `fill_rate`
+    분모(`eligible_setups`)까지 비트 단위로 재현된다. `--years 3`으로 두면 데이터가 쌓일
+    때마다 그 분모가 창 경계에서 밀려 이 셀만 어긋난다(그게 WAN-162가 고친 실패다).
+    이 테스트가 통과한다는 것은 곧 "엔진이 조용히 달라지지 않았다"의 직접 증거이므로,
+    위 WAN-95 상수(같은 창)의 신뢰 근거이기도 하다.
 
     ⚠️ `--offset-bps 0`을 **명시**해야 한다(WAN-112): 채택 기본 오프셋이 2bp가 되면서
     CLI 기본 실행은 더 이상 WAN-99의 오프셋 0 셀이 아니다. 이 인자가 "옛 셀과 대조하려고
