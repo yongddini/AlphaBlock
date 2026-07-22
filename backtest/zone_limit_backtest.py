@@ -351,6 +351,14 @@ class _IntrabarLiveLimit:
         return stop_price, tp_price
 
 
+#: 라이브 러너(WAN-45)가 쓰는 공개 이름. **별칭이지 사본이 아니다** — 라이브·페이퍼가
+#: 백테스트와 같은 밴드→`deviation_entry_price`→`apply_zone_limit_offset` 사슬을 돌게
+#: 하는 장치이고, `tests/test_limit_engine.py`가 동일 객체임을(`is`) 고정한다. 라이브용
+#: 재구현을 새로 만들면 두 벌이 갈라져 어느 쪽이 맞는지 알 수 없게 된다(WAN-100의 교훈:
+#: 「첫 탭 면제」가 A안에만 구현되고 B안에 빠져 몇 달치 수치가 문서와 다른 규칙으로 나왔다).
+IntrabarLiveLimit = _IntrabarLiveLimit
+
+
 @dataclass(frozen=True)
 class TakeProfitContext:
     """익절 목표를 외부 규칙이 정할 때 넘기는 셋업 문맥 (WAN-137 Phase 2, 옵트인).
