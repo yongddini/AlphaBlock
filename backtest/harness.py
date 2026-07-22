@@ -80,6 +80,10 @@ IS_FRACTION = 2.0 / 3.0
 SEGMENT_FULL = "full"
 SEGMENT_IS = "is"
 SEGMENT_OOS = "oos"
+SEGMENT_OOS_WARM = "oos_warm"
+"""따뜻한 연속 OOS(WAN-166) — 전 구간을 연속으로 돌려 존·지표를 데운 뒤, OOS 경계
+이후에 **탭이 발생한** 셋업만 신선한 초기자본으로 평가한다. 차가운 `oos`(물리적 절단,
+존 재고 0에서 시작)와 같은 기간을 재되 실전(연속 차트)에 맞는 현실적 추정이다."""
 
 
 # --------------------------------------------------------------------------- #
@@ -538,29 +542,71 @@ class Segment:
     """워크포워드 창 번호(단일 실행이면 0)."""
     start_fraction: float
     end_fraction: float
+    eval_start_fraction: float | None = None
+    """따뜻한 연속 OOS(WAN-166)의 **평가 경계**. `None`이면 예전 그대로(데이터 창 = 평가 창).
+
+    값이 있으면 데이터는 `[start_fraction, end_fraction)` 전체를 연속으로 태우되(워밍업 —
+    존 재고·지표가 살아 있다), **탭이 이 경계 이후인 셋업만** 신선한 초기자본으로 평가한다.
+    워밍업 경계가 세그먼트의 1급 속성이라는 점이 전체창 라벨링(WAN-155/161이 리포트마다
+    따로 짠 방식)과의 차이다 — 행 좌표(`start_time`·`num_bars`)도 평가 창 기준으로 찍힌다."""
 
     def __post_init__(self) -> None:
         if not 0.0 <= self.start_fraction < self.end_fraction <= 1.0:
             raise ValueError(
                 f"구간 비율이 잘못됐습니다: [{self.start_fraction}, {self.end_fraction})"
             )
+        if self.eval_start_fraction is not None and not (
+            self.start_fraction <= self.eval_start_fraction < self.end_fraction
+        ):
+            raise ValueError(
+                f"평가 경계가 데이터 창을 벗어났습니다: eval_start={self.eval_start_fraction}, "
+                f"창=[{self.start_fraction}, {self.end_fraction})"
+            )
 
 
 FULL_SEGMENT = Segment(name=SEGMENT_FULL, window=0, start_fraction=0.0, end_fraction=1.0)
 
+WARM_OOS_SEGMENT = Segment(
+    name=SEGMENT_OOS_WARM,
+    window=0,
+    start_fraction=0.0,
+    end_fraction=1.0,
+    eval_start_fraction=IS_FRACTION,
+)
+"""따뜻한 연속 OOS(WAN-166). 데이터 창은 전 구간(워밍업 = 앞구간 **전체** — 실전의 연속
+차트와 같게 가장 따뜻한 상태), 평가 경계는 차가운 OOS와 **같은 지점**(`IS_FRACTION`)이다.
 
-def segments_for(*, oos: bool = False, walkforward: int = 0) -> tuple[Segment, ...]:
+워밍업 길이를 파라미터로 열지 않는 이유: 길이를 고르는 순간 IS에서 고르는 자유 파라미터가
+하나 늘고(WAN-108이 경계한 자리), 앞구간 전체보다 짧은 워밍업은 "실전 연속"이라는 이
+방식의 존재 이유를 스스로 깎는다. `start_fraction=0.0`이라 `slice_market`이 항등이 되고,
+평가 경계의 ms 환산이 차가운 OOS의 하한과 **비트 단위로 같은 앵커**(전체 창의 첫/끝 봉)
+에서 계산된다는 것도 이 고정의 부수 효과다."""
+
+
+def segments_for(
+    *, oos: bool = False, walkforward: int = 0, warm_oos: bool = False
+) -> tuple[Segment, ...]:
     """실행할 구간 목록.
 
     - 기본: 전 구간 하나.
     - `oos=True`: 전 구간 + IS(앞 2/3) + OOS(뒤 1/3). 전 구간을 함께 내는 건 IS/OOS가
       전체와 얼마나 다른지 볼 기준선이 필요하기 때문이다.
+    - `warm_oos=True`(WAN-166, **정본 리포트 기준**): 위에 더해 따뜻한 연속 OOS
+      (`oos_warm`, 주 수치)를 낸다 — 차가운 `oos`는 함께 나와 과최적화 스트레스로
+      병기되고, 두 수치의 차이 자체가 강건성 신호다(차이가 크면 그 성과가 물려받은
+      존 재고에 기대고 있다는 뜻).
     - `walkforward=N`: 창을 N등분해 각 창 안에서 다시 IS/OOS로 가른다(겹치지 않는 롤링).
       한 번의 IS/OOS 분할은 경계를 어디에 긋느냐에 성적이 좌우되므로, 여러 창에서
       반복해 그 운을 걷어낸다.
     """
     if walkforward < 0:
         raise ValueError("--walkforward는 0 이상이어야 합니다.")
+    if warm_oos and walkforward:
+        raise ValueError(
+            "--oos-warm과 --walkforward는 함께 쓸 수 없습니다 — 따뜻한 연속 OOS는 "
+            "단일 IS/OOS 분할 위에 정의돼 있습니다(WAN-166). 롤링 창의 따뜻한 판은 "
+            "필요해지면 별도 이슈로 엽니다."
+        )
     if walkforward:
         segments: list[Segment] = []
         span = 1.0 / walkforward
@@ -574,6 +620,13 @@ def segments_for(*, oos: bool = False, walkforward: int = 0) -> tuple[Segment, .
                 Segment(name=SEGMENT_OOS, window=i, start_fraction=boundary, end_fraction=lo + span)
             )
         return tuple(segments)
+    if warm_oos:
+        return (
+            FULL_SEGMENT,
+            Segment(name=SEGMENT_IS, window=0, start_fraction=0.0, end_fraction=IS_FRACTION),
+            WARM_OOS_SEGMENT,
+            Segment(name=SEGMENT_OOS, window=0, start_fraction=IS_FRACTION, end_fraction=1.0),
+        )
     if oos:
         return (
             FULL_SEGMENT,
@@ -615,6 +668,25 @@ def slice_market(market: MarketData, segment: Segment) -> MarketData:
         if lo <= r.funding_time and (hi is None or r.funding_time < hi)
     ]
     return MarketData(market.symbol, market.timeframe, htf, df_1m, rates)
+
+
+def eval_boundary_ms(market: MarketData, segment: Segment) -> int | None:
+    """따뜻한 세그먼트의 평가 경계를 ms로 환산한다. 평가 경계가 없으면 `None`.
+
+    환산식은 `slice_market`의 `lo` 계산과 **글자 그대로 같아야 한다** — 그래야 따뜻한
+    OOS(`oos_warm`)와 차가운 OOS(`oos`)가 정확히 같은 시각부터 평가되고, 두 행의
+    `start_time`이 비트 단위로 일치한다(경계가 1봉이라도 어긋나면 두 방식의 차이에
+    "평가 기간이 달랐다"가 섞여 강건성 신호로 읽을 수 없다).
+
+    ⚠️ 앵커는 **넘겨받은 창의 첫/끝 봉**이다. 따뜻한 세그먼트는 `start_fraction=0.0`·
+    `end_fraction=1.0`으로 고정돼 있어(`WARM_OOS_SEGMENT` 독스트링) `slice_market`이
+    항등이고, 따라서 이 함수가 받는 창 = 전체 창 = 차가운 OOS의 분할 앵커다.
+    """
+    if segment.eval_start_fraction is None:
+        return None
+    times = market.htf_df["open_time"].astype("int64")
+    start, end = int(times.iloc[0]), int(times.iloc[-1])
+    return start + int((end - start) * segment.eval_start_fraction)
 
 
 # --------------------------------------------------------------------------- #
@@ -699,6 +771,7 @@ def run_once(
     fair_window: bool = False,
     portfolio: PortfolioParams | None = None,
     setup_sink: list[SetupDiagnostic] | None = None,
+    eval_from_ms: int | None = None,
 ) -> RunOutcome:
     """`entry_mode`에 따라 A안/B안 엔진을 태운다 (WAN-95 경로 스위치).
 
@@ -721,7 +794,25 @@ def run_once(
     셋업**("살 뻔했는데 못 산 자리")을 DB에 적재하는 입력이다. 종가 진입·다중 포지션
     경로에는 이 진단이 없으므로 **조용히 빈 리스트를 주는 대신 거부한다**: 미체결이
     0건인 것과 미체결을 셀 줄 모르는 것이 화면에서 같아 보이면 안 된다(WAN-95 부류).
+
+    `eval_from_ms`(WAN-166 따뜻한 연속 OOS)를 주면 `market` 전체를 연속으로 태워 존
+    재고·지표를 데운 뒤, **탭이 그 시각 이후인 셋업만** 신선한 초기자본으로 시퀀싱한다.
+    B안(지정가) 단일 포지션 전용이다 — A안은 엔진이 봉 단위 자본을 굴려 평가 창만 뗄 수
+    없고(사이징 자본이 워밍업 손익에 오염된다), 다중 포지션 경로는 배선하지 않았다.
+    둘 다 조용히 무시하는 대신 거부한다(WAN-95 부류).
     """
+    if eval_from_ms is not None:
+        if params.entry_mode != "zone_limit":
+            raise ValueError(
+                "따뜻한 연속 OOS(eval_from_ms)는 지정가(B안) 전용입니다 — 종가 진입(A안)은 "
+                "엔진이 봉 단위 자본을 굴려 평가 창을 신선한 자본으로 뗄 수 없습니다(WAN-166)."
+            )
+        if portfolio is not None:
+            raise ValueError(
+                "따뜻한 연속 OOS(eval_from_ms)는 동시 다중 포지션 경로에 아직 없습니다"
+                "(run_zone_limit_portfolio_backtest에 배선하지 않음, WAN-166). "
+                "단일 포지션(채택 기본값)으로 평가하세요."
+            )
     if setup_sink is not None:
         if params.entry_mode != "zone_limit":
             raise ValueError(
@@ -766,6 +857,7 @@ def run_once(
             order_block_result=order_block_result,
             funding_rates=market.funding_rates,
             setup_sink=setup_sink,
+            eval_from_ms=eval_from_ms,
         )
         return RunOutcome(result=result, stats=stats)
 
@@ -898,9 +990,21 @@ def build_row(
     `portfolio`·`order_block`은 `run_once`/`detect_order_blocks`에 넘긴 것과 **같은
     객체**를 준다 — 라벨을 따로 만들면 "다중으로 돌고 single 라벨이 붙는" WAN-95 부류의
     거짓말이 가능해진다.
+
+    따뜻한 세그먼트(WAN-166)의 행 좌표(`start_time`·`num_bars`)는 데이터 창이 아니라
+    **평가 창** 기준이다 — 전 구간을 태웠다는 이유로 전 구간 좌표를 찍으면 차가운 OOS
+    행과 나란히 놓았을 때 "다른 기간을 쟀다"로 읽힌다(실제로는 같은 기간의 다른 방식이다).
     """
     m = outcome.result.metrics
     stats = outcome.stats
+    start_time = market.start_ms if not market.empty else None
+    num_bars = len(market.htf_df)
+    boundary = eval_boundary_ms(market, segment)
+    if boundary is not None and not market.empty:
+        times = market.htf_df["open_time"].astype("int64")
+        in_eval = times[times >= boundary]
+        start_time = int(in_eval.iloc[0]) if not in_eval.empty else None
+        num_bars = int(in_eval.size)
     return RunRow(
         symbol=market.symbol,
         timeframe=market.timeframe,
@@ -916,9 +1020,9 @@ def build_row(
         max_zone_width_atr=params.max_zone_width_atr,
         fill=fill_name,
         seed=params.fill_dropout_seed,
-        start_time=market.start_ms if not market.empty else None,
+        start_time=start_time,
         end_time=market.end_ms if not market.empty else None,
-        num_bars=len(market.htf_df),
+        num_bars=num_bars,
         num_trades=m.num_trades,
         win_rate=m.win_rate,
         total_return=m.total_return,

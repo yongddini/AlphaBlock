@@ -353,6 +353,48 @@ def test_run_grid_oos_split_produces_full_is_oos_segments(synthetic_loader: None
     assert segments["is"].num_bars < segments["full"].num_bars
 
 
+def test_run_grid_warm_oos_adds_warm_row_and_keeps_cold_rows_bit_identical(
+    synthetic_loader: None,
+) -> None:
+    """WAN-166: `--oos-warm`은 따뜻한 행(주 수치)을 **더할 뿐**이다.
+
+    full/is/oos 행이 `--oos`와 비트 단위로 같아야 한다 — 특히 IS 비트 동일이 완료기준이고,
+    차가운 OOS가 흔들리면 스트레스 병기의 대조 축이 사라진다. 따뜻한 행의 좌표
+    (`start_time`·`num_bars`)는 차가운 OOS와 같은 평가 기간을 가리켜야 한다(전 구간을
+    태웠다는 이유로 전 구간 좌표가 붙으면 "다른 기간을 쟀다"로 읽힌다).
+    """
+    grid = _grid_from(["--symbol", "BTCUSDT"])
+    cold_rows = run_grid(grid, RunOptions(oos=True), log=False)
+    warm_rows = run_grid(grid, RunOptions(warm_oos=True), log=False)
+    assert [r.segment for r in warm_rows] == ["full", "is", "oos_warm", "oos"]
+    by = {r.segment: r for r in warm_rows}
+    cold_by = {r.segment: r for r in cold_rows}
+    for segment in ("full", "is", "oos"):
+        assert by[segment].model_dump() == cold_by[segment].model_dump()
+    assert by["oos_warm"].start_time == by["oos"].start_time
+    assert by["oos_warm"].end_time == by["oos"].end_time
+    assert by["oos_warm"].num_bars == by["oos"].num_bars
+
+
+def test_run_grid_warm_oos_rejects_close_entry_and_multi_positions(
+    synthetic_loader: None,
+) -> None:
+    """따뜻한 연속 OOS는 B안 단일 포지션 전용 — 격자를 반쯤 돌린 뒤가 아니라 시작 전에
+    거부한다(WAN-95 부류의 조용한 무시 방지)."""
+    with pytest.raises(ValueError, match="oos-warm"):
+        run_grid(
+            _grid_from(["--symbol", "BTCUSDT", "--entry-mode", "close"]),
+            RunOptions(warm_oos=True),
+            log=False,
+        )
+    with pytest.raises(ValueError, match="oos-warm"):
+        run_grid(
+            _grid_from(["--symbol", "BTCUSDT", "--positions", "3"]),
+            RunOptions(warm_oos=True),
+            log=False,
+        )
+
+
 def test_run_grid_walkforward_produces_rolling_windows(synthetic_loader: None) -> None:
     grid = _grid_from(["--symbol", "BTCUSDT"])
     rows = run_grid(grid, RunOptions(walkforward=2), log=False)
@@ -601,6 +643,18 @@ def test_main_reports_bad_arguments_as_exit_code_2(capsys: pytest.CaptureFixture
 def test_main_rejects_oos_with_walkforward(capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["--oos", "--walkforward", "3"]) == 2
     assert "함께 쓸 수 없습니다" in capsys.readouterr().err
+
+
+def test_main_rejects_warm_oos_with_walkforward_and_wrong_paths(
+    synthetic_loader: None, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """WAN-166: `--oos-warm`의 금지 조합이 트레이스백 없이 종료 코드 2로 끝난다."""
+    assert main(["--oos-warm", "--walkforward", "3"]) == 2
+    assert "함께 쓸 수 없습니다" in capsys.readouterr().err
+    assert main(["--symbol", "BTCUSDT", "--oos-warm", "--entry-mode", "close"]) == 2
+    assert "oos-warm" in capsys.readouterr().err
+    assert main(["--symbol", "BTCUSDT", "--oos-warm", "--positions", "3"]) == 2
+    assert "oos-warm" in capsys.readouterr().err
 
 
 def test_run_row_columns_cover_issue_required_metrics() -> None:

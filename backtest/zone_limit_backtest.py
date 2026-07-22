@@ -473,12 +473,22 @@ def run_zone_limit_backtest_verbose(
     order_block_result: OrderBlockResult | None = None,
     funding_rates: Sequence[FundingRate] | None = None,
     setup_sink: list[SetupDiagnostic] | None = None,
+    eval_from_ms: int | None = None,
 ) -> tuple[BacktestResult, ZoneLimitStats]:
     """`run_zone_limit_backtest`와 동일하되 진단 통계도 함께 반환한다(WAN-46).
 
     반환 통계 `ZoneLimitStats`는 지정가 체결률(체결/대상)과 관통(같은 스텝 진입+손절)
     건수를 담아 낙관 편향 감사에 쓴다. `setup_sink`(WAN-96)를 주면 eligible 셋업별
     체결 여부 레코드를 채워 체결 편향 진단에 쓸 수 있다.
+
+    `eval_from_ms`(WAN-166 따뜻한 연속 OOS)를 주면 **셋업 탐색·체결 시뮬레이션은 넘겨받은
+    창 전체에서 그대로 하되**(워밍업 — 경계 이전에 형성된 존과 데워진 지표가 살아 있다),
+    **탭(`trigger_time`)이 그 시각 이후인 셋업만** 신선한 초기자본으로 시퀀싱하고, 통계
+    (`ZoneLimitStats`)·`setup_sink`·펀딩 커버리지도 같은 평가 창으로 좁힌다. 워밍업 구간의
+    셋업은 배치조차 하지 않으므로 평가 창 수익률이 워밍업 손익·자본에 오염되지 않는다
+    (`Segment` 독스트링의 그 원칙). ⚠️ 경계에 걸친 워밍업 포지션이 평가 초입의 슬롯을
+    잠그는 실전 효과는 모델링하지 않는다 — WAN-155/161의 전체창 라벨링과 같은 규약이다.
+    `None`(기본)이면 예전과 비트 단위로 같다.
     """
     params = confluence_params or ConfluenceParams()
     if params.entry_mode != "zone_limit":
@@ -501,6 +511,8 @@ def run_zone_limit_backtest_verbose(
             "동일 비율의 자본을 쓰므로 성과가 리스크 정규화되지 않습니다(WAN-65).",
             cfg.position_fraction * 100.0,
         )
+    # 평가 창 통계 재계산에는 셋업별 진단이 필요하다 — 호출부가 sink를 안 줬어도 내부용을 쓴다.
+    sink = setup_sink if setup_sink is not None or eval_from_ms is None else []
     candidates, stats = build_zone_limit_candidates(
         htf_df,
         df_1m,
@@ -509,10 +521,27 @@ def run_zone_limit_backtest_verbose(
         cfg=cfg,
         order_block_params=order_block_params,
         order_block_result=order_block_result,
-        setup_sink=setup_sink,
+        setup_sink=sink,
     )
+    coverage_frame = htf_df
+    if eval_from_ms is not None:
+        assert sink is not None  # 위에서 보장 — mypy용
+        candidates = [c for c in candidates if c.trigger_time >= eval_from_ms]
+        kept = [d for d in sink if d.trigger_time >= eval_from_ms]
+        if setup_sink is not None:
+            setup_sink[:] = kept
+        # 통계도 평가 창 기준으로 다시 센다 — 전 창 체결률에 평가 창 수익률이 붙으면
+        # 두 숫자가 다른 모집단을 가리키는 표가 된다(WAN-95 부류의 조용한 어긋남).
+        stats = ZoneLimitStats(
+            eligible=len(kept),
+            filled=sum(1 for d in kept if d.filled),
+            penetrations=sum(1 for c in candidates if c.penetration),
+            dropped=sum(1 for d in kept if d.dropped),
+        )
+        times = htf_df["open_time"].astype("int64")
+        coverage_frame = htf_df[times >= eval_from_ms]
     trades = _sequence_and_cost(candidates, cfg, rates)
-    coverage = _check_funding_coverage(htf_df, rates, cfg)
+    coverage = _check_funding_coverage(coverage_frame, rates, cfg)
     result = build_result_from_trades(trades, cfg, timeframe, funding_coverage_value=coverage)
     return result, stats
 
