@@ -50,6 +50,16 @@ ON CONFLICT(symbol, timeframe, open_time) DO UPDATE SET
     closed = excluded.closed
 """
 
+# 백필 전용 삽입: 이미 있는 행은 절대 건드리지 않는다 (WAN-175).
+# 과거 구간 집계 봉을 채울 때 기존(거래소 수집) 봉이 비트 단위로 불변이어야
+# 하므로, UPSERT가 아니라 충돌 시 무시로 넣는다.
+_INSERT_IGNORE = """
+INSERT INTO ohlcv
+    (symbol, timeframe, open_time, open, high, low, close, volume, closed)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(symbol, timeframe, open_time) DO NOTHING
+"""
+
 # 거래소에서 직접 수집하지 않고 하위 TF에서 리샘플로 파생하는 타임프레임 → 원본 TF.
 # 2h는 미수집(WAN-6은 1h까지만)이라 1h 두 봉을 합쳐 무손실로 만든다 (WAN-24).
 _DERIVED_TIMEFRAMES: dict[str, str] = {"2h": "1h"}
@@ -118,6 +128,21 @@ class OhlcvStore:
         with self._lock, self._conn:  # 락으로 스레드 직렬화 + 트랜잭션 자동 커밋/롤백
             self._conn.executemany(_UPSERT, rows)
         return len(rows)
+
+    def insert_candles_ignore(self, candles: Iterable[Candle]) -> int:
+        """봉들을 삽입하되 **이미 있는 행은 건드리지 않고** 새로 넣은 행 수를 반환한다.
+
+        `upsert_candles`와 달리 충돌 시 기존 행이 비트 단위로 보존된다(WAN-175
+        과거 구간 집계 백필 전용 — 거래소에서 직접 수집한 봉을 리샘플 봉이
+        덮어쓰는 사고를 SQL 수준에서 막는다).
+        """
+        rows = [c.as_row() for c in candles]
+        if not rows:
+            return 0
+        with self._lock, self._conn:
+            before = self._conn.total_changes
+            self._conn.executemany(_INSERT_IGNORE, rows)
+            return self._conn.total_changes - before
 
     def last_open_time(self, symbol: str, timeframe: str) -> int | None:
         """해당 심볼·타임프레임의 가장 최근 `open_time`. 없으면 None."""
