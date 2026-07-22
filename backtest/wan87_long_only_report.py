@@ -43,7 +43,10 @@ from strategy.order_blocks import OrderBlockDetector
 #: **RSI 게이트도 같은 이유로 고정한다**(WAN-123이 기본값을 `unconditional`로 옮겼다) —
 #: 이 표의 롱/숏 대조는 게이트가 켜진 거래 집합에서 잰 값이다.
 SHORT_DISABLED_PARAMS = ConfluenceParams(
-    entry_mode="close", rsi_mode="closed_bar", rsi_gate_mode=LEGACY_RSI_GATE_MODE
+    entry_mode="close",
+    rsi_mode="closed_bar",
+    rsi_gate_mode=LEGACY_RSI_GATE_MODE,
+    max_zone_width_atr=None,
 )
 
 #: WAN-81/WAN-84가 검증했던 이전 기본값 — 숏 활성화. 비교 기준선으로 명시 고정한다.
@@ -52,6 +55,7 @@ SHORT_ENABLED_PARAMS = ConfluenceParams(
     entry_mode="close",
     rsi_mode="closed_bar",
     rsi_gate_mode=LEGACY_RSI_GATE_MODE,
+    max_zone_width_atr=None,
 )
 
 ENGINE_PRESETS: dict[str, ConfluenceParams] = {

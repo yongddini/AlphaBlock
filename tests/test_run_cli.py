@@ -294,7 +294,11 @@ def test_run_grid_returns_one_row_per_combination(synthetic_loader: None) -> Non
 
 def test_run_grid_routes_entry_modes_to_their_engines(synthetic_loader: None) -> None:
     """A안/B안이 각자 경로를 타고 한 표에 함께 나온다 — 체결률 축의 유무로 구분된다."""
-    grid = _grid_from(["--symbol", "BTCUSDT", "--entry-mode", "close,zone_limit"])
+    # 존폭 필터를 끈다(WAN-159 기본값 1.28) — 합성 존은 1.28×ATR보다 넓어 켜 두면 zone_limit
+    # 팔이 0체결이 되어 체결률 축이 사라진다. 이 테스트가 보는 것은 경로 라우팅이지 필터가 아니다.
+    grid = _grid_from(
+        ["--symbol", "BTCUSDT", "--entry-mode", "close,zone_limit", "--max-zone-width-atr", "none"]
+    )
     rows = run_grid(grid, RunOptions(), log=False)
     by_mode = {r.entry_mode: r for r in rows}
     assert set(by_mode) == {"close", "zone_limit"}

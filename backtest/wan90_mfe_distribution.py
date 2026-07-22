@@ -237,7 +237,7 @@ def _trade_rows_for_cell(
     # ⚠️ 밴드는 WAN-132 이전 값(`tap`)으로 고정한다 — 이 분포·R 스윕이 낸 판정(1.5R 유지)은
     # 탭 봉 종가 밴드의 1R 위에서 나왔고, 익절만 끈 변형은 `take_profit_override` 경로라
     # 봉내 라이브 밴드에서 아예 돌지 않는다.
-    params = _uncensored_params(pin_band_bar(ConfluenceParams()))
+    params = _uncensored_params(pin_band_bar(ConfluenceParams(max_zone_width_atr=None)))
     htf_ms = timeframe_to_ms(timeframe)
     rows: list[dict[str, object]] = []
     for segment in segments_for(oos=oos):
@@ -331,6 +331,7 @@ def run_sweep(
         fills=(BASELINE_FILL,),
         band_bar=LEGACY_BAND_BAR,
         combine_obs=(LEGACY_COMBINE_OBS,),
+        max_zone_widths_atr=(None,),
     )
     options = RunOptions(start_ms=start_ms, end_ms=end_ms, oos=True)
     rows = run_grid(grid, options, log=True, jobs=jobs)

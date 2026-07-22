@@ -1078,7 +1078,12 @@ def run_experiment(
     """6심볼 × {15m,1h} × 두 장벽 × 세 팔 — 공통 풀 위의 손익과 매칭 검정."""
     start_ms, end_ms = parse_date_ms(start), parse_date_ms(end)
     result = ExperimentResult()
-    params = harness.build_params(fill=harness.fill_preset(LENS_PRIMARY))
+    # 🚨 이중 필터 방지(WAN-159): 좁은 존 팔을 후보 리스트로 직접 만드므로 엔진의 채택
+    # 기본값 필터(1.28)를 꺼야 대조군·매칭이 오염되지 않는다.
+    params = harness.build_params(
+        fill=harness.fill_preset(LENS_PRIMARY),
+        max_zone_width_atr=harness.LEGACY_MAX_ZONE_WIDTH_ATR,
+    )
     for symbol in symbols:
         norm = harness.normalize_symbol(symbol)
         for timeframe in timeframes:

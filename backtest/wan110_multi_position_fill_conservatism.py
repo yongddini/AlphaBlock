@@ -275,7 +275,9 @@ def run_report(
                                 seed=seed,
                                 offset_bps=PINNED_OFFSET_BPS,
                                 base=pin_band_bar(
-                                    ConfluenceParams(rsi_gate_mode=PINNED_RSI_GATE_MODE),
+                                    ConfluenceParams(
+                                        rsi_gate_mode=PINNED_RSI_GATE_MODE, max_zone_width_atr=None
+                                    ),
                                     PINNED_BAND_BAR,
                                 ),
                             ),

@@ -203,7 +203,9 @@ def rung_params(rung: Rung, *, fill: FillPreset, seed: int = 0) -> ConfluencePar
     오프셋·익절 R을 넘기지 않으므로 둘 다 채택 기본값(2bp · 1.5R)을 따라간다.
     """
     base = ConfluenceParams().model_copy(update=dict(rung.updates))
-    return build_params(entry_mode="zone_limit", fill=fill, seed=seed, base=base)
+    return build_params(
+        entry_mode="zone_limit", fill=fill, seed=seed, base=base, max_zone_width_atr=None
+    )
 
 
 # --------------------------------------------------------------------------- #

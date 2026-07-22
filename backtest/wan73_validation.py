@@ -51,7 +51,7 @@ _YEAR_MS = int(365.25 * 24 * 60 * 60 * 1000)
 #: 현행(채택 전) 기본 규칙: 존당 첫 탭 1회 + RSI 극단 게이트 + 선(EMA60/VWMA100) 익절.
 #: ⚠️ `band_bar`는 당시 값(`tap`)으로 **명시 고정**한다(WAN-132 기본값 전환).
 CURRENT_DEFAULT_PARAMS = pin_band_bar(
-    ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime")
+    ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime", max_zone_width_atr=None)
 )
 
 #: WAN-73 제안 규칙: 매 탭 재진입 + RSI 중립(40~60) 게이트 + 고정 2R 익절.
@@ -61,6 +61,7 @@ WAN73_NEW_PARAMS = pin_band_bar(
         rsi_mode="realtime",
         retap_mode="every_tap",
         rsi_gate_mode="neutral",
+        max_zone_width_atr=None,
         rsi_neutral_band=(40.0, 60.0),
         take_profit_mode="fixed_r",
         take_profit_r=2.0,

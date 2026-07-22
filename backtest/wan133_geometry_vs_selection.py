@@ -909,7 +909,9 @@ def run_experiment(
     """6심볼 × {15m,1h} — 팔별 라벨링 → focus 순열/분위 → 필터 손익."""
     # ⚠️ 밴드는 WAN-132 이전 값(`tap`)으로 고정한다 — 이 리포트 헤더가 이미 그 전제를
     # 적어 두었고(「`band_bar="tap"` 정본 전제」), 1R 기하가 진입가에 직접 달려 있다.
-    params = harness.pin_band_bar(ConfluenceParams())
+    # 🚨 이중 필터 방지(WAN-159): 이 모듈은 후보를 자기가 걸러 좁은 존 팔을 만든다 —
+    # 채택 기본값 1.28을 꺼야 대조군·분위 문턱이 오염되지 않는다. (옛 엔진 = tap 밴드)
+    params = harness.pin_zone_width(harness.pin_band_bar(ConfluenceParams()))
     start_ms, end_ms = parse_date_ms(start), parse_date_ms(end)
     cells: list[CellResult] = []
     markets: dict[tuple[str, str], MarketData] = {}

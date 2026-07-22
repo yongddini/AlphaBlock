@@ -37,7 +37,9 @@ def test_live_and_backtest_paths_produce_identical_signal_set() -> None:
     # 생성기)는 진입 방식과 무관하게 같은 시그널 집합을 낸다. 즉 이 패리티는 유지되나,
     # **실시간 러너는 아직 지정가를 집행하지 못한다**(WAN-45에서 배선).
     pipeline = run_pipeline(
-        df, OrderBlockParams(), ConfluenceParams(entry_mode="close", rsi_mode="closed_bar")
+        df,
+        OrderBlockParams(),
+        ConfluenceParams(entry_mode="close", rsi_mode="closed_bar", max_zone_width_atr=None),
     )
 
     live_entries = [

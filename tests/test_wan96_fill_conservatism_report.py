@@ -89,7 +89,11 @@ def test_baseline_level_is_the_pinned_pre_wan112_engine() -> None:
     """
     assert (
         pin_band_bar(
-            ConfluenceParams(zone_limit_offset_bps=0.0, rsi_gate_mode=LEGACY_RSI_GATE_MODE)
+            ConfluenceParams(
+                zone_limit_offset_bps=0.0,
+                rsi_gate_mode=LEGACY_RSI_GATE_MODE,
+                max_zone_width_atr=None,
+            )
         )
         == BASE_PARAMS
     )

@@ -224,7 +224,9 @@ def test_adopted_params_changes_nothing_but_fill_knobs() -> None:
     """
     defaults = pin_band_bar(
         ConfluenceParams(
-            zone_limit_offset_bps=PINNED_OFFSET_BPS, rsi_gate_mode=PINNED_RSI_GATE_MODE
+            zone_limit_offset_bps=PINNED_OFFSET_BPS,
+            rsi_gate_mode=PINNED_RSI_GATE_MODE,
+            max_zone_width_atr=None,
         ),
         PINNED_BAND_BAR,
     )
@@ -257,7 +259,9 @@ def test_baseline_fill_is_bit_identical_to_the_pinned_engine() -> None:
     """
     pinned = pin_band_bar(
         ConfluenceParams(
-            zone_limit_offset_bps=PINNED_OFFSET_BPS, rsi_gate_mode=PINNED_RSI_GATE_MODE
+            zone_limit_offset_bps=PINNED_OFFSET_BPS,
+            rsi_gate_mode=PINNED_RSI_GATE_MODE,
+            max_zone_width_atr=None,
         ),
         PINNED_BAND_BAR,
     )
@@ -418,7 +422,9 @@ def test_wan70_segment_unchanged_when_funding_not_passed() -> None:
         symbol="BTC/USDT:USDT",
         segment="IS",
         gate="off",
-        confluence_params=ConfluenceParams(),
+        confluence_params=ConfluenceParams(
+            max_zone_width_atr=None
+        ),  # 필터는 검증 대상 아님(WAN-159)
         order_block_result=obr,
         backtest_config=cfg,
         iterations=10,
@@ -431,7 +437,9 @@ def test_wan70_segment_unchanged_when_funding_not_passed() -> None:
         symbol="BTC/USDT:USDT",
         segment="IS",
         gate="off",
-        confluence_params=ConfluenceParams(),
+        confluence_params=ConfluenceParams(
+            max_zone_width_atr=None
+        ),  # 필터는 검증 대상 아님(WAN-159)
         order_block_result=obr,
         backtest_config=cfg,
         iterations=10,
@@ -445,7 +453,9 @@ def test_wan70_segment_unchanged_when_funding_not_passed() -> None:
         symbol="BTC/USDT:USDT",
         segment="IS",
         gate="off",
-        confluence_params=ConfluenceParams(),
+        confluence_params=ConfluenceParams(
+            max_zone_width_atr=None
+        ),  # 필터는 검증 대상 아님(WAN-159)
         order_block_result=obr,
         backtest_config=cfg,
         iterations=10,

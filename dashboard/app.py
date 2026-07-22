@@ -389,7 +389,12 @@ def _render_analysis(settings: Settings) -> None:
     # 배지가 "A안(봉 마감 종가)"로 그 사실을 항상 드러낸다. 대시보드를 채택 기본값과
     # 일치시키려면 1분봉 로딩 + `run_zone_limit_backtest` 배선이 필요하다(WAN-45 계열).
     conf_params = ConfluenceParams(
-        entry_mode="close", rsi_mode="closed_bar", zone_limit_offset_bps=0.0
+        entry_mode="close",
+        rsi_mode="closed_bar",
+        zone_limit_offset_bps=0.0,
+        # A안은 존폭 필터(B안 전용)를 읽지 않는다 — 채택 기본값 1.28을 들고 있으면
+        # `evaluate`가 거부한다(WAN-159, `CLOSE_ENTRY_DEFAULTS`와 같은 처리).
+        max_zone_width_atr=None,
     )
     # CLI 리포트와 동일한 설정 소스(`default_backtest_config`)에서 백테스트 설정을
     # 가져온다 — 대시보드와 CLI가 서로 다른 설정을 들고 갈라지지 않게 한다(WAN-59).

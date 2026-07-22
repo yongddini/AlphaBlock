@@ -149,7 +149,13 @@ def _with_entry_mode(
     base: ConfluenceParams | None, *, entry_mode: str, rsi_mode: str
 ) -> ConfluenceParams:
     params = base or ConfluenceParams()
-    return params.model_copy(update={"entry_mode": entry_mode, "rsi_mode": rsi_mode})
+    update: dict[str, object] = {"entry_mode": entry_mode, "rsi_mode": rsi_mode}
+    if entry_mode == "close":
+        # A안은 존폭 필터(B안 전용, WAN-158)를 읽지 않는다. 채택 기본값 1.28을 들고 있으면
+        # `sweep.evaluate`가 거부하므로 끈다 — `CLOSE_ENTRY_DEFAULTS`가 offset과 함께 끄는 것과
+        # 같은 처리(WAN-159).
+        update["max_zone_width_atr"] = None
+    return params.model_copy(update=update)
 
 
 def _windowed_result(

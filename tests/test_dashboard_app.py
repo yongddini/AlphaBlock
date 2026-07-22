@@ -48,7 +48,7 @@ def seeded_db_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[
 
 def test_run_config_badge_text_reports_current_settings() -> None:
     """WAN-65: 배지 문구가 진입 방식·RSI·사이징·병합·펀딩비 반영 여부를 담는다."""
-    conf = ConfluenceParams(entry_mode="close", rsi_mode="closed_bar")
+    conf = ConfluenceParams(entry_mode="close", rsi_mode="closed_bar", max_zone_width_atr=None)
     ob = OrderBlockParams(combine_obs=True)
     sized = BacktestConfig(
         risk_sizing=PositionSizingParams(risk_per_trade=0.01), funding_enabled=True

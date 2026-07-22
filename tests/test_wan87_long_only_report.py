@@ -45,6 +45,7 @@ def test_short_disabled_params_pins_pre_wan95_close_entry_engine() -> None:
                 "entry_mode": "close",
                 "rsi_mode": "closed_bar",
                 "rsi_gate_mode": LEGACY_RSI_GATE_MODE,
+                "max_zone_width_atr": None,
             }
         )
         == SHORT_DISABLED_PARAMS

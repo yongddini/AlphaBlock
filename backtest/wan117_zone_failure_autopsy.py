@@ -709,7 +709,7 @@ def run_experiment(
     # 채택 기본값(offset 2bp · unconditional 게이트 · baseline) + 밴드만 당시 값 고정.
     # ⚠️ WAN-132가 밴드 정본을 `intrabar_live`로 옮겼다 — 이 부검의 라벨(뚫림/버팀)과
     # 분위·순열 수치는 탭 봉 종가 밴드가 낸 거래 위에서 산출됐으므로 고정한다.
-    params = harness.pin_band_bar(ConfluenceParams())
+    params = harness.pin_band_bar(ConfluenceParams(max_zone_width_atr=None))
     start_ms, end_ms = parse_date_ms(start), parse_date_ms(end)
     labeled: list[LabeledTrade] = []
     for symbol in symbols:

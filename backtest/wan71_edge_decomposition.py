@@ -80,12 +80,14 @@ _DEFAULT_SEED = 71
 #: ⚠️ `band_bar`는 당시 값(`tap`)으로 **명시 고정**한다 — WAN-132가 기본값을
 #: `intrabar_live`로 옮겼으므로 고정하지 않으면 이 표가 조용히 새 밴드로 다시 돈다.
 CURRENT_DEFAULT_PARAMS = pin_band_bar(
-    ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime")
+    ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime", max_zone_width_atr=None)
 )
 
 #: 숏을 허용한 변형(WAN-64/69 숏 문제를 이 매칭 널 프레임에서 재확인, 작업범위 4번째 항목).
 SHORT_ENABLED_PARAMS = pin_band_bar(
-    ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime", short_enabled=True)
+    ConfluenceParams(
+        entry_mode="zone_limit", rsi_mode="realtime", short_enabled=True, max_zone_width_atr=None
+    )
 )
 
 #: 무작위 대조군을 돌릴 게이트. "current"가 채택 전략(가설 1·비용 민감도의 기준),

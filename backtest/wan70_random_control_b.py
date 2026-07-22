@@ -109,7 +109,9 @@ Segment = Literal["IS", "OOS"]
 #: 라이브 밴드는 `min_rr` 게이트를 지원하지 않으므로("on" 프리셋의 1.5) 고정하지 않으면
 #: 이 모듈이 `ValueError`로 죽는다.
 GATE_PRESETS: dict[str, ConfluenceParams] = {
-    "off": pin_band_bar(ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime")),
+    "off": pin_band_bar(
+        ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime", max_zone_width_atr=None)
+    ),
     "on": pin_band_bar(
         ConfluenceParams(
             entry_mode="zone_limit",
@@ -117,6 +119,7 @@ GATE_PRESETS: dict[str, ConfluenceParams] = {
             min_rr=1.5,
             long_max_deviation=-0.03,
             short_enabled=False,
+            max_zone_width_atr=None,
         )
     ),
 }

@@ -1025,6 +1025,7 @@ def _staged_long_setup(offset_bps: float) -> list[_Candidate]:
         take_profit_r=1.5,
         rsi_gate_mode="none",  # 검증 대상은 진입가·1R·익절이지 RSI 게이트가 아니다.
         zone_limit_offset_bps=offset_bps,
+        max_zone_width_atr=None,  # 존폭 필터도 검증 대상이 아니다(WAN-159 기본값 1.28)
     )
     candidates, _ = build_zone_limit_candidates(
         htf,
@@ -1189,7 +1190,9 @@ def test_entry_is_maker_and_exit_is_taker() -> None:
 def test_zone_limit_rejects_close_entry_params() -> None:
     """B안 진입점에 종가 진입 파라미터가 들어오면 거부한다(WAN-95)."""
     htf, one_min = _synthetic_pair()
-    close_params = ConfluenceParams(entry_mode="close", rsi_mode="closed_bar")
+    close_params = ConfluenceParams(
+        entry_mode="close", rsi_mode="closed_bar", max_zone_width_atr=None
+    )
     with pytest.raises(ValueError, match="지정가 진입"):
         run_zone_limit_backtest(htf, one_min, "1h", confluence_params=close_params)
 

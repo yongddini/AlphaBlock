@@ -124,6 +124,7 @@ def build_grid(symbols: Sequence[str]) -> Grid:
         rsi_gate_mode=LEGACY_RSI_GATE_MODE,
         band_bar=LEGACY_BAND_BAR,
         combine_obs=(LEGACY_COMBINE_OBS,),
+        max_zone_widths_atr=(None,),
     )
 
 

@@ -145,8 +145,22 @@ def test_cli_reproduces_wan99_pen_5bp_cell() -> None:
     이쪽은 **축이라 CLI 플래그(`--combine-obs`)가 있지만**, 이 대조는 "옛 엔진을 요청한다"는
     사실이 코드에 드러나야 하므로 다른 두 핀과 같은 자리에서 명시한다.
     """
+    # ⚠️ **존폭 필터도 되돌린다**(WAN-159): 채택 기본값이 `max_zone_width_atr=1.28`(좁은 존만
+    # 매매)이 되면서 후보 집합이 3분의 1로 줄었다. WAN-99 격자는 필터 꺼진 엔진에서 나왔으므로
+    # `--max-zone-width-atr none`으로 끄기를 명시 요청한다(축이라 CLI 플래그가 있다).
     row = _run(
-        ["--symbol", "BTCUSDT", "--tf", _TIMEFRAME, "--fill", "pen_5bp", "--offset-bps", "0"],
+        [
+            "--symbol",
+            "BTCUSDT",
+            "--tf",
+            _TIMEFRAME,
+            "--fill",
+            "pen_5bp",
+            "--offset-bps",
+            "0",
+            "--max-zone-width-atr",
+            "none",
+        ],
         rsi_gate_mode=LEGACY_RSI_GATE_MODE,
         band_bar=LEGACY_BAND_BAR,
         combine_obs=LEGACY_COMBINE_OBS,

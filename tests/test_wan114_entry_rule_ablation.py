@@ -105,7 +105,9 @@ def test_adopted_rung_is_exactly_the_adoption_default() -> None:
     assert adopted == build_params(
         entry_mode="zone_limit",
         fill=_BASELINE,
-        base=pin_band_bar(ConfluenceParams(rsi_gate_mode=LEGACY_RSI_GATE_MODE)),
+        base=pin_band_bar(
+            ConfluenceParams(rsi_gate_mode=LEGACY_RSI_GATE_MODE, max_zone_width_atr=None)
+        ),
     )
     # 고정한 게이트·밴드가 현재 기본값과 **다르다**는 것 자체를 못 박는다 — 같아지면 위
     # docstring이 거짓이 되고, 이 사다리가 조용히 새 엔진으로 옮겨 간 것이다.

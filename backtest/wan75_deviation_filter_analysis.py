@@ -126,7 +126,10 @@ def _params(variant: str) -> ConfluenceParams:
     # (`strategy.realtime_band`) 고정하지 않으면 ATR 변형이 `ValueError`로 죽는다.
     return pin_band_bar(
         ConfluenceParams(
-            entry_mode="zone_limit", rsi_mode="realtime", deviation_filter=REAL_VARIANTS[base]
+            entry_mode="zone_limit",
+            rsi_mode="realtime",
+            deviation_filter=REAL_VARIANTS[base],
+            max_zone_width_atr=None,  # 존폭 필터 당시 값(꺼짐) 고정(WAN-159)
         )
     )
 
@@ -449,7 +452,10 @@ def run_a_engine_crosscheck(
     for variant, filter_params in REAL_VARIANTS.items():
         # A안(종가 진입) 교차검증 경로임을 명시(WAN-95).
         params = ConfluenceParams(
-            deviation_filter=filter_params, entry_mode="close", rsi_mode="closed_bar"
+            deviation_filter=filter_params,
+            entry_mode="close",
+            rsi_mode="closed_bar",
+            max_zone_width_atr=None,
         )
         result = evaluate(
             htf_df, confluence_params=params, backtest_config=cfg, order_block_result=ob_result

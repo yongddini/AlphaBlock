@@ -343,8 +343,14 @@ def run_audit(
     """6심볼 × TF × 장벽 3종 × (렌즈 2 · 가드 5 · 문턱 3) — 셀은 렌즈당 한 번만 빌드한다."""
     start_ms, end_ms = parse_date_ms(start), parse_date_ms(end)
     result = AuditResult()
-    base_params = harness.build_params(fill=harness.BASELINE_FILL)
-    pen_params = harness.build_params(fill=harness.fill_preset(LENS_PEN))
+    # 🚨 이중 필터 방지(WAN-159): 존폭 필터를 후보 리스트로 직접 만드므로 엔진의 채택
+    # 기본값(1.28)을 꺼야 대조군·매칭이 오염되지 않는다(WAN-152 확장 모듈).
+    base_params = harness.build_params(
+        fill=harness.BASELINE_FILL, max_zone_width_atr=harness.LEGACY_MAX_ZONE_WIDTH_ATR
+    )
+    pen_params = harness.build_params(
+        fill=harness.fill_preset(LENS_PEN), max_zone_width_atr=harness.LEGACY_MAX_ZONE_WIDTH_ATR
+    )
     for timeframe in timeframes:
         tf_bucket_pool: dict[tuple[str, str, str], list[TradeRecord]] = {}
         for symbol in symbols:

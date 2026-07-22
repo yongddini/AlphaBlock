@@ -99,7 +99,9 @@ DEFAULT_TIMEFRAMES: tuple[str, ...] = ("15m", "1h")
 #: ⚠️ 밴드 표본(`band_bar`)도 같은 이유로 고정한다 — WAN-132가 기본값을 `intrabar_live`로
 #: 옮겼고, 그 밴드에서는 진입가가 봉내에 움직여 이 표의 거래 집합 자체가 달라진다.
 BASE_PARAMS = pin_band_bar(
-    ConfluenceParams(zone_limit_offset_bps=0.0, rsi_gate_mode=LEGACY_RSI_GATE_MODE)
+    ConfluenceParams(
+        zone_limit_offset_bps=0.0, rsi_gate_mode=LEGACY_RSI_GATE_MODE, max_zone_width_atr=None
+    )
 )
 
 

@@ -184,7 +184,7 @@ def _run_cell(
     # ⚠️ 밴드는 WAN-132 이전 값(`tap`)으로 고정한다 — 이 표의 겹침 판정 수치가 그
     # 밴드에서 나왔고, 봉내 라이브 밴드는 진입가를 서브스텝마다 다시 내므로 팔 간
     # 비교의 축(겹침 정의)이 흐려진다.
-    params = pin_band_bar(build_params(entry_mode="zone_limit"))
+    params = pin_band_bar(build_params(entry_mode="zone_limit", max_zone_width_atr=None))
     cfg = build_config(market.timeframe)
     candidates, stats = build_zone_limit_candidates(
         market.htf_df,

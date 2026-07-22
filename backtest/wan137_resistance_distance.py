@@ -247,7 +247,9 @@ def measure_setups(
         return []
     entry_tf = market.timeframe
     # ⚠️ 밴드는 WAN-132 이전 값(`tap`)으로 고정한다(Phase 2와 같은 셋업 풀을 봐야 한다).
-    params = _uncensored_params(harness.pin_band_bar(harness.build_params(entry_mode="zone_limit")))
+    params = _uncensored_params(
+        harness.pin_band_bar(harness.build_params(entry_mode="zone_limit", max_zone_width_atr=None))
+    )
     cfg = harness.build_config(entry_tf)
 
     # 후보 생성에 쓸 진입 TF 오더블록(라인 577과 같이 raw htf_df에서 탐지) — 저항 질의에도
