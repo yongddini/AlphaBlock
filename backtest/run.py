@@ -35,6 +35,9 @@ python -m backtest.run --symbol BTCUSDT,ETHUSDT,SOLUSDT --format csv --out /tmp/
 # 5. OOS 검증 — IS에서 좋았던 게 OOS로 넘어오는가
 python -m backtest.run --tp-r 1.0,1.5,2.0 --oos
 
+# 5b. 따뜻한 연속 OOS(WAN-166, 정본 리포트 기준) — oos_warm(주 수치) + oos(스트레스) 병기
+python -m backtest.run --tp-r 1.0,1.5,2.0 --oos-warm
+
 # 6. 병렬 실행 — 6심볼 격자를 코어에 나눠 돌린다(결과는 직렬과 동일)
 python -m backtest.run --symbol BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,TRXUSDT --jobs auto
 
@@ -113,6 +116,7 @@ from backtest.harness import (
     build_params,
     build_row,
     detect_order_blocks,
+    eval_boundary_ms,
     fill_preset,
     iter_seeds,
     load_market_data,
@@ -435,6 +439,10 @@ class RunOptions:
     maker_fee_rate: float | None = None
     slippage: float | None = None
     oos: bool = False
+    warm_oos: bool = False
+    """따뜻한 연속 OOS(WAN-166, `--oos-warm`) — 정본 리포트 기준. 전 구간을 연속으로
+    태워 존·지표를 데운 뒤 OOS 경계 이후 탭만 평가한 `oos_warm` 행(주 수치)을 내고,
+    차가운 `oos` 행(과최적화 스트레스)을 병기한다. 둘의 차이가 강건성 신호다."""
     walkforward: int = 0
     fair_window: bool | None = None
     """None이면 자동 — 한 표에 종가·지정가가 같이 있을 때만 켠다."""
@@ -528,7 +536,9 @@ def _run_cell(task: _CellTask) -> _CellOutcome:
     grid, options = task.grid, task.options
     symbol, timeframe = task.symbol, task.timeframe
     combos = iter_combos(grid)
-    segments = segments_for(oos=options.oos, walkforward=options.walkforward)
+    segments = segments_for(
+        oos=options.oos, walkforward=options.walkforward, warm_oos=options.warm_oos
+    )
 
     market = load_market_data(
         symbol,
@@ -557,20 +567,24 @@ def _run_cell(task: _CellTask) -> _CellOutcome:
     )
     rows: list[RunRow] = []
     artifacts: list[RunArtifact] = []
+    # 존 병합 축(WAN-149)은 **탐지** 파라미터라 값마다 다시 탐지해야 한다. 그 밖의 축은
+    # 탐지와 무관하므로 같은 결과를 공유한다. 키에 데이터 창을 함께 넣는 이유(WAN-166):
+    # 따뜻한 세그먼트는 전 구간과 **같은 창**을 태우므로 `full`의 탐지를 그대로 재사용할
+    # 수 있다 — 창이 같으면 탐지도 같다는 사실을 키가 표현한다.
+    ob_cache: dict[tuple[float, float, bool | None], OrderBlockResult] = {}
     for segment in segments:
         window = slice_market(market, segment)
         if window.empty:
             continue
-        # 존 병합 축(WAN-149)은 **탐지** 파라미터라 값마다 다시 탐지해야 한다. 그 밖의
-        # 축은 탐지와 무관하므로 같은 결과를 공유한다 — 그래서 캐시 키가 이 값 하나다.
-        ob_cache: dict[bool | None, OrderBlockResult] = {}
+        eval_ms = eval_boundary_ms(window, segment)
         for combo in combos:
             if combo.entry_mode == "zone_limit" and window.df_1m.empty:
                 continue
             ob_params = combo.order_block
-            if combo.combine_obs not in ob_cache:
-                ob_cache[combo.combine_obs] = detect_order_blocks(window, ob_params)
-            ob_result = ob_cache[combo.combine_obs]
+            ob_key = (segment.start_fraction, segment.end_fraction, combo.combine_obs)
+            if ob_key not in ob_cache:
+                ob_cache[ob_key] = detect_order_blocks(window, ob_params)
+            ob_result = ob_cache[ob_key]
             params = build_params(
                 entry_mode=combo.entry_mode,
                 take_profit_r=combo.take_profit_r,
@@ -595,6 +609,7 @@ def _run_cell(task: _CellTask) -> _CellOutcome:
                 fair_window=task.fair_window,
                 portfolio=portfolio,
                 setup_sink=setup_sink,
+                eval_from_ms=eval_ms,
             )
             row = build_row(
                 outcome,
@@ -701,6 +716,19 @@ def run_grid_full(
     순서도 직렬과 같다 — 셀끼리 상태를 공유하지 않고(각자 자기 데이터를 로드한다),
     결과는 제출 순서로 모은다.
     """
+    if options.warm_oos:
+        # 따뜻한 연속 OOS(WAN-166)는 B안 단일 포지션 전용이다. 워커 안(run_once)에서도
+        # 거부하지만, 격자 절반을 돌린 뒤 터지는 것보다 시작 전에 막는 쪽이 낫다.
+        if "close" in grid.entry_modes:
+            raise ValueError(
+                "--oos-warm과 --entry-mode close를 같이 줄 수 없습니다 — 따뜻한 연속 "
+                "OOS는 지정가(B안) 전용입니다(WAN-166)."
+            )
+        if grid.portfolio_leverages != (None,):
+            raise ValueError(
+                "--oos-warm과 --positions(다중 포지션)를 같이 줄 수 없습니다 — 따뜻한 "
+                "연속 OOS는 단일 포지션 경로에만 배선돼 있습니다(WAN-166)."
+            )
     fair_window = grid.mixes_entry_modes if options.fair_window is None else options.fair_window
     tasks = [
         _CellTask(
@@ -841,6 +869,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     validation = parser.add_argument_group("과최적화 방어")
     validation.add_argument("--oos", action="store_true", help="IS(앞 2/3)/OOS(뒤 1/3) 분할 실행")
+    validation.add_argument(
+        "--oos-warm",
+        action="store_true",
+        help=(
+            "따뜻한 연속 OOS(WAN-166, 정본 리포트 기준): 전 구간을 연속으로 태워 존·지표를 "
+            "데운 뒤 OOS 경계 이후 탭만 평가한 oos_warm 행(주 수치)을 내고, 차가운 oos 행"
+            "(과최적화 스트레스)을 병기한다. 지정가(B안) 단일 포지션 전용"
+        ),
+    )
     validation.add_argument(
         "--walkforward", type=int, default=0, metavar="N", help="N개 롤링 창으로 IS/OOS 반복"
     )
@@ -1092,6 +1129,7 @@ def options_from_args(args: argparse.Namespace) -> RunOptions:
         maker_fee_rate=args.maker_fee,
         slippage=args.slippage,
         oos=args.oos,
+        warm_oos=args.oos_warm,
         walkforward=args.walkforward,
         fair_window=args.fair_window,
         db_path=args.db_path,
@@ -1109,11 +1147,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"오류: {exc}", file=sys.stderr)
         return 2
 
-    if args.oos and args.walkforward:
-        print("오류: --oos와 --walkforward는 함께 쓸 수 없습니다.", file=sys.stderr)
+    if (args.oos or args.oos_warm) and args.walkforward:
+        print("오류: --oos/--oos-warm과 --walkforward는 함께 쓸 수 없습니다.", file=sys.stderr)
         return 2
 
-    rows, artifacts = run_grid_full(grid, options, log=not args.quiet, jobs=jobs)
+    try:
+        rows, artifacts = run_grid_full(grid, options, log=not args.quiet, jobs=jobs)
+    except ValueError as exc:
+        print(f"오류: {exc}", file=sys.stderr)
+        return 2
     try:
         _write_detail(args, artifacts, log=not args.quiet)
     except (ValueError, DuplicateRunError) as exc:

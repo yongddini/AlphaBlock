@@ -16,12 +16,15 @@ import pytest
 from backtest.harness import (
     BASELINE_FILL,
     FILL_PRESETS,
+    FULL_SEGMENT,
     IS_FRACTION,
     LEGACY_BAND_BAR,
     LEGACY_RSI_GATE_MODE,
     SEGMENT_FULL,
     SEGMENT_IS,
     SEGMENT_OOS,
+    SEGMENT_OOS_WARM,
+    WARM_OOS_SEGMENT,
     FillPreset,
     MarketData,
     RunRow,
@@ -30,6 +33,7 @@ from backtest.harness import (
     build_params,
     build_row,
     detect_order_blocks,
+    eval_boundary_ms,
     fill_preset,
     iter_seeds,
     mean_r,
@@ -411,6 +415,227 @@ def test_slice_market_splits_htf_and_1m_and_funding_by_time() -> None:
 def test_slice_market_full_segment_is_identity() -> None:
     market = _market()
     assert slice_market(market, Segment(SEGMENT_FULL, 0, 0.0, 1.0)) is market
+
+
+# ---------------------------------------------------- 따뜻한 연속 OOS (WAN-166)
+
+
+def _warm_market() -> MarketData:
+    """따뜻한 OOS 테스트용 합성 시장 — 뒤 1/3에도 셋업·체결이 실제로 있는 길이."""
+    return _market(bars=600, span=600)
+
+
+def _warm_params() -> ConfluenceParams:
+    """합성 데이터에서 거래가 나는 파라미터.
+
+    시드 7 합성 데이터는 숏 셋업만 내고(WAN-69와 무관한 픽스처 성질), 볼린저·존폭
+    필터는 이 작은 합성 셋의 후보를 전부 걸러낸다 — 이 테스트들이 보는 것은 평가 경계
+    배선이지 필터가 아니므로 꺼 둔다(`test_zone_limit_backtest._synthetic_pair` 관행).
+    """
+    base = ConfluenceParams(
+        entry_mode="zone_limit", rsi_mode="realtime", short_enabled=True, deviation_filter=None
+    )
+    return build_params(max_zone_width_atr=None, base=base)
+
+
+def test_segments_for_warm_oos_adds_warm_segment_and_keeps_cold() -> None:
+    """`--oos-warm`은 따뜻한 판(주 수치)에 차가운 판(스트레스)을 병기한다 — 대체가 아니다."""
+    segments = segments_for(warm_oos=True)
+    assert [s.name for s in segments] == [SEGMENT_FULL, SEGMENT_IS, SEGMENT_OOS_WARM, SEGMENT_OOS]
+    warm = segments[2]
+    # 데이터 창은 전 구간(워밍업 = 앞구간 전체), 평가 경계는 차가운 OOS와 같은 지점.
+    assert (warm.start_fraction, warm.end_fraction) == (0.0, 1.0)
+    assert warm.eval_start_fraction == pytest.approx(IS_FRACTION)
+    # 차가운 IS/OOS는 `--oos`와 같은 세그먼트 객체다 — IS 비트 동일의 근거.
+    cold = segments_for(oos=True)
+    assert segments[0] == cold[0] and segments[1] == cold[1] and segments[3] == cold[2]
+
+
+def test_segments_for_rejects_warm_with_walkforward() -> None:
+    with pytest.raises(ValueError, match="oos-warm"):
+        segments_for(warm_oos=True, walkforward=2)
+
+
+def test_segment_rejects_eval_boundary_outside_window() -> None:
+    with pytest.raises(ValueError, match="평가 경계"):
+        Segment(name="bad", window=0, start_fraction=0.5, end_fraction=1.0, eval_start_fraction=0.4)
+    with pytest.raises(ValueError, match="평가 경계"):
+        Segment(name="bad", window=0, start_fraction=0.0, end_fraction=0.5, eval_start_fraction=0.5)
+
+
+def test_eval_boundary_matches_cold_oos_slice_anchor() -> None:
+    """따뜻한 평가 경계 == 차가운 OOS 분할 하한 — 두 방식이 정확히 같은 기간을 잰다.
+
+    경계가 1봉이라도 어긋나면 따뜻함/차가움의 차이에 "기간이 달랐다"가 섞여 강건성
+    신호로 읽을 수 없다(WAN-166).
+    """
+    market = _market()
+    boundary = eval_boundary_ms(market, WARM_OOS_SEGMENT)
+    assert boundary is not None
+    cold = slice_market(market, Segment(SEGMENT_OOS, 0, IS_FRACTION, 1.0))
+    times = market.htf_df["open_time"].astype("int64")
+    warm_eval_first = int(times[times >= boundary].iloc[0])
+    assert warm_eval_first == cold.start_ms
+    # 평가 경계가 없는 세그먼트는 None — 예전 경로 그대로.
+    assert eval_boundary_ms(market, FULL_SEGMENT) is None
+
+
+def test_run_once_warm_boundary_at_window_start_is_identity() -> None:
+    """경계를 창 시작에 두면 필터가 아무것도 거르지 않는다 — `>=` 경계 의미의 고정.
+
+    이 동일성이 깨지면 eval_from_ms 배선이 필터링 말고 다른 것(시퀀싱 규칙·통계 산식)을
+    함께 바꿨다는 뜻이다.
+    """
+    market = _warm_market()
+    cfg = build_config(_TIMEFRAME)
+    params = _warm_params()
+    ob_result = detect_order_blocks(market)
+
+    plain = run_once(market, params=params, cfg=cfg, order_block_result=ob_result)
+    warm = run_once(
+        market,
+        params=params,
+        cfg=cfg,
+        order_block_result=ob_result,
+        eval_from_ms=int(market.htf_df["open_time"].iloc[0]),
+    )
+    assert warm.result.metrics == plain.result.metrics
+    assert warm.stats == plain.stats
+
+
+def test_run_once_warm_keeps_inventory_but_evaluates_only_post_boundary_taps() -> None:
+    """따뜻함의 실체를 동작으로 고정한다(라벨 아님, WAN-166).
+
+    - 평가는 경계 이후 탭만: 워밍업 구간의 거래가 결과에 새면 안 된다.
+    - 재고는 살아 있다: 경계 이전에 형성된 존 덕에 차가운 절단보다 셋업이 줄지 않는다
+      (차가운 판은 존 재고 0 + 지표 재워밍업으로 시작하므로 초입 셋업을 잃는다).
+    """
+    market = _warm_market()
+    cfg = build_config(_TIMEFRAME)
+    params = _warm_params()
+    boundary = eval_boundary_ms(market, WARM_OOS_SEGMENT)
+    assert boundary is not None
+
+    warm = run_once(
+        market,
+        params=params,
+        cfg=cfg,
+        order_block_result=detect_order_blocks(market),
+        eval_from_ms=boundary,
+    )
+    cold_market = slice_market(market, Segment(SEGMENT_OOS, 0, IS_FRACTION, 1.0))
+    cold = run_once(
+        cold_market, params=params, cfg=cfg, order_block_result=detect_order_blocks(cold_market)
+    )
+
+    assert all(t.entry_time >= boundary for t in warm.result.trades)
+    assert warm.stats is not None and cold.stats is not None
+    # 합성 픽스처(시드 고정)에서 워밍업 재고가 실제로 셋업을 더한다 — 같으면 이 테스트는
+    # 따뜻함이 아무 일도 하지 않는 배선을 잡지 못한다.
+    assert warm.stats.eligible > cold.stats.eligible
+
+
+def test_run_once_warm_counts_stats_over_eval_window_only() -> None:
+    """체결률·eligible이 평가 창 기준으로 다시 계산된다 — 전 창 통계에 평가 창 수익률이
+    붙으면 두 숫자가 다른 모집단을 가리키는 표가 된다."""
+    market = _warm_market()
+    cfg = build_config(_TIMEFRAME)
+    params = _warm_params()
+    ob_result = detect_order_blocks(market)
+    boundary = eval_boundary_ms(market, WARM_OOS_SEGMENT)
+    assert boundary is not None
+
+    full = run_once(market, params=params, cfg=cfg, order_block_result=ob_result)
+    warm = run_once(
+        market, params=params, cfg=cfg, order_block_result=ob_result, eval_from_ms=boundary
+    )
+    assert warm.stats is not None and full.stats is not None
+    assert warm.stats.eligible < full.stats.eligible
+    # 평가 창 셋업 진단도 경계 이후만 남는다(--persist가 싣는 그 목록).
+    from backtest.zone_limit_backtest import SetupDiagnostic
+
+    sink: list[SetupDiagnostic] = []
+    run_once(
+        market,
+        params=params,
+        cfg=cfg,
+        order_block_result=ob_result,
+        setup_sink=sink,
+        eval_from_ms=boundary,
+    )
+    assert sink and all(d.trigger_time >= boundary for d in sink)
+    assert len(sink) == warm.stats.eligible
+
+
+def test_run_once_warm_rejects_close_entry_and_portfolio() -> None:
+    """따뜻한 연속 OOS는 B안 단일 포지션 전용 — 조용히 무시하지 않고 거부한다(WAN-95 부류)."""
+    from backtest.portfolio import PortfolioParams
+
+    market = _market()
+    cfg = build_config(_TIMEFRAME)
+    with pytest.raises(ValueError, match="따뜻한 연속 OOS"):
+        run_once(market, params=build_params(entry_mode="close"), cfg=cfg, eval_from_ms=1)
+    with pytest.raises(ValueError, match="따뜻한 연속 OOS"):
+        run_once(
+            market,
+            params=build_params(),
+            cfg=cfg,
+            portfolio=PortfolioParams(leverage=2.0),
+            eval_from_ms=1,
+        )
+
+
+def test_warm_oos_has_zero_future_leakage() -> None:
+    """미래 누수 0을 **동작으로** 고정한다(WAN-166 완료기준).
+
+    미래 봉을 잘라내도(데이터가 T에서 끝나도) T 이전에 청산까지 끝난 거래는 비트 단위로
+    같아야 한다 — 어떤 결정에도 미래 봉이 들어가지 않았다는 뜻이다. 잘린 창에서 청산이
+    미확정인 거래(END_OF_DATA)는 정의상 달라지므로 비교에서 뺀다.
+    """
+    from backtest.zone_limit_backtest import run_zone_limit_backtest_verbose
+
+    market = _warm_market()
+    cfg = build_config(_TIMEFRAME, funding_enabled=False)
+    params = _warm_params()
+    boundary = eval_boundary_ms(market, WARM_OOS_SEGMENT)
+    assert boundary is not None
+
+    htf = market.htf_df
+    times = htf["open_time"].astype("int64")
+    cut = int(times.iloc[-40])  # 평가 창 안쪽의 절단 시각 T
+    assert cut > boundary
+    htf_cut = htf[times < cut].reset_index(drop=True)
+    m1_times = market.df_1m["open_time"].astype("int64")
+    df_1m_cut = market.df_1m[m1_times < cut].reset_index(drop=True)
+
+    def _resolved(trades: list[Trade]) -> list[tuple[int, float, int, float]]:
+        keys: list[tuple[int, float, int, float]] = []
+        for t in trades:
+            exit_fill = t.exits[-1]
+            if exit_fill.time < cut and exit_fill.reason is not ExitReason.END_OF_DATA:
+                keys.append((t.entry_time, t.entry_price, exit_fill.time, exit_fill.price))
+        return keys
+
+    full_result, _ = run_zone_limit_backtest_verbose(
+        htf,
+        market.df_1m,
+        _TIMEFRAME,
+        confluence_params=params,
+        backtest_config=cfg,
+        eval_from_ms=boundary,
+    )
+    cut_result, _ = run_zone_limit_backtest_verbose(
+        htf_cut,
+        df_1m_cut,
+        _TIMEFRAME,
+        confluence_params=params,
+        backtest_config=cfg,
+        eval_from_ms=boundary,
+    )
+    full_keys = _resolved(full_result.trades)
+    cut_keys = _resolved(cut_result.trades)
+    assert full_keys, "픽스처가 절단 이전에 청산까지 끝난 거래를 내지 못했다 — 테스트 무력"
+    assert full_keys == cut_keys
 
 
 # ---------------------------------------------------- 경로 스위치
