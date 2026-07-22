@@ -395,7 +395,9 @@ class ConfluenceStrategy:
                 new_price = deviation_entry_price(d, signal.order_block, band)
                 if new_price is None:
                     confirmed = False
-                else:
+                elif not params.deviation_filter.select_only:
+                    # WAN-131 `select_only=True`면 밴드는 선별(위 기각)에만 쓰고 진입가는
+                    # 재산정하지 않는다 — 라벨만 붙고 동작이 없는 조용한 실패를 막는다.
                     entry_price = new_price
 
         lines = self._lines_at(pos, line_cols)

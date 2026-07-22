@@ -306,6 +306,12 @@ class _IntrabarLiveLimit:
         price = deviation_entry_price(d_sign, self.order_block, band)
         if price is None:
             return None  # WAN-75 규칙 3: 밴드가 존 전체보다 불리 — 지금은 주문이 없다.
+        deviation = self.params.deviation_filter
+        if deviation is not None and deviation.select_only:
+            # WAN-131 B팔: 밴드는 **선별(위 규칙 3 기각)** 에만 쓰고 가격은 존 근단 그대로.
+            # 규칙 3을 통과한 셋업이라 선별은 `select_only=False`와 동일하고, 진입가만
+            # 볼린저 재산정을 건너뛴다 — 이 한 줄이 「선별」과 「가격」을 가른다.
+            price = self.params.zone_limit_price(self.order_block)
         return self.params.apply_zone_limit_offset(price, is_long=self.is_long)
 
     def resolve_exits(self, limit_price: float) -> tuple[float, float | None] | None:
@@ -798,7 +804,10 @@ def build_zone_limit_candidates(
             new_price = deviation_entry_price(d_sign, seed_ob, band)
             if new_price is None:
                 continue  # WAN-75: 밴드가 존 전체보다 불리한 쪽 — 진입하지 않음(규칙 3).
-            limit_price = new_price
+            if not deviation.select_only:
+                # WAN-131 B팔(`select_only=True`)이면 규칙 3 기각(위 `continue`)만 물려받고
+                # 진입가는 존 근단(`limit_price` 초깃값) 그대로 둔다 — 밴드를 선별에만 쓴다.
+                limit_price = new_price
         lines = line_snapshots[pos] if line_snapshots is not None else []
         if live_band_mode:
             # WAN-119: 지정가·1R·익절 목표가 전부 봉내 체결 순간에 정해진다 — 탭 봉
