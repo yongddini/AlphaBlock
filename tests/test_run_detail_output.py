@@ -142,7 +142,14 @@ def test_persist_keeps_the_setups_that_never_filled(
     """
     db = tmp_path / "runs.db"
 
-    assert _run(tmp_path, _BASE, "--persist", "--persist-db", str(db)) == 0
+    # 존폭 필터를 끈다(WAN-159 기본값 1.28) — 합성 존은 1.28×ATR보다 넓어 전부 걸러지면
+    # "적격이었지만 미체결"이라는 이 테스트의 대상이 사라진다. 필터는 여기 검증 대상이 아니다.
+    assert (
+        _run(
+            tmp_path, [*_BASE, "--max-zone-width-atr", "none"], "--persist", "--persist-db", str(db)
+        )
+        == 0
+    )
 
     with BacktestRunStore(db) as store:
         run = store.list_runs()[0]

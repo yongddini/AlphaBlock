@@ -178,7 +178,7 @@ def run_offset(
         build_params(
             offset_bps=offset_bps,
             fill=BASELINE_FILL,
-            base=ConfluenceParams(rsi_gate_mode=LEGACY_RSI_GATE_MODE),
+            base=ConfluenceParams(rsi_gate_mode=LEGACY_RSI_GATE_MODE, max_zone_width_atr=None),
         )
     )
     setup_sink: list[SetupDiagnostic] = []

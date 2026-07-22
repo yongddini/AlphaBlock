@@ -104,7 +104,9 @@ DEFAULT_OFFSETS_BPS: tuple[float, ...] = (0.0, 2.0, 5.0, 10.0, 20.0)
 #: 단위로 맞물리는 것이 이 리포트의 검산이다 — 기본값을 따라가게 두면 그 검산이 깨진다.
 #: ⚠️ 밴드 표본(`band_bar`)도 같은 이유로 고정한다(WAN-132 기본값 전환) — 그 검산은
 #: 밴드 정의까지 같아야 성립한다.
-BASE_PARAMS = pin_band_bar(ConfluenceParams(rsi_gate_mode=LEGACY_RSI_GATE_MODE))
+BASE_PARAMS = pin_band_bar(
+    ConfluenceParams(rsi_gate_mode=LEGACY_RSI_GATE_MODE, max_zone_width_atr=None)
+)
 
 #: IS 비중. 앞 2/3에서 오프셋을 고르고 뒤 1/3(OOS)로 검증한다.
 IS_FRACTION = 2.0 / 3.0

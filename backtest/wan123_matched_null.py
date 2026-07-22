@@ -197,7 +197,7 @@ def adopted_params(fill: FillPreset, seed: int) -> ConfluenceParams:
     새 밴드에서의 널 재검은 **별도 이슈**다(WAN-132 §후속) — 이 표를 조용히 다른 밴드로
     돌려 옛 결론 옆에 새 숫자를 두는 것보다 낫다.
     """
-    return pin_band_bar(build_params(fill=fill, seed=seed))
+    return pin_band_bar(build_params(fill=fill, seed=seed, max_zone_width_atr=None))
 
 
 def neutralized_pool_params(fill: FillPreset, seed: int) -> ConfluenceParams:
@@ -215,7 +215,7 @@ def describe_engine() -> str:
     `adopted_params`가 실제로 조립하는 것을 그대로 찍는다(밴드 고정 포함) — 지문이
     실행과 어긋나면 지문이 아니라 장식이다(WAN-88 `describe_engine`과 같은 규칙).
     """
-    p = pin_band_bar(ConfluenceParams())
+    p = pin_band_bar(ConfluenceParams(max_zone_width_atr=None))
     return (
         f"entry_mode={p.entry_mode}, rsi_mode={p.rsi_mode}, short_enabled={p.short_enabled}, "
         f"take_profit_mode={p.take_profit_mode}, take_profit_r={p.take_profit_r}, "

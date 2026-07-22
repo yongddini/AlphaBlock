@@ -23,6 +23,7 @@ import pytest
 
 from backtest.harness import (
     BASELINE_FILL,
+    UNSET,
     MarketData,
     RunOutcome,
     build_params,
@@ -142,27 +143,33 @@ def _atr_at(htf: pd.DataFrame, pos: int, length: int = 14) -> float:
 # --------------------------------------------------------------------------- #
 
 
-def test_adopted_default_leaves_the_filter_off() -> None:
-    """채택 기본값은 **전부 매매**다 — WAN-158은 채택(A)이 아니라 옵트인(B)이었다."""
-    assert ConfluenceParams().max_zone_width_atr is None
+def test_adopted_default_now_filters_at_1_28() -> None:
+    """WAN-159가 기본값을 옵트인(꺼짐) → 채택(1.28, 좁은 존만)으로 승격했다."""
+    assert ConfluenceParams().max_zone_width_atr == 1.28
 
 
 def test_off_reproduces_the_old_candidate_set() -> None:
-    """필터를 안 주면 후보가 예전과 완전히 같다 — 합성 시장(엔진 탐지 경로)에서 본다."""
+    """필터를 **끄면**(`None`) 후보가 WAN-159 이전 엔진과 완전히 같다 — 합성 시장에서 본다.
+
+    WAN-159가 기본값을 1.28로 올린 뒤로 "인자를 안 준 것"은 더 이상 꺼짐이 아니므로, 끄기는
+    `max_zone_width_atr=None`을 **명시**해야 한다. 그 명시적 끄기가 ATR을 계산조차 하지 않는
+    옛 경로와 비트 단위로 같은지 본다(끄기 vs 끄기 = 같아야 한다). 그리고 채택 기본값(1.28)은
+    같은 시장에서 후보를 **줄인다**(라벨만 붙는 배선이면 안 준다).
+    """
     htf = make_synthetic_ohlcv(timeframe=_TF, bars=600, seed=7)
     start = int(htf["open_time"].iloc[-120])
     one_min = make_synthetic_ohlcv(
         timeframe="1m", bars=120 * 60, seed=11, start_time_ms=start, swing_period=180
     )
-    params = ConfluenceParams(short_enabled=True, deviation_filter=None)
+    off = ConfluenceParams(short_enabled=True, deviation_filter=None, max_zone_width_atr=None)
     cfg = default_backtest_config(_TF)
 
-    before, stats_before = build_zone_limit_candidates(htf, one_min, _TF, params=params, cfg=cfg)
+    before, stats_before = build_zone_limit_candidates(htf, one_min, _TF, params=off, cfg=cfg)
     after, stats_after = build_zone_limit_candidates(
         htf,
         one_min,
         _TF,
-        params=params.model_copy(update={"max_zone_width_atr": None}),
+        params=off.model_copy(update={"max_zone_width_atr": None}),
         cfg=cfg,
     )
     assert before, "합성 데이터에서 후보가 하나도 안 나오면 이 검정이 공허하다."
@@ -171,12 +178,24 @@ def test_off_reproduces_the_old_candidate_set() -> None:
     ]
     assert stats_before == stats_after
 
+    # 채택 기본값(1.28)은 같은 시장에서 후보를 줄인다.
+    filtered, stats_filtered = build_zone_limit_candidates(
+        htf, one_min, _TF, params=off.model_copy(update={"max_zone_width_atr": 1.28}), cfg=cfg
+    )
+    assert stats_filtered.eligible <= stats_before.eligible
 
-def test_build_params_none_does_not_touch_a_filter_set_on_the_base() -> None:
-    """`None` = "손대지 않는다"이지 "끄라"가 아니다(`offset_bps`와 같은 규약)."""
+
+def test_build_params_unset_inherits_base_but_none_turns_off() -> None:
+    """WAN-159: 미지정(`UNSET`)은 `base`를 물려받고, 명시적 `None`은 **끈다**.
+
+    존폭 필터는 끄기가 `None`이라 `offset_bps`의 "None = 손대지 않는다" 규약을 못 쓴다 —
+    센티넬로 미지정을 따로 표현한다. 이래야 「필터 끔」 라벨을 단 채 1.28로 도는 이중
+    필터를 피한다.
+    """
     base = ConfluenceParams(max_zone_width_atr=1.24)
-    assert build_params(base=base).max_zone_width_atr == 1.24
+    assert build_params(base=base).max_zone_width_atr == 1.24  # UNSET = 물려받음
     assert build_params(max_zone_width_atr=0.9, base=base).max_zone_width_atr == 0.9
+    assert build_params(max_zone_width_atr=None, base=base).max_zone_width_atr is None  # 끄기
 
 
 # --------------------------------------------------------------------------- #
@@ -262,7 +281,8 @@ def test_unusable_atr_is_rejected_not_waved_through() -> None:
 
 
 def test_off_never_rejects() -> None:
-    assert ConfluenceParams().zone_width_filter_passes(_zone(1e9, 0.0), None) is True
+    off = ConfluenceParams(max_zone_width_atr=None)
+    assert off.zone_width_filter_passes(_zone(1e9, 0.0), None) is True
 
 
 def test_threshold_must_be_positive() -> None:
@@ -294,7 +314,7 @@ def test_build_params_rejects_filter_on_close_entry() -> None:
 
 
 def test_grid_rejects_filter_on_close_entry() -> None:
-    with pytest.raises(ValueError, match="존폭 필터"):
+    with pytest.raises(ValueError, match="존폭"):
         Grid(
             symbols=("BTC/USDT:USDT",),
             timeframes=(_TF,),
@@ -312,11 +332,14 @@ def test_grid_rejects_filter_on_close_entry() -> None:
 
 
 def test_cli_axis_defaults_to_the_adopted_engine() -> None:
-    """인자를 안 주면 축이 `(None,)` — 예전과 **비트 단위로 같은 행**이 나온다."""
+    """인자를 안 주면 축이 `(UNSET,)` — 채택 기본값(1.28)으로 도는 행이 나온다(WAN-159)."""
     args = build_parser().parse_args(["--symbol", "BTCUSDT"])
     grid = grid_from_args(args)
-    assert grid.max_zone_widths_atr == (None,)
-    assert [c.max_zone_width_atr for c in iter_combos(grid)] == [None]
+    assert grid.max_zone_widths_atr == (UNSET,)
+    combos = iter_combos(grid)
+    assert [c.max_zone_width_atr for c in combos] == [UNSET]
+    # 센티넬은 build_params에서 채택 기본값으로 풀린다.
+    assert build_params(max_zone_width_atr=combos[0].max_zone_width_atr).max_zone_width_atr == 1.28
 
 
 def test_cli_axis_parses_none_and_numbers() -> None:
@@ -351,7 +374,11 @@ def test_row_carries_the_value_that_actually_ran() -> None:
         fill_name=BASELINE_FILL.name,
     )
     off = build_row(
-        outcome, market, segment=segment, params=build_params(), fill_name=BASELINE_FILL.name
+        outcome,
+        market,
+        segment=segment,
+        params=build_params(max_zone_width_atr=None),
+        fill_name=BASELINE_FILL.name,
     )
     assert on.max_zone_width_atr == 1.24
     assert off.max_zone_width_atr is None

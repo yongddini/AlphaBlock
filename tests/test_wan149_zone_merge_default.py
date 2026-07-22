@@ -112,7 +112,7 @@ def test_row_carries_the_value_actually_detected() -> None:
     """
     df = make_synthetic_ohlcv(symbol="BTC/USDT:USDT", timeframe="1h", bars=300, seed=3)
     market = MarketData("BTC/USDT:USDT", "1h", df, pd.DataFrame(), [])
-    params = ConfluenceParams(entry_mode="close", rsi_mode="closed_bar")
+    params = ConfluenceParams(entry_mode="close", rsi_mode="closed_bar", max_zone_width_atr=None)
     from backtest.harness import build_config, run_once, segments_for
 
     outcome = run_once(market, params=params, cfg=build_config("1h"))
@@ -170,7 +170,9 @@ def test_every_entry_signal_has_a_zone_box_in_the_archive() -> None:
     """
     df = make_synthetic_ohlcv(symbol="BTC/USDT:USDT", timeframe="1h", bars=800, seed=7)
     pipeline = run_pipeline(
-        df, OrderBlockParams(), ConfluenceParams(entry_mode="close", rsi_mode="closed_bar")
+        df,
+        OrderBlockParams(),
+        ConfluenceParams(entry_mode="close", rsi_mode="closed_bar", max_zone_width_atr=None),
     )
     entered = entered_zone_keys(pipeline.signals)
     assert entered, "합성 데이터에서 진입 시그널이 나와야 이 회귀 테스트가 의미가 있다"
@@ -193,7 +195,7 @@ def test_merged_path_still_has_the_known_chart_limitation() -> None:
     pipeline = run_pipeline(
         df,
         OrderBlockParams(combine_obs=True),
-        ConfluenceParams(entry_mode="close", rsi_mode="closed_bar"),
+        ConfluenceParams(entry_mode="close", rsi_mode="closed_bar", max_zone_width_atr=None),
     )
     entered = entered_zone_keys(pipeline.signals)
     archive_keys = {zone_key(ob) for ob in pipeline.order_blocks}
@@ -218,7 +220,7 @@ def test_dashboard_badge_says_merge_off_on_the_adopted_default() -> None:
     from dashboard.app import _run_config_badge_text
 
     text = _run_config_badge_text(
-        ConfluenceParams(entry_mode="close", rsi_mode="closed_bar"),
+        ConfluenceParams(entry_mode="close", rsi_mode="closed_bar", max_zone_width_atr=None),
         OrderBlockParams(),
         BacktestConfig(),
     )

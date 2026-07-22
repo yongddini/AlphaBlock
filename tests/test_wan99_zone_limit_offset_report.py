@@ -95,7 +95,9 @@ def test_zero_offset_baseline_is_the_pre_wan112_engine_unchanged() -> None:
     baseline = FILL_ASSUMPTIONS[0]
     assert baseline.name == "baseline"
     assert baseline.params(offset_bps=0.0, seed=0) == pin_band_bar(
-        ConfluenceParams(zone_limit_offset_bps=0.0, rsi_gate_mode=LEGACY_RSI_GATE_MODE)
+        ConfluenceParams(
+            zone_limit_offset_bps=0.0, rsi_gate_mode=LEGACY_RSI_GATE_MODE, max_zone_width_atr=None
+        )
     )
     assert ConfluenceParams().zone_limit_offset_bps == 2.0, "채택 기본값과 갈라졌음이 의도다"
     assert ConfluenceParams().rsi_gate_mode == "unconditional", "게이트도 갈라졌음이 의도다"
@@ -116,7 +118,9 @@ def test_grid_only_varies_offset_and_fill_assumptions() -> None:
         "fill_dropout_rate",
         "fill_dropout_seed",
     }
-    default = pin_band_bar(ConfluenceParams(rsi_gate_mode=LEGACY_RSI_GATE_MODE)).model_dump()
+    default = pin_band_bar(
+        ConfluenceParams(rsi_gate_mode=LEGACY_RSI_GATE_MODE, max_zone_width_atr=None)
+    ).model_dump()
     for assumption in FILL_ASSUMPTIONS:
         for offset in DEFAULT_OFFSETS_BPS:
             for seed in assumption.seeds:

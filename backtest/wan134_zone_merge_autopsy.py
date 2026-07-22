@@ -547,7 +547,7 @@ def run_ablation_cell(market: harness.MarketData) -> list[AblationRow]:
     if market.empty or market.df_1m.empty:
         return []
     # 채택 기본값 + 밴드만 WAN-132 이전 값(`tap`) 고정. 두 팔 공통(진입 규칙은 combine_obs와 무관).
-    params = harness.pin_band_bar(harness.build_params())
+    params = harness.pin_band_bar(harness.build_params(max_zone_width_atr=None))
     cfg = harness.build_config(market.timeframe)
     rows: list[AblationRow] = []
     for segment in harness.segments_for(oos=True):

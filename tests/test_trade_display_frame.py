@@ -199,7 +199,7 @@ def test_engine_labels_survive_in_the_caption() -> None:
 
     caption = engine_label_caption(
         result,
-        ConfluenceParams(entry_mode="close", rsi_mode="closed_bar"),
+        ConfluenceParams(entry_mode="close", rsi_mode="closed_bar", max_zone_width_atr=None),
         OrderBlockParams(combine_obs=True),
         result.config,
     )

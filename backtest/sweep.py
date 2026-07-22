@@ -142,9 +142,14 @@ def default_backtest_config(
 #: 호출부가 `zone_limit` 파라미터를 명시적으로 넘기면 `evaluate()`가 거부한다 —
 #: 조용히 종가 진입으로 되돌리지 않는다.
 #: 오프셋도 함께 0으로 못 박는다(WAN-112): A안은 `apply_zone_limit_offset`을 호출하지
-#: 않으므로 채택 기본값의 2bp를 들고 있어 봐야 **리포트 라벨만 거짓**이 된다.
+#: 않으므로 채택 기본값의 2bp를 들고 있어 봐야 **리포트 라벨만 거짓**이 된다. 존폭 필터도
+#: 같은 이유로 끈다(WAN-159): A안은 이 필드를 안 읽는데 채택 기본값 1.28을 들고 있으면
+#: `_require_close_entry`가 거부한다.
 CLOSE_ENTRY_DEFAULTS = ConfluenceParams(
-    entry_mode="close", rsi_mode="closed_bar", zone_limit_offset_bps=0.0
+    entry_mode="close",
+    rsi_mode="closed_bar",
+    zone_limit_offset_bps=0.0,
+    max_zone_width_atr=None,
 )
 
 

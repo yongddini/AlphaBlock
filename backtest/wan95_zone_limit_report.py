@@ -78,7 +78,12 @@ ZONE_LIMIT_PARAMS = ConfluenceParams()
 #: — 이 리포트가 격리하려는 변수는 **진입 방식(+그에 따른 체결 비용)** 하나다.
 #: 오프셋 0은 A안엔 아무 영향이 없지만(호출부가 B안뿐) 라벨을 정직하게 두려고 명시한다.
 CLOSE_ENTRY_PARAMS = ConfluenceParams(
-    entry_mode="close", rsi_mode="closed_bar", zone_limit_offset_bps=0.0
+    entry_mode="close",
+    rsi_mode="closed_bar",
+    zone_limit_offset_bps=0.0,
+    # A안은 존폭 필터(B안 전용)를 읽지 않는다 — 채택 기본값 1.28을 들고 있으면 `evaluate`가
+    # 거부한다(WAN-159). 채택 성과(B안, ZONE_LIMIT_PARAMS)는 1.28로 재산출된다.
+    max_zone_width_atr=None,
 )
 
 
@@ -415,6 +420,18 @@ def build_markdown(frame: pd.DataFrame, delta: pd.DataFrame) -> str:
         "OOS +0.50%p지만 **1h OOS는 −1.62%p**) · ⚠️ **「엣지 없음」(WAN-84/88/111/114/124)은 "
         "그대로**다. 근거·파급은 "
         "[`docs/decisions/wan132.md`](../../docs/decisions/wan132.md).",
+        "",
+        "> 🔁 **WAN-159(존폭 필터를 채택 기본값으로)로 `zone_limit` 행이 다시 전면 "
+        "재산출됐다.** 채택 기본 `max_zone_width_atr`가 `None`(꺼짐, 전부 매매) → **`1.28`**"
+        "(존폭 ÷ ATR ≤ 1.28인 좁은 존만 매매)이 되면서 진입 **후보 집합 자체가 3분의 1로 "
+        "줄었다** — 진입 방식·가격이 아니라 **어떤 셋업을 버리는가**가 바뀌었으므로 거래 수·"
+        "승률·MDD가 모두 이동한다. `close` 행은 A안이라 이 필드를 읽지 않아 **정의상 무관**"
+        "하다(재산출 시점 드리프트만 있을 수 있다). ⚠️ **「켜면 돈을 더 번다」로 인용 금지** — "
+        "문턱 1.28은 데이터가 아니라 사용자 판단(측정 권고 15m 1.24 · 1h 1.32의 중간)이고, "
+        "승률 상승의 과반은 기하(1R이 좁아져 고정 1.5R 익절이 가까워짐)이며, TRX 15m은 "
+        "손절폭 가드에 잘려 사실상 매매가 멈춘다 · ⚠️ **「엣지 없음」(WAN-84/88/111/114/124/"
+        "151)은 그대로**다. 근거·경고는 "
+        "[`docs/decisions/wan159.md`](../../docs/decisions/wan159.md).",
         "",
         "> ℹ️ **WAN-100과 무관한 차이 한 건**: 재산출에서 `SOL 15m close` 행이 최초 "
         "커밋본과 다르다(거래 939→938, return −8.68%→−9.87%). 수정을 되돌리고 돌려도 "

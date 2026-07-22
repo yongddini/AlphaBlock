@@ -115,7 +115,8 @@ def test_baseline_lens_is_the_pinned_wan103_engine() -> None:
             seed=0,
             offset_bps=PINNED_OFFSET_BPS,
             base=pin_band_bar(
-                ConfluenceParams(rsi_gate_mode=PINNED_RSI_GATE_MODE), PINNED_BAND_BAR
+                ConfluenceParams(rsi_gate_mode=PINNED_RSI_GATE_MODE, max_zone_width_atr=None),
+                PINNED_BAND_BAR,
             ),
         )
         == PARAMS
@@ -166,7 +167,10 @@ def test_build_cell_lens_params_differ_from_default() -> None:
         fill=fill_preset("pen_5bp"),
         seed=0,
         offset_bps=PINNED_OFFSET_BPS,
-        base=pin_band_bar(ConfluenceParams(rsi_gate_mode=PINNED_RSI_GATE_MODE), PINNED_BAND_BAR),
+        base=pin_band_bar(
+            ConfluenceParams(rsi_gate_mode=PINNED_RSI_GATE_MODE, max_zone_width_atr=None),
+            PINNED_BAND_BAR,
+        ),
     )
     assert lens != PARAMS
     assert lens.fill_penetration_bps == 5.0
@@ -319,7 +323,9 @@ def test_default_params_untouched_by_this_report() -> None:
     assert (
         pin_band_bar(
             ConfluenceParams(
-                zone_limit_offset_bps=PINNED_OFFSET_BPS, rsi_gate_mode=PINNED_RSI_GATE_MODE
+                zone_limit_offset_bps=PINNED_OFFSET_BPS,
+                rsi_gate_mode=PINNED_RSI_GATE_MODE,
+                max_zone_width_atr=None,
             ),
             PINNED_BAND_BAR,
         )

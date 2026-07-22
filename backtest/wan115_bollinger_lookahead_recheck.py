@@ -200,7 +200,9 @@ def rung_params(rung: Rung, *, fill: FillPreset, seed: int = 0) -> ConfluencePar
     요구한 "baseline + offset 2bp" 토대가 그대로 들어온다.
     """
     base = ConfluenceParams().model_copy(update=dict(rung.updates))
-    return build_params(entry_mode="zone_limit", fill=fill, seed=seed, base=base)
+    return build_params(
+        entry_mode="zone_limit", fill=fill, seed=seed, base=base, max_zone_width_atr=None
+    )
 
 
 # --------------------------------------------------------------------------- #

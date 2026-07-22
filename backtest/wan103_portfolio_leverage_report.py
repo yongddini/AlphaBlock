@@ -75,7 +75,9 @@ DEFAULT_SYMBOLS: tuple[str, ...] = ("BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:
 #: 적힌 %p가 재현되지 않는다.
 #: ⚠️ 밴드 표본(`band_bar`)도 같은 이유로 고정한다(WAN-132 기본값 전환).
 PARAMS = pin_band_bar(
-    ConfluenceParams(zone_limit_offset_bps=0.0, rsi_gate_mode=LEGACY_RSI_GATE_MODE)
+    ConfluenceParams(
+        zone_limit_offset_bps=0.0, rsi_gate_mode=LEGACY_RSI_GATE_MODE, max_zone_width_atr=None
+    )
 )
 
 #: 고정 레버리지 스윕 축(이슈 완료기준). N배(= peak concurrency)는 여기 없고, 실행 중

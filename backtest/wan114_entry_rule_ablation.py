@@ -220,7 +220,9 @@ def rung_params(rung: Rung, *, fill: FillPreset, seed: int = 0) -> ConfluencePar
     +16.20%p)은 탭 봉 종가 밴드 위에서 나왔고 `wan111`/`wan115`/`wan119`/`wan120` CSV와의
     비트 일치 검산도 그 밴드를 전제한다. 새 밴드에서의 분해는 별도 이슈 소관이다.
     """
-    base = pin_band_bar(ConfluenceParams().model_copy(update=dict(rung.updates)))
+    base = pin_band_bar(
+        ConfluenceParams(max_zone_width_atr=None).model_copy(update=dict(rung.updates))
+    )
     return build_params(entry_mode="zone_limit", fill=fill, seed=seed, base=base)
 
 

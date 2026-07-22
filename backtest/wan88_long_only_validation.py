@@ -161,7 +161,9 @@ def adopted_params(fill: FillPreset) -> ConfluenceParams:
         build_params(
             fill=fill,
             offset_bps=PINNED_OFFSET_BPS,
-            base=ConfluenceParams(rsi_gate_mode=PINNED_RSI_GATE_MODE),
+            # 존폭 필터를 당시 값(꺼짐)으로 고정한다(WAN-159 기본값 전환). 숫자 보존이다 —
+            # 고정하지 않으면 채택 기본값 1.28로 조용히 걸러져 이 표의 판정이 어긋난다.
+            base=ConfluenceParams(rsi_gate_mode=PINNED_RSI_GATE_MODE, max_zone_width_atr=None),
         ),
         PINNED_BAND_BAR,
     )
@@ -175,7 +177,9 @@ def describe_engine() -> str:
     """
     p = pin_band_bar(
         ConfluenceParams(
-            zone_limit_offset_bps=PINNED_OFFSET_BPS, rsi_gate_mode=PINNED_RSI_GATE_MODE
+            zone_limit_offset_bps=PINNED_OFFSET_BPS,
+            rsi_gate_mode=PINNED_RSI_GATE_MODE,
+            max_zone_width_atr=None,
         ),
         PINNED_BAND_BAR,
     )

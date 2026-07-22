@@ -115,6 +115,7 @@ NEW_ENGINE_PARAMS = pin_band_bar(
         rsi_mode="realtime",
         short_enabled=True,
         rsi_gate_mode=LEGACY_RSI_GATE_MODE,
+        max_zone_width_atr=None,
     )
 )
 

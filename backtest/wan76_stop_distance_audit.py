@@ -58,7 +58,7 @@ _YEAR_MS = int(365.25 * 24 * 60 * 60 * 1000)
 #: 채택 전략(WAN-68/70/73/74와 동일 정의): B안(존-지정가+실시간 RSI), 그 외 전부 기본값.
 #: ⚠️ `band_bar`는 당시 값(`tap`)으로 **명시 고정**한다(WAN-132 기본값 전환).
 CURRENT_DEFAULT_PARAMS = pin_band_bar(
-    ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime")
+    ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime", max_zone_width_atr=None)
 )
 
 #: 민감도 스윕 대상 하한(이슈 본문 지정).

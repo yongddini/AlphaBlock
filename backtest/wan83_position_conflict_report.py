@@ -90,7 +90,9 @@ DEFAULT_TIMEFRAMES: tuple[str, ...] = ("15m", "1h", "4h", "1d")
 #: 나왔다. 기본값을 따라가게 두면 숫자가 조용히 움직여 본문과 어긋난다.
 #: WAN-132(밴드 정본 `tap` → `intrabar_live`)도 같은 이유로 고정 대상에 더한다.
 PARAMS = pin_band_bar(
-    ConfluenceParams(zone_limit_offset_bps=0.0, rsi_gate_mode=LEGACY_RSI_GATE_MODE)
+    ConfluenceParams(
+        zone_limit_offset_bps=0.0, rsi_gate_mode=LEGACY_RSI_GATE_MODE, max_zone_width_atr=None
+    )
 )
 
 SCOPE_SERIES = "series"

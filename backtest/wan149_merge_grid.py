@@ -106,6 +106,9 @@ def build_grid(symbols: Sequence[str] = ALL_SYMBOLS) -> Grid:
         offsets_bps=(defaults.zone_limit_offset_bps,),
         fills=(BASELINE_FILL,),
         combine_obs=(MERGE_ON, MERGE_OFF),
+        # 존폭 필터는 **고정하지 않는다** — 이 표는 밴드·게이트를 고정하지 않고 오늘의 채택
+        # 기본값 위에서 병합 축만 갈라 보는 것이 의도라(위 독스트링), WAN-159의 필터도 그대로
+        # 따라간다. 옛(필터 꺼진) 수치는 스냅샷이고 새 기본값 위의 재측정은 별도 이슈다.
     )
 
 

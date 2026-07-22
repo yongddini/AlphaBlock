@@ -722,7 +722,13 @@ def run_experiment(
             for combine in (False, True):
                 result.zone_widths.append(zone_width_row(market, combine_obs=combine))
             for lens in lenses:
-                params = harness.build_params(fill=harness.fill_preset(lens))
+                params = harness.build_params(
+                    fill=harness.fill_preset(lens),
+                    # 🚨 이중 필터 방지(WAN-159): 이 모듈이 후보를 자기가 걸러 좁은 존 팔을
+                    # 만드는데, 채택 기본값 1.28이 엔진에서 먼저 걸러 버리면 대조군이 오염되고
+                    # 매칭 개수가 깨진다. 명시적으로 꺼서 오늘의 판정 근거표를 보존한다.
+                    max_zone_width_atr=harness.LEGACY_MAX_ZONE_WIDTH_ATR,
+                )
                 cell = build_cell(market, params=params)
                 result.pnl_rows.extend(pnl_rows_for_cell(cell, market, lens=lens))
                 print(

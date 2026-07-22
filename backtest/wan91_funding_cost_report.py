@@ -80,13 +80,17 @@ FundingMode = Literal["off", "on"]
 #: 펀딩 on/off 델타는 거래 집합이 고정돼야 뜻이 있다.
 ENGINE_PRESETS: dict[str, ConfluenceParams] = {
     "long_only": ConfluenceParams(
-        entry_mode="close", rsi_mode="closed_bar", rsi_gate_mode=LEGACY_RSI_GATE_MODE
+        entry_mode="close",
+        rsi_mode="closed_bar",
+        rsi_gate_mode=LEGACY_RSI_GATE_MODE,
+        max_zone_width_atr=None,
     ),
     "short_enabled": ConfluenceParams(
         short_enabled=True,
         entry_mode="close",
         rsi_mode="closed_bar",
         rsi_gate_mode=LEGACY_RSI_GATE_MODE,
+        max_zone_width_atr=None,
     ),
 }
 

@@ -151,7 +151,9 @@ def test_explicit_zero_offset_matches_wan99_zero_offset_baseline() -> None:
 
     assert build_params(
         offset_bps=0.0,
-        base=pin_band_bar(ConfluenceParams(rsi_gate_mode=LEGACY_RSI_GATE_MODE)),
+        base=pin_band_bar(
+            ConfluenceParams(rsi_gate_mode=LEGACY_RSI_GATE_MODE, max_zone_width_atr=None)
+        ),
     ) == FILL_ASSUMPTIONS[0].params(offset_bps=0.0, seed=0)
 
 
@@ -182,11 +184,13 @@ def test_default_band_is_intrabar_live_and_legacy_pin_differs() -> None:
 
 def test_legacy_band_pin_flows_through_base() -> None:
     """`base=`로 준 밴드 핀이 조립을 통과해 살아남는다 — 옛 리포트 고정의 배선 검사."""
-    pinned = build_params(base=pin_band_bar(ConfluenceParams()))
+    pinned = build_params(base=pin_band_bar(ConfluenceParams(max_zone_width_atr=None)))
     assert pinned.deviation_filter is not None
     assert pinned.deviation_filter.band_bar == LEGACY_BAND_BAR
     with_axes = build_params(
-        offset_bps=0.0, take_profit_r=2.0, base=pin_band_bar(ConfluenceParams())
+        offset_bps=0.0,
+        take_profit_r=2.0,
+        base=pin_band_bar(ConfluenceParams(max_zone_width_atr=None)),
     )
     assert with_axes.deviation_filter is not None
     assert with_axes.deviation_filter.band_bar == LEGACY_BAND_BAR
@@ -201,14 +205,16 @@ def test_legacy_gate_pin_flows_through_base() -> None:
     끼어들면 base의 핀이 조용히 지워진다. 그러면 "고정했다"고 적힌 리포트가 새 게이트로
     돈다 — WAN-95(라벨과 실행이 갈라짐)의 재발이다.
     """
-    pinned = build_params(base=ConfluenceParams(rsi_gate_mode=LEGACY_RSI_GATE_MODE))
+    pinned = build_params(
+        base=ConfluenceParams(rsi_gate_mode=LEGACY_RSI_GATE_MODE, max_zone_width_atr=None)
+    )
     assert pinned.rsi_gate_mode == LEGACY_RSI_GATE_MODE
     # 다른 축을 같이 줘도 핀이 살아남아야 한다.
     with_axes = build_params(
         offset_bps=0.0,
         take_profit_r=2.0,
         fill=fill_preset("pen_5bp"),
-        base=ConfluenceParams(rsi_gate_mode=LEGACY_RSI_GATE_MODE),
+        base=ConfluenceParams(rsi_gate_mode=LEGACY_RSI_GATE_MODE, max_zone_width_atr=None),
     )
     assert with_axes.rsi_gate_mode == LEGACY_RSI_GATE_MODE
     assert with_axes.zone_limit_offset_bps == 0.0
@@ -246,7 +252,9 @@ def test_fill_presets_match_wan96_conservatism_levels() -> None:
                 fill=preset,
                 seed=seed,
                 offset_bps=0.0,
-                base=pin_band_bar(ConfluenceParams(rsi_gate_mode=LEGACY_RSI_GATE_MODE)),
+                base=pin_band_bar(
+                    ConfluenceParams(rsi_gate_mode=LEGACY_RSI_GATE_MODE, max_zone_width_atr=None)
+                ),
             ) == level.params(seed)
 
 
@@ -258,7 +266,9 @@ def test_fill_presets_match_wan99_fill_assumptions() -> None:
     """
     from backtest.wan99_zone_limit_offset_report import FILL_ASSUMPTIONS
 
-    legacy = pin_band_bar(ConfluenceParams(rsi_gate_mode=LEGACY_RSI_GATE_MODE))
+    legacy = pin_band_bar(
+        ConfluenceParams(rsi_gate_mode=LEGACY_RSI_GATE_MODE, max_zone_width_atr=None)
+    )
     for assumption in FILL_ASSUMPTIONS:
         preset = fill_preset(assumption.name)
         assert preset.penetration_bps == assumption.penetration_bps
@@ -300,6 +310,7 @@ def test_build_params_only_touches_requested_axes() -> None:
         "fill_dropout_seed",
         "take_profit_r",
         "short_enabled",
+        "max_zone_width_atr",
     }
     default = ConfluenceParams().model_dump()
     params = build_params(entry_mode="close", take_profit_r=3.0, short_enabled=True).model_dump()

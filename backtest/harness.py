@@ -29,6 +29,7 @@
 
 from __future__ import annotations
 
+import enum
 import json
 import math
 from collections.abc import Iterator, Sequence
@@ -261,6 +262,58 @@ def pin_band_bar(params: ConfluenceParams, band_bar: BandBar = LEGACY_BAND_BAR) 
     )
 
 
+#: WAN-158~WAN-158 채택 엔진의 존폭 필터 — **꺼짐**(`max_zone_width_atr=None`, 전부 매매).
+#:
+#: **WAN-159가 기본값을 `1.28`(좁은 존만 매매)로 옮겼다.** 그 이전 수치를 결론 문장에 박아
+#: 둔 리포트는 이 값을 **명시 고정**해 당시 엔진의 기록으로 보존한다 — `combine_obs`·`band_bar`와
+#: 같은 부류라 **거의 아무 리포트도 고정해 두지 않았으므로**, 고정하지 않으면 기본값을 따라
+#: 조용히 필터 켜진 엔진으로 다시 돌아 본문과 어긋난다(「안 바꿨다고 믿었는데 바뀐 것」).
+#: 고정 대상 목록은 [`docs/decisions/wan159.md`](../docs/decisions/wan159.md) §파급이다.
+#:
+#: ⚠️ 반대로 **"지금 채택된 것"을 재는 리포트는 고정하지 않는다**(wan95) — 기본값이 움직이면
+#: 그 수치는 낡은 것이 되어야 맞다.
+#: ⚠️ **이미 이 축을 명시한 모듈은 손대지 않는다**(wan155/wan161) — 문턱을 자기 입력으로
+#: 명시(`1.28` 또는 `None`)하므로 기본값 전환과 무관하게 같은 행을 낸다.
+#: 🚨 **wan133/142/152/154는 특히 빠뜨리면 안 된다** — 후보를 자기가 걸러 좁은 존 팔을
+#: 만드는데 엔진이 먼저 1.28로 걸러 버리면 「이중 필터」가 되어 판정 근거표가 조용히 망가진다.
+LEGACY_MAX_ZONE_WIDTH_ATR: float | None = None
+
+
+def pin_zone_width(
+    params: ConfluenceParams, threshold: float | None = LEGACY_MAX_ZONE_WIDTH_ATR
+) -> ConfluenceParams:
+    """`params`의 존폭 필터 문턱만 갈아끼운다(다른 필드는 손대지 않는다).
+
+    `pin_band_bar`와 같은 자리다 — 리포트가 `ConfluenceParams(...)`를 기본값에 맡기던 곳이
+    대부분이라, 고정 보일러플레이트를 각자 짜면 한 곳을 빠뜨리는 것이 정확히 WAN-159 §파급이
+    경고한 「이중 필터」·「조용히 필터 켜진 엔진」이 된다. 기본값 `None`이 **끄기**다.
+    """
+    return params.model_copy(update={"max_zone_width_atr": threshold})
+
+
+class _Unset(enum.Enum):
+    """`build_params(max_zone_width_atr=...)`의 「인자 미지정」 센티넬.
+
+    존폭 필터는 **끄기 = 명시적 `None`**이라, `None`을 "손대지 않는다(채택 기본값에 맡긴다)"로
+    쓰던 `offset_bps` 규약을 그대로 못 쓴다(둘이 충돌한다). 그래서 "미지정"을 이 센티넬로
+    따로 표현한다 — `is UNSET`이면 `base`의 값을 물려받고(= 채택 기본값 = `1.28`), 명시적
+    `None`이면 **끈다**. WAN-159 완료기준 3.
+
+    ⚠️ **`enum.Enum`이라야 한다** — CLI 축(`Grid`)이 `--jobs` 병렬에서 워커로 **피클**되는데,
+    평범한 `object()` 센티넬은 언피클 때 **새 인스턴스**가 되어 `!= (UNSET,)` 비교가 깨진다.
+    Enum 멤버는 이름으로 피클돼 언피클 후에도 **같은 싱글턴**이라 `is`·`==`가 성립한다.
+    """
+
+    UNSET = "unset"
+
+
+UNSET = _Unset.UNSET
+
+#: 존폭 필터 인자의 타입 — 실제 문턱(`float`)·끄기(`None`)·미지정(`UNSET`). CLI 축이
+#: 「미지정」을 「끄기」와 갈라 나르려고 쓴다(run.py의 `Grid`/`Combo`).
+ZoneWidthArg = float | None | _Unset
+
+
 def build_params(
     *,
     entry_mode: str = "zone_limit",
@@ -270,7 +323,7 @@ def build_params(
     seed: int = 0,
     short_enabled: bool | None = None,
     retap_mode: str | None = None,
-    max_zone_width_atr: float | None = None,
+    max_zone_width_atr: float | None | _Unset = UNSET,
     base: ConfluenceParams | None = None,
 ) -> ConfluenceParams:
     """CLI 인자를 `ConfluenceParams`로 조립한다.
@@ -282,6 +335,12 @@ def build_params(
     둘을 가르지 않고 0.0을 기본 인자로 두면 이 함수가 `ConfluenceParams`의 기본 오프셋을
     **말없이 덮어써서**, WAN-112가 기본값을 2bp로 올려도 CLI 기본 실행만 혼자 0bp로 도는
     조용한 갈라짐이 생긴다(= 위 첫 문단의 약속이 깨진다).
+
+    ⚠️ **`max_zone_width_atr`은 규약이 반대다** — 끄기가 `None`이라 `offset_bps`처럼
+    `None`을 "손대지 않는다"로 쓸 수 없다(둘이 충돌한다, WAN-159). "미지정"은 센티넬
+    `UNSET`으로 표현한다: `UNSET`이면 `base`의 값을 물려받고(= 채택 기본값 = `1.28`),
+    명시적 `None`이면 **끈다**(= `1.28`을 덮어써 `None`으로). 이래야 wan155/wan161·CLI의
+    `none` 팔이 「필터 끔」 라벨을 단 채 조용히 1.28로 도는 이중 필터를 피한다.
 
     지정가 전용 노브(`offset_bps`·`fill`)를 종가 진입에 주면 **거부한다**. 조용히
     무시하면 "오프셋 5bp로 돌렸다"고 믿는 사용자에게 오프셋이 없는 결과를 주게 되는데,
@@ -302,7 +361,7 @@ def build_params(
                 f"체결 가정(--fill {fill.name})은 종가 진입(--entry-mode close)에 적용되지 "
                 "않습니다. 탭이 곧 진입이라 미체결이라는 개념이 없습니다."
             )
-        if max_zone_width_atr is not None:
+        if max_zone_width_atr is not UNSET and max_zone_width_atr is not None:
             raise ValueError(
                 "존폭 필터(--max-zone-width-atr)는 종가 진입(--entry-mode close)에 적용되지 "
                 "않습니다. 필터는 지정가 후보를 거르는 B안 경로에만 배선돼 있습니다(WAN-158)."
@@ -320,8 +379,16 @@ def build_params(
         # 기본값의 2bp를 그대로 들고 있으면 리포트에 "오프셋 2bp"라 찍히면서 실제로는
         # 아무 데도 안 쓰이는 거짓 라벨이 된다 — WAN-95가 고친 그 병이다.
         update["zone_limit_offset_bps"] = 0.0
-    elif offset_bps is not None:
-        update["zone_limit_offset_bps"] = offset_bps
+        # 같은 이유로 존폭 필터도 끈다 — A안은 이 필드를 안 읽는데 채택 기본값 1.28을
+        # 들고 있으면 `evaluate()`가 거부하고(WAN-158), 리포트 라벨도 거짓이 된다.
+        update["max_zone_width_atr"] = None
+    else:
+        if offset_bps is not None:
+            update["zone_limit_offset_bps"] = offset_bps
+        if max_zone_width_atr is not UNSET:
+            # 명시적 `None`은 **끄기**다(채택 기본값 1.28을 덮어쓴다). `UNSET`이면
+            # `base`(= 채택 기본값)의 값을 그대로 물려받는다 — 위 독스트링 규약.
+            update["max_zone_width_atr"] = max_zone_width_atr
     if take_profit_r is not None:
         update["take_profit_r"] = take_profit_r
     if short_enabled is not None:
@@ -331,10 +398,6 @@ def build_params(
             supported = ", ".join(RETAP_MODES)
             raise ValueError(f"알 수 없는 재탭 정책: {retap_mode!r} (지원: {supported})")
         update["retap_mode"] = retap_mode
-    if max_zone_width_atr is not None:
-        # `None`은 "손대지 않는다"(= 채택 기본값 = 꺼짐)이지 "끄라"가 아니다 —
-        # `offset_bps`와 같은 규약이라 `base`가 켜 둔 필터를 여기서 말없이 끄지 않는다.
-        update["max_zone_width_atr"] = max_zone_width_atr
     return (base or ConfluenceParams()).model_copy(update=update)
 
 

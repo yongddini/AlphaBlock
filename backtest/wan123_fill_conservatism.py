@@ -138,6 +138,7 @@ def build_grid(symbols: Sequence[str], gate: RsiGateMode, timeframes: Sequence[s
         fills=tuple(fill_preset(name) for name in LENS_NAMES),
         band_bar=LEGACY_BAND_BAR,
         combine_obs=(LEGACY_COMBINE_OBS,),
+        max_zone_widths_atr=(None,),
         rsi_gate_mode=gate,
     )
 

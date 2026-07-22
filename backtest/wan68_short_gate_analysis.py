@@ -318,7 +318,9 @@ def run_variant_comparison(
     warmup_bars = min(is_end, max(60, n // 6))
     cfg = backtest_config or default_backtest_config(timeframe)
     # ⚠️ `band_bar`는 당시 값(`tap`)으로 명시 고정한다(WAN-132 기본값 전환).
-    base_params = pin_band_bar(ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime"))
+    base_params = pin_band_bar(
+        ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime", max_zone_width_atr=None)
+    )
 
     def eval_is(
         params: ConfluenceParams, signal_filter: RegimeLookup | None = None

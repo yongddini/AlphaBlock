@@ -113,10 +113,14 @@ SENSITIVITY_FLOORS: tuple[float, ...] = (0.0, 0.005, 0.01)
 
 #: 채택 전략(B안): 존-지정가 + 실시간 RSI. WAN-70/75/76과 동일 정의.
 #: ⚠️ `band_bar`는 당시 값(`tap`)으로 **명시 고정**한다(WAN-132 기본값 전환).
-B_ENGINE_PARAMS = pin_band_bar(ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime"))
+B_ENGINE_PARAMS = pin_band_bar(
+    ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime", max_zone_width_atr=None)
+)
 #: A안 교차검증: 확정봉 종가 + closed_bar RSI. WAN-95로 저장소 기본값이 B안(지정가)로
 #: 바뀐 뒤로는 기본값이 아니라 **명시 고정**이다.
-A_ENGINE_PARAMS = ConfluenceParams(entry_mode="close", rsi_mode="closed_bar")
+A_ENGINE_PARAMS = ConfluenceParams(
+    entry_mode="close", rsi_mode="closed_bar", max_zone_width_atr=None
+)
 
 _BOOTSTRAP_ITERATIONS = 100
 

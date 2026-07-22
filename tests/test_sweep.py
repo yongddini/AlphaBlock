@@ -315,6 +315,7 @@ def test_evaluate_executes_trade_with_injected_order_block() -> None:
     params = ConfluenceParams(
         entry_mode="close",  # A안(evaluate) 전용 경로 — WAN-95 기본값은 zone_limit.
         rsi_mode="closed_bar",
+        max_zone_width_atr=None,  # A안은 존폭 필터를 안 읽는다(WAN-159 기본값 1.28)
         rsi_overbought=50.0,
         rsi_oversold=30.0,
         short_enabled=True,
@@ -364,6 +365,7 @@ def _forced_short_setup() -> tuple[pd.DataFrame, OrderBlockResult, ConfluencePar
     params = ConfluenceParams(
         entry_mode="close",  # A안(evaluate) 전용 경로 — WAN-95 기본값은 zone_limit.
         rsi_mode="closed_bar",
+        max_zone_width_atr=None,  # A안은 존폭 필터를 안 읽는다(WAN-159 기본값 1.28)
         rsi_overbought=50.0,
         rsi_oversold=30.0,
         short_enabled=True,
