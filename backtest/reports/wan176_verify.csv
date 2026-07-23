@@ -1,0 +1,5 @@
+check,reference,rows_compared,max_abs_diff,status,note
+grid-1h,backtest/reports/wan166_warm_vs_cold_1h.csv,24,3.552713678800501e-15,잡음,최대 절대차 3.55e-15 — 부동소수 끝자리.
+grid-15m,backtest/reports/wan166_warm_vs_cold_15m.csv,24,7.105427357601002e-15,잡음,최대 절대차 7.11e-15 — 부동소수 끝자리.
+null-long,backtest/reports/wan164_short_null.csv,24,9.71445146547012e-17,잡음,최대 절대차 9.71e-17 — 부동소수 끝자리.
+zonewidth-pnl,backtest/reports/wan142_matched_pnl.csv,552,9.71445146547012e-17,잡음,최대 절대차 9.71e-17 — 부동소수 끝자리.
