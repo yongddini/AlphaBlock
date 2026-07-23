@@ -284,7 +284,7 @@ def test_grid_needs_1m_only_for_zone_limit() -> None:
 
 def test_run_grid_returns_one_row_per_combination(synthetic_loader: None) -> None:
     """격자의 모든 조합이 빠짐없이 1행씩 나온다."""
-    grid = _grid_from(["--symbol", "BTCUSDT,ETHUSDT", "--tp-r", "1.5,2.0"])
+    grid = _grid_from(["--symbol", "BTCUSDT,ETHUSDT", "--tf", "1h", "--tp-r", "1.5,2.0"])
     rows = run_grid(grid, RunOptions(), log=False)
     assert len(rows) == 2 * 2
     assert {r.symbol for r in rows} == {"BTC/USDT:USDT", "ETH/USDT:USDT"}
@@ -325,11 +325,15 @@ def test_run_grid_multi_position_arm_routes_to_the_portfolio_engine(
 
     monkeypatch.setattr("backtest.harness.run_zone_limit_portfolio_backtest", _spy)
 
-    baseline_rows = run_grid(_grid_from(["--symbol", "BTCUSDT"]), RunOptions(), log=False)
+    baseline_rows = run_grid(
+        _grid_from(["--symbol", "BTCUSDT", "--tf", "1h"]), RunOptions(), log=False
+    )
     assert seen == []  # 단일 팔은 포트폴리오 경로를 건드리지 않는다.
 
     rows = run_grid(
-        _grid_from(["--symbol", "BTCUSDT", "--positions", "single,3"]), RunOptions(), log=False
+        _grid_from(["--symbol", "BTCUSDT", "--tf", "1h", "--positions", "single,3"]),
+        RunOptions(),
+        log=False,
     )
     single, multi = rows
     assert (single.position_mode, single.portfolio_leverage) == ("single", None)
@@ -363,7 +367,7 @@ def test_run_grid_warm_oos_adds_warm_row_and_keeps_cold_rows_bit_identical(
     (`start_time`·`num_bars`)는 차가운 OOS와 같은 평가 기간을 가리켜야 한다(전 구간을
     태웠다는 이유로 전 구간 좌표가 붙으면 "다른 기간을 쟀다"로 읽힌다).
     """
-    grid = _grid_from(["--symbol", "BTCUSDT"])
+    grid = _grid_from(["--symbol", "BTCUSDT", "--tf", "1h"])
     cold_rows = run_grid(grid, RunOptions(oos=True), log=False)
     warm_rows = run_grid(grid, RunOptions(warm_oos=True), log=False)
     assert [r.segment for r in warm_rows] == ["full", "is", "oos_warm", "oos"]
@@ -396,7 +400,7 @@ def test_run_grid_warm_oos_rejects_close_entry_and_multi_positions(
 
 
 def test_run_grid_walkforward_produces_rolling_windows(synthetic_loader: None) -> None:
-    grid = _grid_from(["--symbol", "BTCUSDT"])
+    grid = _grid_from(["--symbol", "BTCUSDT", "--tf", "1h"])
     rows = run_grid(grid, RunOptions(walkforward=2), log=False)
     assert {r.window for r in rows} == {0, 1}
     assert {r.segment for r in rows} == {"is", "oos"}
@@ -607,7 +611,18 @@ def test_main_prints_table_by_default(
 def test_main_writes_csv_to_out_path(synthetic_loader: None, tmp_path: Path) -> None:
     """완료기준: CSV 출력."""
     out = tmp_path / "sweep.csv"
-    argv = ["--symbol", "BTCUSDT", "--tp-r", "1.5,2.0", "--format", "csv", "--out", str(out)]
+    argv = [
+        "--symbol",
+        "BTCUSDT",
+        "--tf",
+        "1h",
+        "--tp-r",
+        "1.5,2.0",
+        "--format",
+        "csv",
+        "--out",
+        str(out),
+    ]
     assert main([*argv, "--quiet"]) == 0
     frame = pd.read_csv(out)
     assert len(frame) == 2
@@ -617,7 +632,12 @@ def test_main_writes_csv_to_out_path(synthetic_loader: None, tmp_path: Path) -> 
 def test_main_writes_json_to_out_path(synthetic_loader: None, tmp_path: Path) -> None:
     """완료기준: JSON 출력."""
     out = tmp_path / "sweep.json"
-    assert main(["--symbol", "BTCUSDT", "--format", "json", "--out", str(out), "--quiet"]) == 0
+    assert (
+        main(
+            ["--symbol", "BTCUSDT", "--tf", "1h", "--format", "json", "--out", str(out), "--quiet"]
+        )
+        == 0
+    )
     payload = json.loads(out.read_text(encoding="utf-8"))
     assert len(payload) == 1
     assert payload[0]["entry_mode"] == "zone_limit"
@@ -627,7 +647,7 @@ def test_main_keeps_stdout_clean_for_piping(
     synthetic_loader: None, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """진행 로그는 stderr로 — stdout이 오염되면 `--format csv | ...` 파이프가 깨진다."""
-    assert main(["--symbol", "BTCUSDT", "--format", "csv"]) == 0
+    assert main(["--symbol", "BTCUSDT", "--tf", "1h", "--format", "csv"]) == 0
     captured = capsys.readouterr()
     frame = pd.read_csv(pd.io.common.StringIO(captured.out))
     assert len(frame) == 1

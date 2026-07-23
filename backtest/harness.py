@@ -63,12 +63,63 @@ from strategy.models import (
 from strategy.order_blocks import OrderBlockDetector
 
 # --------------------------------------------------------------------------- #
-# 기본값 (기존 리포트 스크립트와 동일한 좌표)
+# 기본값 — 채택 좌표 (WAN-182 = WAN-179 결정 실행)
 # --------------------------------------------------------------------------- #
 
-DEFAULT_SYMBOLS: tuple[str, ...] = ("BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT")
-DEFAULT_TIMEFRAMES: tuple[str, ...] = ("1h",)
+#: 채택 유니버스 = 9종목 (WAN-182, 기존 6종목(WAN-111) + DOGE·LINK·LTC(WAN-175/176)).
+#:
+#: **수집·측정 대상**일 뿐 실거래·실시간 시그널 대상이 아니다(그쪽은
+#: `settings.live_signal_symbols`, 기본 BTC 단독 — WAN-111 원칙). 순서는 「기존 → 신규」로
+#: 고정한다(wan176과 동일 — leave-one-out 표에서 신규 3종목이 어디부터인지 눈으로 갈리게).
+#:
+#: ⚠️ 신규 3종목(DOGE·LINK·LTC)은 이 창에서 **펀딩 데이터가 0행**이다(WAN-178 백필 전) —
+#: 펀딩을 켠 실행에서 그대로 두면 펀딩비 0으로 성과가 부풀려진다. 채택 성과(wan95)는
+#: WAN-180과 같은 **BTC 대리 시계열**(기존 6종목 중 확정 펀딩 평균 최고 = 롱에게 가장 비싼
+#: 종목)로 보정한다. 범용 CLI(`backtest.run`)는 대리를 얹지 않으므로 신규 3종목 행의
+#: `funding_coverage`(0%)를 확인하고 읽을 것.
+DEFAULT_SYMBOLS: tuple[str, ...] = (
+    "BTC/USDT:USDT",
+    "ETH/USDT:USDT",
+    "SOL/USDT:USDT",
+    "BNB/USDT:USDT",
+    "XRP/USDT:USDT",
+    "TRX/USDT:USDT",
+    "DOGE/USDT:USDT",
+    "LINK/USDT:USDT",
+    "LTC/USDT:USDT",
+)
+
+#: 작업 TF = 15m·1h·4h (WAN-182 — WAN-107의 15m·1h에 WAN-179가 4h를 승격).
+#: 1d는 표본 미달(OOS 심볼당 ~10거래 < WAN-84 유효 기준 20건)로 제외 유지.
+DEFAULT_TIMEFRAMES: tuple[str, ...] = ("15m", "1h", "4h")
+
+#: 채택 창 = 못 박은 6년 (WAN-182, 실효 5.85년). 시작점은 SOL 상장(2020-09-14) 하한 —
+#: 9종목이 **같은 창**을 보게 하는 균일 창 원칙(WAN-175/176). 끝은 마지막 미완 하루를
+#: 잘라낸 2026-07-22 00:00 UTC. `--years N`(마지막 봉 기준 미끄러지는 창)과 달리 새 봉이
+#: 쌓여도 움직이지 않는다 — 옛 리포트가 비트 단위로 재현되지 않던 원인(CLAUDE.md)의 반대.
+DEFAULT_START: str = "2020-09-15"
+DEFAULT_END: str = "2026-07-22"
+
+#: `--years`를 명시한 실행의 기본 폭. **CLI 기본 창이 아니다** — 인자 없는 실행은
+#: `DEFAULT_START`~`DEFAULT_END` 못 박은 창을 쓴다(WAN-182).
 DEFAULT_YEARS: float = 3.0
+
+#: WAN-101~WAN-181 범용 CLI·리포트의 기본 좌표 — 3심볼 × 1h × 최근 3년(미끄러지는 창).
+#:
+#: **WAN-182가 기본 좌표를 9종목 × 15m·1h·4h × 못 박은 6년 창으로 옮겼다.** 그 이전
+#: 수치를 결론 문장에 박아 둔 리포트는 이 값을 **명시 고정**해 당시 좌표의 기록으로
+#: 보존한다 — 고정하지 않으면 기본값을 따라 조용히 9종목/6년으로 다시 돌아 본문과
+#: 어긋난다(WAN-91/95/112 부류, `LEGACY_RSI_GATE_MODE` 문단과 같은 원칙). 고정 대상
+#: 목록은 [`docs/decisions/wan182.md`](../docs/decisions/wan182.md) §파급이다.
+#:
+#: ⚠️ 반대로 **"지금 채택된 것"을 재는 리포트는 고정하지 않는다**(wan95) — 기본값이
+#: 움직이면 그 수치는 낡은 것이 되어야 맞다.
+#: ⚠️ 대부분의 옛 리포트 모듈은 좌표를 **자기 모듈 상수로** 들고 있어(wan70/81/84/88 등)
+#: 이 전환의 영향을 받지 않는다 — 고정이 필요한 것은 harness 기본값을 직접 읽던
+#: 모듈(wan104/wan108)뿐이다.
+LEGACY_SYMBOLS: tuple[str, ...] = ("BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT")
+LEGACY_TIMEFRAMES: tuple[str, ...] = ("1h",)
+LEGACY_YEARS: float = 3.0
 DB_PATH = "data/ohlcv.db"
 CACHE_DIR = "data/cache"
 

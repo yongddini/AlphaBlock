@@ -21,12 +21,18 @@ from strategy.models import ConfluenceParams
 def _default_symbols() -> list[str]:
     """수집 대상 기본 심볼 (USDT 무기한 선물).
 
-    WAN-111에서 BNB·XRP·TRX를 더해 6심볼이 됐다. **수집 대상**일 뿐 실거래·실시간 시그널
-    대상이 아니다(그쪽은 `live_signal_symbols`, 기본 BTC 단독).
+    WAN-111에서 BNB·XRP·TRX를 더해 6심볼, **WAN-182(= WAN-179 결정)에서 DOGE·LINK·LTC를
+    더해 9종목**이 됐다. **수집 대상**일 뿐 실거래·실시간 시그널 대상이 아니다(그쪽은
+    `live_signal_symbols`, 기본 BTC 단독 — 유니버스 확장은 측정·수집 대상이지 실거래
+    승인이 아니다).
 
-    신규 3심볼을 여기에 올리지 않으면 수집기가 기존 3심볼만 갱신해 **신규 심볼만 낡는다** —
-    그러면 WAN-111 격자를 다시 돌릴 때 6심볼이 서로 다른 창을 보게 되고, 심볼 편중을
-    가르려던 표에 기간 차이가 섞인다.
+    신규 심볼을 여기에 올리지 않으면 수집기가 기존 심볼만 갱신해 **신규 심볼만 낡는다** —
+    그러면 다음 격자에서 9종목이 서로 다른 창을 보게 되고, 심볼 편중을 가르려던 표에
+    기간 차이가 섞인다.
+
+    ⚠️ 신규 3종목(DOGE·LINK·LTC)은 **펀딩 데이터가 아직 0행**이다(WAN-178 백필 전) —
+    수집기가 앞으로의 펀딩은 쌓지만 과거분은 백필해야 한다. 그전까지 백테스트는 대리
+    (BTC 시계열, WAN-180 규칙) 또는 펀딩 미반영으로 돈다.
     """
     return [
         "BTC/USDT:USDT",
@@ -35,6 +41,9 @@ def _default_symbols() -> list[str]:
         "BNB/USDT:USDT",
         "XRP/USDT:USDT",
         "TRX/USDT:USDT",
+        "DOGE/USDT:USDT",
+        "LINK/USDT:USDT",
+        "LTC/USDT:USDT",
     ]
 
 
