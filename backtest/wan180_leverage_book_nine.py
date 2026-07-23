@@ -48,6 +48,7 @@ import dataclasses
 import json
 import math
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pandas as pd
@@ -63,6 +64,7 @@ from backtest.leverage_book import (
     _FundingIndex,
     run_leverage_book,
 )
+from backtest.models import BacktestResult
 from backtest.wan167_position_census import MAIN_TIMEFRAMES
 from backtest.wan169_leverage_book import (
     BOOK_ANNUALIZATION_TF,
@@ -90,6 +92,7 @@ REPORTS_DIR = Path("backtest/reports")
 DEFAULT_CELLS_CSV = REPORTS_DIR / "wan180_leverage_book_cells.csv"
 DEFAULT_GRID_CSV = REPORTS_DIR / "wan180_leverage_book_grid.csv"
 DEFAULT_OPP_CSV = REPORTS_DIR / "wan180_opportunity_cost.csv"
+DEFAULT_MONTHLY_CSV = REPORTS_DIR / "wan180_monthly_returns.csv"
 DEFAULT_SUMMARY = REPORTS_DIR / "wan180_leverage_book_summary.md"
 DEFAULT_META_JSON = REPORTS_DIR / "wan180_run_meta.json"
 
@@ -202,6 +205,27 @@ class OppRow(BaseModel):
     actual_mean_r: float
     actual_win_rate: float
     actual_return_sum: float
+
+
+class MonthlyRow(BaseModel):
+    """북 자본곡선의 월별 수익률 한 칸 (사용자 질문 2026-07-23 「월별 수익률도 알 수 있나」).
+
+    월말 자본 ÷ 직전 월말 자본 − 1 (UTC 달력월 · 거래 청산 시각 기준 복리). 청산이 없던
+    달은 행이 없다(자본 불변 = 0%). ⚠️ 복리 곡선의 월 분해라 높은 배수의 월 수익률은
+    절대값 인용 금지 — **플러스 월 비율·최악 월(월간 낙폭)** 이 결정에 실질적인 열이다.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    scope: str
+    leverage_mode: str
+    multiple: float
+    segment: str
+    month: str
+    """UTC 달력월, `YYYY-MM`."""
+    monthly_return: float
+    equity_end: float
+    num_exits: int
 
 
 # --------------------------------------------------------------------------- #
@@ -379,8 +403,52 @@ def _opportunity_rows(
     return rows
 
 
-def build_rows(payloads: Sequence[CellPayload]) -> tuple[list[BookRow], list[OppRow]]:
-    """격자 전체 — 두 유니버스 × 두 팔의 북 행 + 격리 대조 행 + 팔 A 기회비용."""
+def _monthly_rows(
+    result: BacktestResult,
+    scope: str,
+    leverage_mode: str,
+    multiple: float,
+    segment: str,
+) -> list[MonthlyRow]:
+    """북 자본곡선을 UTC 달력월로 접은 월별 수익률 — 월말 자본 ÷ 직전 월말 자본 − 1.
+
+    자본곡선의 첫 점(첫 진입 시각의 초기자본)은 청산이 아니므로 월 카운트에 넣지 않는다.
+    청산이 없던 달은 자본이 안 움직여 행이 없다(0%로 읽는다).
+    """
+    curve = result.equity_curve
+    if len(curve) < 2:
+        return []
+    month_end: dict[str, float] = {}
+    month_exits: dict[str, int] = {}
+    for point in curve[1:]:  # 첫 점은 초기자본 앵커 — 청산이 아니다.
+        stamp = datetime.fromtimestamp(point.time / 1000, tz=UTC)
+        month = f"{stamp.year:04d}-{stamp.month:02d}"
+        month_end[month] = point.equity
+        month_exits[month] = month_exits.get(month, 0) + 1
+    rows: list[MonthlyRow] = []
+    prev = result.config.initial_capital
+    for month in sorted(month_end):
+        equity = month_end[month]
+        rows.append(
+            MonthlyRow(
+                scope=scope,
+                leverage_mode=leverage_mode,
+                multiple=multiple,
+                segment=segment,
+                month=month,
+                monthly_return=equity / prev - 1.0 if prev > 0 else 0.0,
+                equity_end=equity,
+                num_exits=month_exits[month],
+            )
+        )
+        prev = equity
+    return rows
+
+
+def build_rows(
+    payloads: Sequence[CellPayload],
+) -> tuple[list[BookRow], list[OppRow], list[MonthlyRow]]:
+    """격자 전체 — 두 유니버스 × 두 팔의 북 행 + 격리 대조 행 + 팔 A 기회비용 + 월별 수익률."""
     base_cfg = harness.build_config(BOOK_ANNUALIZATION_TF)
     old_six = {_short(s) for s in OLD_SYMBOLS}
     cell_rows_by_key = {
@@ -388,6 +456,7 @@ def build_rows(payloads: Sequence[CellPayload]) -> tuple[list[BookRow], list[Opp
     }
     book_rows: list[BookRow] = []
     opp_rows: list[OppRow] = []
+    monthly_rows: list[MonthlyRow] = []
 
     for universe in UNIVERSES:
         uni_payloads = (
@@ -461,11 +530,15 @@ def build_rows(payloads: Sequence[CellPayload]) -> tuple[list[BookRow], list[Opp
                                     skipped_sizing=stats.skipped_sizing,
                                 )
                             )
-                            if universe == "nine" and not exclude and mode == "combined":
-                                opp_rows.extend(
-                                    _opportunity_rows(outcome, cells, scope, segment, multiple)
+                            if universe == "nine" and not exclude:
+                                monthly_rows.extend(
+                                    _monthly_rows(result, scope, mode, multiple, segment)
                                 )
-    return book_rows, opp_rows
+                                if mode == "combined":
+                                    opp_rows.extend(
+                                        _opportunity_rows(outcome, cells, scope, segment, multiple)
+                                    )
+    return book_rows, opp_rows, monthly_rows
 
 
 # --------------------------------------------------------------------------- #
@@ -661,6 +734,15 @@ def opp_from_csv(path: Path) -> list[OppRow]:
     return [OppRow.model_validate(rec) for rec in frame.to_dict(orient="records")]
 
 
+def monthly_to_frame(rows: Sequence[MonthlyRow]) -> pd.DataFrame:
+    return pd.DataFrame([r.model_dump() for r in rows], columns=list(MonthlyRow.model_fields))
+
+
+def monthly_from_csv(path: Path) -> list[MonthlyRow]:
+    frame = pd.read_csv(path, keep_default_na=False)
+    return [MonthlyRow.model_validate(rec) for rec in frame.to_dict(orient="records")]
+
+
 # --------------------------------------------------------------------------- #
 # 렌더
 # --------------------------------------------------------------------------- #
@@ -849,10 +931,80 @@ def _loo_lines(rows: Sequence[BookRow], scope: str, segment: str, mode: str) -> 
     return lines
 
 
+def _monthly_stats_table(monthly_rows: Sequence[MonthlyRow], scope: str, segment: str) -> list[str]:
+    """모드 × 배수별 월별 수익률 통계 — 결정에 실질적인 열(플러스 월 비율 · 최악 월)."""
+    lines = [
+        "| 팔 | 배수 | 개월 | 플러스 월 | 평균 월수익 | 중앙값 | 최악 월 | 최고 월 |",
+        "| -- | --: | --: | --: | --: | --: | --: | --: |",
+    ]
+    for mode in MODES:
+        for multiple in MULTIPLES:
+            rows = [
+                r
+                for r in monthly_rows
+                if r.scope == scope
+                and r.segment == segment
+                and r.leverage_mode == mode
+                and r.multiple == multiple
+            ]
+            if not rows:
+                continue
+            returns = sorted(r.monthly_return for r in rows)
+            n = len(returns)
+            plus = sum(1 for v in returns if v > 0)
+            median = returns[n // 2] if n % 2 else (returns[n // 2 - 1] + returns[n // 2]) / 2.0
+            worst = min(rows, key=lambda r: r.monthly_return)
+            best = max(rows, key=lambda r: r.monthly_return)
+            lines.append(
+                f"| {_mode_label(mode)} | {multiple:g} | {n} | {plus}/{n} | "
+                f"{_pct(sum(returns) / n)} | {_pct(median)} | "
+                f"{_pct(worst.monthly_return)} ({worst.month}) | "
+                f"{_pct(best.monthly_return)} ({best.month}) |"
+            )
+    return lines
+
+
+def _monthly_detail_table(
+    monthly_rows: Sequence[MonthlyRow],
+    scope: str,
+    segment: str,
+    configs: Sequence[tuple[str, float]],
+) -> list[str]:
+    """헤드라인 구성의 월별 수익률 나열 — 달력월 행, 구성 열."""
+    per_config: dict[tuple[str, float], dict[str, MonthlyRow]] = {}
+    months: set[str] = set()
+    for mode, multiple in configs:
+        rows = {
+            r.month: r
+            for r in monthly_rows
+            if r.scope == scope
+            and r.segment == segment
+            and r.leverage_mode == mode
+            and r.multiple == multiple
+        }
+        per_config[(mode, multiple)] = rows
+        months.update(rows)
+    if not months:
+        return ["(부분 실행 — 월별 행 없음)"]
+    header = " | ".join(f"{_mode_label(m)} {mult:g}배" for m, mult in configs)
+    lines = [
+        f"| 월 | {header} |",
+        "| -- | " + " | ".join("--:" for _ in configs) + " |",
+    ]
+    for month in sorted(months):
+        cells = []
+        for key in configs:
+            row = per_config[key].get(month)
+            cells.append(_pct(row.monthly_return) if row else "0.00%")
+        lines.append(f"| {month} | " + " | ".join(cells) + " |")
+    return lines
+
+
 def build_summary_markdown(
     cell_rows: Sequence[CellRow],
     book_rows: Sequence[BookRow],
     opp_rows: Sequence[OppRow],
+    monthly_rows: Sequence[MonthlyRow] = (),
     *,
     cells_csv: Path,
     grid_csv: Path,
@@ -961,6 +1113,30 @@ def build_summary_markdown(
         "",
         *_loo_lines(book_rows, main_scope, SEGMENT_OOS_WARM, "cap_only"),
         "",
+        f"## 7. 월별 수익률 — {main_scope} (UTC 달력월 · 청산 시각 복리)",
+        "",
+        "### 통계 — oos_warm (주)",
+        "",
+        *_monthly_stats_table(monthly_rows, main_scope, SEGMENT_OOS_WARM),
+        "",
+        "### 통계 — oos (스트레스)",
+        "",
+        *_monthly_stats_table(monthly_rows, main_scope, SEGMENT_OOS),
+        "",
+        "### 월별 나열 — 예산 헤드라인 구성 · oos_warm",
+        "",
+        *_monthly_detail_table(
+            monthly_rows,
+            main_scope,
+            SEGMENT_OOS_WARM,
+            [("combined", 1.0), ("combined", 3.0), ("cap_only", 5.0)],
+        ),
+        "",
+        "⚠️ 청산이 없던 달은 행이 없어 0%로 접힌다(월별 나열에선 0.00%로 표기). 높은 배수의 "
+        "월 수익률 절대값은 복리 값이라 인용 금지 — 결정에 실질적인 열은 **플러스 월 비율과 "
+        "최악 월**(월간 낙폭)이다. 원자료(전 스코프 × 팔 × 배수 × 구간)는 "
+        "`wan180_monthly_returns.csv`.",
+        "",
         "## 판정",
         "",
         *verdict(book_rows, opp_rows),
@@ -989,6 +1165,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out-cells", type=Path, default=DEFAULT_CELLS_CSV)
     parser.add_argument("--out-grid", type=Path, default=DEFAULT_GRID_CSV)
     parser.add_argument("--out-opp", type=Path, default=DEFAULT_OPP_CSV)
+    parser.add_argument("--out-monthly", type=Path, default=DEFAULT_MONTHLY_CSV)
     parser.add_argument("--out-md", type=Path, default=DEFAULT_SUMMARY)
     parser.add_argument("--out-meta", type=Path, default=DEFAULT_META_JSON)
     parser.add_argument(
@@ -1006,6 +1183,7 @@ def main(argv: list[str] | None = None) -> int:
     out_cells = Path(args.out_cells)
     out_grid = Path(args.out_grid)
     out_opp = Path(args.out_opp)
+    out_monthly = Path(args.out_monthly)
     out_md = Path(args.out_md)
     out_meta = Path(args.out_meta)
 
@@ -1013,6 +1191,7 @@ def main(argv: list[str] | None = None) -> int:
         cell_rows = cells_from_csv(out_cells)
         book_rows = grid_from_csv(out_grid)
         opp_rows = opp_from_csv(out_opp)
+        monthly_rows = monthly_from_csv(out_monthly) if out_monthly.exists() else []
         funding_note = ""
         if out_meta.exists():
             funding_note = str(
@@ -1020,7 +1199,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         print(
             f"[wan180] CSV 로드 — 칸 {len(cell_rows)}행 · 격자 {len(book_rows)}행 · "
-            f"기회비용 {len(opp_rows)}행 (재실행 없음)"
+            f"기회비용 {len(opp_rows)}행 · 월별 {len(monthly_rows)}행 (재실행 없음)"
         )
     else:
         payloads = run_cells(
@@ -1036,11 +1215,12 @@ def main(argv: list[str] | None = None) -> int:
             if funding_note:
                 print(f"[wan180] {funding_note}")
         cell_rows = [row for p in payloads for row in p.rows]
-        book_rows, opp_rows = build_rows(payloads)
+        book_rows, opp_rows, monthly_rows = build_rows(payloads)
         out_cells.parent.mkdir(parents=True, exist_ok=True)
         cells_to_frame(cell_rows).to_csv(out_cells, index=False)
         grid_to_frame(book_rows).to_csv(out_grid, index=False)
         opp_to_frame(opp_rows).to_csv(out_opp, index=False)
+        monthly_to_frame(monthly_rows).to_csv(out_monthly, index=False)
         out_meta.write_text(
             json.dumps({"funding_note": funding_note}, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
@@ -1048,6 +1228,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"[wan180] 칸 {len(cell_rows)}행 → {out_cells}")
         print(f"[wan180] 격자 {len(book_rows)}행 → {out_grid}")
         print(f"[wan180] 기회비용 {len(opp_rows)}행 → {out_opp}")
+        print(f"[wan180] 월별 {len(monthly_rows)}행 → {out_monthly}")
 
     verify_line, worst = verify_cells(cell_rows)
     print(f"[wan180] 검산: {verify_line}")
@@ -1061,6 +1242,7 @@ def main(argv: list[str] | None = None) -> int:
             cell_rows,
             book_rows,
             opp_rows,
+            monthly_rows,
             cells_csv=out_cells,
             grid_csv=out_grid,
             opp_csv=out_opp,

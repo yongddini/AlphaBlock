@@ -134,3 +134,39 @@ def test_proxy_reprice_reflects_funding_cost_in_return() -> None:
     # 원본 rows는 total_return=0.0 더미다 — 재계산 값은 실제 시퀀싱 결과라 0이 아니고,
     # 펀딩 비용(3회 × 1% × 명목)이 실린 값이다.
     assert proxy_return != pytest.approx(blank_return)
+
+
+def test_monthly_rows_compound_by_calendar_month() -> None:
+    """월별 수익률 = 월말 자본 ÷ 직전 월말 자본 − 1 (UTC 달력월 · 복리)."""
+    from backtest.leverage_book import BookCell, LeverageBookParams, run_leverage_book
+    from backtest.models import BacktestConfig
+    from backtest.wan180_leverage_book_nine import _monthly_rows
+    from backtest.zone_limit_backtest import build_result_from_trades
+    from execution.sizing import PositionSizingParams
+
+    jan_10 = 1_704_844_800_000  # 2024-01-10 UTC
+    jan_20 = 1_705_708_800_000
+    feb_05 = 1_707_091_200_000
+    feb_10 = 1_707_523_200_000
+    cfg = BacktestConfig(
+        initial_capital=10_000.0,
+        risk_sizing=PositionSizingParams(leverage=10.0, min_stop_distance_fraction=0.0),
+    )
+    cells = [
+        BookCell(
+            symbol="BTC/USDT:USDT",
+            timeframe="1h",
+            candidates=[_cand(jan_10, jan_20), _cand(feb_05, feb_10)],
+        )
+    ]
+    outcome = run_leverage_book(cells, cfg, LeverageBookParams())
+    result = build_result_from_trades(outcome.trades, outcome.effective_config, "1h")
+    rows = _monthly_rows(result, "both", "combined", 1.0, "full")
+
+    assert [r.month for r in rows] == ["2024-01", "2024-02"]
+    eq_jan = 10_000.0 + outcome.trades[0].realized_pnl
+    eq_feb = eq_jan + outcome.trades[1].realized_pnl
+    assert rows[0].monthly_return == pytest.approx(eq_jan / 10_000.0 - 1.0)
+    assert rows[1].monthly_return == pytest.approx(eq_feb / eq_jan - 1.0)  # 복리 분모 = 1월말.
+    assert rows[0].num_exits == 1 and rows[1].num_exits == 1
+    assert rows[1].equity_end == pytest.approx(eq_feb)
