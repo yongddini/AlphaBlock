@@ -46,7 +46,10 @@ from strategy.models import ConfluenceParams, DeviationFilterParams
 
 #: 바이낸스 USDⓈ-M 선물 웹소켓 베이스. `data.stream.FUTURES_WS_BASE`와 같은 값이지만
 #: 여기서는 **브라우저가** 붙으므로 파이썬 스트림 소비 경로(`data.stream`)와 무관하다.
-LIVE_WS_BASE = "wss://fstream.binance.com"
+#: ⚠️ **`/market` 접두사가 필수다**(WAN-174) — 옛 경로는 핸드셰이크만 성공하고 데이터를
+#: 한 건도 안 보낸다(바로 아래 `LIVE_INTERVALS` 주석이 말하는 "조용히 아무 메시지도 안
+#: 오는 상태"가 인터벌 오타 없이도 일어난다). 근거·실측은 `data.stream.FUTURES_WS_BASE`.
+LIVE_WS_BASE = "wss://fstream.binance.com/market"
 
 #: 바이낸스 kline 스트림이 지원하는 인터벌. 대시보드 TF가 이 목록에 없으면 라이브를
 #: 아예 켜지 않는다(없는 스트림에 붙으면 조용히 아무 메시지도 안 오는 상태가 된다).

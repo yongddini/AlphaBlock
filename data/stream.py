@@ -20,7 +20,15 @@ from data.storage import OhlcvStore
 
 logger = logging.getLogger(__name__)
 
-FUTURES_WS_BASE = "wss://fstream.binance.com"
+#: 바이낸스 USDⓈ-M 선물 웹소켓 베이스. ⚠️ **`/market` 접두사가 필수다**(WAN-174).
+#: 옛 경로(`wss://fstream.binance.com/stream?streams=...`)는 지금도 핸드셰이크가
+#: **성공**하지만(101 Switching Protocols) 데이터 프레임을 **한 건도 보내지 않는다** —
+#: 예외도 종료도 없이 조용히 멈춘 것처럼 보인다. 현물(`stream.binance.com:9443`)은
+#: 접두사 없이 계속 동작하므로 "웹소켓 자체는 되는데 선물만 0건"으로 관측된다.
+#: 실측(2026-07-24 로컬 맥, 각 20초): 옛 경로 0건 · `/market` 경로 36건.
+#: 이 조용한 실패가 WAN-174에서 ASTx 차단·바이낸스 클라우드 IP 차단으로 여러 번
+#: 오진됐다(ccxt.pro는 `/market/ws/0`으로 붙어서 잘 받았고, 그 대조가 단서였다).
+FUTURES_WS_BASE = "wss://fstream.binance.com/market"
 
 
 def to_ws_symbol(symbol: str) -> str:

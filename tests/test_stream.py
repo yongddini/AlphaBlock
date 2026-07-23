@@ -11,6 +11,7 @@ import pytest
 from data.models import Candle
 from data.storage import OhlcvStore
 from data.stream import (
+    FUTURES_WS_BASE,
     build_stream_path,
     build_symbol_map,
     consume_messages,
@@ -62,6 +63,19 @@ def test_build_symbol_map() -> None:
 def test_build_stream_path() -> None:
     path = build_stream_path(["BTC/USDT:USDT"], ["1m", "1h"])
     assert path == "/stream?streams=btcusdt@kline_1m/btcusdt@kline_1h"
+
+
+def test_futures_ws_base_keeps_market_prefix() -> None:
+    """선물 베이스의 `/market` 접두사를 동작으로 고정한다(WAN-174).
+
+    접두사가 빠지면 바이낸스는 **101 핸드셰이크까지 성공시키고 데이터 프레임을 한 건도
+    안 보낸다** — 예외도 연결 종료도 없어 수집기가 조용히 멈춘 것처럼 보인다. 라벨이
+    아니라 **최종 조립 URL**로 고정해야 이 조용한 실패가 회귀로 잡힌다.
+    """
+    assert FUTURES_WS_BASE == "wss://fstream.binance.com/market"
+
+    url = FUTURES_WS_BASE + build_stream_path(["BTC/USDT:USDT"], ["1m"])
+    assert url == ("wss://fstream.binance.com/market/stream?streams=btcusdt@kline_1m")
 
 
 def test_parse_closed_candle_combined() -> None:

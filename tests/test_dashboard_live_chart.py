@@ -132,8 +132,19 @@ def test_js_band_warmup_returns_null() -> None:
 
 def test_live_stream_url_uses_binance_futures_kline() -> None:
     assert live_stream_url("BTC/USDT:USDT", "15m") == (
-        "wss://fstream.binance.com/ws/btcusdt@kline_15m"
+        "wss://fstream.binance.com/market/ws/btcusdt@kline_15m"
     )
+
+
+def test_live_stream_url_keeps_market_prefix() -> None:
+    """`/market` 접두사를 동작으로 고정한다(WAN-174).
+
+    옛 경로(`/ws/...`)는 핸드셰이크가 성공하고 데이터만 안 와서 **화면이 조용히 빈
+    채로** 남는다 — 접두사를 잃어도 예외가 안 나므로 이 단언이 유일한 방어선이다.
+    """
+    url = live_stream_url("ETH/USDT:USDT", "1m")
+    assert "/market/ws/" in url
+    assert not url.startswith("wss://fstream.binance.com/ws/")
 
 
 def test_build_live_config_seeds_band_window_from_closed_bars() -> None:
@@ -204,7 +215,7 @@ def test_live_payload_shape() -> None:
     )
     assert config is not None
     payload = config.to_payload()
-    assert payload["streamUrl"] == "wss://fstream.binance.com/ws/btcusdt@kline_15m"
+    assert payload["streamUrl"] == "wss://fstream.binance.com/market/ws/btcusdt@kline_15m"
     assert payload["bandColor"] == "#00e5ff"
     assert payload["intervalMs"] == 900_000
     assert isinstance(payload["bandCloses"], list)
