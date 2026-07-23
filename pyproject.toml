@@ -59,7 +59,15 @@ files = [
     "cli",
     "tests",
     "scripts",
+    "qc",
 ]
+
+# QC 클라우드 전용 셸 — `AlgorithmImports`(QC SDK)가 로컬에 없어 타입 검사가 성립하지
+# 않는다(WAN-181). 로컬에서 검증되는 로직은 전부 `qc.event_engine`(strict 검사 대상)에
+# 있고 이 모듈은 QC 이벤트 번역만 담는다.
+[[tool.mypy.overrides]]
+module = ["qc.algorithm"]
+ignore_errors = true
 
 # ccxt/pandas/matplotlib/streamlit은 타입 스텁을 제공하지 않으므로 미싱 임포트를 허용한다.
 [[tool.mypy.overrides]]

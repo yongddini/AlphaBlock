@@ -1,0 +1,4 @@
+arm,num_trades,win_rate,total_return,max_drawdown,final_equity,total_funding_cost,canon_eligible,canon_filled,canon_penetrations,event_eligible,event_filled,event_penetrations,same_minute_fill_ties,event_skipped_fills,seq_axis_mismatched_trades,seq_axis_pnl_gap,final_mismatched_trades,final_pnl_gap,funding_enabled
+canonical,254.0,0.610236220472441,0.9893945855778715,0.050880373680385,19893.945855778715,67.23709999896195,,,,,,,,,,,,,
+event,254.0,0.610236220472441,0.9985945365416319,0.050880373680385,19985.94536541632,66.96015575247246,,,,,,,,,,,,,
+counters,,,,,,,485.0,344.0,0.0,485.0,344.0,0.0,19.0,42.0,32.0,91.99950963759693,32.0,91.99950963759693,True
