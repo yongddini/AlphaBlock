@@ -1,6 +1,13 @@
 # Secrets / env
 .env
 
+# 개인키 — 원격이 공개 저장소라 `git add -A` 한 번에 유출된다.
+# 저장소 루트 ssh/ 에 실제 키가 있었다(추적된 적은 없음). 확장자 글롭도 함께 건다.
+ssh/
+*.key
+*.ppk
+*.pem
+
 # Virtual environments
 .venv/
 
