@@ -19,7 +19,8 @@ from backtest.leverage_book import (
     scale_sizing_params,
 )
 from backtest.models import BacktestConfig, ExitReason, PositionSide
-from backtest.zone_limit_backtest import _Candidate, sequence_with_candidates
+from backtest.zone_limit_backtest import _Candidate, _to_trade, sequence_with_candidates
+from data.models import FundingRate
 from execution.sizing import PositionSizingParams
 
 
@@ -372,3 +373,142 @@ def test_book_causality_truncating_future_keeps_past_trades() -> None:
     part_done = [t for t in part.trades if t.exit_time < cut]
     assert full_done == part_done
     assert len(full_done) >= 2  # 빈 비교로 통과하는 것을 막는다.
+
+
+# --------------------------------------------------------------------------- #
+# cap-only 레버리지 (WAN-180 팔 B): 상한만 N배, 거래 크기는 1배 그대로
+# --------------------------------------------------------------------------- #
+
+
+def test_cap_only_scales_cap_not_trade_size() -> None:
+    """cap-only는 스킵을 실제로 줄이고 동시 열림을 늘리되, 거래 크기는 1배 그대로다.
+
+    손절 1%·리스크 1%·leverage 1이면 자연 명목 = 자본이라 한 거래가 1배 상한을 다
+    쓴다. combined는 배수 N이 크기·상한을 함께 키워 겹침 자리가 늘지 않지만(상대 여유
+    불변 — WAN-169 성질), cap-only N=3은 상한만 3배라 같은 크기 포지션이 세 자리
+    생긴다 — 라벨이 아니라 동작(수량·스킵·동시 열림)으로 고정한다(완료기준).
+    """
+    a = _cand(1_000, 5_000)
+    b = _cand(2_000, 6_000)
+    cells = [_cell("BTC/USDT:USDT", "1h", [a]), _cell("ETH/USDT:USDT", "1h", [b])]
+
+    base = run_leverage_book(cells, _cfg(), LeverageBookParams(leverage_multiple=1.0))
+    assert base.stats.placed == 1
+    assert base.stats.skipped_notional == 1
+
+    combined = run_leverage_book(cells, _cfg(), LeverageBookParams(leverage_multiple=3.0))
+    assert combined.stats.placed == 1  # 상대 여유 불변 — 겹침 자리가 늘지 않는다.
+    assert combined.stats.skipped_notional == 1
+
+    cap_only = run_leverage_book(
+        cells, _cfg(), LeverageBookParams(leverage_multiple=3.0, leverage_mode="cap_only")
+    )
+    assert cap_only.stats.placed == 2  # 스킵이 실제로 줄었다 —
+    assert cap_only.stats.skipped_notional == 0
+    assert cap_only.stats.peak_concurrency == 2  # — 동시 열림이 늘었다 —
+    for trade in cap_only.trades:  # — 그리고 거래 크기는 1배 그대로다.
+        assert trade.quantity == pytest.approx(base.trades[0].quantity)
+
+
+def test_cap_only_per_trade_ceiling_stays_base() -> None:
+    """cap-only에서 거래당 명목 천장도 1배로 남는다 — 상한을 키운 만큼 개별 거래가
+    커지면 그건 cap-only가 아니라 결합의 반쪽이다(모듈 독스트링)."""
+    close_stop = _cand(1_000, 2_000, stop_price=99.9)  # 자연 명목 = 자본×10.
+    cells = [_cell("BTC/USDT:USDT", "1h", [close_stop])]
+
+    cap_only = run_leverage_book(
+        cells, _cfg(), LeverageBookParams(leverage_multiple=5.0, leverage_mode="cap_only")
+    )
+    combined = run_leverage_book(cells, _cfg(), LeverageBookParams(leverage_multiple=5.0))
+
+    cap_qty = cap_only.trades[0].quantity
+    # 1배 천장(자본×1 = 10,000 명목) ÷ 진입가 100 = 수량 100 — 북 상한(5배)이 아니다.
+    assert cap_qty * cap_only.trades[0].entry_price == pytest.approx(10_000.0)
+    assert cap_only.stats.clamped_entries == 1
+    # combined의 천장은 5배라 같은 후보가 5배 명목까지 커진다 — 두 모드가 실제로 다르다.
+    assert combined.trades[0].quantity == pytest.approx(cap_qty * 5.0)
+
+
+def test_cap_only_multiple_one_equals_combined() -> None:
+    """배수 1에서는 두 모드가 같은 거래를 낸다 — cap-only는 1배의 다른 이름이 아니라
+    배수를 싣는 자리만 다른 같은 북이다."""
+    cells = [
+        _cell("BTC/USDT:USDT", "1h", [_cand(1_000, 5_000), _cand(6_000, 8_000)]),
+        _cell("ETH/USDT:USDT", "1h", [_cand(2_000, 6_000)]),
+    ]
+    cfg = _cfg(leverage=10.0)  # 상한이 판정을 가리지 않게.
+    combined = run_leverage_book(cells, cfg, LeverageBookParams(leverage_multiple=1.0))
+    cap_only = run_leverage_book(
+        cells, cfg, LeverageBookParams(leverage_multiple=1.0, leverage_mode="cap_only")
+    )
+    assert cap_only.trades == combined.trades
+    assert cap_only.stats.placed == combined.stats.placed
+
+
+def test_scale_sizing_params_cap_only_scales_only_leverage() -> None:
+    sizing = PositionSizingParams(
+        risk_per_trade=0.01, leverage=2.0, notional_fraction=0.5, min_stop_distance_fraction=0.0
+    )
+    scaled = scale_sizing_params(sizing, 5.0, mode="cap_only")
+    assert scaled.leverage == pytest.approx(10.0)
+    assert scaled.risk_per_trade == pytest.approx(0.01)  # 거래 크기 노브는 불변 —
+    assert scaled.notional_fraction == pytest.approx(0.5)  # — 둘 다.
+
+
+# --------------------------------------------------------------------------- #
+# 스킵·배치 기록 (WAN-180 밀림 기회비용의 원자료)
+# --------------------------------------------------------------------------- #
+
+
+def test_skip_and_placed_records_match_counters() -> None:
+    """기록 리스트는 카운터의 원자료다 — 사유별 합이 카운터와 항상 같다."""
+    a = _cand(1_000, 5_000)
+    a_overlap = _cand(2_000, 4_000)  # 같은 칸 → cell_busy.
+    b = _cand(2_500, 6_000)  # 다른 칸이되 상한 소진 → notional.
+    outcome = run_leverage_book(
+        [_cell("BTC/USDT:USDT", "1h", [a, a_overlap]), _cell("ETH/USDT:USDT", "1h", [b])],
+        _cfg(),
+        LeverageBookParams(),
+    )
+    stats = outcome.stats
+    reasons = [r.reason for r in stats.skip_records]
+    assert reasons.count("cell_busy") == stats.skipped_cell_busy == 1
+    assert reasons.count("notional") == stats.skipped_notional == 1
+    assert reasons.count("sizing") == stats.skipped_sizing == 0
+    # 스킵 순간의 공유 자본이 실렸다(아직 실현 손익이 없으니 초기자본 그대로).
+    assert all(r.equity == pytest.approx(10_000.0) for r in stats.skip_records)
+    assert len(stats.placed_records) == stats.placed == 1
+    placed = stats.placed_records[0]
+    assert placed.realized_pnl == pytest.approx(outcome.trades[0].realized_pnl)
+    assert placed.risk_amount > 0.0
+
+
+# --------------------------------------------------------------------------- #
+# 펀딩 구간 자르기 (성능 전용): 전체 리스트 경로와 비트 단위로 같아야 한다
+# --------------------------------------------------------------------------- #
+
+
+def test_funding_window_slicing_bit_identical_to_full_list() -> None:
+    """북이 자른 펀딩 구간의 손익이 전체 리스트를 넘긴 `_to_trade`와 비트로 같다.
+
+    자르기는 같은 부분집합을 같은 순서로 누적하게 만드는 성능 장치일 뿐이다 — 구간 밖
+    정산과 예측값(`is_predicted`)이 걸러지는 기존 필터 동작이 그대로임을 고정한다.
+    """
+    cand = _cand(10_000, 30_000)
+    rates = [
+        FundingRate(symbol="BTC/USDT:USDT", funding_time=5_000, rate=0.01),  # 진입 전 — 제외.
+        FundingRate(symbol="BTC/USDT:USDT", funding_time=12_000, rate=0.0001),
+        FundingRate(symbol="BTC/USDT:USDT", funding_time=20_000, rate=-0.0002),
+        FundingRate(symbol="BTC/USDT:USDT", funding_time=25_000, rate=0.0003, is_predicted=True),
+        FundingRate(symbol="BTC/USDT:USDT", funding_time=30_000, rate=0.05),  # 청산 시각 — 제외.
+    ]
+    cfg = _cfg().model_copy(update={"funding_enabled": True})
+    outcome = run_leverage_book(
+        [BookCell(symbol="BTC/USDT:USDT", timeframe="1h", candidates=[cand], funding_rates=rates)],
+        cfg,
+        LeverageBookParams(),
+    )
+    manual = _to_trade(cand, cfg.initial_capital, cfg, rates, 0.0)
+    assert manual is not None
+    assert outcome.trades == [manual]
+    assert outcome.trades[0].funding_cost != 0.0  # 구간 안 정산이 실제로 반영됐다.
