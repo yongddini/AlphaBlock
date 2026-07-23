@@ -1,0 +1,30 @@
+# AlphaBlock 대시보드 systemd 서비스 (WAN-174, 리눅스 서버).
+#
+# scripts/install-systemd.sh 가 __PLACEHOLDER__ 를 실제 값으로 치환해
+# /etc/systemd/system/alphablock-dashboard.service 로 설치한다.
+# launchd 판(scripts/launchd/com.alphablock.dashboard.plist.template, WAN-48)과 대칭.
+#
+# 안전: 127.0.0.1 로만 바인딩한다 — 공개 노출 금지, 접속은 SSH 터널로 한다
+# (docs/ops/server-migration.md 참고). --server.headless true 로 첫 실행
+# 이메일 프롬프트를 억제한다. 읽기 전용이며 러너/수집 CLI 를 켜지 않는다.
+
+[Unit]
+Description=AlphaBlock dashboard (127.0.0.1 only; access via SSH tunnel)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=__RUN_USER__
+WorkingDirectory=__WORKDIR__
+Environment=PATH=__PATH__
+ExecStart=__UV_BIN__ run -- streamlit run dashboard/app.py --server.port __DASHBOARD_PORT__ --server.address 127.0.0.1 --server.headless true
+
+Restart=always
+RestartSec=10
+
+StandardOutput=append:__LOG_DIR__/dashboard.log
+StandardError=append:__LOG_DIR__/dashboard.log
+
+[Install]
+WantedBy=multi-user.target
