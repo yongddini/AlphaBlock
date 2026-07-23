@@ -51,7 +51,7 @@ from pathlib import Path
 import pandas as pd
 from pydantic import BaseModel, ConfigDict
 
-from backtest.harness import DEFAULT_YEARS, mean_r, segments_for
+from backtest.harness import LEGACY_YEARS, mean_r, segments_for
 from backtest.harness import load_market_data as _load_market_data
 from backtest.models import BacktestConfig, Trade
 from backtest.portfolio import C, PortfolioParams, PortfolioStats, ToTrade, sequence_portfolio
@@ -74,6 +74,11 @@ from data.models import FundingRate
 from execution.sizing import SizingMode
 
 DEFAULT_SYMBOLS: tuple[str, ...] = ("BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT")
+
+#: 이 리포트의 창은 **당시(최근 3년) 기록으로 명시 고정**한다(WAN-182 파급). WAN-182가
+#: harness 기본 좌표를 9종목 × 못 박은 6년 창으로 옮겼는데, 이 모듈은 결론(다중 대 단일
+#: 판정)이 3심볼/3년 수치에 박혀 있어 기본값을 따라가면 본문과 어긋난다.
+DEFAULT_YEARS = LEGACY_YEARS
 
 SCENARIO_SINGLE = "single"
 SCENARIO_PEAK = "peak_N"

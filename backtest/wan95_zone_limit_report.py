@@ -48,28 +48,33 @@ python -m backtest.wan95_zone_limit_report
 from __future__ import annotations
 
 import argparse
+import gc
 from pathlib import Path
 
 import pandas as pd
 from pydantic import BaseModel, ConfigDict
 
 from backtest.ab_run import _window, _windowed_result
-from backtest.models import BacktestConfig
-from backtest.sweep import default_backtest_config, evaluate
-from backtest.wan81_engine_replacement_report import (
-    _CACHE_DIR,
-    _DB_PATH,
+from backtest.harness import (
+    DEFAULT_END,
+    DEFAULT_START,
     DEFAULT_SYMBOLS,
     DEFAULT_TIMEFRAMES,
-    DEFAULT_YEARS,
-    _load_recent,
 )
+from backtest.models import BacktestConfig
+from backtest.run import parse_date_ms
+from backtest.sweep import default_backtest_config, evaluate
+from backtest.wan81_engine_replacement_report import _CACHE_DIR, _DB_PATH
 from backtest.zone_limit_backtest import run_zone_limit_backtest_verbose
 from data.funding import FundingRateStore
 from data.models import FundingRate
 from data.storage import OhlcvStore
 from strategy.models import ConfluenceParams, OrderBlockResult
 from strategy.order_blocks import OrderBlockDetector
+
+#: 신규 3종목(WAN-182 유니버스 확장분). 이 창에서 펀딩 데이터가 0행이라(WAN-178 백필 전)
+#: 그대로 두면 펀딩비 0으로 성과가 부풀려진다 — 아래 `apply_funding_proxy`가 보정한다.
+NEW_SYMBOLS: tuple[str, ...] = ("DOGE/USDT:USDT", "LINK/USDT:USDT", "LTC/USDT:USDT")
 
 #: 채택 기본값(WAN-95) — 지정가 + 실시간 RSI + 롱 온리. `ConfluenceParams()` 그 자체다.
 ZONE_LIMIT_PARAMS = ConfluenceParams()
@@ -193,33 +198,102 @@ def run_symbol_timeframe(
     ]
 
 
+def apply_funding_proxy(
+    funding_by_symbol: dict[str, list[FundingRate]],
+) -> tuple[dict[str, list[FundingRate]], str]:
+    """신규 3종목의 빈 펀딩을 기존 종목 중 **최고 펀딩** 종목의 시계열로 대체한다.
+
+    WAN-180과 같은 규칙(사용자 지시 2026-07-23): 대리 종목 = 신규가 아닌 종목 중 이 창의
+    확정 펀딩 **평균이 가장 높은**(= 롱에게 가장 비싼) 종목. 보수적 대체다 — 실제 신규 종목
+    펀딩이 이보다 쌌다면 성과는 여기 값보다 좋았을 것이다. 신규 종목이라도 **자기 데이터가
+    있으면 덮지 않는다**(대리는 「데이터가 없어 0으로 계상되는」 문제의 교정이지 데이터
+    교체가 아니다) — WAN-178 백필이 끝나면 이 함수는 저절로 아무것도 하지 않는다.
+    """
+    olds = {s: r for s, r in funding_by_symbol.items() if s not in NEW_SYMBOLS and r}
+    targets = [s for s in funding_by_symbol if s in NEW_SYMBOLS and not funding_by_symbol[s]]
+    if not olds or not targets:
+        return dict(funding_by_symbol), ""
+
+    def mean_confirmed(rates: list[FundingRate]) -> float:
+        vals = [r.rate for r in rates if not r.is_predicted]
+        return sum(vals) / len(vals) if vals else float("-inf")
+
+    rate_by_symbol = {s: mean_confirmed(r) for s, r in olds.items()}
+    proxy_symbol = max(rate_by_symbol, key=lambda s: rate_by_symbol[s])
+    if rate_by_symbol[proxy_symbol] == float("-inf"):
+        return dict(funding_by_symbol), ""
+
+    out = dict(funding_by_symbol)
+    for symbol in targets:
+        out[symbol] = list(funding_by_symbol[proxy_symbol])
+    note = (
+        f"신규 종목 펀딩 대리(WAN-182 · WAN-180과 같은 규칙): "
+        f"{', '.join(s.split('/')[0] for s in targets)}의 펀딩을 "
+        f"**{proxy_symbol.split('/')[0]}**(기존 종목 중 확정 펀딩 평균 최고 "
+        f"{rate_by_symbol[proxy_symbol] * 100:.4f}%/정산)의 시계열로 대체했다 — 신규 종목은 "
+        "이 창에서 펀딩 데이터가 없어(WAN-178 백필 전) 그대로 두면 펀딩비 0으로 성과가 "
+        "부풀려진다. 보수적(롱에게 가장 비싼) 대체이며, 백필이 끝나 자기 데이터가 생기면 "
+        "대리는 자동으로 적용되지 않는다."
+    )
+    return out, note
+
+
 def collect_rows(
     symbols: tuple[str, ...] = DEFAULT_SYMBOLS,
     timeframes: tuple[str, ...] = DEFAULT_TIMEFRAMES,
-    years: float = DEFAULT_YEARS,
+    start: str = DEFAULT_START,
+    end: str = DEFAULT_END,
     db_path: str = _DB_PATH,
     cache_dir: str = _CACHE_DIR,
-) -> list[ZoneLimitRow]:
-    """전 심볼×TF를 재산출한다. 1분봉이 없는 심볼은 건너뛴다(지정가 평가 불가)."""
+) -> tuple[list[ZoneLimitRow], str]:
+    """전 심볼×TF를 채택 창(못 박은 6년, WAN-182)에서 재산출한다.
+
+    1분봉이 없는 심볼은 건너뛴다(지정가 평가 불가). 반환은 (행들, 펀딩 대리 각주) —
+    각주가 비어 있지 않으면 신규 종목 펀딩이 대리 시계열로 계산된 것이다.
+
+    ⚠️ 옛 판(WAN-159까지)은 `--years 3`(마지막 봉 기준 미끄러지는 창) × 3심볼 × 4TF였다 —
+    WAN-182가 좌표를 채택 창으로 옮겼다. 창이 못 박혀 있으므로 새 봉이 쌓여도 이 표는
+    비트 단위로 재현된다(데이터 드리프트 각주의 원인 하나가 사라진다).
+    """
     store = OhlcvStore(db_path, cache_dir=cache_dir)
     funding_store = FundingRateStore(db_path)
+    start_ms = parse_date_ms(start)
+    end_ms = parse_date_ms(end)
+
+    # 펀딩 조회는 요청 심볼 + **대리 도너 후보**(채택 유니버스의 비-신규 종목)를 함께 본다 —
+    # 신규 종목만 부분 실행해도(`--symbols DOGE/...`) 대리가 같은 도너에서 같은 시계열을
+    # 받게 하기 위해서다. 조회만 넓히는 것이고 행은 요청 심볼만 만든다(펀딩 테이블은 작아
+    # 비용이 무시할 수준이다).
+    donor_candidates = tuple(s for s in DEFAULT_SYMBOLS if s not in NEW_SYMBOLS)
+    query_symbols = list(dict.fromkeys([*donor_candidates, *symbols]))
+    funding_by_symbol = {
+        symbol: funding_store.get_rates(
+            symbol, start_ms=start_ms, end_ms=end_ms, include_predicted=True
+        )
+        for symbol in query_symbols
+    }
+    funding_by_symbol, proxy_note = apply_funding_proxy(funding_by_symbol)
+
     rows: list[ZoneLimitRow] = []
     for symbol in symbols:
-        df_1m = store.load(symbol, "1m")
+        # 직전 심볼의 1분봉을 확실히 놓고 나서 다음 것을 읽는다 — 6년 1분봉(심볼당 ~315만 행)
+        # 은 두 심볼 몫이 겹치는 순간이 메모리 피크다. 9종목 직렬 실행이 이 지점에서 조용히
+        # 죽은 적이 있다(WAN-182 재산출 1차 시도 — 트레이스백 없이 프로세스 소멸).
+        gc.collect()
+        df_1m = store.load(symbol, "1m", start_ms=start_ms, end_ms=end_ms).reset_index(drop=True)
         if df_1m.empty:
             print(f"[wan95] {symbol}: 1분봉 없음 — 지정가 평가 불가, 건너뜀")
             continue
+        funding_rates = funding_by_symbol[symbol]
         for timeframe in timeframes:
-            htf_df = _load_recent(store, symbol, timeframe, years)
+            htf_df = store.load(symbol, timeframe, start_ms=start_ms, end_ms=end_ms).reset_index(
+                drop=True
+            )
             if htf_df.empty:
                 continue
-            start_ms = int(htf_df["open_time"].iloc[0])
-            end_ms = int(htf_df["open_time"].iloc[-1])
-            funding_rates = funding_store.get_rates(
-                symbol, start_ms=start_ms, end_ms=end_ms, include_predicted=True
-            )
+            window_start = int(htf_df["open_time"].iloc[0])
             # 상위TF 창으로 1분봉을 잘라 메모리·시간을 아낀다(워밍업은 상위TF가 담당).
-            window_1m = df_1m[df_1m["open_time"] >= start_ms]
+            window_1m = df_1m[df_1m["open_time"] >= window_start]
             if window_1m.empty:
                 continue
             ob_result = OrderBlockDetector().run(htf_df)
@@ -235,9 +309,13 @@ def collect_rows(
             )
             print(
                 f"[wan95] {symbol} {timeframe}: {len(htf_df)}봉, "
-                f"1분봉 {len(window_1m)}행, 펀딩 {len(funding_rates)}건"
+                f"1분봉 {len(window_1m)}행, 펀딩 {len(funding_rates)}건",
+                flush=True,
             )
-    return rows
+            del window_1m, htf_df, ob_result
+        # 이름을 놓아야 다음 심볼 로드 때 두 심볼 몫이 겹치지 않는다(위 gc.collect() 주석).
+        del df_1m
+    return rows, proxy_note
 
 
 _TF_ORDER = {"15m": 0, "1h": 1, "4h": 2, "1d": 3}
@@ -340,9 +418,11 @@ def _verdict_lines(frame: pd.DataFrame) -> list[str]:
         "WAN-91은 15m을 채택 대상에서 제외할 것을 권고했고, 그 근거는 과최적화가 아니라 "
         "**비용**이었다 — 거래 수가 많아 왕복 0.18%(테이커)가 신호를 잠식한다는 것. "
         "그 권고의 전제(테이커 진입)가 사용자의 실매매와 달랐으므로, 메이커 진입으로 "
-        "다시 돌린 이 표가 답이다: **15m은 3심볼 전부 마이너스에서 3심볼 전부 플러스로 "
-        "뒤집혔고, MDD도 크게 줄었다.** 즉 15m의 문제는 신호가 아니라 비용이었다는 "
-        "WAN-91의 진단 자체는 옳았고, 비용을 실제 매매 방식에 맞추자 결론이 반대로 나온다.",
+        "다시 돌린 이 표가 답이다: 당시 판(3심볼 × 3년)에서 **15m은 3심볼 전부 마이너스에서 "
+        "3심볼 전부 플러스로 뒤집혔고**, 채택 좌표(9종목 × 6년, WAN-182)에서도 방향은 같다"
+        "(위 표의 종가 대 지정가 플러스 심볼 수·MDD 대조). 즉 15m의 문제는 신호가 아니라 "
+        "비용이었다는 WAN-91의 진단 자체는 옳았고, 비용을 실제 매매 방식에 맞추자 결론이 "
+        "반대로 나온다.",
         "",
         "### 그러나 이 결과를 채택 근거로 쓰기 전 반드시 볼 한계",
         "",
@@ -351,14 +431,17 @@ def _verdict_lines(frame: pd.DataFrame) -> list[str]:
         f"하면 체결되지 않을 수 있다. 즉 실제 체결률은 이 표(15m 기준 {_fmt_pct(zl_fill)})"
         "보다 낮고, **체결된 거래만 골라 담는 편향**이 남는다. WAN-96이 이 가정을 보수화해 "
         "재검정했다.",
-        f"2. **승률은 오히려 떨어졌다**(15m 기준 {_fmt_pct(close_win)} → {_fmt_pct(zl_win)}). "
-        "수익 개선은 승률이 아니라 진입가·비용에서 나온 것이다 — 지정가는 더 유리한 "
-        "가격에 들어가므로 1R이 줄고 익절 목표가 가까워진다(고정 1:1.5R 규칙과의 상호작용).",
-        "3. **4h·1d는 반대로 나빠졌다**(체결률이 높아 기회 손실은 작지만 표본이 작다: "
-        "1d는 심볼당 4~12거래). 이 TF들의 델타는 표본이 작아 신뢰구간이 넓다.",
-        "4. **룩어헤드 잔존**: 볼린저 진입가가 탭 봉 SMA20(그 봉 종가 포함)으로 계산되는데 "
-        "체결은 봉 내부에서 일어날 수 있다(CLAUDE.md 참고). 영향은 작을 것으로 보지만 "
-        "0은 아니다.",
+        f"2. **수익 개선을 승률로 설명할 수 없다**(15m 승률 {_fmt_pct(close_win)} → "
+        f"{_fmt_pct(zl_win)}). 개선의 몸통은 진입가·비용이다 — 지정가는 더 유리한 가격에 "
+        "들어가 1R이 줄고 익절 목표가 가까워진다(고정 1:1.5R 규칙과의 상호작용). 옛 판"
+        "(3심볼 × 3년)에서는 승률이 오히려 떨어지면서 수익이 늘어 이 성질이 극명했다.",
+        "3. **4h는 표본이 작다**(체결률이 높아 기회 손실은 작지만 심볼당 거래가 적어 "
+        "델타의 신뢰구간이 넓다). 1d는 WAN-182(작업 TF 15m·1h·4h 확정)가 표본 미달로 "
+        "제외해 이 표에 없다 — 옛 판(3심볼 × 4TF)의 1d 행은 당시 기록이다.",
+        "4. **1분봉 근사 잔존**: 채택 밴드(`intrabar_live`, WAN-132)는 미래를 보지 않지만 "
+        "1분봉 근사라 **잔여 1분**이 남는다 — WAN-120이 그 잔여를 0으로 만든 감사에서 "
+        "판정 불변(증분 88.5% 잔존)을 확인했다. 옛 판의 「탭 봉 SMA20 룩어헤드」 서술은 "
+        "WAN-132 전환으로 채택 경로에서 사라졌다.",
         "",
         "따라서 이 리포트는 **'15m 제외 권고를 확정할 수 없다'**까지가 결론이다. "
         "15m 채택 여부는 체결 가정을 보수화한 재검정(체결률 하향·큐 모델) 후 판단할 것을 "
@@ -368,12 +451,25 @@ def _verdict_lines(frame: pd.DataFrame) -> list[str]:
     return lines
 
 
-def build_markdown(frame: pd.DataFrame, delta: pd.DataFrame) -> str:
+def build_markdown(frame: pd.DataFrame, delta: pd.DataFrame, proxy_note: str = "") -> str:
     """리포트 마크다운. 수치 해석은 사람이 하되, 재현 커맨드·방법론을 함께 남긴다."""
     lines = [
         "# WAN-95: 지정가(zone_limit) 채택 재산출",
         "",
         "**재현**: `python -m backtest.wan95_zone_limit_report`",
+        "",
+        "> 🔁 **WAN-182(채택 좌표 재-베이스라인)로 이 표가 전면 재산출됐다 — 이번에 움직인 "
+        "것은 엔진이 아니라 좌표다.** 유니버스 3심볼 → **9종목**(WAN-111의 6종목 + DOGE·LINK·"
+        "LTC), 창 `--years 3`(마지막 봉 기준 미끄러지는 창) → **못 박은 6년 창 "
+        f"{DEFAULT_START} ~ {DEFAULT_END}**(실효 5.85년, SOL 상장 하한 · 9종목 균일 창), "
+        "TF 15m/1h/4h/1d → **작업 TF 15m·1h·4h**(WAN-179가 4h를 승격, 1d는 표본 미달로 제외 "
+        "유지). `ConfluenceParams()`는 그대로이므로 **이 표의 옛 판과의 차이를 엔진 변화로 "
+        "읽지 말 것** — 창·유니버스가 통째로 다르다(옛 판과 셀 비교 금지). 창이 못 박혀 "
+        "있으므로 이제 이 표는 새 봉이 쌓여도 비트 단위로 재현된다. ⚠️ 신규 3종목(DOGE·LINK·"
+        "LTC)은 이 창에서 **펀딩 데이터가 0행**이라(WAN-178 백필 전) 기존 종목 중 확정 펀딩 "
+        "평균 최고(= 롱에게 가장 비싼) 종목의 시계열로 **대리 계산**한다(WAN-180과 같은 "
+        "규칙, 아래 각주). 근거·파급은 "
+        "[`docs/decisions/wan182.md`](../../docs/decisions/wan182.md).",
         "",
         "> ⚠️ **이 표는 WAN-100(첫 탭 면제 배선)으로 전면 재산출됐다.** 최초 WAN-95 산출 "
         "당시 지정가(B안) 경로는 `tap_index`를 읽지 않아 「첫 탭은 RSI 무관 무조건 진입」"
@@ -494,9 +590,10 @@ def build_markdown(frame: pd.DataFrame, delta: pd.DataFrame) -> str:
         )
     lines += [""]
     lines += _verdict_lines(frame)
+    lines += ["## 펀딩 커버리지", ""]
+    if proxy_note:
+        lines += [f"> ⚠️ {proxy_note}", ""]
     lines += [
-        "## 펀딩 커버리지",
-        "",
         "| 심볼 | TF | 진입 | 펀딩 비용 | 커버리지 |",
         "| -- | -- | -- | --: | --: |",
     ]
@@ -512,16 +609,18 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="WAN-95 지정가 채택 재산출")
     parser.add_argument("--symbols", nargs="+", default=list(DEFAULT_SYMBOLS))
     parser.add_argument("--timeframes", nargs="+", default=list(DEFAULT_TIMEFRAMES))
-    parser.add_argument("--years", type=float, default=DEFAULT_YEARS)
+    parser.add_argument("--start", default=DEFAULT_START, help="채택 창 시작(YYYY-MM-DD)")
+    parser.add_argument("--end", default=DEFAULT_END, help="채택 창 끝(YYYY-MM-DD)")
     parser.add_argument("--db-path", default=_DB_PATH)
     parser.add_argument("--cache-dir", default=_CACHE_DIR)
     parser.add_argument("--out-dir", default="backtest/reports")
     args = parser.parse_args()
 
-    rows = collect_rows(
+    rows, proxy_note = collect_rows(
         symbols=tuple(args.symbols),
         timeframes=tuple(args.timeframes),
-        years=args.years,
+        start=args.start,
+        end=args.end,
         db_path=args.db_path,
         cache_dir=args.cache_dir,
     )
@@ -535,7 +634,7 @@ def main() -> None:
     md_path = out_dir / "wan95_zone_limit_summary.md"
     frame.to_csv(csv_path, index=False)
     delta.to_csv(delta_path, index=False)
-    md_path.write_text(build_markdown(frame, delta), encoding="utf-8")
+    md_path.write_text(build_markdown(frame, delta, proxy_note), encoding="utf-8")
     print(f"[wan95] 저장: {csv_path}\n[wan95] 저장: {delta_path}\n[wan95] 저장: {md_path}")
 
 

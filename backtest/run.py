@@ -101,6 +101,8 @@ from backtest.harness import (
     BASELINE_FILL,
     CACHE_DIR,
     DB_PATH,
+    DEFAULT_END,
+    DEFAULT_START,
     DEFAULT_SYMBOLS,
     DEFAULT_TIMEFRAMES,
     DEFAULT_YEARS,
@@ -797,9 +799,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=",".join(DEFAULT_TIMEFRAMES),
         help=f"타임프레임(콤마 복수). 기본 {','.join(DEFAULT_TIMEFRAMES)}",
     )
-    data.add_argument("--years", type=float, default=DEFAULT_YEARS, help="최근 N년 (기본 3)")
-    data.add_argument("--start", help="시작일 YYYY-MM-DD (--years 대신)")
-    data.add_argument("--end", help="종료일 YYYY-MM-DD (--years 대신)")
+    data.add_argument(
+        "--years",
+        type=float,
+        default=None,
+        help=(
+            "최근 N년(마지막 봉 기준 미끄러지는 창). 명시하면 채택 창 대신 이 창을 쓴다. "
+            f"기본은 못 박은 채택 창 {DEFAULT_START}~{DEFAULT_END}(WAN-182)"
+        ),
+    )
+    data.add_argument("--start", help=f"시작일 YYYY-MM-DD (기본 채택 창 {DEFAULT_START})")
+    data.add_argument("--end", help=f"종료일 YYYY-MM-DD (기본 채택 창 {DEFAULT_END})")
     data.add_argument("--db-path", default=DB_PATH)
     data.add_argument("--cache-dir", default=CACHE_DIR)
 
@@ -1118,12 +1128,19 @@ def wants_detail(args: argparse.Namespace) -> bool:
 
 def options_from_args(args: argparse.Namespace) -> RunOptions:
     detail = wants_detail(args)
+    start_ms = parse_date_ms(args.start) if args.start else None
+    end_ms = parse_date_ms(args.end) if args.end else None
+    # 창 인자가 하나도 없으면 **못 박은 채택 창**(WAN-182)이 기본이다. `--years`를 명시한
+    # 실행만 옛 미끄러지는 창을 쓴다 — 인자 없는 정본 리포트가 날짜에 따라 흔들리지 않게.
+    if args.years is None and start_ms is None and end_ms is None:
+        start_ms = parse_date_ms(DEFAULT_START)
+        end_ms = parse_date_ms(DEFAULT_END)
     return RunOptions(
         collect_artifacts=detail,
         revision=engine_revision() if detail else UNKNOWN_REVISION,
-        years=args.years,
-        start_ms=parse_date_ms(args.start) if args.start else None,
-        end_ms=parse_date_ms(args.end) if args.end else None,
+        years=args.years if args.years is not None else DEFAULT_YEARS,
+        start_ms=start_ms,
+        end_ms=end_ms,
         funding=args.funding,
         fee_rate=args.fee,
         maker_fee_rate=args.maker_fee,

@@ -82,10 +82,10 @@ from backtest.harness import (
     BASELINE_FILL,
     CACHE_DIR,
     DB_PATH,
-    DEFAULT_SYMBOLS,
-    DEFAULT_YEARS,
     LEGACY_OB_PARAMS,
     LEGACY_RSI_GATE_MODE,
+    LEGACY_SYMBOLS,
+    LEGACY_YEARS,
     MarketData,
     build_config,
     build_params,
@@ -104,6 +104,12 @@ from backtest.zone_limit_backtest import (
     sequence_with_candidates,
 )
 from strategy.models import ConfluenceParams
+
+#: 이 리포트의 좌표는 **당시(3심볼 × 최근 3년) 기록으로 명시 고정**한다(WAN-182 파급).
+#: WAN-182가 harness 기본 좌표를 9종목 × 못 박은 6년 창으로 옮겼는데, 이 모듈은 결론
+#: 문장(0bp vs 2bp 판정)이 3심볼/3년 수치에 박혀 있어 기본값을 따라가면 본문과 어긋난다.
+DEFAULT_SYMBOLS = LEGACY_SYMBOLS
+DEFAULT_YEARS = LEGACY_YEARS
 
 #: 판정 TF. WAN-97이 정한 작업 TF 하나만 본다 — 15m은 WAN-97에서 제외됐다.
 DEFAULT_TIMEFRAME = "1h"
