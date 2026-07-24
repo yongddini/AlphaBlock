@@ -1,12 +1,15 @@
 """OHLCV 갭 자동 복구 백필 (WAN-35).
 
-`data.gaps.find_gaps`로 시리즈별 누락 구간을 찾고, **그 구간만** WAN-6 수집기
+`data.gaps`로 시리즈별 누락 구간을 찾고, **그 구간만** WAN-6 수집기
 로직(`data.backfill.backfill_symbol`)으로 재수집해 UPSERT한다. 저장소 기본키가
 `(symbol, timeframe, open_time)`이라 기존 봉 덮어쓰기는 무해하다.
 
 핵심 성질
 --------
-* **갭이 없으면 API를 호출하지 않는다.** `find_gaps`가 빈 결과면 곧바로 반환한다.
+* **갭이 없으면 API를 호출하지 않는다.** 갭 탐지가 빈 결과면 곧바로 반환한다.
+* **갭 탐지는 시리즈를 메모리에 올리지 않는다 (WAN-187).** 저장소 커서를 스트리밍으로
+  훑어 벌어진 자리만 본다(`_stored_gaps`) — 6년 DB에서 이 단계가 수집기 시작을
+  막던 병목이었다.
 * **탐지된 구간만** 재수집한다(전체 재백필이 아니라 구멍만).
 * 시리즈 단위로 예외를 격리한다 — 한 시리즈 실패가 나머지 복구·수집 데몬을 죽이지
   않도록 오류를 `SeriesRepair.error`에 담아 계속 진행한다. 상위(오케스트레이션)는
@@ -52,7 +55,7 @@ from data.freshness import (
     find_stale_series,
     format_stale,
 )
-from data.gaps import find_gaps, total_missing
+from data.gaps import Gap, gaps_from_boundaries, total_missing
 from data.models import timeframe_to_ms
 from data.storage import OhlcvStore
 
@@ -109,6 +112,14 @@ class RepairSummary(BaseModel):
     """꼬리가 멈춘 시리즈(WAN-156). 갭 복구로는 메울 수 없는 결함이라 별도로 싣는다.
 
     비어 있는 것이 정상이고, 여기에 뭔가 있으면 `gaps_found: 0`이어도 이상이다.
+    """
+    lookback_ms: int | None = None
+    """이번 실행이 **본 창**의 길이(None이면 전 구간) — WAN-187.
+
+    수집기 시작 점검은 최근 창만 본다(6년 DB 전 구간 스캔은 ~40초라 스트림 접속을
+    늦춘다). 그러면 `gaps_found: 0`은 「전 구간 이상 없음」이 아니라 「이 창 안에서
+    이상 없음」이다. 그 차이를 요약이 스스로 밝히지 않으면 WAN-156과 같은 종류의
+    침묵이 된다 — 창 밖 갭은 `alphablock backfill --repair`/`verify`가 본다.
     """
     untracked_series: list[UntrackedSeries] = []
     """저장돼 있으나 수집 대상 TF가 아닌 시리즈(WAN-157).
@@ -181,12 +192,30 @@ class RepairStateStore:
 # -- 복구 로직 -----------------------------------------------------------------
 
 
-def _stored_timestamps(store: OhlcvStore, symbol: str, timeframe: str) -> list[int]:
-    """저장된 시리즈의 봉 open_time 목록(오름차순)."""
-    df = store.load(symbol, timeframe)
-    if df.empty:
-        return []
-    return [int(t) for t in df["open_time"].tolist()]
+def _stored_gaps(
+    store: OhlcvStore, symbol: str, timeframe: str, *, since_ms: int | None = None
+) -> list[Gap]:
+    """저장된 시리즈의 내부 갭 (WAN-187 — 시각열을 메모리에 올리지 않는다).
+
+    예전에는 `store.load()`로 시리즈 **전체를 모든 컬럼째 pandas DataFrame**으로
+    읽은 뒤 `open_time` 하나만 꺼내 `find_gaps`에 넘겼다. 3년·6종목에선 참을 만했지만
+    WAN-182가 창을 6년 × 9종목으로 넓히자 시리즈당 ~315만 봉(1m 기준 9.9초 · RSS
+    2.3GB)이 되어, **수집기 시작 갭 복구가 웹소켓 접속 직전에 매달렸다**(서버 실측).
+    WAN-186이 시리즈 **목록** 쿼리를 고쳤지만 각 시리즈를 **여는** 이 단계가 같은
+    자리를 다시 막고 있었다.
+
+    지금은 저장소가 커서를 스트리밍으로 훑어 **간격이 벌어진 자리만** 돌려주고
+    (`gap_boundaries`), 갭 계산은 `find_gaps`와 같은 코어를 쓴다
+    (`gaps_from_boundaries`) — 결과는 같고 비용만 다르다(1.2초 · 17MB).
+
+    `since_ms`를 주면 그 시각 이후의 갭만 본다(수집기 시작 점검의 최근 창 한정).
+    """
+    return gaps_from_boundaries(
+        store.gap_boundaries(
+            symbol, timeframe, min_gap_ms=timeframe_to_ms(timeframe), start_ms=since_ms
+        ),
+        timeframe,
+    )
 
 
 def repair_series(
@@ -200,14 +229,23 @@ def repair_series(
     backoff_base: float = 1.0,
     sleeper: Callable[[float], None] = time.sleep,
     now_ms: Callable[[], int] = lambda: int(time.time() * 1000),
+    lookback_ms: int | None = None,
 ) -> SeriesRepair:
     """한 시리즈의 내부 갭을 탐지·복구한다.
 
     갭이 없으면 거래소를 호출하지 않고 즉시 반환한다. 갭이 있으면 각 구간만
     `backfill_symbol`로 재수집한다. 오류는 격리해 `SeriesRepair.error`에 담는다.
+
+    `lookback_ms`를 주면 **최근 그만큼의 창**만 점검한다(WAN-187). 6년 DB에서 전
+    구간 스캔은 45 시리즈에 ~40초(콜드)라 수집기 시작 경로에는 무겁다 — 그 경로는
+    창을 좁히고, 전 구간 점검은 `alphablock backfill --repair`/`verify`가 맡는다.
+    ⚠️ 창을 좁히면 **그 밖의 옛 갭은 이번 실행에서 안 보인다** — 그래서
+    `RepairSummary.lookback_ms`가 「어디까지 봤는지」를 요약에 남긴다(갭 0을 「전
+    구간 이상 없음」으로 읽지 않도록).
     """
     tf_ms = timeframe_to_ms(timeframe)
-    gaps = find_gaps(_stored_timestamps(store, symbol, timeframe), timeframe)
+    since_ms = None if lookback_ms is None else now_ms() - lookback_ms
+    gaps = _stored_gaps(store, symbol, timeframe, since_ms=since_ms)
     if not gaps:
         return SeriesRepair(
             symbol=symbol,
@@ -242,7 +280,7 @@ def repair_series(
         logger.exception("갭 복구 실패 %s %s", symbol, timeframe)
 
     # 복구 후 남은 갭 재계산(거래소에도 없는 구간은 그대로 남을 수 있음).
-    remaining = total_missing(find_gaps(_stored_timestamps(store, symbol, timeframe), timeframe))
+    remaining = total_missing(_stored_gaps(store, symbol, timeframe, since_ms=since_ms))
     result = SeriesRepair(
         symbol=symbol,
         timeframe=timeframe,
@@ -278,6 +316,7 @@ def repair_all(
     stale_multiplier: float = DEFAULT_STALE_MULTIPLIER,
     funding_last_times: Sequence[tuple[str, int | None]] = (),
     tracked_timeframes: Sequence[str] | None = None,
+    lookback_ms: int | None = None,
 ) -> RepairSummary:
     """저장된 모든(또는 지정한) 시리즈의 갭을 탐지·복구하고 꼬리 신선도를 판정한다.
 
@@ -293,6 +332,9 @@ def repair_all(
     `tracked_timeframes`(= 설정의 수집 대상 TF)를 주면 그 목록에 없는 TF를 **복구·
     신선도 판정에서 빼고** `RepairSummary.untracked_series`에 따로 싣는다(WAN-157).
     안 주면(기본) 예전처럼 저장된 전부를 판정하므로 기존 호출부는 그대로 동작한다.
+
+    `lookback_ms`(WAN-187)를 주면 갭 **탐지**만 최근 창으로 좁힌다 — 신선도 판정은
+    창과 무관하게 전 시리즈를 그대로 본다(꼬리 정지는 창을 좁혀도 보여야 한다).
     """
     stored = list(series) if series is not None else store.list_series()
     if tracked_timeframes is None:
@@ -313,6 +355,7 @@ def repair_all(
             backoff_base=backoff_base,
             sleeper=sleeper,
             now_ms=now_ms,
+            lookback_ms=lookback_ms,
         )
         for symbol, timeframe in targets
     ]
@@ -357,6 +400,7 @@ def repair_all(
         series=results,
         stale_series=stale,
         untracked_series=untracked,
+        lookback_ms=lookback_ms,
     )
 
 

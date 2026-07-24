@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from data.gaps import Gap, find_gaps, total_missing
+from data.gaps import Gap, find_gaps, gaps_from_boundaries, total_missing
 
 TF_MS = 3_600_000  # 1h
 T0 = 1_700_000_000_000
@@ -75,3 +75,43 @@ def test_respects_timeframe() -> None:
 def test_unsupported_timeframe_raises() -> None:
     with pytest.raises(ValueError):
         find_gaps([T0], "7h")
+
+
+# --- 경계 쌍 입구 (WAN-187) ---------------------------------------------------
+
+
+def test_gaps_from_boundaries_matches_find_gaps() -> None:
+    """같은 시리즈를 「시각열 전부」와 「벌어진 쌍만」으로 넣으면 답이 같다."""
+    timestamps = [T0 + i * TF_MS for i in (0, 1, 2, 6, 7, 12, 13)]
+    boundaries = [
+        (prev, cur)
+        for prev, cur in zip(timestamps, timestamps[1:], strict=False)
+        if cur - prev > TF_MS
+    ]
+    assert gaps_from_boundaries(boundaries, "1h") == find_gaps(timestamps, "1h")
+    assert gaps_from_boundaries(boundaries, "1h") == [
+        Gap(start_ms=T0 + 3 * TF_MS, end_ms=T0 + 5 * TF_MS, missing=3),
+        Gap(start_ms=T0 + 8 * TF_MS, end_ms=T0 + 11 * TF_MS, missing=4),
+    ]
+
+
+def test_gaps_from_boundaries_tolerates_a_loose_filter() -> None:
+    """간격이 TF 이하인 쌍이 섞여 와도 `find_gaps`와 똑같이 무시한다.
+
+    저장소가 거는 필터가 느슨해져도(또는 TF 정렬이 안 된 데이터라도) 답이 달라지지
+    않아야 두 입구가 하나의 계산부를 공유한다는 말이 성립한다.
+    """
+    pairs = [
+        (T0, T0 + TF_MS),  # 정상 인접 — 갭 아님
+        (T0 + TF_MS, T0 + TF_MS),  # 동일 봉 — 갭 아님
+        (T0 + 2 * TF_MS, T0 + 2 * TF_MS + TF_MS // 2),  # TF 미만 간격
+        (T0 + 3 * TF_MS, T0 + 5 * TF_MS),  # 진짜 갭 1개
+    ]
+    assert gaps_from_boundaries(pairs, "1h") == [
+        Gap(start_ms=T0 + 4 * TF_MS, end_ms=T0 + 4 * TF_MS, missing=1)
+    ]
+
+
+def test_gaps_from_boundaries_unsupported_timeframe_raises() -> None:
+    with pytest.raises(ValueError):
+        gaps_from_boundaries([(T0, T0 + TF_MS)], "7h")

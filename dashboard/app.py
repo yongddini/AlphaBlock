@@ -849,6 +849,13 @@ def _render_repair(view: HealthView) -> None:
         st.dataframe(frame, use_container_width=True, hide_index=True)
     else:
         st.caption("마지막 점검에서 갭이 없었습니다.")
+    if rep.lookback_ms:
+        # 창을 좁힌 실행의 「갭 없음」은 「그 창 안에서」라는 뜻이다 — 전 구간 무결로
+        # 읽히면 WAN-156과 같은 종류의 침묵이 된다(WAN-187).
+        st.caption(
+            f"이 점검은 최근 {rep.lookback_ms // 86_400_000}일 창만 봤습니다 — "
+            "전 구간은 `alphablock backfill --repair`로 점검하세요."
+        )
     if rep.has_error:
         st.error("일부 시리즈 갭 복구에 실패했습니다 — 로그/텔레그램 경고를 확인하세요.")
     if rep.untracked_series:

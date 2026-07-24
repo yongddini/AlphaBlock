@@ -166,6 +166,10 @@ class Settings(BaseSettings):
     # 기본값(repair_on_start=True)과, 마지막 복구 요약을 남겨 Health 뷰가 읽는 파일 경로.
     repair_on_start: bool = Field(default=True)
     repair_state_path: str = Field(default="data/repair_state.json")
+    # 시작 점검이 보는 창(일). 6년 DB에서 전 구간 갭 스캔은 45 시리즈에 ~40초(콜드)라
+    # 웹소켓 접속을 그만큼 늦춘다(WAN-187) — 시작 시엔 최근 창만 보고, 전 구간 점검은
+    # `alphablock backfill --repair`/`verify`가 맡는다. 0이면 예전처럼 전 구간.
+    repair_on_start_lookback_days: int = Field(default=7, ge=0)
 
     # 운영 상태(Health) 워치(WAN-32). WAN-30 판정을 주기적으로 점검해 이상 시 텔레그램
     # 경고를 보낸다. stale 판정 배수는 위 health_stale_multiplier를 공유한다.

@@ -128,6 +128,9 @@ def format_status(view: HealthView, *, configured_symbols: Sequence[str] | None 
             detail += f", {rep.total_remaining}봉 잔여"
         if rep.has_error:
             detail += " ⚠️ 복구 오류"
+        if rep.lookback_ms:
+            # 「갭 없음」을 「전 구간 이상 없음」으로 읽지 않도록 창을 함께 밝힌다(WAN-187).
+            detail += f" (최근 {rep.lookback_ms // 86_400_000}일 창)"
         lines.append(f"마지막 갭 복구: {_fmt_time(rep.ran_at_ms)} — {detail}")
         if rep.untracked_series:
             # 판정에서 뺐다고 화면에서까지 지우면 WAN-156과 같은 침묵이 된다(WAN-157).

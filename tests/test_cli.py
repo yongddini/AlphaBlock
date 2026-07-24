@@ -19,6 +19,7 @@ from common.heartbeat import HeartbeatStore
 from config.settings import Settings
 from dashboard.health_data import build_health_view
 from data.models import Candle
+from data.repair import RepairStateStore, RepairSummary
 from data.storage import OhlcvStore
 
 _HOUR = 3_600_000
@@ -100,6 +101,41 @@ def test_format_status_reports_idle_when_nothing_ran(tmp_path: Path) -> None:
     text = format_status(view)
     assert "alphablock collect" in text
     assert "저장된 OHLCV 없음" in text
+
+
+def test_format_status_shows_the_window_a_windowed_repair_looked_at(tmp_path: Path) -> None:
+    """창을 좁힌 점검의 「갭 없음」이 「전 구간 무결」로 읽히지 않게 창을 함께 찍는다.
+
+    수집기 시작 점검은 최근 창만 본다(WAN-187) — 그 사실이 화면에서 사라지면
+    WAN-156/157과 같은 종류의 침묵이 된다.
+    """
+    state_path = tmp_path / "repair_state.json"
+    RepairStateStore(state_path).save(
+        RepairSummary(ran_at_ms=_NOW, series=[], lookback_ms=7 * 86_400_000)
+    )
+    view = build_health_view(
+        str(tmp_path / "empty.db"),
+        runtime_state_path=str(tmp_path / "missing.json"),
+        poll_interval_seconds=60,
+        stale_multiplier=2.5,
+        collector_heartbeat_path=str(tmp_path / "no_hb.json"),
+        repair_state_path=str(state_path),
+        now_ms=_NOW,
+    )
+    assert "최근 7일 창" in format_status(view)
+
+    # 전 구간 점검(창 없음)에는 그 표기가 붙지 않는다.
+    RepairStateStore(state_path).save(RepairSummary(ran_at_ms=_NOW, series=[]))
+    view = build_health_view(
+        str(tmp_path / "empty.db"),
+        runtime_state_path=str(tmp_path / "missing.json"),
+        poll_interval_seconds=60,
+        stale_multiplier=2.5,
+        collector_heartbeat_path=str(tmp_path / "no_hb.json"),
+        repair_state_path=str(state_path),
+        now_ms=_NOW,
+    )
+    assert "창" not in format_status(view)
 
 
 # --- 명령 배선(외부 호출은 스텁) --------------------------------------------
