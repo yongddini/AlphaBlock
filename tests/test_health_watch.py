@@ -135,6 +135,31 @@ def test_evaluate_alerts_detail_names_series_and_lag() -> None:
     assert "3.0시간" in alert.detail
 
 
+def test_evaluate_alerts_detail_shows_absolute_time_in_kst() -> None:
+    """경고 본문에 마지막 갱신 **절대 시각**이 KST로 붙는다(WAN-172).
+
+    폰으로 받는 경고라 "3.0시간 전"만으로는 언제인지 감이 안 온다. UTC epoch 0은
+    KST로 1970-01-01 09:00 — 이 +9h 오프셋이 변환이 실제로 일어났다는 증거다.
+    """
+    view = _view(freshness=[_series("BTC/USDT:USDT", "1h", HealthLevel.STALE)])
+    (alert,) = evaluate_alerts(view)
+    assert "1970-01-01 09:00 KST" in alert.detail
+    assert "UTC" not in alert.detail
+
+
+def test_evaluate_alerts_detail_covers_every_alert_kind() -> None:
+    """네 종류(데이터·펀딩·러너·수집기) 전부 KST 절대 시각을 싣는다."""
+    view = _view(
+        freshness=[_series("BTC/USDT:USDT", "1h", HealthLevel.STALE)],
+        funding=[_funding("BTC/USDT:USDT", HealthLevel.STALE)],
+        runner=_runner(ran=True, level=HealthLevel.STALE),
+        collector=_collector(ran=True, level=HealthLevel.STALE),
+    )
+    alerts = evaluate_alerts(view)
+    assert len(alerts) == 4
+    assert all("KST" in a.detail for a in alerts)
+
+
 # -- reconcile: 쿨다운·복구 ---------------------------------------------------
 
 

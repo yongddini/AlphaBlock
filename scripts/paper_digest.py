@@ -29,6 +29,7 @@ import sqlite3
 import pandas as pd
 
 from common.telegram import build_telegram_client
+from common.timefmt import kst_log_format, use_kst_logging
 from config.settings import Settings, get_settings
 from paper.digest import build_digest, format_period_label
 from paper.performance import build_performance
@@ -181,9 +182,8 @@ def generate_digest(
 
 
 def main(argv: list[str] | None = None) -> int:
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
-    )
+    use_kst_logging()  # 로그 시각도 KST(WAN-172)
+    logging.basicConfig(level=logging.INFO, format=kst_log_format())
     args = _parse_args(argv)
     settings = get_settings()
     if args.db_path:

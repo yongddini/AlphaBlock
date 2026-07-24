@@ -7,13 +7,12 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import UTC, datetime
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 import pandas as pd
 
 from backtest.models import BacktestResult, ExitReason, PositionSide, TradeFill
+from common import timefmt
 from strategy.models import ConfluenceParams, OrderBlockParams
 
 
@@ -101,7 +100,8 @@ def trades_to_dataframe(
 
 #: 표시 전용 시간대. ⚠️ **저장·계산은 UTC 그대로다** — 데이터에 로컬 시각을 섞으면
 #: 백테스트 재현이 깨진다. 변환은 이 표시 계층에서만 일어난다.
-KST = ZoneInfo("Asia/Seoul")
+#: WAN-172에서 `common.timefmt`로 올렸다(cli·live·대시보드가 같은 시간대를 쓴다).
+KST = timefmt.KST
 
 #: 청산 사유 한글 라벨. 원문(`stop_loss`)은 사용자가 읽는 표에 그대로 나가면 안 된다.
 EXIT_REASON_LABELS: Mapping[ExitReason, str] = {
@@ -137,8 +137,13 @@ COL_EQUITY_AFTER = "시드(후)"
 
 
 def format_time_kst(ms: int) -> str:
-    """epoch ms → `YYYY-MM-DD HH:MM`(KST). 표시 계층 전용(저장·계산은 UTC 그대로)."""
-    return datetime.fromtimestamp(ms / 1000, tz=KST).strftime("%Y-%m-%d %H:%M")
+    """epoch ms → `YYYY-MM-DD HH:MM`(KST). 표시 계층 전용(저장·계산은 UTC 그대로).
+
+    구현은 `common.timefmt.format_kst` 하나뿐이다(WAN-172) — 운영 로그·텔레그램·
+    `alphablock status`가 같은 함수를 쓴다. 이 이름은 대시보드·저장된 거래 조회가
+    쓰던 기존 진입점이라 그대로 둔다.
+    """
+    return timefmt.format_kst(ms)
 
 
 #: 내부 호출부용 별칭. 표시 시각 포맷은 이 모듈 한 곳에서만 정의한다 — 화면·CSV·DB
@@ -147,7 +152,8 @@ _fmt_time_kst = format_time_kst
 
 
 def _fmt_time_utc(ms: int) -> str:
-    return datetime.fromtimestamp(ms / 1000, tz=UTC).strftime("%Y-%m-%d %H:%M")
+    """데이터 열용 UTC 시각. KST 전환(WAN-172)이 이 열을 건드리지 않는다."""
+    return timefmt.format_utc(ms)
 
 
 def _avg_exit_price(result_trade_exits: list[TradeFill]) -> float:

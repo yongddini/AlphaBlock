@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import time
 from datetime import UTC, datetime
 
 import pandas as pd
@@ -25,6 +26,7 @@ from backtest.models import BacktestConfig, BacktestMetrics, BacktestResult
 from backtest.report import COL_EXIT_REASON, trades_to_dataframe, trades_to_display_frame
 from backtest.sweep import default_backtest_config
 from backtest.trade_store import BacktestRunStore, RunFingerprint, RunSummary
+from common.timefmt import format_kst_zoned
 from config import get_settings
 from config.settings import Settings
 from dashboard.charts import (
@@ -88,9 +90,10 @@ def _datetime_to_ms(value: datetime) -> int:
 
 
 def _fmt_time(ms: int | None) -> str:
-    if ms is None:
-        return "—"
-    return _ms_to_datetime(ms).strftime("%Y-%m-%d %H:%M UTC")
+    """Health 탭의 시각(KST, WAN-172). 거래 표와 같은 공용 포맷터를 쓴다 —
+    화면 안에서 탭마다 시간대가 다르면 같은 사건이 다른 시각으로 보인다.
+    ⚠️ 차트 축·기간 선택은 데이터 축이라 UTC 그대로다(`_ms_to_datetime`)."""
+    return format_kst_zoned(ms)
 
 
 def _fmt_lag(lag_ms: int | None) -> str:
@@ -731,7 +734,7 @@ def _freshness_frame(rows: list[SeriesFreshness]) -> pd.DataFrame:
         {
             "심볼": r.symbol,
             "TF": r.timeframe,
-            "최신 봉(UTC)": _fmt_time(r.last_open_time),
+            "최신 봉(KST)": _fmt_time(r.last_open_time),
             "지연": _fmt_lag(r.lag_ms),
             "봉 수": r.bar_count,
             "상태": _LEVEL_BADGE[r.level],
@@ -745,7 +748,7 @@ def _funding_frame(rows: list[FundingFreshness]) -> pd.DataFrame:
         {
             "심볼": r.symbol,
             "펀딩비": "—" if r.rate is None else f"{r.rate * 100:.4f}%",
-            "다음 정산(UTC)": _fmt_time(r.next_funding_time),
+            "다음 정산(KST)": _fmt_time(r.next_funding_time),
             "구분": "예측" if r.is_predicted else "확정",
             "지연": _fmt_lag(r.lag_ms),
             "상태": _LEVEL_BADGE[r.level],
@@ -760,7 +763,7 @@ def _positions_frame(views: list[OpenPositionView]) -> pd.DataFrame:
             "심볼": v.snapshot.symbol,
             "TF": v.snapshot.timeframe,
             "방향": _direction_label(v.snapshot.direction),
-            "진입시각(UTC)": _fmt_time(v.snapshot.entry_time),
+            "진입시각(KST)": _fmt_time(v.snapshot.entry_time),
             "진입가": v.snapshot.entry_price,
             "현재가": "—" if v.current_price is None else v.current_price,
             "미실현 손익": "—" if v.unrealized_pct is None else f"{v.unrealized_pct:+.2f}%",
@@ -774,7 +777,7 @@ def _positions_frame(views: list[OpenPositionView]) -> pd.DataFrame:
 def _events_frame(events: list[EventRecord]) -> pd.DataFrame:
     return pd.DataFrame(
         {
-            "시각(UTC)": _fmt_time(e.time),
+            "시각(KST)": _fmt_time(e.time),
             "심볼": e.symbol,
             "TF": e.timeframe,
             "종류": _kind_label(e.kind, e.exit_reason),
@@ -858,10 +861,9 @@ def _render_repair(view: HealthView) -> None:
 
 
 def _render_health_body(settings: Settings) -> None:
-    # 마지막 갱신 시각(UTC). 자동 새로고침이 켜져 있으면 fragment가 주기적으로
+    # 마지막 갱신 시각(KST, WAN-172). 자동 새로고침이 켜져 있으면 fragment가 주기적으로
     # 재실행되며 이 값이 갱신돼, 화면이 실제로 최신인지 한눈에 확인할 수 있다.
-    now_local = datetime.now(tz=UTC)
-    st.caption(f"마지막 갱신: {now_local.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    st.caption(f"마지막 갱신: {format_kst_zoned(int(time.time() * 1000), seconds=True)}")
     if st.button("🔄 지금 새로고침"):
         # fragment 범위만 다시 그린다(분석·백테스트 등 무거운 탭은 건드리지 않음).
         st.rerun(scope="fragment")

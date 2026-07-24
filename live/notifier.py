@@ -14,12 +14,12 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import UTC, datetime
 from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict
 
 from common.telegram import TelegramClient
+from common.timefmt import format_kst_zoned
 from execution.engine import EntryIntent
 from execution.models import Position
 from live.executor import PaperExecutor, TradeReport
@@ -102,7 +102,8 @@ def _fmt_money(value: float) -> str:
 
 
 def _fmt_time(open_time_ms: int) -> str:
-    return datetime.fromtimestamp(open_time_ms / 1000, tz=UTC).strftime("%Y-%m-%d %H:%M UTC")
+    """알림 본문의 봉 시각(KST, WAN-172). 내부 비교·저장은 UTC epoch ms 그대로다."""
+    return format_kst_zoned(open_time_ms)
 
 
 def _direction_label(direction: OrderBlockDirection) -> str:

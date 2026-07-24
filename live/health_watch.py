@@ -36,6 +36,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from common.telegram import build_telegram_client
+from common.timefmt import format_kst_zoned, kst_log_format, use_kst_logging
 from config.settings import Settings, get_settings
 from dashboard.health import HealthLevel
 from dashboard.health_data import HealthView, build_health_view
@@ -57,6 +58,15 @@ class Alert(BaseModel):
     """복구 알림 등에 쓰는 짧은 라벨."""
     detail: str
     """텔레그램으로 보낼 경고 본문(마크다운)."""
+
+
+def _fmt_at(ms: int | None) -> str:
+    """경고 본문에 넣는 마지막 갱신 시각(KST, WAN-172).
+
+    폰으로 받는 경고라 "3.0시간 전"만으로는 언제인지 감이 안 온다 — 절대 시각을
+    KST로 함께 준다. ⚠️ 판정에 쓰는 값은 UTC epoch ms 그대로이고 표시만 바뀐다.
+    """
+    return format_kst_zoned(ms)
 
 
 def _fmt_lag(lag_ms: int | None) -> str:
@@ -90,7 +100,8 @@ def evaluate_alerts(view: HealthView) -> list[Alert]:
                     title=f"데이터 수집 지연: {f.symbol} {f.timeframe}",
                     detail=(
                         f"⚠️ *데이터 수집 지연* — `{f.symbol}` `{f.timeframe}`\n"
-                        f"최신 봉이 *{lag}* 지연됐습니다. 수집기가 살아있는지 확인하세요."
+                        f"최신 봉 {_fmt_at(f.last_open_time)} (*{lag}* 지연).\n"
+                        "수집기가 살아있는지 확인하세요."
                     ),
                 )
             )
@@ -104,7 +115,7 @@ def evaluate_alerts(view: HealthView) -> list[Alert]:
                     title=f"펀딩비 갱신 지연: {fund.symbol}",
                     detail=(
                         f"⚠️ *펀딩비 갱신 지연* — `{fund.symbol}`\n"
-                        f"마지막 펀딩 갱신이 *{lag}* 전입니다."
+                        f"마지막 펀딩 갱신 {_fmt_at(fund.funding_time)} (*{lag}* 전)."
                     ),
                 )
             )
@@ -117,7 +128,7 @@ def evaluate_alerts(view: HealthView) -> list[Alert]:
                 title="러너 하트비트 끊김",
                 detail=(
                     "⚠️ *러너 하트비트 끊김*\n"
-                    f"마지막 폴링이 *{lag}* 전입니다. "
+                    f"마지막 폴링 {_fmt_at(view.runner.last_poll_ms)} (*{lag}* 전). "
                     "시그널 러너(`alphablock live`)가 멈췄을 수 있습니다."
                 ),
             )
@@ -131,7 +142,7 @@ def evaluate_alerts(view: HealthView) -> list[Alert]:
                 title="수집기 하트비트 끊김",
                 detail=(
                     "⚠️ *수집기 하트비트 끊김*\n"
-                    f"마지막 하트비트가 *{lag}* 전입니다. "
+                    f"마지막 하트비트 {_fmt_at(view.collector.last_beat_ms)} (*{lag}* 전). "
                     "수집기(`alphablock collect`)가 멈췄을 수 있습니다."
                 ),
             )
@@ -381,9 +392,8 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
-    )
+    use_kst_logging()  # 로그 시각도 KST(WAN-172)
+    logging.basicConfig(level=logging.INFO, format=kst_log_format())
     run_health_watch(once=args.once, dry_run=args.dry_run, test_message=args.test_message)
 
 
