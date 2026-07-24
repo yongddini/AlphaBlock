@@ -25,6 +25,7 @@ from collections.abc import Sequence
 
 from pydantic import BaseModel, ConfigDict
 
+from common.timefmt import format_kst_zoned
 from data.gaps import find_gaps
 from data.models import timeframe_to_ms
 
@@ -157,12 +158,17 @@ def find_stale_funding(
 
 
 def format_stale(stale: StaleSeries) -> str:
-    """정지 시리즈 한 건을 사람이 읽는 한 줄로."""
+    """정지 시리즈 한 건을 사람이 읽는 한 줄로.
+
+    시각은 **KST**(WAN-172) — 폰으로 경고를 받는 자리라 UTC면 볼 때마다 9시간을
+    더해야 한다. ⚠️ 판정에 쓰는 `stale.last_ms`·`lag_ms`는 UTC epoch ms 그대로이고,
+    바뀌는 것은 이 문자열뿐이다.
+    """
     lag_hours = stale.lag_ms / 3_600_000
     lag_text = f"{lag_hours:.1f}시간" if lag_hours < 48 else f"{lag_hours / 24:.1f}일"
     return (
-        f"{stale.symbol} {stale.timeframe}: 마지막 갱신 {lag_text} 전"
-        f" (기대 주기의 {stale.lag_intervals:.1f}배)"
+        f"{stale.symbol} {stale.timeframe}: 마지막 갱신 {format_kst_zoned(stale.last_ms)}"
+        f" ({lag_text} 전, 기대 주기의 {stale.lag_intervals:.1f}배)"
     )
 
 

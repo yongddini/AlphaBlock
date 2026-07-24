@@ -11,9 +11,9 @@ import argparse
 import asyncio
 import logging
 from collections.abc import Sequence
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from common import timefmt
 from config import get_settings
 from config.settings import Settings
 from dashboard.health import HealthLevel
@@ -30,16 +30,15 @@ _LEVEL_TEXT = {
 
 
 def _configure_logging() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    # 로그 시각도 KST다(WAN-172) — 서버(UTC)와 노트북에서 같은 사건이 다른 시각으로
+    # 찍히면 경고와 로그를 나란히 못 읽는다.
+    timefmt.use_kst_logging()
+    logging.basicConfig(level=logging.INFO, format=timefmt.kst_log_format())
 
 
 def _fmt_time(ms: int | None) -> str:
-    if ms is None:
-        return "—"
-    return datetime.fromtimestamp(ms / 1000, tz=UTC).strftime("%Y-%m-%d %H:%M UTC")
+    """운영 출력 시각(KST, WAN-172). 판정·저장은 UTC epoch ms 그대로다."""
+    return timefmt.format_kst_zoned(ms)
 
 
 def _fmt_lag(lag_ms: int | None) -> str:

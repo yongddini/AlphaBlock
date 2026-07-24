@@ -49,6 +49,7 @@ import time
 from collections.abc import Callable
 
 from backtest.sweep import timeframe_to_ms
+from common.timefmt import format_kst_zoned
 from config.settings import Settings
 from data.freshness import window_gap_summary
 from data.storage import OhlcvStore
@@ -197,11 +198,14 @@ class ZoneLimitPaperRunner:
         for event in events:
             if event.kind == "placed":
                 order = event.order
+                # 시각은 KST로 찍는다(WAN-172) — 로그·텔레그램·`status`가 같은 자다.
+                # 판정·저장에 쓰는 값은 UTC epoch ms 그대로다.
                 _logger.info(
-                    "지정가 예약: %s %s %s 지정가=%s 손절=%.6g (탭 #%d)",
+                    "지정가 예약: %s %s %s %s 지정가=%s 손절=%.6g (탭 #%d)",
                     event.symbol,
                     event.timeframe,
                     order.direction.value,
+                    format_kst_zoned(order.placed_ms),
                     "봉내 재산정" if order.live_limit is not None else f"{order.limit_price:.6g}",
                     order.stop_price,
                     order.tap_index,
@@ -221,9 +225,10 @@ class ZoneLimitPaperRunner:
                     now_ms=fill.time,
                 )
                 _logger.info(
-                    "지정가 체결: %s %s @%.6g 관통=%.2fbp 대기=%s → 페이퍼 진입 %s",
+                    "지정가 체결: %s %s %s @%.6g 관통=%.2fbp 대기=%s → 페이퍼 진입 %s",
                     fill.symbol,
                     fill.timeframe,
+                    format_kst_zoned(fill.time),
                     fill.price,
                     fill.penetration_bps,
                     f"{fill.waited_ms}ms" if fill.waited_ms is not None else "?",
@@ -268,10 +273,11 @@ class ZoneLimitPaperRunner:
             symbol, timeframe, exit_price=price, exit_time=time_ms, reason=reason, now_ms=time_ms
         )
         _logger.info(
-            "페이퍼 청산(%s): %s %s @%.6g %s",
+            "페이퍼 청산(%s): %s %s %s @%.6g %s",
             reason.value,
             symbol,
             timeframe,
+            format_kst_zoned(time_ms),
             price,
             "정산" if report.accepted else f"거부({report.outcome.reason})",
         )

@@ -40,6 +40,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from common.telegram import build_telegram_client
+from common.timefmt import kst_log_format, use_kst_logging
 from config.settings import Settings, get_settings
 from data.freshness import window_gap_summary
 from data.funding import FundingRateStore
@@ -323,9 +324,8 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
-    )
+    use_kst_logging()  # 로그 시각도 KST(WAN-172)
+    logging.basicConfig(level=logging.INFO, format=kst_log_format())
     run_signal_runner(
         once=args.once,
         dry_run=args.dry_run,

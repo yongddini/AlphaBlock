@@ -21,6 +21,7 @@ from typing import Any, Literal, Protocol
 
 import pandas as pd
 
+from common.timefmt import kst_log_format, use_kst_logging
 from config.settings import Settings, get_settings
 from data.exchange import create_exchange
 from data.models import (
@@ -661,10 +662,8 @@ async def run_funding_refresh(
 
 def main() -> None:
     """CLI 엔트리포인트: `python -m data.funding`."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    use_kst_logging()  # 로그 시각도 KST(WAN-172)
+    logging.basicConfig(level=logging.INFO, format=kst_log_format())
     asyncio.run(run_funding_refresh())
 
 

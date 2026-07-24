@@ -10,6 +10,7 @@ import asyncio
 import logging
 
 from common.heartbeat import HeartbeatStore
+from common.timefmt import kst_log_format, use_kst_logging
 from config.settings import Settings, get_settings
 from data.backfill import backfill_all
 from data.exchange import create_exchange
@@ -147,10 +148,8 @@ async def run_collector(
 
 def main() -> None:
     """CLI 엔트리포인트: `python -m data.collector`."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    use_kst_logging()  # 로그 시각도 KST(WAN-172)
+    logging.basicConfig(level=logging.INFO, format=kst_log_format())
     asyncio.run(run_collector())
 
 

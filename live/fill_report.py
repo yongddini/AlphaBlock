@@ -22,14 +22,15 @@
 from __future__ import annotations
 
 import argparse
-from datetime import UTC, datetime
 
+from common.timefmt import KST_LABEL, format_kst
 from config.settings import get_settings
 from live.order_journal import MARGINAL_FILL_BPS, OrderJournal
 
 
 def _fmt_ms(ms: int) -> str:
-    return datetime.fromtimestamp(ms / 1000, tz=UTC).strftime("%Y-%m-%d %H:%M")
+    """표 안의 시각(KST, WAN-172). 열 이름이 시간대를 밝히므로 표기는 생략한다."""
+    return format_kst(ms)
 
 
 def _fmt_rate(value: float | None) -> str:
@@ -72,7 +73,7 @@ def render_report(journal: OrderJournal) -> str:
         lines.append("기록된 세션이 없습니다.")
     else:
         lines.append("")
-        lines.append("| 세션 | 시작(UTC) | 마지막 하트비트(UTC) | 가동 시간 |")
+        lines.append(f"| 세션 | 시작({KST_LABEL}) | 마지막 하트비트({KST_LABEL}) | 가동 시간 |")
         lines.append("| --: | -- | -- | --: |")
         total_up = 0
         for span in sessions:
