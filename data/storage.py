@@ -231,6 +231,65 @@ class OhlcvStore:
             )
             return [int(row[0]) for row in cur.fetchall()]
 
+    def gap_boundaries(
+        self, symbol: str, timeframe: str, *, min_gap_ms: int, start_ms: int | None = None
+    ) -> list[tuple[int, int]]:
+        """간격이 `min_gap_ms`를 초과하는 인접 두 봉의 `(앞봉, 뒷봉)` 쌍 (WAN-187).
+
+        시각열을 **파이썬에 올리지 않는다** — 커서를 스트리밍으로 훑으며 벌어진
+        자리만 모으므로 메모리가 시리즈 길이와 무관하다. 갭 계산 자체는
+        `data.gaps.gaps_from_boundaries`가 하고, 그 결과는 시각열 전부를 넘긴
+        `find_gaps`와 같다(같은 `_gap_between`을 쓴다).
+
+        6년 DB에서 이 차이가 운영을 갈랐다: 예전 경로(`load()` → pandas)는 한
+        시리즈(1m ~315만 봉)에 **9.9초 · RSS 2.3GB**가 들어 수집기 시작 갭 복구가
+        웹소켓 접속 전에 매달렸고, 이 경로는 **1.2초 · 17MB**다.
+
+        ⚠️ 커서를 밖으로 넘기지 않고 **락 안에서 끝까지 훑는다** — 게으른 제너레이터로
+        내보내면 소비자가 늦거나 중단할 때 저장소 락이 그만큼 잡혀 스트림 스레드가
+        막힌다(같은 커넥션을 수집·스트림이 공유한다).
+
+        `start_ms`를 주면 **뒷봉이 그 시각 이상인 쌍만** 본다(최근 창 한정 점검). 창
+        경계에 걸친 갭을 놓치지 않도록 `start_ms` 직전 봉 하나를 앵커로 함께 훑으므로,
+        결과는 「전 구간에서 찾은 뒤 `cur >= start_ms`로 거른 것」과 같다. 6년 DB에서
+        전 구간 스캔은 45 시리즈에 ~40초(콜드)라 수집기 시작에는 무겁다.
+
+        `2h`처럼 파생 TF는 저장된 행이 없으므로 예전처럼 원본 TF 리샘플 결과의
+        시각열을 본다(그쪽은 상위 TF라 길이가 짧다).
+        """
+        if timeframe in _DERIVED_TIMEFRAMES:
+            times = [int(t) for t in self.load(symbol, timeframe)["open_time"].tolist()]
+            return [
+                (prev, cur)
+                for prev, cur in zip(times, times[1:], strict=False)
+                if cur - prev > min_gap_ms and (start_ms is None or cur >= start_ms)
+            ]
+        boundaries: list[tuple[int, int]] = []
+        with self._lock:
+            scan_from = start_ms
+            if start_ms is not None:
+                # 창 직전 봉(앵커) — 이게 없으면 경계를 가로지르는 갭이 통째로 안 보인다.
+                (anchor,) = self._conn.execute(
+                    "SELECT MAX(open_time) FROM ohlcv "
+                    "WHERE symbol = ? AND timeframe = ? AND open_time < ?",
+                    (symbol, timeframe, start_ms),
+                ).fetchone()
+                if anchor is not None:
+                    scan_from = int(anchor)
+            sql = "SELECT open_time FROM ohlcv WHERE symbol = ? AND timeframe = ?"
+            params: tuple[object, ...] = (symbol, timeframe)
+            if scan_from is not None:
+                sql += " AND open_time >= ?"
+                params += (scan_from,)
+            cur = self._conn.execute(sql + " ORDER BY open_time ASC", params)
+            prev: int | None = None
+            for (raw,) in cur:
+                open_time = int(raw)
+                if prev is not None and open_time - prev > min_gap_ms:
+                    boundaries.append((prev, open_time))
+                prev = open_time
+        return boundaries
+
     def list_series(self) -> list[tuple[str, str]]:
         """저장된 (symbol, timeframe) 조합 목록을 정렬해 반환한다.
 

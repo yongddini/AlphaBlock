@@ -11,7 +11,7 @@ from pathlib import Path
 import ccxt
 import pytest
 
-from data.gaps import find_gaps
+from data.gaps import Gap, find_gaps
 from data.models import Candle
 from data.repair import (
     RepairStateStore,
@@ -203,3 +203,93 @@ def test_repair_state_store_roundtrip(tmp_path: Path) -> None:
     assert loaded.ran_at_ms == T0
     assert loaded.total_filled == 2
     assert loaded.has_error is False
+
+
+def test_repair_never_loads_the_whole_series(store: OhlcvStore) -> None:
+    """갭 탐지가 `store.load`(pandas 전체 로드)를 **타지 않는다** (WAN-187).
+
+    라벨이 아니라 동작으로 고정한다 — 옛 경로는 시리즈를 9열 DataFrame으로 통째로
+    올려(6년 1m 기준 9.9초 · RSS 2.3GB) 수집기 시작 갭 복구가 웹소켓 접속 직전에
+    매달렸다. 여기서 `load`를 폭탄으로 바꿔 두면, 누가 편의상 그 경로로 되돌릴 때
+    테스트가 먼저 터진다.
+    """
+    store.upsert_candles(_candles([0, 1, 2, 6, 8, 9]))  # 3,4,5,7 누락
+
+    def boom(*args: object, **kwargs: object) -> object:
+        raise AssertionError("갭 탐지가 시리즈를 통째로 로드했다")
+
+    monkeypatched = store.load
+    store.load = boom  # type: ignore[method-assign]
+    try:
+        result = repair_series(
+            FakeExchange(list(range(10))), store, SYMBOL, TF, sleeper=lambda _: None
+        )
+    finally:
+        store.load = monkeypatched  # type: ignore[method-assign]
+
+    # 옛 경로와 같은 답이어야 의미가 있다(복구 전 탐지 · 복구 후 잔여 재계산 둘 다).
+    assert result.gaps_found == 2  # 3-5, 7
+    assert result.bars_filled == 4
+    assert result.bars_remaining == 0
+
+
+def test_repair_lookback_window_skips_older_gaps(store: OhlcvStore) -> None:
+    """최근 창 한정 점검은 창 밖 갭을 건드리지 않는다 (WAN-187).
+
+    6년 DB에서 전 구간 스캔이 수집기 시작을 늦추므로 시작 경로만 창을 좁혔다. 창
+    밖은 `alphablock backfill --repair`(전 구간) 소관이다.
+    """
+    # 옛 갭(2-4)은 창 밖에서 닫히고, 최근 갭(21-23)만 창 안이다.
+    store.upsert_candles(_candles([0, 1, *range(5, 21), 24]))
+    exchange = FakeExchange(list(range(25)))
+    now = T0 + 24 * TF_MS
+
+    result = repair_series(
+        exchange,
+        store,
+        SYMBOL,
+        TF,
+        sleeper=lambda _: None,
+        now_ms=lambda: now,
+        lookback_ms=10 * TF_MS,  # 인덱스 14 이후만
+    )
+
+    assert result.gaps_found == 1  # 21-23만
+    assert result.bars_filled == 3
+    assert result.bars_remaining == 0
+    # 창 밖 옛 갭(2-4)은 그대로 남는다 — 전 구간 점검(=`--repair`)은 여전히 그걸 본다.
+    assert find_gaps(_timestamps(store), TF) == [
+        Gap(start_ms=T0 + 2 * TF_MS, end_ms=T0 + 4 * TF_MS, missing=3)
+    ]
+
+
+def test_repair_lookback_sees_gap_straddling_the_window_edge(store: OhlcvStore) -> None:
+    """창 경계를 가로지르는 갭도 보인다 — 앵커 봉 하나를 함께 훑기 때문이다."""
+    store.upsert_candles(_candles([0, 1, 2, 20]))  # 갭 3-19가 창 경계를 가로지른다
+    exchange = FakeExchange(list(range(21)))
+    now = T0 + 20 * TF_MS
+
+    result = repair_series(
+        exchange,
+        store,
+        SYMBOL,
+        TF,
+        sleeper=lambda _: None,
+        now_ms=lambda: now,
+        lookback_ms=5 * TF_MS,  # 창은 인덱스 15부터 — 갭의 앞봉(2)은 창 밖이다
+    )
+
+    assert result.gaps_found == 1
+    assert result.bars_filled == 17
+    assert store.count(SYMBOL, TF) == 21
+
+
+def test_repair_all_records_the_window_it_looked_at(store: OhlcvStore) -> None:
+    """요약이 「어디까지 봤는지」를 남긴다 — 갭 0을 전 구간 무결로 읽지 않도록."""
+    store.upsert_candles(_candles([0, 1, 2]))
+    summary = repair_all(
+        FakeExchange([0, 1, 2]), store, sleeper=lambda _: None, lookback_ms=3 * TF_MS
+    )
+    assert summary.lookback_ms == 3 * TF_MS
+    # 창을 안 주면(전 구간) None이라 화면에도 창 표기가 안 붙는다.
+    assert repair_all(FakeExchange([0, 1, 2]), store, sleeper=lambda _: None).lookback_ms is None

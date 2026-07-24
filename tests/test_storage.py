@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import tracemalloc
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
 
+from data.gaps import find_gaps, gaps_from_boundaries
 from data.models import Candle
 from data.storage import _DISTINCT_SYMBOLS, _DISTINCT_TIMEFRAMES, OhlcvStore
 
@@ -289,3 +291,78 @@ def test_list_series_work_does_not_grow_with_row_count(store: OhlcvStore) -> Non
         ).fetchall(),
     )
     assert old > large * 5, f"대조군이 충분히 무겁지 않다: skip-scan {large} vs DISTINCT {old}"
+
+
+# --- 갭 경계 스트리밍 스캔 (WAN-187) -----------------------------------------
+
+
+def _seed_with_gaps(store: OhlcvStore, bars: int, missing: set[int]) -> None:
+    """`bars`개 1m 봉 중 `missing` 인덱스를 뺀 시리즈를 넣는다."""
+    store.upsert_candles(
+        Candle("BTC/USDT:USDT", "1m", i * 60_000, 1.0, 2.0, 0.5, 1.5, 10.0)
+        for i in range(bars)
+        if i not in missing
+    )
+
+
+def test_gap_boundaries_agrees_with_find_gaps(store: OhlcvStore) -> None:
+    """스트리밍 경계 스캔 결과가 시각열 전부를 넘긴 `find_gaps`와 **같다**.
+
+    경로가 둘로 갈렸으니(WAN-187) 답도 갈릴 수 있다 — 그 가능성을 여기서 막는다.
+    """
+    missing = {3, 4, 5, 9, 20, 21, 22, 23, 57}
+    _seed_with_gaps(store, bars=80, missing=missing)
+
+    boundaries = store.gap_boundaries("BTC/USDT:USDT", "1m", min_gap_ms=60_000)
+    assert gaps_from_boundaries(boundaries, "1m") == find_gaps(
+        store.open_times("BTC/USDT:USDT", "1m"), "1m"
+    )
+    # 사전 조건: 실제로 갭이 있는 데이터여야 위 비교가 의미를 갖는다.
+    assert len(boundaries) == 4  # 3-5, 9, 20-23, 57
+
+
+def test_gap_boundaries_on_gapless_and_empty_series(store: OhlcvStore) -> None:
+    assert store.gap_boundaries("BTC/USDT:USDT", "1m", min_gap_ms=60_000) == []
+    _seed_with_gaps(store, bars=10, missing=set())
+    assert store.gap_boundaries("BTC/USDT:USDT", "1m", min_gap_ms=60_000) == []
+
+
+def test_gap_boundaries_on_derived_timeframe(store: OhlcvStore) -> None:
+    """파생 TF(2h)는 저장 행이 없으므로 원본 리샘플 시각열로 본다."""
+    hour = 3_600_000
+    store.upsert_candles(
+        Candle("BTC/USDT:USDT", "1h", i * hour, 1.0, 2.0, 0.5, 1.5, 10.0)
+        for i in range(12)
+        if i not in {4, 5}  # 2h 버킷 하나(4,5)가 통째로 빈다
+    )
+    boundaries = store.gap_boundaries("BTC/USDT:USDT", "2h", min_gap_ms=2 * hour)
+    assert gaps_from_boundaries(boundaries, "2h") == find_gaps(
+        [int(t) for t in store.load("BTC/USDT:USDT", "2h")["open_time"].tolist()], "2h"
+    )
+    assert [g.missing for g in gaps_from_boundaries(boundaries, "2h")] == [1]
+
+
+def test_gap_boundaries_memory_does_not_grow_with_series_length(store: OhlcvStore) -> None:
+    """시리즈가 길어져도 갭 스캔이 쓰는 메모리는 그대로다 (WAN-187 완료 기준).
+
+    6년 DB에서 수집기를 막은 것은 **시간이 아니라 메모리**였다(시리즈당 ~315만 봉을
+    9열 DataFrame으로 올려 RSS 2.3GB). 그래서 벽시계가 아니라 **할당량**으로 고정한다
+    — 머신·부하에 흔들리지 않고, 옛 경로였다면 정확히 여기서 무너진다.
+    """
+    _seed_with_gaps(store, bars=60_000, missing={7, 500, 40_000})
+
+    tracemalloc.start()
+    try:
+        tracemalloc.reset_peak()
+        store.gap_boundaries("BTC/USDT:USDT", "1m", min_gap_ms=60_000)
+        _, streamed = tracemalloc.get_traced_memory()
+        tracemalloc.reset_peak()
+        store.open_times("BTC/USDT:USDT", "1m")  # 대조군: 시각열을 통째로 올리는 경로
+        _, materialized = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert streamed < 100_000, f"경계만 모으는데 {streamed}B를 썼다"
+    # 대조군이 충분히 무거워야 위 단언이 "원래 싼 연산"이 아님이 드러난다. 시각열만
+    # 올려도 이만큼이고, 실제 옛 경로(pandas 9열)는 여기서 한 자릿수 더 쓴다.
+    assert materialized > streamed * 20, f"대조군 {materialized}B vs 스트리밍 {streamed}B"

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from functools import partial
 
 from common.heartbeat import HeartbeatStore
 from common.timefmt import kst_log_format, use_kst_logging
@@ -76,7 +77,9 @@ async def run_collector(
 
     `repair_on_start`(None이면 설정값 `settings.repair_on_start`)가 참이면, 백필
     직후 저장된 시리즈의 내부 갭을 1회 자동 복구한다(WAN-35). 복구 중 오류가 나면
-    WAN-32 텔레그램 경고 경로로 알린다.
+    WAN-32 텔레그램 경고 경로로 알린다. 이 점검은 **최근 창만** 본다
+    (`settings.repair_on_start_lookback_days`, 기본 7일 · 0이면 전 구간) — 6년 DB에서
+    전 구간 스캔은 스트림 접속을 ~40초 늦춘다(WAN-187).
     """
     settings = settings or get_settings()
     do_repair = settings.repair_on_start if repair_on_start is None else repair_on_start
@@ -105,7 +108,18 @@ async def run_collector(
         logger.info("백필 총 %d 봉 저장", sum(results.values()))
 
         if do_repair:
-            summary = await asyncio.to_thread(repair_all, exchange, store)
+            # 시작 점검은 최근 창만 본다 (WAN-187) — 6년 DB 전 구간 스캔(~40초)이
+            # 스트림 접속을 늦추기 때문이다. 창 밖 갭은 `alphablock backfill --repair`
+            # 소관이고, 「어디까지 봤는지」는 요약(`RepairSummary.lookback_ms`)에 남는다.
+            lookback_days = settings.repair_on_start_lookback_days
+            lookback_ms = lookback_days * 86_400_000 if lookback_days else None
+            logger.info(
+                "갭 자동 복구 점검 시작: %s",
+                f"최근 {lookback_days}일" if lookback_ms else "전 구간",
+            )
+            summary = await asyncio.to_thread(
+                partial(repair_all, exchange, store, lookback_ms=lookback_ms)
+            )
             RepairStateStore(settings.repair_state_path).save(summary)
             logger.info(
                 "갭 자동 복구: %d 시리즈에서 %d봉 채움%s",
