@@ -892,6 +892,22 @@ uv run alphablock status                                     # 상태 요약
 로그 파일이 무한정 커지지 않게 하려면 macOS `newsyslog`(예: `/etc/newsyslog.d/`에
 `alphablock.conf` 추가)로 로테이션을 설정한다.
 
+### 리눅스 서버 상시 구동 (WAN-174, systemd)
+
+로컬 맥은 ASTx가 바이낸스 선물 웹소켓을 막아 실시간 수집이 불가하므로(WAN-174 진단),
+수집기·페이퍼 러너·대시보드를 **리눅스 서버**(오라클 무료 티어)에서 돌린다. launchd 판과
+대칭인 systemd 스크립트를 쓴다:
+
+```bash
+./scripts/setup-server.sh               # 서버 1회 셋업(스왑 2GB + uv + 의존성)
+./scripts/install-systemd.sh            # 셋 다 설치·시작(부팅 시 자동 시작 포함)
+./scripts/uninstall-systemd.sh          # 해제(로그는 남김)
+```
+
+서버 프로비저닝·`.env`/DB 이전(WAL 체크포인트)·검증 절차·DB 배치 설계(수집=서버 /
+백테스트=로컬)는 [docs/ops/server-migration.md](docs/ops/server-migration.md) 참고.
+대시보드는 서버 `127.0.0.1` 전용 — `ssh -N -L 8501:127.0.0.1:8501 <서버>` 터널로 접속한다.
+
 ## 운영 상태 자동 경고 (WAN-32)
 
 Health 대시보드(WAN-30)·`alphablock status`는 화면을 **열어야** 상태를 볼 수 있다.

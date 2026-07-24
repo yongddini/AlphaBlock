@@ -518,7 +518,7 @@ def test_live_payload_carries_stream_and_band_seed() -> None:
     )
     live = payload["live"]
     assert isinstance(live, dict)
-    assert live["streamUrl"] == "wss://fstream.binance.com/ws/btcusdt@kline_1h"
+    assert live["streamUrl"] == "wss://fstream.binance.com/market/ws/btcusdt@kline_1h"
     assert live["lastBarOpenMs"] == int(df["open_time"].iloc[-1])
     assert isinstance(live["bandCloses"], list) and len(live["bandCloses"]) == 19
     assert live["bandParams"]["directionSign"] == 1

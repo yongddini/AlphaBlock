@@ -1,0 +1,31 @@
+# AlphaBlock 실시간 시그널 러너 systemd 서비스 (WAN-174, 페이퍼 모드).
+#
+# scripts/install-systemd.sh 가 __PLACEHOLDER__ 를 실제 값으로 치환해
+# /etc/systemd/system/alphablock-live.service 로 설치한다.
+# launchd 판(scripts/launchd/com.alphablock.live.plist.template, WAN-31)과 대칭.
+#
+# 안전: 실주문 없음 — ALPHABLOCK_LIVE_TRADING 기본값 false 를 바꾸지 않는다.
+# 수집·시그널·알림(텔레그램)까지만 상시 구동한다.
+
+[Unit]
+Description=AlphaBlock live signal runner (paper only, no real orders)
+Wants=network-online.target
+After=network-online.target
+# 러너는 수집기가 쌓는 DB를 읽으므로 수집기 이후 시작이 자연스럽다(강제 아님).
+After=alphablock-collector.service
+
+[Service]
+Type=simple
+User=__RUN_USER__
+WorkingDirectory=__WORKDIR__
+Environment=PATH=__PATH__
+ExecStart=__UV_BIN__ run -- alphablock live
+
+Restart=always
+RestartSec=10
+
+StandardOutput=append:__LOG_DIR__/live.log
+StandardError=append:__LOG_DIR__/live.log
+
+[Install]
+WantedBy=multi-user.target
