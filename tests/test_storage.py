@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
 
 from data.models import Candle
-from data.storage import OhlcvStore
+from data.storage import _DISTINCT_SYMBOLS, _DISTINCT_TIMEFRAMES, OhlcvStore
 
 
 @pytest.fixture
@@ -179,3 +179,113 @@ def test_corrupted_cache_file_falls_back_to_db(tmp_path: Path) -> None:
         parquet_path.write_bytes(b"not a real parquet file")
         recovered = store.load("BTC/USDT:USDT", "1m")
     assert list(recovered["close"]) == [1.5]
+
+
+# --- 시리즈 목록 skip-scan (WAN-186) ----------------------------------------
+
+
+def _seed_series(store: OhlcvStore, pairs: list[tuple[str, str]], bars: int) -> None:
+    for symbol, timeframe in pairs:
+        store.upsert_candles(
+            Candle(symbol, timeframe, i * 60_000, 1.0, 2.0, 0.5, 1.5, 10.0) for i in range(bars)
+        )
+
+
+def _vm_steps(store: OhlcvStore, call: Callable[[], object]) -> int:
+    """`call` 동안 SQLite VM이 밟은 스텝 수(= 실제 훑은 일의 양)를 센다.
+
+    벽시계가 아니라 VM 스텝을 세는 이유: 시간 기반 단언은 다른 무거운 작업이
+    동시에 돌면 흔들린다(머신·부하 의존). 스텝 수는 결정적이라 "행 수에 비례해
+    일하는가"를 흔들림 없이 고정한다.
+    """
+    steps = 0
+
+    def bump() -> int:
+        nonlocal steps
+        steps += 1
+        return 0
+
+    store._conn.set_progress_handler(bump, 1)
+    try:
+        call()
+    finally:
+        store._conn.set_progress_handler(None, 0)
+    return steps
+
+
+def test_list_series_matches_distinct_query_and_ordering(store: OhlcvStore) -> None:
+    """skip-scan 결과가 옛 `SELECT DISTINCT`와 집합·정렬 모두 같다(WAN-186).
+
+    정렬이 미묘하다 — TF는 사전순(BINARY)이라 `15m < 1d < 1h < 1m < 4h`다.
+    """
+    pairs = [
+        ("BTC/USDT:USDT", "1h"),
+        ("BTC/USDT:USDT", "15m"),
+        ("BTC/USDT:USDT", "1m"),
+        ("BTC/USDT:USDT", "4h"),
+        ("BTC/USDT:USDT", "1d"),
+        ("BTCUSDT-PERP", "1h"),  # 접두가 겹치는 심볼(경계 seek 확인)
+        ("ETH/USDT:USDT", "1h"),
+        ("ETH/USDT:USDT", "1d"),
+    ]
+    _seed_series(store, pairs, bars=3)
+
+    expected = store._conn.execute(
+        "SELECT DISTINCT symbol, timeframe FROM ohlcv ORDER BY symbol, timeframe"
+    ).fetchall()
+    assert store.list_series() == [(row[0], row[1]) for row in expected]
+
+
+def test_list_series_on_empty_store_is_empty(store: OhlcvStore) -> None:
+    assert store.list_series() == []
+
+
+def test_list_series_does_not_scan_the_table(store: OhlcvStore) -> None:
+    """쿼리 계획에 `SCAN ohlcv`가 없다 — 전부 인덱스 seek다(WAN-186 완료 기준)."""
+    _seed_series(store, [("BTC/USDT:USDT", "1h"), ("ETH/USDT:USDT", "1m")], bars=5)
+
+    plans: list[str] = []
+    for sql, params in (
+        (_DISTINCT_SYMBOLS, ()),
+        (_DISTINCT_TIMEFRAMES, ("BTC/USDT:USDT",)),
+    ):
+        rows = store._conn.execute(f"EXPLAIN QUERY PLAN {sql}", params).fetchall()
+        plans.extend(str(row[-1]) for row in rows)
+
+    assert plans, "쿼리 계획이 비어 있다"
+    assert not [p for p in plans if "SCAN ohlcv" in p], plans
+    # 두 열 모두 인덱스 제약으로 쓰여야 한다 — 첫 열만 쓰면 같은 심볼의 다음 TF로
+    # 넘어갈 때 그 시리즈를 통째로 훑어 오히려 더 느려진다(행값 비교의 함정).
+    assert any("symbol=? AND timeframe>?" in p for p in plans), plans
+
+
+def test_list_series_work_does_not_grow_with_row_count(store: OhlcvStore) -> None:
+    """행이 10배로 늘어도 `list_series`가 하는 일은 그대로다(WAN-186).
+
+    옛 `SELECT DISTINCT`는 PK 인덱스를 전수 스캔해 이 단언에서 정확히 무너진다 —
+    6년 × 9종목(3천만 행)에서 status가 멈추고 수집기 스트림이 시작조차 못 한
+    것이 그 스캔이었다. 라벨이 아니라 **일의 양**으로 고정한다.
+    """
+    pairs = [("BTC/USDT:USDT", "1m"), ("ETH/USDT:USDT", "1m"), ("SOL/USDT:USDT", "1h")]
+    _seed_series(store, pairs, bars=200)
+    small = _vm_steps(store, store.list_series)
+
+    for symbol, timeframe in pairs:
+        store.upsert_candles(
+            Candle(symbol, timeframe, i * 60_000, 1.0, 2.0, 0.5, 1.5, 10.0)
+            for i in range(200, 2_000)
+        )
+    large = _vm_steps(store, store.list_series)
+
+    assert store.list_series() == sorted(pairs)
+    assert large <= small * 1.5, f"행 수에 비례해 일한다: {small} → {large} 스텝"
+
+    # 대조군: 옛 구현(전수 스캔)은 같은 데이터에서 훨씬 많이 일한다. 이 줄이 있어야
+    # 위 단언이 "원래 싼 연산이라 통과한 것"이 아님이 드러난다.
+    old = _vm_steps(
+        store,
+        lambda: store._conn.execute(
+            "SELECT DISTINCT symbol, timeframe FROM ohlcv ORDER BY symbol, timeframe"
+        ).fetchall(),
+    )
+    assert old > large * 5, f"대조군이 충분히 무겁지 않다: skip-scan {large} vs DISTINCT {old}"

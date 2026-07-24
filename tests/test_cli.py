@@ -108,10 +108,28 @@ def test_format_status_reports_idle_when_nothing_ran(tmp_path: Path) -> None:
 def test_cmd_status_prints(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     settings = _settings(tmp_path)
     _seed_db(settings.db_path)
-    rc = cmd_status(argparse.Namespace(), settings)
+    rc = cmd_status(argparse.Namespace(bar_count=False), settings)
     assert rc == 0
     out = capsys.readouterr().out
     assert "AlphaBlock 운영 상태" in out
+
+
+def test_cmd_status_omits_bar_count_by_default_and_shows_it_when_asked(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """봉 수는 `--bar-count`로 켤 때만 찍힌다(WAN-186).
+
+    기본 실행이 시리즈마다 `COUNT(*)`를 돌면 6년 DB에서 status가 멈춘다 —
+    라벨이 아니라 **출력**으로 고정한다.
+    """
+    settings = _settings(tmp_path)
+    _seed_db(settings.db_path)
+
+    assert cmd_status(argparse.Namespace(bar_count=False), settings) == 0
+    assert "봉)" not in capsys.readouterr().out
+
+    assert cmd_status(argparse.Namespace(bar_count=True), settings) == 0
+    assert "봉)" in capsys.readouterr().out
 
 
 def test_cmd_collect_invokes_run_collector(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

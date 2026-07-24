@@ -61,16 +61,29 @@ class HealthView(BaseModel):
     """마지막 갭 복구 요약(WAN-35). 복구를 한 번도 안 돌렸으면 None."""
 
 
-def series_freshness_rows(store: OhlcvStore) -> list[tuple[str, str, int | None, int]]:
-    """저장된 시리즈별 `(symbol, timeframe, last_open_time, bar_count)`을 모은다."""
-    rows: list[tuple[str, str, int | None, int]] = []
+def series_freshness_rows(
+    store: OhlcvStore, *, include_bar_count: bool = False
+) -> list[tuple[str, str, int | None, int | None]]:
+    """저장된 시리즈별 `(symbol, timeframe, last_open_time, bar_count)`을 모은다.
+
+    `include_bar_count`가 False(기본)면 봉 수를 **세지 않고 None**으로 둔다
+    (WAN-186). 시리즈별 `COUNT(*)`는 PK 인덱스의 그 시리즈 구간을 전부 훑으므로,
+    6년 × 9종목 DB에서 1분봉 한 시리즈만 ~315만 행(실측 1.3초)이고 45개 시리즈를
+    합치면 화면의 「N봉」 하나 찍자고 수천만 인덱스 엔트리를 읽는다. 신선도 판정
+    (`compute_freshness`)은 봉 수를 쓰지 않으므로 기본값에서 뺐다 — 정확한 봉 수가
+    필요하면 켜면 되고(`alphablock status --bar-count`), 갭·중복까지 보려면
+    `alphablock verify`가 정본이다.
+
+    `last_open_time`은 PK 접두(symbol+timeframe)로 바로 seek라 이미 싸다.
+    """
+    rows: list[tuple[str, str, int | None, int | None]] = []
     for symbol, timeframe in store.list_series():
         rows.append(
             (
                 symbol,
                 timeframe,
                 store.last_open_time(symbol, timeframe),
-                store.count(symbol, timeframe),
+                store.count(symbol, timeframe) if include_bar_count else None,
             )
         )
     return rows
@@ -135,12 +148,16 @@ def build_health_view(
     funding_symbols: list[str] | None = None,
     repair_state_path: str | None = None,
     now_ms: int | None = None,
+    include_bar_count: bool = False,
 ) -> HealthView:
-    """DB·상태파일을 읽어 완성된 `HealthView`를 조립한다."""
+    """DB·상태파일을 읽어 완성된 `HealthView`를 조립한다.
+
+    `include_bar_count`는 시리즈별 봉 수를 셀지 정한다(기본 False = 안 셈, WAN-186).
+    """
     now = now_ms if now_ms is not None else _now_ms()
 
     with OhlcvStore(db_path) as ohlcv:
-        fresh_rows = series_freshness_rows(ohlcv)
+        fresh_rows = series_freshness_rows(ohlcv, include_bar_count=include_bar_count)
         symbols = funding_symbols
         if symbols is None:
             symbols = sorted({symbol for symbol, _, _, _ in fresh_rows})
