@@ -60,6 +60,43 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(symbol, timeframe, open_time) DO NOTHING
 """
 
+# 시리즈 목록 skip-scan (WAN-186).
+#
+# `SELECT DISTINCT symbol, timeframe FROM ohlcv`는 SQLite가 loose index scan으로
+# 최적화하지 못해 **PK 인덱스를 전수 스캔**한다. 3년·6종목일 땐 참을 만했지만
+# WAN-182가 창을 6년 × 9종목으로 넓히자 3천만 행 스캔이 되어(실측 15초 이상)
+# `alphablock status`가 멈추고, 더 나쁘게는 수집기 시작 갭 복구(`repair.repair_all`
+# → `list_series`)가 **웹소켓 접속 직전에 매달려 스트림이 시작되지 못했다**.
+#
+# 재귀 CTE로 "다음 값"만 seek하면 비용이 행 수가 아니라 조합 수(~45)에 비례한다.
+# 두 단으로 나누는 것이 핵심이다 — 한 단으로 `(symbol, timeframe) > (?, ?)` 행값
+# 비교를 쓰면 SQLite가 인덱스 제약에 **첫 열만** 쓰기 때문에(`symbol>?`) 같은
+# 심볼 안에서 다음 TF로 넘어갈 때 그 시리즈의 행을 전부 훑어 오히려 더 느리다
+# (실측 51초). 아래처럼 `symbol = ? AND timeframe > ?`로 걸어야 두 열 모두 seek다.
+_DISTINCT_SYMBOLS = """
+WITH RECURSIVE syms(symbol) AS (
+    SELECT (SELECT MIN(symbol) FROM ohlcv)
+    UNION ALL
+    SELECT (SELECT o.symbol FROM ohlcv o WHERE o.symbol > s.symbol ORDER BY o.symbol LIMIT 1)
+    FROM syms s WHERE s.symbol IS NOT NULL
+)
+SELECT symbol FROM syms WHERE symbol IS NOT NULL
+"""
+
+_DISTINCT_TIMEFRAMES = """
+WITH RECURSIVE tfs(timeframe) AS (
+    SELECT (SELECT MIN(timeframe) FROM ohlcv WHERE symbol = ?1)
+    UNION ALL
+    SELECT (
+        SELECT o.timeframe FROM ohlcv o
+        WHERE o.symbol = ?1 AND o.timeframe > t.timeframe
+        ORDER BY o.timeframe LIMIT 1
+    )
+    FROM tfs t WHERE t.timeframe IS NOT NULL
+)
+SELECT timeframe FROM tfs WHERE timeframe IS NOT NULL
+"""
+
 # 거래소에서 직접 수집하지 않고 하위 TF에서 리샘플로 파생하는 타임프레임 → 원본 TF.
 # 2h는 미수집(WAN-6은 1h까지만)이라 1h 두 봉을 합쳐 무손실로 만든다 (WAN-24).
 _DERIVED_TIMEFRAMES: dict[str, str] = {"2h": "1h"}
@@ -195,13 +232,18 @@ class OhlcvStore:
             return [int(row[0]) for row in cur.fetchall()]
 
     def list_series(self) -> list[tuple[str, str]]:
-        """저장된 (symbol, timeframe) 조합 목록을 정렬해 반환한다."""
+        """저장된 (symbol, timeframe) 조합 목록을 정렬해 반환한다.
+
+        PK 인덱스를 **건너뛰며 seek**한다(skip-scan) — 결과·정렬은 예전
+        `SELECT DISTINCT symbol, timeframe`과 같고 비용만 다르다(WAN-186).
+        """
         with self._lock:
-            cur = self._conn.execute(
-                "SELECT DISTINCT symbol, timeframe FROM ohlcv ORDER BY symbol, timeframe"
-            )
-            rows = cur.fetchall()
-        return [(row[0], row[1]) for row in rows]
+            symbols = [row[0] for row in self._conn.execute(_DISTINCT_SYMBOLS)]
+            return [
+                (symbol, row[0])
+                for symbol in symbols
+                for row in self._conn.execute(_DISTINCT_TIMEFRAMES, (symbol,))
+            ]
 
     def load(
         self,

@@ -101,9 +101,13 @@ def format_status(view: HealthView, *, configured_symbols: Sequence[str] | None 
     lines.append("데이터 신선도:")
     if view.freshness:
         for f in view.freshness:
+            # 봉 수는 기본으로 안 센다(`--bar-count`, WAN-186) — 안 셌으면 아예 안 적는다.
+            detail = f"지연 {_fmt_lag(f.lag_ms)}"
+            if f.bar_count is not None:
+                detail += f", {f.bar_count}봉"
             lines.append(
                 f"  {_LEVEL_TEXT[f.level]} {f.symbol} {f.timeframe}"
-                f"  최신 {_fmt_time(f.last_open_time)} (지연 {_fmt_lag(f.lag_ms)}, {f.bar_count}봉)"
+                f"  최신 {_fmt_time(f.last_open_time)} ({detail})"
             )
     else:
         lines.append("  저장된 OHLCV 없음 — 먼저 수집을 실행하세요.")
@@ -133,9 +137,10 @@ def format_status(view: HealthView, *, configured_symbols: Sequence[str] | None 
     return "\n".join(lines)
 
 
-def _build_health_view(settings: Settings) -> HealthView:
+def _build_health_view(settings: Settings, *, include_bar_count: bool = False) -> HealthView:
     return build_health_view(
         settings.db_path,
+        include_bar_count=include_bar_count,
         runtime_state_path=settings.live_runtime_state_path,
         poll_interval_seconds=settings.live_poll_interval_seconds,
         stale_multiplier=settings.health_stale_multiplier,
@@ -321,7 +326,8 @@ def cmd_live(args: argparse.Namespace, settings: Settings) -> int:
 
 def cmd_status(args: argparse.Namespace, settings: Settings) -> int:
     """`alphablock status` — 운영 상태 요약을 출력."""
-    print(format_status(_build_health_view(settings), configured_symbols=settings.symbols))
+    view = _build_health_view(settings, include_bar_count=args.bar_count)
+    print(format_status(view, configured_symbols=settings.symbols))
     return 0
 
 
@@ -436,6 +442,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_live.set_defaults(func=cmd_live)
 
     p_status = sub.add_parser("status", help="운영 상태(Health) 요약 출력")
+    p_status.add_argument(
+        "--bar-count",
+        action="store_true",
+        help="시리즈별 저장 봉 수도 센다(대용량 DB에서 수십 초 걸릴 수 있음)",
+    )
     p_status.set_defaults(func=cmd_status)
 
     p_watch = sub.add_parser("watch", help="운영 상태 워치(이상 시 텔레그램 경고)")

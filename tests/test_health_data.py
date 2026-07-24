@@ -6,7 +6,7 @@ from pathlib import Path
 
 from common.heartbeat import HeartbeatStore
 from dashboard.health import HealthLevel
-from dashboard.health_data import build_health_view
+from dashboard.health_data import build_health_view, series_freshness_rows
 from data.funding import FundingRateStore
 from data.models import Candle, FundingRate
 from data.storage import OhlcvStore
@@ -125,3 +125,58 @@ def test_build_health_view_no_data_and_no_runner(tmp_path: Path) -> None:
     assert view.collector.level is HealthLevel.UNKNOWN
     assert view.runner.ran is False
     assert view.runner.level is HealthLevel.UNKNOWN
+
+
+# --- 봉 수는 옵트인 (WAN-186) -----------------------------------------------
+
+
+def test_series_freshness_rows_does_not_count_bars_by_default(tmp_path: Path) -> None:
+    """기본 경로는 `COUNT(*)`를 **호출조차 하지 않는다**(WAN-186).
+
+    시리즈별 COUNT는 PK 인덱스의 그 시리즈 구간을 전부 훑는다 — 6년 × 9종목 DB에서
+    1분봉 한 시리즈가 ~315만 행이라, 화면의 「N봉」 하나 때문에 status가 멈췄다.
+    라벨이 아니라 **호출 여부**로 고정한다(안 세는 척하며 세면 그대로 느리다).
+    """
+    db_path = str(tmp_path / "ohlcv.db")
+    _seed(db_path, last_open_time=_NOW)
+
+    with OhlcvStore(db_path) as store:
+        calls: list[tuple[str | None, str | None]] = []
+        real_count = store.count
+
+        def spy(symbol: str | None = None, timeframe: str | None = None) -> int:
+            calls.append((symbol, timeframe))
+            return real_count(symbol, timeframe)
+
+        store.count = spy  # type: ignore[method-assign]
+
+        rows = series_freshness_rows(store)
+        assert calls == []
+        assert [r[3] for r in rows] == [None]
+        # 신선도에 필요한 최신 봉 시각은 그대로 나온다(뺀 것은 봉 수뿐).
+        assert rows[0][:3] == ("BTC/USDT:USDT", "1h", _NOW)
+
+        counted = series_freshness_rows(store, include_bar_count=True)
+        assert calls == [("BTC/USDT:USDT", "1h")]
+        assert [r[3] for r in counted] == [5]
+
+
+def test_build_health_view_bar_count_is_opt_in(tmp_path: Path) -> None:
+    """`build_health_view`도 기본은 안 세고, 켜면 정확한 수를 준다(WAN-186)."""
+    db_path = str(tmp_path / "ohlcv.db")
+    _seed(db_path, last_open_time=_NOW)
+    kwargs = {
+        "runtime_state_path": str(tmp_path / "missing.json"),
+        "poll_interval_seconds": 60,
+        "stale_multiplier": 2.5,
+        "now_ms": _NOW,
+    }
+
+    default_view = build_health_view(db_path, **kwargs)  # type: ignore[arg-type]
+    assert default_view.freshness[0].bar_count is None
+    # 봉 수를 안 세도 신선도 판정은 멀쩡해야 한다 — 그게 이 화면의 본업이다.
+    assert default_view.freshness[0].level is HealthLevel.OK
+
+    counted_view = build_health_view(db_path, include_bar_count=True, **kwargs)  # type: ignore[arg-type]
+    assert counted_view.freshness[0].bar_count == 5
+    assert counted_view.freshness[0].level is HealthLevel.OK

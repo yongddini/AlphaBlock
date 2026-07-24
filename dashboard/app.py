@@ -736,7 +736,8 @@ def _freshness_frame(rows: list[SeriesFreshness]) -> pd.DataFrame:
             "TF": r.timeframe,
             "최신 봉(KST)": _fmt_time(r.last_open_time),
             "지연": _fmt_lag(r.lag_ms),
-            "봉 수": r.bar_count,
+            # 안 셌으면 "—" (WAN-186) — 0봉으로 보이면 데이터가 없는 것처럼 읽힌다.
+            "봉 수": "—" if r.bar_count is None else f"{r.bar_count:,}",
             "상태": _LEVEL_BADGE[r.level],
         }
         for r in rows
@@ -868,8 +869,17 @@ def _render_health_body(settings: Settings) -> None:
         # fragment 범위만 다시 그린다(분석·백테스트 등 무거운 탭은 건드리지 않음).
         st.rerun(scope="fragment")
 
+    # 봉 수 계산은 시리즈마다 인덱스 구간 전체를 훑어 6년 DB에서 수십 초다(WAN-186).
+    # 신선도 판정에는 안 쓰이므로 기본은 끔 — 필요할 때만 켠다.
+    include_bar_count = st.checkbox(
+        "봉 수 세기(느림)",
+        value=False,
+        help="시리즈별 저장 봉 수를 셉니다. 대용량 DB에서는 수십 초 걸릴 수 있습니다.",
+    )
+
     view = build_health_view(
         settings.db_path,
+        include_bar_count=include_bar_count,
         runtime_state_path=settings.live_runtime_state_path,
         poll_interval_seconds=settings.live_poll_interval_seconds,
         stale_multiplier=settings.health_stale_multiplier,
