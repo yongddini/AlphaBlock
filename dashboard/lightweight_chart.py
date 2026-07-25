@@ -263,6 +263,31 @@ _RSI_PANE_HEIGHT_RATIO = 0.25
 _LINE_STYLE_DOTTED = 1
 _LINE_STYLE_DASHED = 2
 
+#: 가격축 선(볼린저 밴드·EMA·VWMA)의 표시 정밀도 = 유효숫자 4자리(WAN-192). 원값은
+#: 부동소수점 나눗셈 결과라 반올림 없이는 유효숫자가 15~17자리로 늘어 페이로드가 크게
+#: 불어난다(3년 15m ≈ 10만 봉 × 여러 선). 옛 규칙은 `round(v, 2)` 고정이었는데, DOGE처럼
+#: ~$0.07인 저가 종목에선 0.0712·0.0698 등이 전부 0.07로 뭉개져 선이 두세 계단만 밟는
+#: 토막이 됐다. 유효숫자 기준으로 바꾸면 저가 종목도 살아나고 고가 종목 페이로드는 그대로다.
+_PRICE_SIG_FIGS = 4
+
+
+def _round_price_point(value: float) -> float:
+    """가격축 선 점을 유효숫자 `_PRICE_SIG_FIGS`자리로 반올림한다(순수 표시, WAN-192).
+
+    `|value| >= 1`이면 소수점 2자리 고정 — 옛 동작과 비트 단위로 같아 BTC·ETH 등 고가
+    종목의 선·페이로드에 회귀가 없다. `|value| < 1`이면 첫 유효숫자 위치에서 자릿수를
+    도출해 DOGE(0.0712)·XRP(0.5) 같은 저가 종목의 밴드 값을 뭉개지 않고 살린다.
+    """
+    magnitude = abs(value)
+    if magnitude >= 1.0 or magnitude == 0.0:
+        return round(value, 2)
+    # 첫 유효숫자의 10의 지수(0.0712 → -2, 0.5 → -1). 유효숫자 S자리를 남기려면
+    # 소수 자릿수 = S - 1 - exponent 이고, exponent <= -1이라 자릿수 >= S(항상 2 이상).
+    exponent = math.floor(math.log10(magnitude))
+    decimals = _PRICE_SIG_FIGS - 1 - exponent
+    return round(value, decimals)
+
+
 #: 표시선(EMA) 오버레이 **폴백** 팔레트. 기본 색은 길이별 고정 매핑
 #: (`ChartTheme.ema_length_colors`, WAN-67)이고, 사용자가 `display_ema_lengths`를 바꿔
 #: **스펙에 없는 길이**가 오면 팔레트가 무너지지 않도록 여기서 순번으로 순환 배정한다
@@ -817,7 +842,7 @@ _TEMPLATE = """
         } else if (openMs === expectedOpenMs) {
           const value = computeLiveBand(bandWindow, bar.close, live.bandParams);
           if (value !== null) {
-            const point = { time: barTime, value: value };
+            const point = { time: barTime, value: roundPricePoint(value) };
             bandSeries.update(point);
             liveBandPoints.set(barTime, point);
           }
@@ -944,7 +969,9 @@ def _band_points(
         value = ConfluenceStrategy.deviation_band_at(
             pos, direction_sign, anchor_vals, width_vals, band_bar=band_bar
         )
-        points.append(None if value is None else {"time": time_sec, "value": round(value, 2)})
+        points.append(
+            None if value is None else {"time": time_sec, "value": _round_price_point(value)}
+        )
     return points
 
 
@@ -1051,13 +1078,14 @@ def build_chart_html(
             ema_index += 1
         if key not in allowed_lines:
             continue
-        # 소수점 2자리로 반올림한다(가격 표시 정밀도로 충분 — `_fmt_price`와 동일).
-        # EMA/VWMA는 부동소수점 나눗셈 결과라 반올림 없이는 유효숫자가 15~17자리까지
-        # 늘어나 6개 선 전체(3년 15m ≈ 10만 봉)를 실으면 페이로드가 크게 불어난다.
+        # 유효숫자 기준으로 반올림한다(`_round_price_point`, WAN-192). EMA/VWMA는 밴드선과
+        # 같은 가격축이라 같은 함정을 공유한다 — 옛 `round(v, 2)` 고정은 DOGE 같은 저가
+        # 종목에서 선을 계단으로 뭉갰다. 반올림 없이는 부동소수점 나눗셈 결과의 유효숫자가
+        # 15~17자리까지 늘어 6개 선 전체(3년 15m ≈ 10만 봉)를 실으면 페이로드가 크게 불어난다.
         # (`_touched_line_label`이 선을 되짚을 때는 이 반올림값이 아니라 원본 정밀도
         # 시리즈를 쓴다 — 그 경로는 지금 화면에 안 그려진다, WAN-146.)
         points: list[dict[str, float] | None] = [
-            None if math.isnan(v) else {"time": t, "value": round(v, 2)}
+            None if math.isnan(v) else {"time": t, "value": _round_price_point(v)}
             for t, v in zip(times_sec, series.tolist(), strict=True)
         ]
         lines_payload.append(

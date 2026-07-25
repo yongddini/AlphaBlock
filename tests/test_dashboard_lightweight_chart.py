@@ -26,6 +26,7 @@ from dashboard.lightweight_chart import (
     _RSI_LENGTH,
     BAND_LINE_COLOR,
     _exit_marker_text,
+    _round_price_point,
     build_chart_html,
 )
 from dashboard.live_chart import LiveChartConfig, build_live_config
@@ -181,6 +182,65 @@ def test_rsi_points_null_during_warmup_then_populated() -> None:
     assert len(rsi_points) == 30  # type: ignore[arg-type]
     assert all(p is None for p in rsi_points[:_RSI_LENGTH])  # type: ignore[index]
     assert any(p is not None for p in rsi_points[_RSI_LENGTH:])  # type: ignore[index]
+
+
+def _low_price_df(n: int) -> pd.DataFrame:
+    """DOGE 같은 저가 종목(~$0.07) 프레임 — 봉마다 살짝 다른 종가로 밴드가 흔들린다."""
+    closes = [0.0700 + 0.0004 * ((i * 7) % 11) for i in range(n)]
+    return pd.DataFrame(
+        {
+            "open_time": [i * _STEP for i in range(n)],
+            "open": closes,
+            "high": [c + 0.0005 for c in closes],
+            "low": [c - 0.0005 for c in closes],
+            "close": closes,
+            "volume": [10.0] * n,
+        }
+    )
+
+
+def test_round_price_point_high_price_keeps_two_decimals() -> None:
+    # BTC/ETH 등 |v|>=1은 옛 동작(round(v, 2))과 비트 단위로 같다 — 페이로드·선 회귀 없음.
+    assert _round_price_point(40123.456) == 40123.46
+    assert _round_price_point(1.005) == round(1.005, 2)
+    assert _round_price_point(95.0) == 95.0
+
+
+def test_round_price_point_low_price_keeps_significant_figures() -> None:
+    # DOGE ~$0.07: 옛 round(v, 2)는 0.07로 뭉갰지만 유효숫자 4자리는 살린다.
+    assert _round_price_point(0.07123) == 0.07123
+    assert _round_price_point(0.06987) == 0.06987
+    # XRP ~$0.5 → 소수 4자리, 아주 작은 값도 자릿수가 더 늘어난다.
+    assert _round_price_point(0.51234) == 0.5123
+    assert _round_price_point(0.007123) == 0.007123
+    # 0은 안전하게 통과.
+    assert _round_price_point(0.0) == 0.0
+
+
+def test_band_points_smooth_for_low_priced_symbol() -> None:
+    conf_params = ConfluenceParams()
+    payload = _payload(build_chart_html(_low_price_df(60), [], conf_params=conf_params))
+
+    band = payload["band"]
+    assert band is not None
+    values = [p["value"] for p in band["points"] if p is not None]  # type: ignore[index]
+    assert values, "저가 프레임에서 밴드 점이 있어야 한다"
+    # 옛 버그(round(v, 2))라면 전부 0.07/0.08 두세 값으로 뭉개진다 — 유효숫자 정밀도는
+    # 소수 2자리보다 세밀한 값을 남긴다.
+    assert any(abs(v - round(v, 2)) > 1e-9 for v in values)
+    assert len(set(values)) > 3
+
+
+def test_band_points_unchanged_for_high_priced_symbol() -> None:
+    conf_params = ConfluenceParams()
+    payload = _payload(build_chart_html(_df(60), [], conf_params=conf_params))
+
+    band = payload["band"]
+    assert band is not None
+    values = [p["value"] for p in band["points"] if p is not None]  # type: ignore[index]
+    assert values
+    # |v|>=1이면 소수 2자리 고정 — 옛 동작 그대로.
+    assert all(v == round(v, 2) for v in values)
 
 
 def test_initial_bars_capped_to_available_candles() -> None:

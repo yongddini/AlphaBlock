@@ -17,6 +17,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from dashboard.lightweight_chart import _round_price_point
 from dashboard.live_chart import (
     LIVE_BAND_JS,
     band_js_params,
@@ -128,6 +129,40 @@ def test_js_band_warmup_returns_null() -> None:
         ]
     )
     assert values == [None]
+
+
+def _run_js_round_price(values: list[float]) -> list[float]:
+    """`LIVE_BAND_JS`의 `roundPricePoint`를 Node로 실행해 값별 반올림 결과를 받는다."""
+    script = (
+        LIVE_BAND_JS
+        + "\nconst vals = JSON.parse(process.argv[2]);\n"
+        + "const out = vals.map((v) => roundPricePoint(v));\n"
+        + "process.stdout.write(JSON.stringify(out));\n"
+    )
+    assert _NODE is not None
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "round.js"
+        path.write_text(script, encoding="utf-8")
+        proc = subprocess.run(  # noqa: S603 - 테스트가 만든 스크립트만 실행한다
+            [_NODE, str(path), json.dumps(values)],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    result: list[float] = json.loads(proc.stdout)
+    return result
+
+
+@pytest.mark.skipif(_NODE is None, reason="Node가 없어 JS 패리티를 검증할 수 없다")
+def test_js_round_price_point_matches_python() -> None:
+    """라이브 밴드 JS `roundPricePoint` == 정적 선 파이썬 `_round_price_point`(WAN-192).
+
+    확정봉 선과 형성 중인 봉의 밴드 점이 어긋나지 않도록 두 경로가 같은 정밀도를 낸다.
+    """
+    cases = [40123.456, 95.0, 1.005, 0.51234, 0.07123, 0.06987, 0.007123, 0.0]
+    js_values = _run_js_round_price(cases)
+    py_values = [_round_price_point(v) for v in cases]
+    assert js_values == pytest.approx(py_values, rel=0, abs=1e-12)
 
 
 def test_live_stream_url_uses_binance_futures_kline() -> None:
