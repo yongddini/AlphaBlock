@@ -117,6 +117,16 @@ function computeLiveBand(closedCloses, livePrice, params) {
   if (!Number.isFinite(anchorVal) || !Number.isFinite(widthVal)) return null;
   return anchorVal - params.directionSign * widthVal;
 }
+
+// 형성 중인 봉의 밴드 점을 확정봉 선(`_round_price_point`, WAN-192)과 같은 정밀도로
+// 반올림해 정적/라이브 두 경로가 어긋나지 않게 한다 — 유효숫자 4자리, |v|>=1이면 2자리.
+function roundPricePoint(value) {
+  const magnitude = Math.abs(value);
+  if (!(magnitude > 0) || magnitude >= 1) return Math.round(value * 100) / 100;
+  const exponent = Math.floor(Math.log10(magnitude));
+  const factor = Math.pow(10, 3 - exponent);  // 유효숫자 4 = (4 - 1) - exponent 자릿수
+  return Math.round(value * factor) / factor;
+}
 """
 
 
