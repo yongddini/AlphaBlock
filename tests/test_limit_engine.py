@@ -296,6 +296,29 @@ def test_zone_width_filter_blocks_wide_zone(monkeypatch: pytest.MonkeyPatch) -> 
     assert engine.book.pending(_SYMBOL, _TF) is None
 
 
+def test_fill_carries_zone_width_atr_when_filter_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """필터가 켜져 있으면 체결이 통과한 존폭(÷ATR)을 실어 나른다(WAN-189 알림용).
+
+    합성 df의 ATR은 ≈1.0(고저 폭 1.0 고정)이라 폭 0.8짜리 존은 0.8×ATR로 필터(1.28)를
+    통과한다 — 그 비율이 `LimitFill.zone_width_atr`에 그대로 실린다.
+    """
+    narrow = _zone(top=95.0, bottom=94.2)  # 폭 0.8, ATR≈1.0 → 0.8 ≤ 1.28 통과.
+    engine = _engine(monkeypatch, [narrow], params=ConfluenceParams())
+    events = engine.on_substep(_SYMBOL, _TF, time_ms=_FORMING + _M, low=94.9, high=99.0, close=95.2)
+    filled = [e for e in events if e.kind == "filled"]
+    assert len(filled) == 1 and filled[0].fill is not None
+    assert filled[0].fill.zone_width_atr == pytest.approx(0.8, abs=0.05)
+
+
+def test_fill_zone_width_atr_none_when_filter_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """필터가 꺼져 있으면 ATR을 계산조차 안 하므로 존폭 값이 None이다(알림이 그 줄을 뺀다)."""
+    engine = _engine(monkeypatch, [_zone()])  # _params() → 필터 off.
+    events = engine.on_substep(_SYMBOL, _TF, time_ms=_FORMING + _M, low=94.9, high=99.0, close=95.2)
+    filled = [e for e in events if e.kind == "filled"]
+    assert len(filled) == 1 and filled[0].fill is not None
+    assert filled[0].fill.zone_width_atr is None
+
+
 def test_no_retap_arming_while_price_stays_inside(monkeypatch: pytest.MonkeyPatch) -> None:
     """탭은 바깥→안 전이만 센다 — 존 안에 머무는 연속 봉은 새 예약을 만들지 않는다."""
     engine = _rest_without_touch(monkeypatch)

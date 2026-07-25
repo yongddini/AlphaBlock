@@ -98,6 +98,9 @@ class LimitFill:
     `baseline`("닿으면 체결") 가정의 낙관 비용을 실측하는 열쇠 값."""
     waited_ms: int | None
     """예약(`placed_ms`)→체결까지 걸린 시간(ms). 예약 시각을 모르면 None."""
+    zone_width_atr: float | None = None
+    """진입 근거 존의 폭 ÷ ATR(존폭 필터 축, WAN-159 정의). 필터가 꺼져 있거나 ATR을
+    모르면 None — 알림의 체결 품질 줄이 "통과 존폭"을 찍는 데 쓴다(WAN-189)."""
 
 
 @dataclass
@@ -136,6 +139,10 @@ class PendingLimitOrder:
     cancel_on_condition_fail: bool = False
     placed_ms: int | None = None
     tap_index: int = 0
+    zone_width_atr: float | None = None
+    """진입 근거 존의 폭 ÷ ATR(존폭 필터 축, WAN-159). 필터가 꺼져 있으면 None. 판정에는
+    쓰지 않고(필터 판정은 예약 전에 이미 끝났다) 체결 시 `LimitFill`에 실어 알림이
+    "통과 존폭"을 찍게 한다(WAN-189)."""
     journal_id: int | None = None
     """체결률 실측 장부(`live.order_journal`)의 행 id. 기록을 안 쓰면 None."""
     status: LimitOrderStatus = LimitOrderStatus.PENDING
@@ -263,6 +270,7 @@ class PendingLimitOrder:
             take_profit_price=tp_price,
             penetration_bps=penetration_bps,
             waited_ms=None if self.placed_ms is None else now_ms - self.placed_ms,
+            zone_width_atr=self.zone_width_atr,
         )
 
     def cancel_invalidated(self) -> None:
