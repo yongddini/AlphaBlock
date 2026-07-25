@@ -67,7 +67,13 @@ from dashboard.trade_table import (
 from live.runtime_state import EventRecord
 from paper.parity import build_parity_report
 from paper.performance import build_performance
-from paper.report import performance_to_dataframe, records_to_dataframe
+from paper.report import (
+    parity_to_display_frame,
+    performance_to_dataframe,
+    performance_to_display_frame,
+    records_to_dataframe,
+    records_to_display_frame,
+)
 from paper.store import PaperTradeStore
 from strategy.confluence import SignalKind
 from strategy.models import (
@@ -1043,7 +1049,10 @@ def _render_paper(settings: Settings) -> None:
     cols[5].metric("거래 수", str(overall.num_trades))
 
     st.subheader("시리즈별 성과")
-    st.dataframe(performance_to_dataframe(performance), use_container_width=True, hide_index=True)
+    # 화면은 한글 컬럼, CSV 내보내기는 데이터 축이라 영문·UTC 그대로(WAN-190/172).
+    st.dataframe(
+        performance_to_display_frame(performance), use_container_width=True, hide_index=True
+    )
     st.download_button(
         "성과 요약 CSV",
         performance_to_dataframe(performance).to_csv(index=False),
@@ -1052,11 +1061,10 @@ def _render_paper(settings: Settings) -> None:
     )
 
     st.subheader("거래 원장")
-    trades_df = records_to_dataframe(records)
-    st.dataframe(trades_df, use_container_width=True, hide_index=True)
+    st.dataframe(records_to_display_frame(records), use_container_width=True, hide_index=True)
     st.download_button(
         "거래 원장 CSV",
-        trades_df.to_csv(index=False),
+        records_to_dataframe(records).to_csv(index=False),
         file_name="paper_trades.csv",
         mime="text/csv",
     )
@@ -1068,11 +1076,10 @@ def _render_paper(settings: Settings) -> None:
     except Exception as exc:  # noqa: BLE001 — 대시보드는 실패해도 다른 섹션을 살린다.
         st.warning(f"패리티 리포트를 만들지 못했습니다: {exc}")
         return
-    parity_df = report.to_dataframe()
-    st.dataframe(parity_df, use_container_width=True, hide_index=True)
+    st.dataframe(parity_to_display_frame(report), use_container_width=True, hide_index=True)
     st.download_button(
         "패리티 CSV",
-        parity_df.to_csv(index=False),
+        report.to_dataframe().to_csv(index=False),
         file_name="paper_parity.csv",
         mime="text/csv",
     )
