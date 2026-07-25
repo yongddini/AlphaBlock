@@ -1,7 +1,8 @@
 """통합 트레이딩 웹 대시보드 (WAN-15 · WAN-30).
 
-**분석 탭**: 캔들+오더블록+시그널 차트와 백테스트 성과(화면을 열 때마다 재계산 —
-1분봉을 안 읽으므로 A안 종가 진입이다).
+**분석 탭**: 캔들+오더블록+시그널 차트와 백테스트 성과(1분봉을 안 읽으므로 A안 종가
+진입이다). 기본 기간은 **최근 구간**이고 결과는 디스크에 캐시된다 — 전 구간을 매번 다시
+계산하지 않는다(WAN-188).
 **저장된 거래 탭(WAN-106)**: `backtest.run --persist`가 적재해 둔 **채택 엔진(B안
 지정가)** 거래를 계산 없이 조회한다(손절/익절 필터 · 미체결 셋업 · 차트 점프).
 **운영 상태(Health) 탭**: 데이터 신선도·펀딩·러너 생존·페이퍼 포지션·최근 신호를
@@ -17,7 +18,7 @@
 from __future__ import annotations
 
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pandas as pd
 import streamlit as st
@@ -25,10 +26,11 @@ import streamlit as st
 from backtest.models import BacktestConfig, BacktestMetrics, BacktestResult
 from backtest.report import COL_EXIT_REASON, trades_to_dataframe, trades_to_display_frame
 from backtest.sweep import default_backtest_config
-from backtest.trade_store import BacktestRunStore, RunFingerprint, RunSummary
+from backtest.trade_store import BacktestRunStore, RunFingerprint, RunSummary, engine_revision
 from common.timefmt import format_kst_zoned
 from config import get_settings
 from config.settings import Settings
+from dashboard.analysis_cache import AnalysisCache, cache_key
 from dashboard.charts import (
     DEFAULT_ZONE_CATEGORIES,
     ZONE_CATEGORY_LABELS,
@@ -37,7 +39,7 @@ from dashboard.charts import (
     entered_zone_keys,
     filter_zones,
 )
-from dashboard.data_access import list_series, load_ohlcv
+from dashboard.data_access import list_series, load_ohlcv, series_bounds
 from dashboard.health import (
     CollectorStatus,
     FundingFreshness,
@@ -147,6 +149,10 @@ def _kind_label(kind: SignalKind, exit_reason: SignalExitReason | None) -> str:
 _SERIES_TTL_SECONDS = 60
 _HEAVY_TTL_SECONDS = 3600
 
+#: 분석 탭 기간 슬라이더의 기본 폭(일). 전 구간이 기본이면 6년 데이터를 매번 탐지·
+#: 백테스트하고 브라우저로 보낸다 — 최근 구간만 기본으로 두고 나머지는 옵트인이다(WAN-188).
+_DEFAULT_WINDOW_DAYS = 180
+
 
 @st.cache_data(ttl=_SERIES_TTL_SECONDS, show_spinner=False)
 def _cached_series(db_path: str) -> list[tuple[str, str]]:
@@ -164,6 +170,22 @@ def _cached_ohlcv(
     return load_ohlcv(db_path, symbol, timeframe, start_ms=start_ms, end_ms=end_ms)
 
 
+@st.cache_data(ttl=_SERIES_TTL_SECONDS, show_spinner=False)
+def _cached_bounds(db_path: str, symbol: str, timeframe: str) -> tuple[int, int] | None:
+    """시리즈의 첫/마지막 봉(WAN-188) — 인덱스만 읽는다."""
+    return series_bounds(db_path, symbol, timeframe)
+
+
+@st.cache_data(ttl=_SERIES_TTL_SECONDS, show_spinner=False)
+def _cached_revision() -> str:
+    """분석 캐시 키에 실을 코드 리비전(WAN-188).
+
+    `git` 호출이 재실행마다 반복되지 않게 짧게 캐시한다 — 슬라이더를 한 칸 옮길 때마다
+    프로세스를 두 번 띄우는 비용(실측 ~57ms)은 성능 개선의 취지에 어긋난다.
+    """
+    return engine_revision()
+
+
 @st.cache_data(ttl=_HEAVY_TTL_SECONDS, show_spinner="오더블록 탐지·백테스트 계산 중…")
 def _cached_pipeline(
     db_path: str,
@@ -176,8 +198,29 @@ def _cached_pipeline(
     _conf_params: ConfluenceParams,
     _bt_config: BacktestConfig,
 ) -> PipelineResult:
+    """오더블록 탐지 + 백테스트. **디스크 캐시를 먼저 본다**(WAN-188).
+
+    `st.cache_data`는 프로세스가 살아 있는 동안만 유효해, 대시보드를 다시 띄우면 안 바뀐
+    옛 구간까지 통째로 다시 계산했다(6년 15m 실측 6.80초). 디스크 캐시가 그 재계산을
+    0.89초로 줄인다. 키에 **코드 리비전**이 들어가므로 엔진이 바뀌면 옛 결과를 꺼내 오지
+    않는다(WAN-106 원칙 — `dashboard.analysis_cache` 참고).
+    """
+    cache = AnalysisCache.for_db(db_path)
+    key = cache_key(
+        symbol=symbol,
+        timeframe=timeframe,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        params_key=params_key,
+        revision=_cached_revision(),
+    )
+    cached = cache.load(key)
+    if cached is not None:
+        return cached
     df = _cached_ohlcv(db_path, symbol, timeframe, start_ms, end_ms)
-    return run_pipeline(df, _ob_params, _conf_params, _bt_config)
+    result = run_pipeline(df, _ob_params, _conf_params, _bt_config)
+    cache.store(key, result)
+    return result
 
 
 # --- 분석 탭 ----------------------------------------------------------------
@@ -358,20 +401,40 @@ def _render_analysis(settings: Settings) -> None:
         timeframes = sorted({tf for s, tf in series if s == symbol})
         timeframe = st.selectbox("타임프레임", timeframes)
 
-    full_df = _cached_ohlcv(db_path, symbol, timeframe)
-    if full_df.empty:
+    # 기간 위젯 범위는 경계 두 개면 충분하다 — 예전처럼 전 구간을 로드해 min/max를 구하지
+    # 않는다(WAN-188: 6년 15m ≈ 21만 봉·19MB를 매 재실행마다 읽던 자리).
+    bounds = _cached_bounds(db_path, symbol, timeframe)
+    if bounds is None:
         st.warning("선택한 심볼/타임프레임에 데이터가 없습니다.")
         return
 
-    min_dt = _ms_to_datetime(int(full_df["open_time"].min()))
-    max_dt = _ms_to_datetime(int(full_df["open_time"].max()))
+    first_ms, last_ms = bounds
+    min_dt = _ms_to_datetime(first_ms)
+    max_dt = _ms_to_datetime(last_ms)
     with st.sidebar:
+        # 기본은 **최근 구간**이다(WAN-188). 전 구간이 기본이면 아무것도 안 골라도 6년치를
+        # 탐지·백테스트하고 브라우저로 보낸다(실측: 계산 6.80초 + 페이로드 75.65MB).
+        # 최근 6개월이면 같은 화면이 0.25초 + 2.79MB다. 옛 구간은 아래 체크박스로 편다.
+        show_full_range = st.checkbox(
+            "전 구간 보기(느림)",
+            value=False,
+            help=(
+                f"기본은 최근 {_DEFAULT_WINDOW_DAYS}일입니다. 전 구간을 켜면 가진 데이터 "
+                "전부를 탐지·백테스트하고 차트로 보냅니다(6년 15m 기준 수십 MB — 느립니다). "
+                "기간 슬라이더로 원하는 구간만 골라 보는 편이 빠릅니다."
+            ),
+        )
+        default_start_dt = (
+            min_dt
+            if show_full_range
+            else max(min_dt, max_dt - timedelta(days=_DEFAULT_WINDOW_DAYS))
+        )
         if min_dt < max_dt:
             start_dt, end_dt = st.slider(
                 "기간",
                 min_value=min_dt,
                 max_value=max_dt,
-                value=(min_dt, max_dt),
+                value=(default_start_dt, max_dt),
                 format="YYYY-MM-DD HH:mm",
             )
         else:
@@ -379,7 +442,9 @@ def _render_analysis(settings: Settings) -> None:
 
     start_ms = _datetime_to_ms(start_dt)
     end_ms = _datetime_to_ms(end_dt)
-    df = full_df[(full_df["open_time"] >= start_ms) & (full_df["open_time"] <= end_ms)]
+    # 고른 구간만 읽는다. `load_ohlcv`의 `end_ms`는 배타라 `+1`로 마지막 봉을 포함시킨다 —
+    # 예전 `full_df[... <= end_ms]` 슬라이스와 **같은 캔들 집합**이어야 화면이 안 바뀐다.
+    df = _cached_ohlcv(db_path, symbol, timeframe, start_ms, end_ms + 1)
 
     if df.empty:
         st.warning("선택한 기간에 데이터가 없습니다.")
@@ -483,11 +548,18 @@ def _render_analysis(settings: Settings) -> None:
             st.caption(f"{timeframe}은 바이낸스 kline 스트림이 지원하지 않는 인터벌입니다.")
 
         st.subheader("차트 표시선 (EMA/VWMA)")
+        # 기본 꺼짐(WAN-188). 채택 규칙은 이 선들을 **하나도 쓰지 않는다** — RSI 게이트가
+        # 없고(WAN-123) 익절은 고정 1.5R이라 `use_line_take_profit=False`다. 즉 순수
+        # 장식인데 선마다 봉 개수만큼 긴 배열이라 페이로드의 절반을 넘게 먹는다
+        # (6년 15m 실측: 75.65MB → 끄면 31.72MB = **58%가 표시선**). 정보 손실은 0이고,
+        # 보고 싶으면 아래 체크박스로 언제든 켠다.
+        # ⚠️ 진입 기준선인 **볼린저 하단선은 이 토글과 무관하게 계속 그려진다**
+        # (`build_chart_html`이 `deviation_filter`에서 따로 만든다) — 끄는 건 장식뿐이다.
         st.caption(
-            "차트에 그리는 선입니다. 익절 판정은 이 중 EMA "
+            "차트에 그리는 선입니다(기본 꺼짐 — 채택 규칙은 쓰지 않습니다). 익절 판정은 이 중 EMA "
             f"{'/'.join(str(n) for n in conf_params.sorted_tp_ema_lengths)}"
             + (f" + VWMA {conf_params.tp_vwma_length}" if conf_params.tp_vwma_length else "")
-            + "에서만 일어납니다(WAN-66)."
+            + "에서만 일어납니다(WAN-66). 진입 기준선인 볼린저 하단선은 항상 그려집니다."
         )
         line_keys = [f"ema_{length}" for length in conf_params.sorted_display_ema_lengths]
         if conf_params.tp_vwma_length is not None:
@@ -496,7 +568,7 @@ def _render_analysis(settings: Settings) -> None:
         for key in line_keys:
             kind, _, length = key.partition("_")
             label = f"{kind.upper()} {length}"
-            if st.checkbox(label, value=True, key=f"line_toggle_{key}"):
+            if st.checkbox(label, value=False, key=f"line_toggle_{key}"):
                 visible_lines.add(key)
 
     chart_df, zones = _select_chart_zones(
@@ -515,7 +587,7 @@ def _render_analysis(settings: Settings) -> None:
     # 백테스트 결과 그대로다(실시간 값이 섞이지 않는다). 시점 재생 중이거나 기간을
     # 과거로 잘라 본 화면에서는 켜지 않는다 — 지나간 구간에 현재 봉을 붙이면 화면이
     # "그때 무엇을 봤나"를 더는 재현하지 못한다.
-    showing_tail = end_ms >= int(full_df["open_time"].max())
+    showing_tail = end_ms >= last_ms
     live_config = (
         build_live_config(
             chart_df,
