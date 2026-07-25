@@ -46,6 +46,100 @@ def seeded_db_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[
     get_settings.cache_clear()
 
 
+@pytest.fixture
+def long_span_db_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
+    """기본 기간(최근 180일)보다 훨씬 긴 시리즈 — 창 축소가 실제로 일어나는지 보려면 필요."""
+    db_path = str(tmp_path / "long.db")
+    day = 86_400_000
+    with OhlcvStore(db_path) as store:
+        store.upsert_candles(
+            Candle("BTC/USDT:USDT", "1d", i * day, 100.0 + i, 105.0 + i, 95.0 + i, 100.0 + i, 10.0)
+            for i in range(800)
+        )
+    monkeypatch.setenv("ALPHABLOCK_DB_PATH", db_path)
+    get_settings.cache_clear()
+    yield db_path
+    get_settings.cache_clear()
+
+
+def test_window_load_matches_the_old_full_load_slice(long_span_db_path: str) -> None:
+    """WAN-188 회귀 고정: 고른 구간만 읽어도 **캔들 집합이 예전과 같다**.
+
+    예전에는 전 구간을 로드해 `full_df[(>= start) & (<= end)]`로 잘랐다. 지금은 SQL로
+    그 구간만 읽는데, `load_ohlcv`의 `end_ms`가 **배타**라 `+1`을 넘긴다 — 이 `+1`이
+    빠지면 마지막 봉 하나가 조용히 사라진다(화면과 지표가 어긋나는 자리).
+    """
+    from dashboard.data_access import load_ohlcv, series_bounds
+
+    bounds = series_bounds(long_span_db_path, "BTC/USDT:USDT", "1d")
+    assert bounds is not None
+    first_ms, last_ms = bounds
+    full = load_ohlcv(long_span_db_path, "BTC/USDT:USDT", "1d")
+
+    for start_ms, end_ms in ((first_ms, last_ms), (first_ms + 10 * 86_400_000, last_ms - 1)):
+        expected = full[(full["open_time"] >= start_ms) & (full["open_time"] <= end_ms)]
+        actual = load_ohlcv(
+            long_span_db_path, "BTC/USDT:USDT", "1d", start_ms=start_ms, end_ms=end_ms + 1
+        )
+        assert list(actual["open_time"]) == list(expected["open_time"])
+
+
+def test_analysis_defaults_to_recent_window_not_the_whole_history(long_span_db_path: str) -> None:
+    """기본 기간이 전 구간이 아니다(WAN-188) — 전 구간은 옵트인 체크박스로만."""
+    from dashboard.app import _DEFAULT_WINDOW_DAYS, _ms_to_datetime
+    from dashboard.data_access import series_bounds
+
+    at = AppTest.from_file("dashboard/app.py")
+    at.run(timeout=60)
+
+    assert not at.exception
+    period = next(s for s in at.slider if s.label == "기간")
+    start_dt, end_dt = period.value
+    # 800일치를 넣었는데 기본 창은 최근 180일이다.
+    assert (end_dt - start_dt).days == _DEFAULT_WINDOW_DAYS
+    bounds = series_bounds(long_span_db_path, "BTC/USDT:USDT", "1d")
+    assert bounds is not None
+    assert start_dt > _ms_to_datetime(bounds[0])
+    # 옛 구간을 보는 길이 사라지지는 않았다.
+    assert "전 구간 보기(느림)" in {c.label for c in at.checkbox}
+
+
+def test_full_range_checkbox_really_widens_the_window(long_span_db_path: str) -> None:
+    """옵트인이 라벨만 붙은 게 아니라 **실제로 전 구간을 편다**(WAN-188).
+
+    켰는데 창이 그대로면 사용자는 옛 구간을 볼 길을 잃는다 — 이 저장소가 반복해서 당한
+    "라벨은 바뀌었는데 동작은 그대로"(WAN-91/95/112/123) 부류를 동작으로 막는다.
+    """
+    from dashboard.app import _ms_to_datetime
+    from dashboard.data_access import series_bounds
+
+    at = AppTest.from_file("dashboard/app.py")
+    at.run(timeout=60)
+    assert not at.exception
+    narrow_start, _ = next(s for s in at.slider if s.label == "기간").value
+
+    next(c for c in at.checkbox if c.label == "전 구간 보기(느림)").set_value(True)
+    at.run(timeout=60)
+    assert not at.exception
+
+    wide_start, _ = next(s for s in at.slider if s.label == "기간").value
+    bounds = series_bounds(long_span_db_path, "BTC/USDT:USDT", "1d")
+    assert bounds is not None
+    assert wide_start < narrow_start
+    assert wide_start == _ms_to_datetime(bounds[0])
+
+
+def test_analysis_display_lines_are_off_by_default(seeded_db_path: str) -> None:
+    """표시선 6개는 기본 꺼짐(WAN-188) — 페이로드의 58%인데 채택 규칙이 안 쓴다."""
+    at = AppTest.from_file("dashboard/app.py")
+    at.run(timeout=30)
+
+    assert not at.exception
+    line_toggles = [c for c in at.checkbox if c.label.startswith(("EMA ", "VWMA "))]
+    assert line_toggles, "표시선 토글이 사라졌다 — 끄는 것이지 없애는 게 아니다"
+    assert not any(c.value for c in line_toggles)
+
+
 def test_run_config_badge_text_reports_current_settings() -> None:
     """WAN-65: 배지 문구가 진입 방식·RSI·사이징·병합·펀딩비 반영 여부를 담는다."""
     conf = ConfluenceParams(entry_mode="close", rsi_mode="closed_bar", max_zone_width_atr=None)
