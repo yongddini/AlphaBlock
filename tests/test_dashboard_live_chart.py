@@ -159,7 +159,22 @@ def test_js_round_price_point_matches_python() -> None:
 
     확정봉 선과 형성 중인 봉의 밴드 점이 어긋나지 않도록 두 경로가 같은 정밀도를 낸다.
     """
-    cases = [40123.456, 95.0, 1.005, 0.51234, 0.07123, 0.06987, 0.007123, 0.0]
+    # 고가·중가($1~$100)·저가 세 구간 전부: 2자리 하한이 걸리고/풀리는 경계를 함께 고정한다.
+    cases = [
+        40123.456,
+        3456.789,
+        95.0,
+        60.128,
+        10.0,
+        8.3421,
+        2.71828,
+        1.005,
+        0.51234,
+        0.07123,
+        0.06987,
+        0.007123,
+        0.0,
+    ]
     js_values = _run_js_round_price(cases)
     py_values = [_round_price_point(v) for v in cases]
     assert js_values == pytest.approx(py_values, rel=0, abs=1e-12)

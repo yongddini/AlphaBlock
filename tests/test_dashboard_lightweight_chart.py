@@ -199,11 +199,38 @@ def _low_price_df(n: int) -> pd.DataFrame:
     )
 
 
+def _mid_price_df(n: int) -> pd.DataFrame:
+    """LINK 같은 중가 종목(~$8.3) 프레임 — 봉당 밴드 움직임이 0.01(옛 2자리 계단)보다 작다."""
+    closes = [8.3000 + 0.004 * ((i * 7) % 11) for i in range(n)]
+    return pd.DataFrame(
+        {
+            "open_time": [i * _STEP for i in range(n)],
+            "open": closes,
+            "high": [c + 0.005 for c in closes],
+            "low": [c - 0.005 for c in closes],
+            "close": closes,
+            "volume": [10.0] * n,
+        }
+    )
+
+
 def test_round_price_point_high_price_keeps_two_decimals() -> None:
-    # BTC/ETH 등 |v|>=1은 옛 동작(round(v, 2))과 비트 단위로 같다 — 페이로드·선 회귀 없음.
+    # BTC/ETH 등 exponent>=3(>=$1000)은 2자리 하한이 이겨 옛 동작(round(v, 2))과 비트 단위로
+    # 같다 — 페이로드·선 회귀 없음. $10~$1000(exponent 1~2)도 sig-fig 자릿수 <= 2라 2자리.
     assert _round_price_point(40123.456) == 40123.46
-    assert _round_price_point(1.005) == round(1.005, 2)
-    assert _round_price_point(95.0) == 95.0
+    assert _round_price_point(3456.789) == 3456.79
+    assert _round_price_point(95.0) == 95.0  # LTC ~$60~$95: exponent 1 → 2자리
+    assert _round_price_point(60.128) == 60.13
+    assert _round_price_point(10.0) == 10.0
+
+
+def test_round_price_point_mid_price_keeps_significant_figures() -> None:
+    # LINK ~$8: 옛 round(v, 2)는 8.34로 뭉갰지만(밴드 움직임 < 0.01) 유효숫자 4자리 =
+    # 3자리로 계단을 푼다. exponent 0(> $1, < $10)이라 하한 2를 넘는 첫 구간이다.
+    assert _round_price_point(8.3421) == 8.342
+    assert _round_price_point(2.71828) == 2.718
+    # $1 경계: exponent 0 → 3자리(옛 2자리 고정에서 바뀌는 지점).
+    assert _round_price_point(1.005) == round(1.005, 3)
 
 
 def test_round_price_point_low_price_keeps_significant_figures() -> None:
@@ -229,6 +256,23 @@ def test_band_points_smooth_for_low_priced_symbol() -> None:
     # 소수 2자리보다 세밀한 값을 남긴다.
     assert any(abs(v - round(v, 2)) > 1e-9 for v in values)
     assert len(set(values)) > 3
+
+
+def test_band_points_smooth_for_mid_priced_symbol() -> None:
+    # LINK(~$8)·LTC(~$60) 같은 중가 종목이 이 이슈 재리뷰의 핵심이다 — 옛 |v|>=1 경로가
+    # 2자리로 고정해 여전히 계단이었다. 2자리 하한 위 sig-fig 자릿수가 그 계단을 푼다.
+    conf_params = ConfluenceParams()
+    payload = _payload(build_chart_html(_mid_price_df(60), [], conf_params=conf_params))
+
+    band = payload["band"]
+    assert band is not None
+    values = [p["value"] for p in band["points"] if p is not None]  # type: ignore[index]
+    assert values, "중가 프레임에서 밴드 점이 있어야 한다"
+    # 핵심: 옛 |v|>=1 경로(round(v, 2))보다 계단이 덜하다 — 3자리 정밀도가 옆 봉과 뭉개지던
+    # 값을 더 많은 구분값으로 편다. 밴드가 거의 안 움직이는 프레임이라 절대 개수가 아니라
+    # 옛 동작 대비 구분값 증가로 고정한다.
+    assert any(abs(v - round(v, 2)) > 1e-9 for v in values)
+    assert len(set(values)) > len({round(v, 2) for v in values})
 
 
 def test_band_points_unchanged_for_high_priced_symbol() -> None:
