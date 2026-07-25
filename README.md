@@ -778,7 +778,8 @@ WAN-23 컨플루언스 전략을 저장소(WAN-6 수집분)에 **주기적으로
 추적한다. 실주문 연결은 WAN-9의 몫이다.
 
 - **폴링**: `ALPHABLOCK_LIVE_POLL_INTERVAL_SECONDS`(기본 60초)마다 각 시리즈(심볼·TF)를
-  재평가한다. 심볼·TF는 `ALPHABLOCK_LIVE_SIGNAL_SYMBOLS`·`..._TIMEFRAMES`(기본 BTC 1h).
+  재평가한다. 심볼·TF는 `ALPHABLOCK_LIVE_SIGNAL_SYMBOLS`·`..._TIMEFRAMES`(기본 9종목 ×
+  15m·1h·4h = 27 조합, WAN-191 — 여전히 페이퍼). 좁히려면 수집 대상의 부분집합으로 지정.
 - **페이퍼 포지션**: 확정 진입에서 열고 계획 청산(익절=선 도달 / 손절=오더블록 무효화)
   에서 닫으며, 청산 시 실현 손익률(%)을 알림에 포함한다(TF당 동시 1포지션).
 - **중복 방지**: 시리즈별 **워터마크**(마지막 처리 신호 시각)를

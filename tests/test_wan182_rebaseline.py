@@ -83,13 +83,20 @@ def test_explicit_start_end_wins_over_adopted_window() -> None:
 # ------------------------------------------------------- 수집 대상 · 실거래 불변
 
 
-def test_collection_universe_is_nine_but_live_signal_stays_btc_only() -> None:
-    """수집 유니버스는 9종목, 실시간 시그널 대상은 BTC 단독 그대로다(WAN-111 원칙).
+def test_collection_universe_is_nine_and_live_signal_expanded_to_nine() -> None:
+    """수집 유니버스 9종목 · 실시간 페이퍼 감시 대상도 9종목으로 확대(WAN-191).
 
-    유니버스 확장은 측정·수집 대상이지 실거래 승인이 아니다.
+    WAN-182 시점의 「실시간 시그널은 BTC 단독」은 **WAN-191(사용자 결정 2026-07-25)이
+    번복**해 9종목 × 15m·1h·4h로 넓혔다. 여전히 페이퍼이므로 WAN-111 원칙(유니버스
+    확장은 측정·수집 대상이지 실거래 승인이 아니다)과 충돌하지 않는다 —
+    실거래(`ALPHABLOCK_LIVE_TRADING`)는 불변이다.
+
+    감시 심볼은 수집 유니버스와 항상 일치해야 한다(갈라지면 감시 대상이 수집되지 않아
+    조용히 낡은 데이터를 본다).
     """
     assert tuple(_default_symbols()) == _NINE
-    assert _default_live_signal_symbols() == ["BTC/USDT:USDT"]
+    assert _default_live_signal_symbols() == _default_symbols()
+    assert tuple(_default_live_signal_symbols()) == _NINE
 
 
 # ------------------------------------------------------------ 옛 리포트 핀
