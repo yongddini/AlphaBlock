@@ -59,6 +59,7 @@ from live.limit_engine import EngineEvent, ZoneLimitLiveEngine
 from live.order_journal import OrderJournal
 from live.paper import PaperPosition
 from live.runtime_state import PendingOrderSnapshot, RuntimeStateStore
+from live.zone_limit_notifier import ZoneLimitNotifier
 from strategy.models import ConfluenceParams, OrderBlockDirection, SignalExitReason
 
 _logger = logging.getLogger(__name__)
@@ -85,6 +86,7 @@ class ZoneLimitPaperRunner:
         lookback_bars: int,
         poll_interval_seconds: float,
         runtime_state: RuntimeStateStore | None = None,
+        notifier: ZoneLimitNotifier | None = None,
         sleep: Callable[[float], None] = time.sleep,
         now_ms: Callable[[], int] = lambda: int(time.time() * 1000),
     ) -> None:
@@ -98,6 +100,7 @@ class ZoneLimitPaperRunner:
         self._lookback_bars = lookback_bars
         self._poll_interval = poll_interval_seconds
         self._runtime_state = runtime_state
+        self._notifier = notifier
         self._sleep = sleep
         self._now_ms = now_ms
         #: 시리즈별 마지막으로 반영한 확정 상위TF 봉 시각.
@@ -173,6 +176,9 @@ class ZoneLimitPaperRunner:
                 _logger.exception("시리즈 폴링 실패: %s %s", symbol, timeframe)
         now = self._now_ms()
         self._journal.heartbeat(self._session_id, now_ms=now)
+        if self._notifier is not None:
+            # KST 날짜가 바뀌면 전날 예약·체결·만료 일일 요약을 보낸다(만료 실시간 대체).
+            self._notifier.tick(self._executor.equity, now_ms=now)
         if self._runtime_state is not None:
             self._runtime_state.record(
                 now_ms=now,
@@ -198,6 +204,8 @@ class ZoneLimitPaperRunner:
         for event in events:
             if event.kind == "placed":
                 order = event.order
+                if self._notifier is not None:
+                    self._notifier.note_placed()  # 예약은 실시간 알림 없음 — 일일 요약에만.
                 # 시각은 KST로 찍는다(WAN-172) — 로그·텔레그램·`status`가 같은 자다.
                 # 판정·저장에 쓰는 값은 UTC epoch ms 그대로다.
                 _logger.info(
@@ -234,7 +242,11 @@ class ZoneLimitPaperRunner:
                     f"{fill.waited_ms}ms" if fill.waited_ms is not None else "?",
                     "성공" if report.accepted else f"거부({report.outcome.reason})",
                 )
+                if self._notifier is not None:
+                    self._notifier.handle_fill(fill, report)
             else:
+                if self._notifier is not None and event.kind == "cancelled_expired":
+                    self._notifier.note_expired()  # 만료는 실시간 없음 — 일일 요약에만.
                 _logger.info(
                     "지정가 주문 종결: %s %s %s", event.symbol, event.timeframe, event.kind
                 )
@@ -281,6 +293,8 @@ class ZoneLimitPaperRunner:
             price,
             "정산" if report.accepted else f"거부({report.outcome.reason})",
         )
+        if self._notifier is not None:
+            self._notifier.handle_exit(report, exit_price=price, reason=reason, exit_time=time_ms)
 
     # -- 스냅샷 --------------------------------------------------------------
 
@@ -330,6 +344,7 @@ def build_series(settings: Settings) -> list[Series]:
 
 def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
     """존-지정가 페이퍼 러너를 실행한다(`live.runner`가 기본값에서 위임하는 진입점)."""
+    from common.telegram import build_telegram_client
     from data.funding import FundingRateStore
     from execution.engine import build_execution_engine
     from paper.store import PaperTradeRecorder, PaperTradeStore
@@ -365,6 +380,14 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
             ),
         )
         series = build_series(settings)
+        # 매매 이벤트 알림(WAN-189, 페이퍼 한정). 텔레그램 미설정이면 build_telegram_client가
+        # None을 주고 알림기는 드라이런(로그만)으로 돈다 — `notifier`의 기존 관행 그대로다.
+        notifier: ZoneLimitNotifier | None = None
+        if settings.paper_trade_notify_enabled:
+            notifier = ZoneLimitNotifier(
+                build_telegram_client(settings),
+                events=frozenset(settings.paper_trade_notify_events),
+            )
         runner = ZoneLimitPaperRunner(
             store=store,
             engine=engine,
@@ -376,6 +399,7 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
             lookback_bars=settings.live_signal_lookback_bars,
             poll_interval_seconds=settings.live_poll_interval_seconds,
             runtime_state=RuntimeStateStore(settings.live_runtime_state_path),
+            notifier=notifier,
         )
         _logger.info(
             "존-지정가 페이퍼 러너 시작(WAN-45): %d 시리즈, 폴링 %ds, 세션 #%d"

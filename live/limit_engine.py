@@ -477,6 +477,14 @@ class ZoneLimitLiveEngine:
         stop_price = ob.bottom if is_long else ob.top
         rsi_state = RealtimeRsi.seed_from_closed(state.seed_closes, params.rsi_length)
 
+        # 통과한 존폭(÷ATR) — 필터가 켜져 ATR을 알 때만 산출한다(`zone_width_filter_passes`
+        # 와 같은 정의: 존폭 = top−bottom, ATR = 탭 봉 직전 확정봉). 판정에는 이미 통과했고
+        # 여기선 알림(WAN-189)이 찍을 값으로만 실어 나른다.
+        atr_value = state.last_closed_atr
+        zone_width_atr: float | None = None
+        if atr_value is not None and atr_value > 0.0:
+            zone_width_atr = (ob.top - ob.bottom) / atr_value
+
         deviation = params.deviation_filter
         live_limit: IntrabarLiveLimit | None = None
         static_price: float | None = None
@@ -523,6 +531,7 @@ class ZoneLimitLiveEngine:
             cancel_on_condition_fail=params.cancel_limit_on_condition_fail,
             placed_ms=time_ms,
             tap_index=tap_index,
+            zone_width_atr=zone_width_atr,
         )
 
 

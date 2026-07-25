@@ -19,9 +19,9 @@ from typing import Protocol
 from pydantic import BaseModel, ConfigDict
 
 from common.telegram import TelegramClient
-from common.timefmt import format_kst_zoned
 from execution.engine import EntryIntent
 from execution.models import Position
+from live import message_format as _mf
 from live.executor import PaperExecutor, TradeReport
 from live.paper import ClosedTrade, PaperBook, PaperPosition
 from strategy.confluence import (
@@ -82,32 +82,14 @@ def collect_events(result: ConfluenceResult, symbol: str, timeframe: str) -> lis
 
 
 # -- 포맷 헬퍼 ----------------------------------------------------------------
-
-
-def _fmt_price(value: float) -> str:
-    """가격을 천 단위 구분 + 불필요한 소수점 0 제거로 읽기 좋게 포맷."""
-    text = f"{value:,.8f}".rstrip("0").rstrip(".")
-    return text or "0"
-
-
-def _fmt_qty(value: float) -> str:
-    """수량을 불필요한 소수점 0 제거로 포맷."""
-    text = f"{value:.8f}".rstrip("0").rstrip(".")
-    return text or "0"
-
-
-def _fmt_money(value: float) -> str:
-    """견적 통화 금액(USDT 등)을 천 단위 구분·소수 2자리로 포맷."""
-    return f"{value:,.2f}"
-
-
-def _fmt_time(open_time_ms: int) -> str:
-    """알림 본문의 봉 시각(KST, WAN-172). 내부 비교·저장은 UTC epoch ms 그대로다."""
-    return format_kst_zoned(open_time_ms)
-
-
-def _direction_label(direction: OrderBlockDirection) -> str:
-    return "롱" if direction is OrderBlockDirection.BULLISH else "숏"
+# 저수준 포맷(가격·수량·금액·시각·방향)은 `live.message_format`이 단일 소스다(WAN-189) —
+# 지정가 러너 알림과 **같은 객체**를 공유해 같은 값이 폰에서 다르게 보이는 것을 막는다.
+# 사설 별칭으로만 재노출한다(중복 정의 아님 — 테스트가 `is`로 고정).
+_fmt_price = _mf.fmt_price
+_fmt_qty = _mf.fmt_qty
+_fmt_money = _mf.fmt_money
+_fmt_time = _mf.fmt_time
+_direction_label = _mf.direction_label
 
 
 def _line_label(key: str) -> str:

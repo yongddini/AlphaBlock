@@ -67,6 +67,15 @@ def _default_live_signal_timeframes() -> list[str]:
     return ["1h"]
 
 
+def _default_paper_trade_notify_events() -> list[str]:
+    """존-지정가 페이퍼 러너 매매 알림(WAN-189)의 기본 이벤트.
+
+    실시간은 체결·청산만, 만료·예약은 일일 요약 한 줄에만 실린다(스팸 방지 — 9종목 ×
+    3TF면 하루 수십 건이라 만료를 매번 알리면 시끄럽다).
+    """
+    return ["filled", "exit", "daily_summary"]
+
+
 class Settings(BaseSettings):
     """환경변수/.env 기반 설정 값."""
 
@@ -154,6 +163,13 @@ class Settings(BaseSettings):
     live_runtime_state_path: str = Field(default="data/live_runtime_state.json")
     # 데이터 신선도(수집 멈춤)를 stale로 볼 지연 배수. TF 주기 대비 이 배수를 넘으면 경고.
     health_stale_multiplier: float = Field(default=2.5, gt=0)
+
+    # 존-지정가 페이퍼 러너 매매 알림(WAN-189). 체결·청산을 텔레그램으로 보낸다(WAN-32/25
+    # 경로 재사용, 페이퍼 한정). 텔레그램 미설정이면 드라이런(로그만). 기본은 켬 — 이 러너의
+    # 매매 이벤트가 폰에 안 오던 빈틈을 메우는 게 이 이슈의 목적이라 기본으로 흐르게 한다.
+    # 이벤트 종류는 아래 목록으로 켠다(만료·예약은 실시간 없이 일일 요약 한 줄에만).
+    paper_trade_notify_enabled: bool = Field(default=True)
+    paper_trade_notify_events: list[str] = Field(default_factory=_default_paper_trade_notify_events)
 
     # 상시 구동 수집기 하트비트(WAN-31). 수집기가 살아있음을 남기는 파일과, Health가
     # 생존 판정에 쓰는 기대 하트비트 간격(초). min_interval은 파일 쓰기 스로틀.

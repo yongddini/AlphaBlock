@@ -262,6 +262,39 @@ def test_priming_does_not_replay_history(rig: dict[str, object]) -> None:
     assert journal.fill_stats() == []
 
 
+def test_runner_forwards_events_to_notifier(rig: dict[str, object]) -> None:
+    """러너가 체결·청산을 알림기로 넘긴다(WAN-189) — 배선을 동작으로 고정."""
+    store: OhlcvStore = rig["store"]  # type: ignore[assignment]
+    runner: ZoneLimitPaperRunner = rig["runner"]  # type: ignore[assignment]
+
+    fills: list[object] = []
+    exits: list[object] = []
+
+    class _Spy:
+        def note_placed(self) -> None: ...
+        def note_expired(self) -> None: ...
+        def tick(self, equity: float, *, now_ms: int | None = None) -> None: ...
+        def handle_fill(self, fill: object, report: object) -> None:
+            fills.append(fill)
+
+        def handle_exit(
+            self, report: object, *, exit_price: float, reason: object, exit_time: int
+        ) -> None:
+            exits.append((exit_price, reason))
+
+    runner._notifier = _Spy()  # type: ignore[assignment]
+
+    # 예약+체결이 같은 서브스텝 → handle_fill 한 번.
+    store.upsert_candles([_m1(_FORMING + _M, 94.9, 99.0, 95.2)])
+    runner.poll_once()
+    assert len(fills) == 1
+
+    # 익절 관통 → handle_exit 한 번.
+    store.upsert_candles([_m1(_FORMING + 2 * _M, 95.0, 103.5, 103.0)])
+    runner.poll_once()
+    assert len(exits) == 1
+
+
 def test_default_settings_dispatch_to_zone_limit_runner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
