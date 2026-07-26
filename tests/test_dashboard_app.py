@@ -140,6 +140,28 @@ def test_analysis_display_lines_are_off_by_default(seeded_db_path: str) -> None:
     assert not any(c.value for c in line_toggles)
 
 
+def test_period_widget_datetime_conversion_is_kst_and_roundtrips() -> None:
+    """기간/재생 위젯은 KST 벽시계로 보이되 질의 ms는 UTC 등가 그대로다(WAN-193).
+
+    사용자 결정(2026-07-26): 화면 날짜는 전부 KST. 단 저장·질의는 UTC 등가 ms 불변이라
+    경계 왕복(`_ms_to_datetime`↔`_datetime_to_ms`)이 원 ms를 되돌려야 한다 — "라벨만
+    KST, 데이터 축은 UTC" 원칙을 동작으로 고정한다.
+    """
+    from datetime import UTC, datetime
+
+    from dashboard.app import _datetime_to_ms, _ms_to_datetime
+
+    # 2021-01-01 00:00:00 UTC → KST 벽시계는 09:00, 같은 순간(ms)을 가리킨다.
+    ms = int(datetime(2021, 1, 1, 0, 0, tzinfo=UTC).timestamp() * 1000)
+    dt = _ms_to_datetime(ms)
+    assert (dt.hour, dt.minute) == (9, 0)  # KST 벽시계
+    assert dt.year == 2021 and dt.month == 1 and dt.day == 1
+
+    # 위젯이 벽시계만 돌려줘도(tz 유무 무관) 같은 ms로 되돌아온다 → 질의는 UTC 등가 불변.
+    assert _datetime_to_ms(dt) == ms
+    assert _datetime_to_ms(dt.replace(tzinfo=None)) == ms
+
+
 def test_run_config_badge_text_reports_current_settings() -> None:
     """WAN-65: 배지 문구가 진입 방식·RSI·사이징·병합·펀딩비 반영 여부를 담는다."""
     conf = ConfluenceParams(entry_mode="close", rsi_mode="closed_bar", max_zone_width_atr=None)

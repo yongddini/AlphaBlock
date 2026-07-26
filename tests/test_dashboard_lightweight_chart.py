@@ -719,6 +719,82 @@ def test_default_initial_bars_constant_is_used_when_not_overridden() -> None:
     assert payload["initialBars"] == min(_INITIAL_BARS, 3)
 
 
+def test_initial_visible_bars_is_one_week_of_the_timeframe() -> None:
+    """초기 가시창 = 최근 1주일치 봉수(WAN-193). `_df`는 1h 봉이라 168봉이다."""
+    payload = _payload(build_chart_html(_df(400), []))
+
+    assert payload["initialVisibleBars"] == 7 * 24  # 1h × 168 = 1주일
+
+
+def test_initial_visible_bars_falls_back_when_interval_unknown() -> None:
+    """봉이 하나뿐이라 간격을 못 구하면 렌더 상한으로 폴백한다(WAN-193)."""
+    payload = _payload(build_chart_html(_df(1), []))
+
+    assert payload["initialVisibleBars"] == _INITIAL_BARS
+
+
+def test_initial_view_shows_recent_window_not_fitcontent() -> None:
+    """초기 로드가 fitContent(전량 욱여넣기)가 아니라 최근창 논리범위를 쓴다(WAN-193).
+
+    focus 경로는 그대로 setVisibleRange를 쓰므로, 라벨만 바뀐 게 아니라 초기(비-focus)
+    경로가 실제로 setVisibleLogicalRange + initialVisibleBars를 타는지 동작으로 고정한다.
+    """
+    html = build_chart_html(_df(400), [])
+
+    # 우리 스크립트 블록만 본다 — fitContent는 벤더링된 라이브러리에도 있는 이름이다.
+    script = html.rsplit("<script>", 1)[1].split("</script>", 1)[0]
+    assert "fitContent()" not in script
+    assert "setVisibleLogicalRange({ from: rendered - n, to: rendered })" in script
+    assert "payload.initialVisibleBars" in script
+
+
+def test_chart_axis_time_labels_render_in_kst() -> None:
+    """시간축·크로스헤어 라벨이 KST(+9h)로 렌더된다 — 표시 계층만(WAN-193).
+
+    포맷터를 Node로 실행해 알려진 UTC 시각이 +9시간으로 찍히는지 확인한다. 내부 time
+    값(payload.candles[].time)은 UTC epoch 그대로임도 함께 고정한다.
+    """
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node가 없어 JS 포맷터를 실행할 수 없다")
+    df = _df(5)
+    html = build_chart_html(df, [])
+
+    # 내부 time은 UTC epoch 초 그대로다(표시만 KST — raw epoch을 밀지 않았다).
+    payload = _payload(html)
+    candles = payload["candles"]
+    assert isinstance(candles, list)
+    assert candles[0]["time"] == 0  # _df의 open_time[0] = 0ms → 0s (UTC epoch 불변)
+
+    # 축 포맷터가 옵션에 배선돼 있다.
+    assert "localization: { timeFormatter: kstCrosshairFormatter }" in html
+    assert "tickMarkFormatter: kstTickFormatter" in html
+
+    script = html.rsplit("<script>", 1)[1].split("</script>", 1)[0]
+    start = script.index("const _KST_OFFSET_SEC")
+    end = script.index("const chart = LightweightCharts.createChart")
+    formatters = script[start:end]
+    # 2021-01-01 00:00:00 UTC = 1609459200s → KST 2021-01-01 09:00.
+    harness = (
+        formatters
+        + "const t = 1609459200;\n"
+        + "console.log(JSON.stringify(["
+        + "kstCrosshairFormatter(t), kstTickFormatter(t, 3), kstTickFormatter(t, 2),"
+        + "kstTickFormatter(t, 0)]));\n"
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "fmt.js"
+        path.write_text(harness, encoding="utf-8")
+        out = subprocess.run(  # noqa: S603
+            [node, str(path)], check=True, capture_output=True, text=True
+        )
+    crosshair, tick_time, tick_day, tick_year = json.loads(out.stdout)
+    assert crosshair == "2021-01-01 09:00 KST"  # UTC 00:00 → KST 09:00
+    assert tick_time == "09:00"
+    assert tick_day == "01-01"
+    assert tick_year == "2021"
+
+
 def test_chart_script_is_valid_javascript() -> None:
     """템플릿 치환 결과가 파싱 가능한 JS인지 Node로 확인한다(오타 방지)."""
     node = shutil.which("node")

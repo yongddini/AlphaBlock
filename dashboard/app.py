@@ -18,7 +18,7 @@
 from __future__ import annotations
 
 import time
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 
 import pandas as pd
 import streamlit as st
@@ -27,7 +27,7 @@ from backtest.models import BacktestConfig, BacktestMetrics, BacktestResult
 from backtest.report import COL_EXIT_REASON, trades_to_dataframe, trades_to_display_frame
 from backtest.sweep import default_backtest_config
 from backtest.trade_store import BacktestRunStore, RunFingerprint, RunSummary, engine_revision
-from common.timefmt import format_kst_zoned
+from common.timefmt import KST, format_kst_zoned
 from config import get_settings
 from config.settings import Settings
 from dashboard.analysis_cache import AnalysisCache, cache_key
@@ -87,11 +87,24 @@ from strategy.models import (
 
 
 def _ms_to_datetime(ms: int) -> datetime:
-    return datetime.fromtimestamp(ms / 1000, tz=UTC)
+    """epoch ms → **KST** 벽시계 datetime — 기간/재생 위젯이 KST 날짜로 보이게 한다(WAN-193).
+
+    ⚠️ 표시·입력 **경계 전용** 변환이다(WAN-172/146 원칙). 여기서 나온 datetime을
+    질의로 다시 넣을 때는 반드시 `_datetime_to_ms`로 되돌린다 — 저장·질의·백테스트는
+    epoch ms(UTC 등가)로만 오간다. 사용자 결정(2026-07-26): 화면에 보이는 모든 날짜는
+    한국시간이다(차트 축·현재봉은 lightweight_chart.py의 표시 포맷터가 담당).
+    """
+    return datetime.fromtimestamp(ms / 1000, tz=KST)
 
 
 def _datetime_to_ms(value: datetime) -> int:
-    return int(value.replace(tzinfo=UTC).timestamp() * 1000)
+    """KST 벽시계 datetime(위젯이 돌려준 값) → epoch ms. 경계에서만 변환(WAN-193).
+
+    Streamlit 슬라이더는 넘긴 벽시계 값을 그대로 돌려주므로 KST로 해석한다. `replace`는
+    tz-aware(KST)든 naive든 같은 벽시계를 KST로 고정해 `_ms_to_datetime`와 정확히
+    왕복한다(저장·질의는 UTC 등가 ms 불변 — 테스트가 왕복을 고정).
+    """
+    return int(value.replace(tzinfo=KST).timestamp() * 1000)
 
 
 # --- 포맷 헬퍼 (Health) ------------------------------------------------------
@@ -100,7 +113,9 @@ def _datetime_to_ms(value: datetime) -> int:
 def _fmt_time(ms: int | None) -> str:
     """Health 탭의 시각(KST, WAN-172). 거래 표와 같은 공용 포맷터를 쓴다 —
     화면 안에서 탭마다 시간대가 다르면 같은 사건이 다른 시각으로 보인다.
-    ⚠️ 차트 축·기간 선택은 데이터 축이라 UTC 그대로다(`_ms_to_datetime`)."""
+    ⚠️ 기간/재생 위젯도 KST다(WAN-193 — `_ms_to_datetime`가 경계에서 변환). 차트
+    시간축·현재봉은 lightweight_chart.py의 표시 포맷터가 KST로 그린다. 내부
+    저장·질의·백테스트·CSV는 UTC 등가 ms 그대로다."""
     return format_kst_zoned(ms)
 
 

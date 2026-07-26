@@ -528,6 +528,24 @@ def _bar_interval_ms(times_ms: Sequence[int]) -> int:
     return sorted(diffs)[len(diffs) // 2]
 
 
+#: 초기 화면에 보일 시간창 = 최근 1주일(WAN-193, 사용자 기준점 "15m=일주일"). TF마다
+#: 봉 간격이 달라 고정 봉수면 1h=한 달·4h=넉 달이 보이므로, 실제 1주일 시간창을
+#: 봉 간격으로 역산해 어느 TF든 최근 ~1주일이 보이게 한다(15m≈672 · 1h≈168 · 4h≈42봉).
+_INITIAL_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
+
+
+def _initial_visible_bars(times_ms: Sequence[int]) -> int:
+    """초기 가시 봉 수 = 최근 1주일치(TF별). 봉 간격을 못 구하면 렌더 상한으로 폴백한다.
+
+    표시 전용이다 — 데이터는 그대로 전량 로드되고 좌측 스크롤 지연 로딩은 불변이며,
+    이 값은 처음 **보이는 창**의 봉 수만 정한다(JS가 렌더된 봉 수로 한 번 더 클램프).
+    """
+    interval = _bar_interval_ms(times_ms)
+    if interval <= 0:
+        return _INITIAL_BARS
+    return max(1, _INITIAL_WINDOW_MS // interval)
+
+
 def _focus_range(times_ms: Sequence[int], focus: tuple[int, int]) -> dict[str, int]:
     """(진입 ms, 청산 ms) → 차트에 보여줄 (from, to) 초 단위 구간 + 좌우 여유.
 
@@ -553,6 +571,36 @@ _TEMPLATE = """
   }
 
   const theme = payload.theme;
+
+  // 시간축·크로스헤어 라벨을 KST로 표시한다(WAN-193). ⚠️ 표시 계층 전용이다 — 차트에
+  // 넘긴 time(=UTC epoch 초)은 그대로 두고 **문자열을 만드는 순간에만** +9시간 밀어 읽는다
+  // (raw epoch을 밀면 크로스헤어 조회·마커 정렬·focus 점프가 다 깨진다, WAN-172/146 원칙).
+  // KST는 DST가 없어 고정 +9로 충분하고, UTC 파트를 읽어 뷰어 브라우저 시간대와 무관하게
+  // 결정적으로 KST를 낸다. 표기는 common/timefmt.py의 KST 포맷("YYYY-MM-DD HH:MM KST")과 맞춘다.
+  const _KST_OFFSET_SEC = 9 * 3600;
+  function _kstParts(time) {
+    const d = new Date((time + _KST_OFFSET_SEC) * 1000);
+    return {
+      y: d.getUTCFullYear(), mo: d.getUTCMonth() + 1, da: d.getUTCDate(),
+      h: d.getUTCHours(), mi: d.getUTCMinutes(), s: d.getUTCSeconds(),
+    };
+  }
+  function _p2(n) { return n < 10 ? "0" + n : "" + n; }
+  // 축 눈금 라벨. tickMarkType: 0=Year 1=Month 2=DayOfMonth 3=Time 4=TimeWithSeconds.
+  function kstTickFormatter(time, tickMarkType) {
+    const p = _kstParts(time);
+    if (tickMarkType === 0) return "" + p.y;
+    if (tickMarkType === 1) return p.y + "-" + _p2(p.mo);
+    if (tickMarkType === 2) return _p2(p.mo) + "-" + _p2(p.da);
+    if (tickMarkType === 4) return _p2(p.h) + ":" + _p2(p.mi) + ":" + _p2(p.s);
+    return _p2(p.h) + ":" + _p2(p.mi);
+  }
+  // 크로스헤어(마우스 위치) 시각 라벨 — 표와 같은 "YYYY-MM-DD HH:MM KST" 표기.
+  function kstCrosshairFormatter(time) {
+    const p = _kstParts(time);
+    return p.y + "-" + _p2(p.mo) + "-" + _p2(p.da) + " " + _p2(p.h) + ":" + _p2(p.mi) + " KST";
+  }
+
   const chart = LightweightCharts.createChart(container, {
     autoSize: true,
     layout: { background: { type: "solid", color: theme.background }, textColor: theme.textColor },
@@ -560,11 +608,13 @@ _TEMPLATE = """
       vertLines: { color: theme.gridColor },
       horzLines: { color: theme.gridColor },
     },
+    localization: { timeFormatter: kstCrosshairFormatter },
     rightPriceScale: { borderVisible: false },
     timeScale: {
       borderVisible: false,
       timeVisible: true,
       secondsVisible: false,
+      tickMarkFormatter: kstTickFormatter,
       // 과거 거래를 보고 있는데(payload.focus) 라이브로 새 봉이 들어와 화면이 최신으로
       // 끌려가면 안 된다(WAN-146 × WAN-147).
       shiftVisibleRangeOnNewBar: !payload.focus,
@@ -766,7 +816,13 @@ _TEMPLATE = """
     if (target !== loadedFrom) applyFrom(target);
     chart.timeScale().setVisibleRange({ from: payload.focus.from, to: payload.focus.to });
   } else {
-    chart.timeScale().fitContent();
+    // 초기 화면은 최근 ~1주일(TF별 봉수)만 보인다(WAN-193). 옛 경로는 로드한 봉
+    // (최대 1,500)을 통째로 욱여넣어 최근 오더블록이 손톱만 했다. 데이터는 그대로 다
+    // 실려 있고(좌측 스크롤 지연 로딩 불변), 처음 **보이는 창**만 좁힌다. 논리 범위는
+    // 지금 그려진(setData한) 봉 기준이라 loadedFrom을 빼고 센다.
+    const rendered = payload.candles.length - loadedFrom;
+    const n = Math.min(payload.initialVisibleBars, rendered);
+    chart.timeScale().setVisibleLogicalRange({ from: rendered - n, to: rendered });
   }
 
   let loading = false;
@@ -1127,6 +1183,7 @@ def build_chart_html(
     boxes = _zone_boxes(order_blocks, last_bar_ms, chart_theme)
     markers = _entry_exit_markers(backtest, chart_theme) if backtest is not None else []
     focus_payload = _focus_range(times_ms, focus) if focus is not None else None
+    initial_visible_bars = _initial_visible_bars(times_ms)
 
     payload: dict[str, object] = {
         "candles": candles,
@@ -1138,6 +1195,7 @@ def build_chart_html(
         "live": live_payload,
         "focus": focus_payload,
         "initialBars": min(initial_bars, len(candles)),
+        "initialVisibleBars": initial_visible_bars,
         "priceColors": {
             "up": chart_theme.bull_candle,
             "down": chart_theme.bear_candle,
