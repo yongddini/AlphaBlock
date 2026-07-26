@@ -146,6 +146,27 @@ def format_position_exit(
     )
 
 
+def format_entry_rejected(fill: LimitFill, *, reason: str) -> str:
+    """체결됐지만 집행 계층이 진입을 거부했을 때의 알림(WAN-194).
+
+    이 알림이 없던 동안 거부는 INFO 로그 한 줄이 전부였고, 폰으로 보는 운영자에게는
+    "체결도 진입도 없었다"와 구분되지 않았다. 사유를 그대로 실어 보내 장부를 열지 않고도
+    가드가 걸렀는지 알 수 있게 한다(대부분은 손절폭 가드 0.3% — WAN-79).
+    """
+    header = (
+        f"⚪️ *진입 거부* · {short_symbol(fill.symbol)} {fill.timeframe} "
+        f"{direction_label(fill.direction)}"
+    )
+    return "\n".join(
+        [
+            header,
+            f"지정가는 체결됐으나 포지션을 열지 않았습니다 — {reason}",
+            f"체결가 {fmt_price(fill.price)} · 손절 참조 {fmt_price(fill.stop_price)}",
+            fmt_time(fill.time),
+        ]
+    )
+
+
 def format_daily_summary(day: date, *, placed: int, filled: int, expired: int) -> str:
     """일일 요약 한 줄(만료 포함) — 실시간으로 안 보내는 예약·만료를 여기서 합산해 본다."""
     return "\n".join(
@@ -221,12 +242,19 @@ class ZoneLimitNotifier:
         self._expired += 1
 
     def handle_fill(self, fill: LimitFill, report: TradeReport) -> None:
-        """체결 → 진입 알림. 페이퍼 진입이 실제로 열렸을 때만 보낸다(거부면 카운트만)."""
+        """체결 → 진입 알림. 진입이 거부되면 **거부 알림**을 보낸다(WAN-194).
+
+        옛 동작은 거부 시 조용히 반환하는 것이었다 — 그래서 체결이 거래가 되지 않은
+        사건이 폰에서 "아무 일도 없었다"와 같아 보였다. 같은 `filled` 이벤트 스위치를
+        쓴다(체결은 났으므로 같은 부류의 사건이고, 스위치를 늘리면 기본값에서 꺼진
+        새 채널이 또 조용해진다).
+        """
         self._filled += 1
         if "filled" not in self._events:
             return
         position = report.outcome.position
         if not report.accepted or position is None:
+            self._send(format_entry_rejected(fill, reason=report.outcome.reason or "사유 미기록"))
             return
         fee = report.outcome.fill.fee if report.outcome.fill is not None else 0.0
         equity_before = report.equity + fee

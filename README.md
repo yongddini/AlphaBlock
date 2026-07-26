@@ -767,6 +767,14 @@ uv run python -m live.fill_report
 분모에서 걸러 읽기 위해서다(재시작 시 이전 대기 주문은 복원하지 않고 `discarded_restart`로
 마감). 페이퍼 한정: 실주문 API는 부르지 않는다(`ALPHABLOCK_LIVE_TRADING=false` 불변).
 
+⚠️ **체결 ≠ 진입 (WAN-194)**: 체결된 지정가도 집행 계층이 거부하면 포지션이 열리지 않는다
+(손절 거리 < 0.3% 가드 · 명목 상한 · 이미 오픈 포지션 · 리스크 한도). 백테스트도 같은 자로
+후보를 버리므로 **거부 자체는 정상**이지만, 그 처분이 장부에 남지 않던 동안에는 정상 거부가
+**DB 손상과 같은 모양**이었다. 이제 `live_limit_orders.entry_status`
+(`entered`/`rejected` + 사유)가 남고, `fill_report`가 `진입%`(= 체결이 거래가 된 비율)와
+**처분 미기록** 건수를 병기한다 — 후자가 곧 "러너가 두 쓰기 사이에서 죽었다"의 서명이다.
+**거래가 되는 비율 = 체결률 × 진입%**이니 두 값을 같이 읽을 것.
+
 ## 실시간 시그널 러너 + 텔레그램 알림 (WAN-25, 페이퍼 · A안 경로)
 
 ⚠️ **아래 A안(봉 마감 종가) 러너는 `ALPHABLOCK_CONFLUENCE__ENTRY_MODE=close`로 명시했을
@@ -851,7 +859,17 @@ uv run alphablock live             # 실시간 시그널 러너(페이퍼) 상�
 uv run alphablock live --once      # 러너 1회 폴링 후 종료(점검)
 uv run alphablock status           # 운영 상태(Health) 요약을 콘솔에 출력
 uv run alphablock watch            # 운영 상태 워치(이상 시 텔레그램 경고) 상주 — WAN-32
+uv run alphablock doctor           # DB 무결성·위생 점검(이상이면 종료 코드 1) — WAN-194
+uv run alphablock doctor --skip-quick-check  # 인구조사만(수 GB DB에서 빠르게)
 ```
+
+`alphablock doctor`는 DB 손상(`PRAGMA quick_check`)·`.recover` 산출물(`lost_and_found`)·
+빈 장부·**처분 미기록 체결**·공간/WAL/디스크 여유를 한 번에 찍는다(WAN-194). 읽기 전용이
+기본이고 이상이 있으면 종료 코드 1이라 cron·감시에 그대로 물릴 수 있다.
+⚠️ **자동 `VACUUM`·자동 복구는 의도적으로 없다** — VACUUM은 DB를 독점 락하고 같은 크기의
+임시 파일을 쓰므로 러너·수집기가 붙은 서버에서 코드가 스스로 돌 일이 아니고, 자동 복구는
+"누가 복구했는지 모르는 DB"를 저장소가 스스로 만들게 된다(WAN-194가 겪은 상황).
+`--drop-recovery-artifacts`만 파괴적이며 명시적 옵트인이다(앱 테이블은 건드리지 않는다).
 
 `alphablock status`는 대시보드 Health 탭과 같은 판정을 텍스트로 보여준다 —
 수집기·러너 생존, 데이터 신선도, 오픈 페이퍼 포지션을 한눈에 확인한다.
