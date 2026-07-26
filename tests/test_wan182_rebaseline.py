@@ -121,12 +121,8 @@ def test_wan104_and_wan108_are_pinned_to_legacy_coordinates() -> None:
     assert wan104.DEFAULT_SYMBOLS == harness.LEGACY_SYMBOLS
     assert wan104.DEFAULT_YEARS == harness.LEGACY_YEARS
     assert wan108.DEFAULT_YEARS == harness.LEGACY_YEARS
-    # 다른 옛 리포트(wan70/81/84/88 등)는 좌표를 자기 모듈 상수로 들고 있어 이 전환의
-    # 영향을 받지 않는다 — 대표로 wan81이 여전히 3심볼/3년임을 확인한다.
-    from backtest import wan81_engine_replacement_report as wan81
-
-    assert wan81.DEFAULT_SYMBOLS == harness.LEGACY_SYMBOLS
-    assert wan81.DEFAULT_YEARS == harness.LEGACY_YEARS
+    # 다른 옛 리포트(wan70/88 등)는 좌표를 자기 모듈 상수로 들고 있어 이 전환의 영향을
+    # 받지 않는다. 옛 A안 대조 리포트(wan81/84 등)는 WAN-198이 파일째 삭제했다.
 
 
 def test_wan95_tracks_the_adopted_coordinates() -> None:

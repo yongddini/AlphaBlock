@@ -9,7 +9,8 @@
 
 ## 방법론
 
-`backtest.ab_run.build_ab_entries`와 같은 **공정 비교 창** 규칙을 쓴다. B안(지정가)은
+`backtest.harness`의 `coverage_window`/`windowed_result`(공용 골격)과 같은 **공정 비교
+창** 규칙을 쓴다. B안(지정가)은
 1분봉이 커버하는 구간의 셋업만 평가하므로(`zone_limit_backtest` 참고), A안(종가) 성과도
 1분봉 커버 창 안에 진입한 거래만 집계해야 같은 기간을 비교하게 된다. 상위TF 히스토리
 전체는 오더블록 탐지·지표 워밍업에 그대로 쓰고, 성과 집계만 창으로 한정한다. 두 변형은
@@ -54,17 +55,27 @@ from pathlib import Path
 import pandas as pd
 from pydantic import BaseModel, ConfigDict
 
-from backtest.ab_run import _window, _windowed_result
+from backtest.harness import (
+    CACHE_DIR as _CACHE_DIR,
+)
+from backtest.harness import (
+    DB_PATH as _DB_PATH,
+)
 from backtest.harness import (
     DEFAULT_END,
     DEFAULT_START,
     DEFAULT_SYMBOLS,
     DEFAULT_TIMEFRAMES,
 )
+from backtest.harness import (
+    coverage_window as _window,
+)
+from backtest.harness import (
+    windowed_result as _windowed_result,
+)
 from backtest.models import BacktestConfig
 from backtest.run import parse_date_ms
 from backtest.sweep import default_backtest_config, evaluate
-from backtest.wan81_engine_replacement_report import _CACHE_DIR, _DB_PATH
 from backtest.zone_limit_backtest import run_zone_limit_backtest_verbose
 from data.funding import FundingRateStore
 from data.models import FundingRate

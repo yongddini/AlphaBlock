@@ -523,6 +523,16 @@ def load_recent(store: OhlcvStore, symbol: str, timeframe: str, years: float) ->
     return df[df["open_time"] >= start].reset_index(drop=True)
 
 
+def split_bars(n: int, is_frac: float = 2.0 / 3.0) -> int:
+    """`n`봉을 IS `[0, is_end)`/OOS `[is_end, n)`으로 나눈다(단순 분할, 구 WAN-68).
+
+    구 `wan68_short_gate_analysis._split_bars`에서 옮겨 온 순수 헬퍼(WAN-198). 여러
+    엣지 널 리포트(wan70/71/88)가 인덱스 기준 IS/OOS 분할에 이 함수를 공유한다 —
+    아카이브 모듈에 갇혀 있던 것을 중립 골격으로 끌어올렸다(동작·비트 재현 불변).
+    """
+    return max(1, min(n - 1, int(round(n * is_frac))))
+
+
 def load_market_data(
     symbol: str,
     timeframe: str,

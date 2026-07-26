@@ -62,17 +62,25 @@ from pathlib import Path
 import pandas as pd
 from pydantic import BaseModel, ConfigDict
 
+from backtest.harness import (
+    CACHE_DIR as _CACHE_DIR,
+)
+from backtest.harness import (
+    DB_PATH as _DB_PATH,
+)
 from backtest.harness import LEGACY_OB_PARAMS, LEGACY_RSI_GATE_MODE, pin_band_bar
+from backtest.harness import (
+    LEGACY_SYMBOLS as DEFAULT_SYMBOLS,
+)
+from backtest.harness import (
+    LEGACY_YEARS as DEFAULT_YEARS,
+)
+from backtest.harness import (
+    load_recent as _load_recent,
+)
 from backtest.models import BacktestConfig, PositionSide
 from backtest.substep import SubStep, build_substeps
 from backtest.sweep import default_backtest_config, timeframe_to_ms
-from backtest.wan81_engine_replacement_report import (
-    _CACHE_DIR,
-    _DB_PATH,
-    DEFAULT_SYMBOLS,
-    DEFAULT_YEARS,
-    _load_recent,
-)
 from backtest.zone_limit_backtest import SetupDiagnostic, run_zone_limit_backtest_verbose
 from data.funding import FundingRateStore
 from data.models import FundingRate
