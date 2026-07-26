@@ -232,7 +232,20 @@ class ZoneLimitPaperRunner:
                     ),
                     now_ms=fill.time,
                 )
-                _logger.info(
+                # 체결의 하류 처분을 장부에 남긴다(WAN-194). 거부일 때도 반드시 남긴다 —
+                # 안 남기면 `filled`인데 포지션이 없는 행이 "정상 거부"인지 "쓰기 사이의
+                # 유실"인지 구분되지 않는다(이 이슈가 손상 의심으로 시작한 이유).
+                journal_id = order.journal_id
+                if journal_id is not None:
+                    self._journal.record_entry_result(
+                        journal_id,
+                        entered=report.accepted,
+                        reason=report.outcome.reason,
+                    )
+                # 거부는 WARNING이다 — 체결이 거래가 되지 않은 것이라 조용히 흘리면
+                # 장부와 성과가 어긋난 채로 운영이 계속된다.
+                log = _logger.info if report.accepted else _logger.warning
+                log(
                     "지정가 체결: %s %s %s @%.6g 관통=%.2fbp 대기=%s → 페이퍼 진입 %s",
                     fill.symbol,
                     fill.timeframe,

@@ -205,12 +205,22 @@ def test_dry_run_logs_when_telegram_missing(caplog: pytest.LogCaptureFixture) ->
     assert any("드라이런" in r.message for r in caplog.records)
 
 
-def test_rejected_entry_does_not_send_but_counts() -> None:
+def test_rejected_entry_sends_rejection_notice_and_counts() -> None:
+    """거부도 알림으로 나간다 (WAN-194 — 옛 동작은 조용한 반환이었고 그게 버그였다).
+
+    체결은 났는데 포지션이 열리지 않은 사건이 폰에서 "아무 일도 없었다"와 같아 보이면,
+    운영자는 장부와 성과가 어긋난 걸 알 수 없다(WAN-194가 손상 의심으로 시작한 이유).
+    사유를 실어 보내 장부를 열지 않고도 가드가 걸렀는지 알 수 있게 한다.
+    """
     rec = _Recorder()
     notif = ZoneLimitNotifier(_client(rec), now_ms=lambda: 14 * _H)
     notif.handle_fill(_fill(), _entry_report(accepted=False))
-    assert rec.sent == []
-    # 체결 자체는 일어났으니 일일 카운터에는 잡힌다.
+    assert len(rec.sent) == 1
+    assert "진입 거부" in rec.sent[0]
+    assert "이미 오픈 포지션" in rec.sent[0]  # 거부 사유가 그대로 실린다.
+    assert "진입 체결" not in rec.sent[0]  # 진입 알림으로 오인되지 않는다.
+
+    # 체결 자체는 일어났으니 일일 카운터에도 잡힌다(거부와 별개의 자다).
     notif.tick(10_000.0, now_ms=14 * _H)
     notif.tick(10_000.0, now_ms=14 * _H + 24 * _H)
     assert any("체결 1" in s for s in rec.sent)
@@ -220,6 +230,18 @@ def test_filled_event_toggle_off_suppresses_send() -> None:
     rec = _Recorder()
     notif = ZoneLimitNotifier(_client(rec), events=frozenset({"exit"}), now_ms=lambda: 14 * _H)
     notif.handle_fill(_fill(), _entry_report())
+    assert rec.sent == []
+
+
+def test_filled_toggle_also_governs_rejection_notice() -> None:
+    """거부 알림은 `filled` 스위치를 함께 쓴다 (WAN-194).
+
+    스위치를 새로 늘리면 기본값에서 꺼진 채널이 또 하나 생겨 같은 침묵이 재발한다 —
+    체결은 났으므로 같은 부류의 사건으로 묶는다.
+    """
+    rec = _Recorder()
+    notif = ZoneLimitNotifier(_client(rec), events=frozenset({"exit"}), now_ms=lambda: 14 * _H)
+    notif.handle_fill(_fill(), _entry_report(accepted=False))
     assert rec.sent == []
 
 

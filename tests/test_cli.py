@@ -11,6 +11,7 @@ import pytest
 from cli.main import (
     build_parser,
     cmd_collect,
+    cmd_doctor,
     cmd_live,
     cmd_status,
     format_status,
@@ -21,6 +22,7 @@ from dashboard.health_data import build_health_view
 from data.models import Candle
 from data.repair import RepairStateStore, RepairSummary
 from data.storage import OhlcvStore
+from live.order_journal import OrderJournal
 
 _HOUR = 3_600_000
 _NOW = 1_000 * _HOUR
@@ -198,3 +200,99 @@ def test_cmd_live_invokes_runner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     rc = cmd_live(argparse.Namespace(once=True, dry_run=True, test_message=False), settings)
     assert rc == 0
     assert calls == {"once": True, "dry_run": True, "test_message": False}
+
+
+# --- doctor (WAN-194) --------------------------------------------------------
+
+
+def test_parser_routes_doctor() -> None:
+    parser = build_parser()
+    args = parser.parse_args(["doctor"])
+    assert args.func is cmd_doctor
+    # 파괴적 옵션은 기본이 꺼져 있다.
+    assert args.drop_recovery_artifacts is False
+    assert args.skip_quick_check is False
+    assert args.orphans_since is None
+    assert parser.parse_args(["doctor", "--skip-quick-check"]).skip_quick_check is True
+
+
+def test_cmd_doctor_exit_code_signals_findings(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """이상이 있으면 종료 코드 1 — cron·감시에서 그대로 쓸 수 있어야 한다."""
+    import sqlite3
+
+    settings = _settings(tmp_path)
+    journal = OrderJournal(settings.db_path)
+    journal.start_session(now_ms=0)
+    journal.close()
+    conn = sqlite3.connect(settings.db_path)
+    with conn:  # 복구 산출물 = 이상 신호.
+        conn.execute("CREATE TABLE lost_and_found (rootpgno INTEGER, pgno INTEGER)")
+    conn.close()
+
+    args = argparse.Namespace(
+        db=None,
+        skip_quick_check=True,
+        orphans_since=None,
+        drop_recovery_artifacts=False,
+    )
+    assert cmd_doctor(args, settings) == 1
+    assert "lost_and_found" in capsys.readouterr().out
+
+
+def test_cmd_doctor_drop_is_explicit_and_reports(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--drop-recovery-artifacts`가 실제로 지우고, VACUUM은 사람 몫임을 알린다."""
+    import sqlite3
+
+    settings = _settings(tmp_path)
+    journal = OrderJournal(settings.db_path)
+    journal.start_session(now_ms=0)
+    journal.close()
+    conn = sqlite3.connect(settings.db_path)
+    with conn:
+        conn.execute("CREATE TABLE lost_and_found (rootpgno INTEGER)")
+    conn.close()
+
+    args = argparse.Namespace(
+        db=None,
+        skip_quick_check=True,
+        orphans_since=None,
+        drop_recovery_artifacts=True,
+    )
+    cmd_doctor(args, settings)
+    out = capsys.readouterr().out
+    assert "복구 산출 테이블 삭제" in out
+    assert "VACUUM" in out
+    # 삭제 후 같은 실행의 리포트에는 산출물이 없다.
+    assert "이 DB에 `.recover` 흔적이 없다" in out
+
+
+def test_cmd_doctor_orphans_since_is_kst(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--orphans-since`는 KST 자정 기준이다(운영 출력 시간대 규약, WAN-172)."""
+    settings = _settings(tmp_path)
+    journal = OrderJournal(settings.db_path)
+    session = journal.start_session(now_ms=0)
+    # 2026-07-26 00:30 KST = 2026-07-25 15:30 UTC.
+    fill_ms = 1784993400000
+    conn = journal._conn  # noqa: SLF001
+    with conn:
+        conn.execute(
+            "INSERT INTO live_limit_orders (session_id, symbol, timeframe, direction,"
+            " placed_ms, status, fill_ms) VALUES (?, 'LINK/USDT:USDT', '15m', 'bullish',"
+            " 1, 'filled', ?)",
+            (session, fill_ms),
+        )
+    journal.close()
+
+    base = {"db": None, "skip_quick_check": True, "drop_recovery_artifacts": False}
+    # 그 날 자정(KST) 이후로 자르면 00:30 체결이 포함된다.
+    cmd_doctor(argparse.Namespace(orphans_since="2026-07-26", **base), settings)
+    assert "LINK/USDT:USDT" in capsys.readouterr().out
+    # 다음 날로 자르면 빠진다.
+    cmd_doctor(argparse.Namespace(orphans_since="2026-07-27", **base), settings)
+    assert "모든 체결에 진입/거부 처분이 남아 있다" in capsys.readouterr().out

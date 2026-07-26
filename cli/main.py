@@ -11,9 +11,11 @@ import argparse
 import asyncio
 import logging
 from collections.abc import Sequence
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 from common import timefmt
+from common.timefmt import KST
 from config import get_settings
 from config.settings import Settings
 from dashboard.health import HealthLevel
@@ -347,6 +349,37 @@ def cmd_watch(args: argparse.Namespace, settings: Settings) -> int:
     return 0
 
 
+def cmd_doctor(args: argparse.Namespace, settings: Settings) -> int:
+    """`alphablock doctor` — DB 무결성·위생 점검(WAN-194 §2·§4·§5).
+
+    읽기 전용이 기본이고, 이상이 하나라도 있으면 종료 코드 1을 낸다(cron·감시에서
+    바로 쓸 수 있게). `--drop-recovery-artifacts`만 파괴적이며 명시적 옵트인이다.
+    """
+    from data.integrity import drop_recovery_artifacts, inspect, render_report
+
+    db_path = args.db if args.db is not None else settings.db_path
+
+    if args.drop_recovery_artifacts:
+        dropped = drop_recovery_artifacts(db_path)
+        if dropped:
+            print(f"복구 산출 테이블 삭제: {', '.join(dropped)}")
+            print(
+                "⚠️ 파일 크기는 아직 줄지 않았다(페이지가 프리리스트로 갔을 뿐이다)."
+                " 줄이려면 러너·수집기를 멈춘 뒤 `VACUUM`을 직접 돌릴 것."
+            )
+        else:
+            print("삭제할 복구 산출 테이블이 없습니다.")
+
+    since_ms: int | None = None
+    if args.orphans_since is not None:
+        since = datetime.strptime(args.orphans_since, "%Y-%m-%d").replace(tzinfo=KST)
+        since_ms = int(since.timestamp() * 1000)
+
+    report = inspect(db_path, quick_check=not args.skip_quick_check, orphan_since_ms=since_ms)
+    print(render_report(report))
+    return 0 if report.healthy else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="alphablock",
@@ -461,6 +494,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="테스트 메시지를 한 번 보내고 종료(텔레그램 연결 확인)",
     )
     p_watch.set_defaults(func=cmd_watch)
+
+    p_doctor = sub.add_parser(
+        "doctor",
+        help="DB 무결성·위생 점검(손상·복구 산출물·빈 장부·처분 미기록 체결, WAN-194)",
+    )
+    p_doctor.add_argument("--db", default=None, help="점검할 DB 경로(기본: 설정의 db_path)")
+    p_doctor.add_argument(
+        "--skip-quick-check",
+        action="store_true",
+        help="`PRAGMA quick_check`를 건너뛴다(수 GB DB에서 느림 — 인구조사만 볼 때)",
+    )
+    p_doctor.add_argument(
+        "--orphans-since",
+        default=None,
+        metavar="YYYY-MM-DD",
+        help="이 날짜(KST) 이후 체결만 처분 미기록으로 본다(WAN-194 열 도입 이전은 판별 불가)",
+    )
+    p_doctor.add_argument(
+        "--drop-recovery-artifacts",
+        action="store_true",
+        help="`lost_and_found` 등 `.recover` 산출 테이블을 삭제한다(파괴적 — VACUUM은 안 한다)",
+    )
+    p_doctor.set_defaults(func=cmd_doctor)
 
     return parser
 

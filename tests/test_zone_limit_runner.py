@@ -25,6 +25,7 @@ from live.executor import PaperExecutor
 from live.limit_engine import ZoneLimitLiveEngine
 from live.order_journal import OrderJournal
 from live.runtime_state import RuntimeStateStore
+from live.zone_limit_notifier import ZoneLimitNotifier
 from live.zone_limit_runner import ZoneLimitPaperRunner
 from paper.store import PaperTradeRecorder, PaperTradeStore
 from strategy.models import (
@@ -309,3 +310,110 @@ def test_default_settings_dispatch_to_zone_limit_runner(
     assert settings.confluence.entry_mode == "zone_limit"
     runner_mod.run_signal_runner(settings, once=True)
     assert calls == [True]
+
+
+# -- 체결 ≠ 진입 (WAN-194) -----------------------------------------------------
+
+
+def _install_narrow_zone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """손절폭 가드(0.3%)에 걸릴 만큼 좁은 존을 물린다 — WAN-194 증상의 재현 장치.
+
+    존 하단이 진입가에 너무 가까워 `position_size`가 0을 낸다(WAN-79 가드). 백테스트도
+    같은 자로 이 후보를 버리므로 거부 자체는 정상이다 — 이 테스트가 고정하는 것은 그
+    거부가 **기록되는지**다.
+    """
+    narrow = OrderBlock(
+        direction=OrderBlockDirection.BULLISH,
+        top=95.0,
+        bottom=94.8,  # 진입가(≈95.019) 대비 손절 거리 0.23% < 가드 0.3%.
+        start_time=0,
+        confirmed_time=_H,
+        ob_volume=1.0,
+        ob_low_volume=0.5,
+        ob_high_volume=0.5,
+    )
+    result = OrderBlockResult(order_blocks=[narrow], signals=[])
+
+    class _Stub:
+        def __init__(self, params: object = None) -> None:
+            pass
+
+        def run(self, df: pd.DataFrame) -> OrderBlockResult:
+            return result
+
+    monkeypatch.setattr(limit_engine, "OrderBlockDetector", _Stub)
+
+
+def test_rejected_entry_is_recorded_not_silent(
+    rig: dict[str, object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """체결됐지만 진입이 거부되면 그 처분이 장부에 남는다 (WAN-194 §3).
+
+    이것이 이 이슈의 증상 그 자체다: `live_limit_orders`는 `filled`인데 `open_positions`·
+    `paper_trades`가 비어 DB 손상으로 보였다. 거부가 기록되면 그 모양이 **정상 동작**으로
+    읽히고, 기록이 없는 행만 진짜 유실로 남는다.
+    """
+    store: OhlcvStore = rig["store"]  # type: ignore[assignment]
+    runner: ZoneLimitPaperRunner = rig["runner"]  # type: ignore[assignment]
+    executor: PaperExecutor = rig["executor"]  # type: ignore[assignment]
+    journal: OrderJournal = rig["journal"]  # type: ignore[assignment]
+    paper_store: PaperTradeStore = rig["paper_store"]  # type: ignore[assignment]
+    _install_narrow_zone(monkeypatch)
+
+    store.upsert_candles([_m1(_FORMING + _M, 94.79, 99.0, 94.9)])
+    runner.poll_once()
+
+    # 증상 재현: 체결은 났는데 포지션·거래가 없다.
+    stats = journal.fill_stats()
+    assert len(stats) == 1 and stats[0].filled == 1
+    assert executor.open_positions == []
+    assert paper_store.count(_SYMBOL, _TF) == 0
+
+    # 그러나 이제 그 이유가 장부에 있다 — 거부로 분류되고 유실 후보가 아니다.
+    assert stats[0].entry_rejected == 1
+    assert stats[0].entered == 0
+    assert stats[0].entry_unrecorded == 0
+    assert journal.orphan_fills() == []
+    reason = journal._conn.execute(  # noqa: SLF001 — 사유가 실제로 찍혔는지 보는 회귀 테스트.
+        "SELECT entry_reject_reason FROM live_limit_orders WHERE status = 'filled'"
+    ).fetchone()[0]
+    assert reason and "사이징" in reason
+
+
+def test_accepted_entry_records_entered_disposition(rig: dict[str, object]) -> None:
+    """정상 진입도 처분이 남는다 — 안 남기면 성공한 체결이 유실 후보로 잡힌다."""
+    store: OhlcvStore = rig["store"]  # type: ignore[assignment]
+    runner: ZoneLimitPaperRunner = rig["runner"]  # type: ignore[assignment]
+    journal: OrderJournal = rig["journal"]  # type: ignore[assignment]
+
+    store.upsert_candles([_m1(_FORMING + _M, 94.9, 99.0, 95.2)])
+    runner.poll_once()
+
+    stats = journal.fill_stats()[0]
+    assert (stats.entered, stats.entry_rejected, stats.entry_unrecorded) == (1, 0, 0)
+    assert stats.entry_rate == 1.0
+    assert journal.orphan_fills() == []
+
+
+def test_rejected_entry_notifies(rig: dict[str, object], monkeypatch: pytest.MonkeyPatch) -> None:
+    """거부도 알림으로 나간다 — 조용히 넘기면 폰에서 "아무 일도 없었다"와 같아 보인다."""
+    store: OhlcvStore = rig["store"]  # type: ignore[assignment]
+    runner: ZoneLimitPaperRunner = rig["runner"]  # type: ignore[assignment]
+    _install_narrow_zone(monkeypatch)
+
+    sent: list[str] = []
+
+    class _Telegram:
+        def send_message(self, text: str) -> bool:
+            sent.append(text)
+            return True
+
+    notifier = ZoneLimitNotifier(_Telegram())  # type: ignore[arg-type]
+    runner._notifier = notifier
+
+    store.upsert_candles([_m1(_FORMING + _M, 94.79, 99.0, 94.9)])
+    runner.poll_once()
+
+    assert len(sent) == 1
+    assert "진입 거부" in sent[0]
+    assert "사이징" in sent[0]
