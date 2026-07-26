@@ -355,12 +355,40 @@ def cmd_doctor(args: argparse.Namespace, settings: Settings) -> int:
     읽기 전용이 기본이고, 이상이 하나라도 있으면 종료 코드 1을 낸다(cron·감시에서
     바로 쓸 수 있게). `--drop-recovery-artifacts`만 파괴적이며 명시적 옵트인이다.
     """
-    from data.integrity import drop_recovery_artifacts, inspect, render_report
+    from data.integrity import (
+        SalvageableRowsPresent,
+        drop_recovery_artifacts,
+        inspect,
+        render_report,
+        salvage_ohlcv,
+    )
 
     db_path = args.db if args.db is not None else settings.db_path
 
+    if args.salvage_ohlcv is not None:
+        # 인자 없이 `--salvage-ohlcv`만 주면 빈 리스트다 = "사라진 TF만 알아서".
+        timeframes = tuple(args.salvage_ohlcv) or None
+        results = salvage_ohlcv(db_path, timeframes=timeframes, dry_run=args.dry_run)
+        if not results:
+            print("복원할 캔들이 없습니다(복구 산출물이 없거나 유일본이 없음).")
+        for result in results:
+            if result.dry_run:
+                # 안 썼으므로 "건너뜀"을 세지 않는다 — 0행 삽입은 결과가 아니라 미실행이다.
+                print(f"복원 예정: `{result.timeframe}` 후보 {result.candidates:,}행 (쓰기 없음)")
+            else:
+                print(
+                    f"복원: `{result.timeframe}` 후보 {result.candidates:,}행 →"
+                    f" 삽입 {result.inserted:,}행 (중복·기존 {result.skipped:,}행 건너뜀)"
+                )
+        if not args.dry_run and results:
+            print("⚠️ 기존 행은 덮어쓰지 않았다(충돌 시 살아 있는 쪽이 이긴다).")
+
     if args.drop_recovery_artifacts:
-        dropped = drop_recovery_artifacts(db_path)
+        try:
+            dropped = drop_recovery_artifacts(db_path, force=args.force)
+        except SalvageableRowsPresent as exc:
+            print(f"🚨 거부: {exc}")
+            return 1
         if dropped:
             print(f"복구 산출 테이블 삭제: {', '.join(dropped)}")
             print(
@@ -512,9 +540,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="이 날짜(KST) 이후 체결만 처분 미기록으로 본다(WAN-194 열 도입 이전은 판별 불가)",
     )
     p_doctor.add_argument(
+        "--salvage-ohlcv",
+        nargs="*",
+        default=None,
+        metavar="TF",
+        help=(
+            "복구 산출물에 갇힌 캔들을 `ohlcv`로 되돌린다(기존 행은 덮어쓰지 않음)."
+            " 인자 없이 주면 본 테이블에서 사라진 TF만, TF를 주면 그것만(WAN-195)"
+        ),
+    )
+    p_doctor.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="`--salvage-ohlcv`를 세기만 하고 쓰지 않는다",
+    )
+    p_doctor.add_argument(
         "--drop-recovery-artifacts",
         action="store_true",
         help="`lost_and_found` 등 `.recover` 산출 테이블을 삭제한다(파괴적 — VACUUM은 안 한다)",
+    )
+    p_doctor.add_argument(
+        "--force",
+        action="store_true",
+        help="복원 가능한 유일본이 남아 있어도 드롭한다(기본은 거부 — WAN-195)",
     )
     p_doctor.set_defaults(func=cmd_doctor)
 
