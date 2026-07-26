@@ -12,24 +12,36 @@ from data.repair import RepairSummary, SeriesRepair, repair_all, repair_series, 
 from data.resample import resample_ohlcv
 from data.storage import OhlcvStore
 from data.stream import parse_kline_message, stream_klines
+from data.watchdog import (
+    HeartbeatWatchdog,
+    ProgressTracker,
+    StreamStalled,
+    guard_idle,
+    run_with_recovery,
+)
 
 __all__ = [
     "Candle",
     "Gap",
+    "HeartbeatWatchdog",
     "OhlcvStore",
+    "ProgressTracker",
     "RepairSummary",
     "SeriesRepair",
+    "StreamStalled",
     "backfill_all",
     "backfill_symbol",
     "candle_from_ccxt",
     "create_exchange",
     "find_gaps",
+    "guard_idle",
     "parse_kline_message",
     "repair_all",
     "repair_series",
     "resample_ohlcv",
     "run_collector",
     "run_repair",
+    "run_with_recovery",
     "stream_klines",
     "timeframe_to_ms",
 ]

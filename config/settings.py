@@ -194,6 +194,22 @@ class Settings(BaseSettings):
     collector_heartbeat_interval_seconds: int = Field(default=60, ge=1)
     collector_heartbeat_min_interval_seconds: int = Field(default=5, ge=0)
 
+    # 스트림 자동 복구 워치독(WAN-173). 조용히 멈춘(half-open) 웹소켓을 스스로 재접속·재시작.
+    # (1) 스트림 유휴 타임아웃(초): 이 시간 안에 메시지가 없으면 stall로 보고 강제 재접속한다.
+    #     바이낸스 kline은 미확정 봉 갱신을 수초 간격으로 밀어 주므로 90s 무수신은 확실한
+    #     half-open이다 — 정상 봉 간격보다 넉넉해 오탐하지 않는다.
+    collector_stream_idle_timeout_seconds: float = Field(default=90.0, gt=0)
+    # 재접속 백오프 상한(초). 지수 백오프로 재시작 폭주를 막되 상한을 둬 복구를 포기하지 않는다.
+    collector_reconnect_max_backoff_seconds: float = Field(default=60.0, gt=0)
+    # (2) 프로세스 레벨 워치독. 하트비트가 이 시간(초) 넘게 안 갱신되면 이벤트 루프가 통째로
+    #     멎은 것으로 보고 프로세스를 종료해 systemd/launchd 재시작을 유도한다(hang→exit).
+    #     스트림 유휴 타임아웃보다 넉넉해 in-process 재접속이 먼저 시도되게 한다.
+    collector_watchdog_timeout_seconds: float = Field(default=300.0, gt=0)
+    # 프로세스 워치독 폴링 주기(초).
+    collector_watchdog_poll_seconds: float = Field(default=15.0, gt=0)
+    # 프로세스 레벨 워치독 on/off. 끄면 스트림 유휴 재접속만 동작한다.
+    collector_watchdog_enabled: bool = Field(default=True)
+
     # OHLCV 갭 자동 탐지·복구 백필(WAN-35). 저장된 시리즈의 내부 누락 봉을 찾아 그
     # 구간만 재수집한다. 수집 데몬(`alphablock collect`) 시작 시 1회 자동 점검을 켜는
     # 기본값(repair_on_start=True)과, 마지막 복구 요약을 남겨 Health 뷰가 읽는 파일 경로.
