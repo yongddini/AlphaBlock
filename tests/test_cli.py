@@ -236,6 +236,9 @@ def test_cmd_doctor_exit_code_signals_findings(
         skip_quick_check=True,
         orphans_since=None,
         drop_recovery_artifacts=False,
+        salvage_ohlcv=None,
+        dry_run=False,
+        force=False,
     )
     assert cmd_doctor(args, settings) == 1
     assert "lost_and_found" in capsys.readouterr().out
@@ -261,6 +264,9 @@ def test_cmd_doctor_drop_is_explicit_and_reports(
         skip_quick_check=True,
         orphans_since=None,
         drop_recovery_artifacts=True,
+        salvage_ohlcv=None,
+        dry_run=False,
+        force=False,
     )
     cmd_doctor(args, settings)
     out = capsys.readouterr().out
@@ -289,7 +295,14 @@ def test_cmd_doctor_orphans_since_is_kst(
         )
     journal.close()
 
-    base = {"db": None, "skip_quick_check": True, "drop_recovery_artifacts": False}
+    base = {
+        "db": None,
+        "skip_quick_check": True,
+        "drop_recovery_artifacts": False,
+        "salvage_ohlcv": None,
+        "dry_run": False,
+        "force": False,
+    }
     # 그 날 자정(KST) 이후로 자르면 00:30 체결이 포함된다.
     cmd_doctor(argparse.Namespace(orphans_since="2026-07-26", **base), settings)
     assert "LINK/USDT:USDT" in capsys.readouterr().out

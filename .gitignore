@@ -26,6 +26,13 @@ data/*.db-wal
 data/*.db-shm
 data/*.parquet
 data/*.json
+# 손상 조사 증거물 (WAN-194/195) — `data/*.db` 글롭이 `.db`로 끝나는 것만 잡아
+# `ohlcv.db.corrupt.bak`·`.old`(각 1.4GB)가 untracked로 남는다. 실수로 `git add -A`
+# 하면 GB 단위 커밋이 되고, WAN-194가 "덮어쓰지 말 것"이라 못 박은 원본 증거다.
+data/*.db.*
+# FUSE가 「열려 있는데 삭제된」 파일에 붙이는 이름. 여기 있는 것들은 SQLite `-shm`
+# 이고 손상 시점의 마운트 상태를 증언한다(WAN-195 §1) — 커밋 대상은 아니다.
+data/.fuse_hidden*
 
 # 1분봉 등 전체 로드 parquet 캐시 (WAN-78) — data/*.parquet는 하위 디렉터리를 잡지 못함
 data/cache/
