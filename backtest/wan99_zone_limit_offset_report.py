@@ -69,19 +69,28 @@ from pathlib import Path
 import pandas as pd
 from pydantic import BaseModel, ConfigDict
 
+from backtest.harness import (
+    CACHE_DIR as _CACHE_DIR,
+)
+from backtest.harness import (
+    DB_PATH as _DB_PATH,
+)
+
 # 평균 R 산식은 공용 골격(WAN-101)으로 옮겼다. 이 모듈의 이름으로도 계속 쓸 수 있게
 # 명시적으로 재수출한다 — 리포트 재현 커맨드와 기존 참조가 그대로 살아 있어야 한다.
 from backtest.harness import LEGACY_OB_PARAMS, LEGACY_RSI_GATE_MODE, pin_band_bar
+from backtest.harness import (
+    LEGACY_SYMBOLS as DEFAULT_SYMBOLS,
+)
+from backtest.harness import (
+    LEGACY_YEARS as DEFAULT_YEARS,
+)
+from backtest.harness import (
+    load_recent as _load_recent,
+)
 from backtest.harness import mean_r as mean_r
 from backtest.models import BacktestConfig
 from backtest.sweep import default_backtest_config
-from backtest.wan81_engine_replacement_report import (
-    _CACHE_DIR,
-    _DB_PATH,
-    DEFAULT_SYMBOLS,
-    DEFAULT_YEARS,
-    _load_recent,
-)
 from backtest.zone_limit_backtest import run_zone_limit_backtest_verbose
 from data.funding import FundingRateStore
 from data.models import FundingRate

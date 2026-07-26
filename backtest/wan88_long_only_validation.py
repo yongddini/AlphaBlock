@@ -85,8 +85,8 @@ from backtest.harness import (
     fill_preset,
     pin_band_bar,
 )
+from backtest.harness import split_bars as _split_bars
 from backtest.models import BacktestConfig, Trade
-from backtest.wan68_short_gate_analysis import _split_bars
 from backtest.wan70_random_control_b import (
     RandomControlBResult,
     Segment,

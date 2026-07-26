@@ -49,9 +49,9 @@ import pandas as pd
 from pydantic import BaseModel, ConfigDict
 
 from backtest.harness import LEGACY_OB_PARAMS, pin_band_bar
+from backtest.harness import split_bars as _split_bars
 from backtest.models import BacktestConfig
 from backtest.sweep import default_backtest_config
-from backtest.wan68_short_gate_analysis import _split_bars
 from backtest.wan70_random_control_b import (
     RandomControlBResult,
     Segment,
