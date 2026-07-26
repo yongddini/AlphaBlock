@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from functools import partial
 
 from common.heartbeat import HeartbeatStore
+from common.telegram import build_telegram_client
 from common.timefmt import kst_log_format, use_kst_logging
 from config.settings import Settings, get_settings
 from data.backfill import backfill_all
@@ -24,8 +26,39 @@ from data.funding import (
 from data.repair import RepairStateStore, alert_on_failure, repair_all
 from data.storage import OhlcvStore
 from data.stream import stream_klines
+from data.watchdog import (
+    HeartbeatWatchdog,
+    ProgressTracker,
+    RecoveryEvent,
+    force_exit,
+    run_with_recovery,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _build_recovery_notifier(settings: Settings) -> Callable[[RecoveryEvent], None]:
+    """복구 이벤트를 로그 + (설정 시) 텔레그램으로 남기는 콜백을 만든다(WAN-173).
+
+    2주 방치 중 수집기가 몇 번 스스로 살아났는지 폰에서도 보이게 한다. WAN-25/32의
+    `TelegramClient`를 재사용하며, 미설정이면 조용히 로그만 남긴다(수집기를 죽이지 않는다).
+    """
+    telegram = build_telegram_client(settings)
+
+    def _notify(event: RecoveryEvent) -> None:
+        if telegram is None:
+            return
+        text = (
+            "🔄 *수집기 스트림 복구* (WAN-173)\n"
+            f"사유: {event.reason}\n"
+            f"재접속 #{event.attempt} · {event.delay_seconds:g}s 후 재접속"
+        )
+        try:
+            telegram.send_message(text)
+        except Exception:  # noqa: BLE001 - 알림 실패가 수집기를 죽이면 안 된다
+            logger.exception("복구 이벤트 텔레그램 전송 실패(무시하고 계속)")
+
+    return _notify
 
 
 async def _backfill_funding(settings: Settings, exchange: FundingRateSource) -> None:
@@ -135,8 +168,13 @@ async def run_collector(
 
         heartbeat.beat()  # 백필 완료 = 첫 하트비트(스트림 접속 전에도 생존 표시).
 
+        # 프로세스 레벨 워치독의 진행 시각. 메시지 수신마다 mark 하고, 감시 스레드가
+        # 이걸 폴링해 이벤트 루프가 통째로 멎으면 프로세스를 종료한다(WAN-173 (2)).
+        tracker = ProgressTracker()
+
         def _beat() -> None:  # stream_klines 는 None 반환 콜백을 기대한다.
             heartbeat.beat()
+            tracker.mark()
 
         if run_stream:
             # 실시간 스트림과 함께 펀딩 현재값을 주기적으로 최신화한다(백필은 위에서
@@ -146,16 +184,43 @@ async def run_collector(
                 funding_task = asyncio.create_task(
                     run_funding_refresh(settings, exchange=exchange, backfill=False)
                 )
-            try:
+
+            # 프로세스 레벨 워치독 스레드(WAN-173 (2)). in-process 재접속(아래 유휴
+            # 워치독)조차 못 돌 만큼 이벤트 루프가 멎으면 hang→exit로 바꿔 서비스
+            # 매니저가 재시작하게 한다. 진행 시각은 백필 완료 직후로 초기화한다.
+            watchdog: HeartbeatWatchdog | None = None
+            if settings.collector_watchdog_enabled:
+                tracker.mark()
+                watchdog = HeartbeatWatchdog(
+                    tracker,
+                    timeout_seconds=settings.collector_watchdog_timeout_seconds,
+                    poll_seconds=settings.collector_watchdog_poll_seconds,
+                    on_stale=force_exit(),
+                )
+                watchdog.start()
+
+            async def _stream_once() -> None:
+                # 한 번의 접속·소비. 유휴 타임아웃을 걸어(WAN-173 (1)) half-open stall을
+                # StreamStalled 예외로 바꾼다 — run_with_recovery가 잡아 재접속한다.
                 await stream_klines(
                     store,
                     settings.symbols,
                     settings.timeframes,
                     heartbeat=_beat,
+                    idle_timeout_seconds=settings.collector_stream_idle_timeout_seconds,
+                )
+
+            try:
+                await run_with_recovery(
+                    _stream_once,
+                    on_recover=_build_recovery_notifier(settings),
+                    max_backoff_seconds=settings.collector_reconnect_max_backoff_seconds,
                 )
             finally:
                 if funding_task is not None:
                     funding_task.cancel()
+                if watchdog is not None:
+                    watchdog.stop()
     finally:
         store.close()
 

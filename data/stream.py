@@ -17,6 +17,7 @@ from websockets.exceptions import ConnectionClosed
 
 from data.models import Candle
 from data.storage import OhlcvStore
+from data.watchdog import guard_idle
 
 logger = logging.getLogger(__name__)
 
@@ -146,20 +147,28 @@ async def stream_klines(
     only_closed: bool = True,
     on_candle: Callable[[Candle], None] | None = None,
     heartbeat: Callable[[], None] | None = None,
+    idle_timeout_seconds: float | None = None,
 ) -> None:
     """선물 kline 결합 스트림에 접속해 확정봉을 계속 저장한다.
 
     네트워크 예외가 나면 로깅 후 예외를 다시 던진다(상위 오케스트레이터가
     재접속 정책을 결정). 무한 스트림이므로 정상 반환은 하지 않는다.
     `heartbeat`는 수신 메시지마다 호출돼 프로세스 생존을 기록한다(WAN-31).
+
+    `idle_timeout_seconds`가 주어지면 수신에 유휴 워치독을 걸어(`guard_idle`), 그 시간
+    안에 메시지가 안 오면 `StreamStalled`를 던진다(WAN-173) — `ConnectionClosed`를
+    못 받는 half-open 소켓 stall을 예외로 바꿔 상위 재접속 루프가 잡게 한다.
     """
     url = ws_base + build_stream_path(symbols, timeframes)
     symbol_map = build_symbol_map(symbols)
     logger.info("웹소켓 접속: %d 심볼 × %d 타임프레임", len(symbols), len(timeframes))
 
     async with connect(url) as ws:
+        messages: AsyncIterator[str | bytes] = _recv_stream(ws)
+        if idle_timeout_seconds is not None:
+            messages = guard_idle(messages, idle_timeout_seconds=idle_timeout_seconds)
         await consume_messages(
-            _recv_stream(ws),
+            messages,
             store,
             symbol_map,
             only_closed=only_closed,
