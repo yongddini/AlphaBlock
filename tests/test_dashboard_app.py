@@ -85,10 +85,15 @@ def test_window_load_matches_the_old_full_load_slice(long_span_db_path: str) -> 
 
 
 def test_analysis_defaults_to_recent_window_not_the_whole_history(long_span_db_path: str) -> None:
-    """기본 기간이 전 구간이 아니다(WAN-188) — 전 구간은 옵트인 체크박스로만."""
+    """기본 기간이 전 구간이 아니다(WAN-188) — 전 구간은 옵트인 체크박스로만.
+
+    WAN-199 이후 분석 탭은 적재된 B안 실행을 조회하므로, 뷰 슬라이더가 뜨려면 그 (심볼·TF)의
+    실행이 하나 있어야 한다 — 성과·거래는 그 실행 기준이고 슬라이더는 차트 뷰만 좁힌다.
+    """
     from dashboard.app import _DEFAULT_WINDOW_DAYS, _ms_to_datetime
     from dashboard.data_access import series_bounds
 
+    _seed_backtest_run(long_span_db_path, timeframe="1d")
     at = AppTest.from_file("dashboard/app.py")
     at.run(timeout=60)
 
@@ -113,6 +118,7 @@ def test_full_range_checkbox_really_widens_the_window(long_span_db_path: str) ->
     from dashboard.app import _ms_to_datetime
     from dashboard.data_access import series_bounds
 
+    _seed_backtest_run(long_span_db_path, timeframe="1d")
     at = AppTest.from_file("dashboard/app.py")
     at.run(timeout=60)
     assert not at.exception
@@ -131,6 +137,7 @@ def test_full_range_checkbox_really_widens_the_window(long_span_db_path: str) ->
 
 def test_analysis_display_lines_are_off_by_default(seeded_db_path: str) -> None:
     """표시선 6개는 기본 꺼짐(WAN-188) — 페이로드의 58%인데 채택 규칙이 안 쓴다."""
+    _seed_backtest_run(seeded_db_path)
     at = AppTest.from_file("dashboard/app.py")
     at.run(timeout=30)
 
@@ -191,6 +198,8 @@ def test_run_config_badge_text_flags_full_position_mode() -> None:
 
 
 def test_app_renders_price_chart_and_metrics_when_data_available(seeded_db_path: str) -> None:
+    # WAN-199: 분석 탭은 적재된 B안 실행을 조회한다 — 그 실행을 하나 넣어 둔다.
+    _seed_backtest_run(seeded_db_path)
     at = AppTest.from_file("dashboard/app.py")
     at.run(timeout=30)
 
@@ -208,19 +217,19 @@ def test_app_renders_price_chart_and_metrics_when_data_available(seeded_db_path:
         "Sharpe",
         "Trades",
     } <= metric_labels
-    # 시드 데이터로는 시그널이 없어 거래 0건 — 값도 의미 있게 검증한다.
+    # 적재된 실행(_win_then_loss)은 거래 2건 — 조회한 값이 그대로 지표에 뜬다(WAN-199).
     metrics_by_label = {m.label: m.value for m in at.metric}
-    assert metrics_by_label["Trades"] == "0"
-    # 분석 탭 상단 실행 설정 배지(WAN-65)가 그려진다. WAN-91부터 `funding_enabled`
-    # 기본값이 True인데, 대시보드는 아직 실제 funding_rates를 조회해 넘기지 않으므로
-    # 커버리지가 0%로 나와 "비정상" 취급 — caption이 아니라 warning으로 렌더된다.
-    # (조용히 caption으로 숨기지 않는 것 자체가 WAN-91의 의도, `_render_run_config_badge` 참고.)
+    assert metrics_by_label["Trades"] == "2"
+    # 분석 탭 상단 실행 설정 배지(WAN-65)가 그려진다. 지문의 `entry_mode`가 zone_limit이라
+    # 배지가 자동으로 "B안(존-지정가)"로 뜬다(WAN-199 완료 기준). 기본 BacktestConfig는
+    # risk_sizing=None이라 "사이징 미적용"으로 warning 색으로 강조된다.
     warnings = [w.value for w in at.warning]
-    assert any("진입:" in w and "사이징:" in w for w in warnings)
+    assert any("진입: B안(존-지정가)" in w and "사이징:" in w for w in warnings)
 
 
 def test_app_trade_table_is_korean_time_and_keeps_engine_labels(seeded_db_path: str) -> None:
     """WAN-146: 거래 표가 KST 안내와 함께 그려지고, 엔진 라벨은 표 밖에 보존된다."""
+    _seed_backtest_run(seeded_db_path)
     at = AppTest.from_file("dashboard/app.py")
     at.run(timeout=30)
 
@@ -269,14 +278,14 @@ def test_app_shows_warning_when_no_data(tmp_path: Path, monkeypatch: pytest.Monk
         get_settings.cache_clear()
 
 
-def _seed_backtest_run(db_path: str) -> str:
-    """저장된 거래 탭이 읽을 실행 하나를 DB에 넣는다 (WAN-106)."""
+def _seed_backtest_run(db_path: str, *, timeframe: str = "1h") -> str:
+    """저장된 거래·분석 탭이 조회할 B안(존-지정가) 실행 하나를 DB에 넣는다 (WAN-106/199)."""
     from backtest.trade_store import BacktestRunStore, RunFingerprint
     from tests.test_trade_display_frame import _win_then_loss
 
     fingerprint = RunFingerprint(
         symbol="BTC/USDT:USDT",
-        timeframe="1h",
+        timeframe=timeframe,
         entry_mode="zone_limit",
         fill="baseline",
         confluence_json=ConfluenceParams().model_dump_json(),
@@ -286,6 +295,20 @@ def _seed_backtest_run(db_path: str) -> str:
     )
     with BacktestRunStore(db_path) as store:
         return store.save_run(fingerprint, _win_then_loss())
+
+
+def test_analysis_tab_hints_to_persist_when_no_zone_limit_run(seeded_db_path: str) -> None:
+    """WAN-199: OHLCV는 있는데 이 (심볼·TF)의 B안 실행이 적재돼 있지 않으면, 분석 탭은
+    화면에서 A안으로 재계산하지 않고 넣는 방법을 안내한다(조용한 7분 대기 금지)."""
+    at = AppTest.from_file("dashboard/app.py")
+    at.run(timeout=30)
+
+    assert not at.exception
+    infos = [i.value for i in at.info]
+    assert any(
+        "BTC/USDT:USDT · 1h" in i and "적재된 채택 엔진(B안 존-지정가) 실행이 없습니다" in i
+        for i in infos
+    )
 
 
 def test_saved_trades_tab_hints_how_to_persist_when_empty(seeded_db_path: str) -> None:
