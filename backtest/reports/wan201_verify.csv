@@ -1,0 +1,4 @@
+check,reference,rows_compared,max_abs_diff,status,note
+filter-on-9sym-vs-wan176,backtest/reports/wan176_null.csv,18,7.105427357601002e-15,잡음,최대 절대차 7.11e-15 — 부동소수 끝자리(메모리 원값 대 CSV 왕복).
+filter-off-6sym-vs-wan151,backtest/reports/wan151_split_zone_null.csv,12,9.71445146547012e-17,잡음,최대 절대차 9.71e-17 — 부동소수 끝자리(메모리 원값 대 CSV 왕복).
+filter-on-6sym-vs-wan164,backtest/reports/wan164_short_null.csv,12,9.020562075079397e-17,잡음,최대 절대차 9.02e-17 — 부동소수 끝자리(메모리 원값 대 CSV 왕복).
