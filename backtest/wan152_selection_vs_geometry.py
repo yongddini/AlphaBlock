@@ -213,24 +213,36 @@ class GeoCell:
         return len(self.zwa)
 
 
-def build_cell(market: MarketData, *, params: ConfluenceParams) -> GeoCell:
-    """두 장벽으로 후보를 만들고 공통 풀로 정렬한다.
+def build_cell(
+    market: MarketData,
+    *,
+    params: ConfluenceParams,
+    barriers: Sequence[str] = BARRIERS,
+) -> GeoCell:
+    """장벽별로 후보를 만들고 공통 풀로 정렬한다.
 
     ⚠️ 오더블록 탐지·컨플루언스 파라미터에 **핀을 쓰지 않는다** — 오늘의 채택 기본값
     (`combine_obs=False`(WAN-149) · `intrabar_live`(WAN-132) · `unconditional`(WAN-123) ·
     오프셋 2bp(WAN-112))이 그대로 돈다. WAN-133이 `LEGACY_OB_PARAMS`로 병합을 고정한 것과
     정반대이고, 그게 이 이슈의 요점이다.
+
+    ⚠️ **`barriers`(WAN-203)**: 기본은 세 장벽 전부(WAN-152/154 재현)지만, 부분집합을 주면
+    그 장벽만 빌드한다 — `build_zone_limit_candidates`가 장벽마다 1분봉 서브스텝을 다시
+    돌리므로(15m·6년에서 초선형) `(zone, atr)`만 주면 판정 자(WAN-152 원 사양)를 그대로
+    지키면서 비용을 3분의 1 줄인다. **`zone`은 반드시 포함**한다(존폭/ATR 유효성 판정 기준).
     """
     cell = GeoCell(symbol=market.symbol, timeframe=market.timeframe)
     if market.empty or market.df_1m.empty:
         return cell
+    if BARRIER_ZONE not in barriers:
+        raise ValueError(f"`{BARRIER_ZONE}` 장벽은 공통 풀 기준이라 반드시 포함해야 한다.")
     frame = harness_prepare(market.htf_df)
     extractor = _FeatureExtractor.build(frame)
     times = frame["open_time"].astype("int64")
     start, end = int(times.iloc[0]), int(times.iloc[-1])
     cell.is_boundary = start + int((end - start) * IS_FRACTION)
     cfg = harness.build_config(market.timeframe)
-    # 오더블록은 장벽과 무관하므로 한 번만 탐지해 두 팔이 공유한다.
+    # 오더블록은 장벽과 무관하므로 한 번만 탐지해 팔들이 공유한다.
     obr = harness.detect_order_blocks(market)
     atr_map = atr_by_tap_time(frame)
 
@@ -240,7 +252,7 @@ def build_cell(market: MarketData, *, params: ConfluenceParams) -> GeoCell:
         BARRIER_ZONE_HEIGHT: make_zone_height_stop_override(),
     }
     built: dict[str, list[_Candidate]] = {}
-    for barrier in BARRIERS:
+    for barrier in barriers:
         override = overrides[barrier]
         cands, _ = build_zone_limit_candidates(
             market.htf_df,
@@ -255,9 +267,9 @@ def build_cell(market: MarketData, *, params: ConfluenceParams) -> GeoCell:
         cell.n_raw[barrier] = len(cands)
 
     indexed = {b: {candidate_key(c): c for c in cands} for b, cands in built.items()}
-    # 공통 풀 = 두 장벽에 모두 있고 존폭/ATR이 유효한 셋업(탭 시각 순).
-    common = set(indexed[BARRIERS[0]])
-    for barrier in BARRIERS[1:]:
+    # 공통 풀 = 요청한 장벽 전부에 있고 존폭/ATR이 유효한 셋업(탭 시각 순).
+    common = set(indexed[barriers[0]])
+    for barrier in barriers[1:]:
         common &= set(indexed[barrier])
     keys = sorted(
         k
@@ -265,7 +277,7 @@ def build_cell(market: MarketData, *, params: ConfluenceParams) -> GeoCell:
         if _zwa(extractor, indexed[BARRIER_ZONE][k]) is not None  # noqa: E501
     )
     cell.zwa = [_zwa(extractor, indexed[BARRIER_ZONE][k]) for k in keys]
-    for barrier in BARRIERS:
+    for barrier in barriers:
         cell.by_barrier[barrier] = [indexed[barrier][k] for k in keys]
     return cell
 
@@ -545,6 +557,7 @@ def pnl_rows_for_cell(
     lens: str = LENS_PRIMARY,
     guard: float | None = None,
     threshold_fraction: float = FILTER_FRACTION,
+    abs_threshold: float | None = None,
 ) -> list[PnlRow]:
     """장벽 × 세 팔의 구간별 손익.
 
@@ -555,10 +568,20 @@ def pnl_rows_for_cell(
     `lens`는 좌표 라벨일 뿐이다 — 렌즈는 체결 집합을 바꾸므로 **셀을 그 렌즈 파라미터로
     빌드한 뒤** 여기에 그 이름을 넘겨야 한다(§4). `guard`/`threshold_fraction`은 실제로
     시퀀싱/필터를 바꾼다(§3-B·§5).
+
+    ⚠️ **`abs_threshold`(WAN-203)**: 주면 필터 팔을 IS 분위(`threshold_fraction`) 대신
+    **절대 존폭÷ATR 문턱**(`zone_width_atr ≤ abs_threshold`)으로 고른다 —
+    `max_zone_width_atr`(WAN-159 채택 기본값 1.28)과 같은 의미다. `None`(기본)이면 예전과
+    비트 단위로 같은 분위 경로라 WAN-152/154 CSV가 그대로 재현된다. 절대 문턱은 룩어헤드가
+    없으므로(문턱이 데이터에서 나오지 않는다) IS/OOS 모두 같은 값을 쓴다.
     """
     if not cell.zwa:
         return []
-    threshold = is_threshold(cell, fraction=threshold_fraction)
+    threshold: float | None
+    if abs_threshold is not None:
+        threshold = abs_threshold
+    else:
+        threshold = is_threshold(cell, fraction=threshold_fraction)
     zone_cands = cell.by_barrier[BARRIER_ZONE]
     barriers = [b for b in BARRIERS if b in cell.by_barrier]
     cfg = apply_guard(harness.build_config(cell.timeframe), guard)
