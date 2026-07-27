@@ -882,11 +882,13 @@ def build_zone_limit_candidates(
         # 커버돼야** 한다 — 탭 봉의 상위TF 슬롯에 1분봉이 없으면(미커버·갭) 이
         # 셋업은 평가에서 제외한다(이슈 WAN-41의 "1분봉이 없는 구간 제외" 폴백).
         start = bisect.bisect_left(substep_times, signal.trigger_time)
-        setup_substeps = substeps[start:]
-        if not setup_substeps:
+        # WAN-203 성능: `substeps[start:]`로 잘라 넘기면 후보마다 수백만 서브스텝을 복사해
+        # 15m·긴 창이 초선형으로 느려진다(list_subscript 핫스팟). 전체 리스트 + `start`
+        # 오프셋만 넘기고 시뮬레이터가 `islice`로 순회한다 — 비트 단위로 동일하다.
+        if start >= len(substeps):
             continue
         tap_htf = (signal.trigger_time // htf_ms) * htf_ms
-        if setup_substeps[0].htf_bar_time != tap_htf:
+        if substeps[start].htf_bar_time != tap_htf:
             continue  # 탭 봉에 1분봉 커버 없음 → 평가 제외.
 
         stop_price = seed_ob.bottom if is_long else seed_ob.top
@@ -925,7 +927,7 @@ def build_zone_limit_candidates(
         else:
             tp_price = _resolve_take_profit(params, is_long, limit_price, stop_price, lines)
 
-        cut = bisect.bisect_left(times, setup_substeps[0].htf_bar_time)
+        cut = bisect.bisect_left(times, substeps[start].htf_bar_time)
         rsi_state = rsi_seeder.seed(cut)
         live_limit: _IntrabarLiveLimit | None = None
         if live_band_mode:
@@ -960,7 +962,8 @@ def build_zone_limit_candidates(
             limit_price=limit_price,
             live_limit=live_limit,
             stop_price=stop_price,
-            substeps=setup_substeps,
+            substeps=substeps,
+            start=start,
             rsi_state=rsi_state,
             rsi_oversold=effective_oversold,
             rsi_overbought=effective_overbought,
@@ -1031,8 +1034,9 @@ def build_zone_limit_candidates(
                 penetration = True
                 penetrations += 1
         else:
-            # 데이터 종료까지 보유 → 마지막 1분봉 종가로 강제 청산.
-            exit_time, exit_price = setup_substeps[-1].time, setup_substeps[-1].close
+            # 데이터 종료까지 보유 → 마지막 1분봉 종가로 강제 청산. `setup_substeps`가 끝까지
+            # 가는 슬라이스였으므로 그 마지막 원소 = 전체 `substeps[-1]`(WAN-203 무복사 후 동일).
+            exit_time, exit_price = substeps[-1].time, substeps[-1].close
             reason = ExitReason.END_OF_DATA
         candidates.append(
             _Candidate(
