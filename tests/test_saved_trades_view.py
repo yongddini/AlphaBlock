@@ -18,6 +18,7 @@ from dashboard.saved_trades import (
     run_label,
     selected_trade_no,
     setups_display_frame,
+    zone_limit_runs,
 )
 from dashboard.trade_table import selected_trade_window
 from strategy.models import ConfluenceParams, OrderBlockParams
@@ -72,6 +73,53 @@ def test_no_selection_means_no_jump() -> None:
     assert selected_trade_no(frame, []) is None
     assert selected_trade_no(frame, [99]) is None
     assert selected_trade_no(pd.DataFrame(columns=[COL_NO]), [0]) is None
+
+
+def _summary(
+    *, entry_mode: str, symbol: str = "BTC/USDT:USDT", timeframe: str = "1h", run_id: str = "0" * 32
+) -> RunSummary:
+    fp = RunFingerprint(
+        symbol=symbol,
+        timeframe=timeframe,
+        entry_mode=entry_mode,
+        fill="baseline",
+        confluence_json=ConfluenceParams().model_dump_json(),
+        order_block_json=OrderBlockParams().model_dump_json(),
+        config_json='{"initial_capital": 10000.0}',
+        revision="abc1234",
+    )
+    return RunSummary(
+        run_id=run_id,
+        fingerprint=fp,
+        created_at=0,
+        num_trades=1,
+        total_return=0.0,
+        max_drawdown=0.0,
+        win_rate=0.0,
+        final_equity=10_000.0,
+        fill_rate=None,
+        eligible_setups=None,
+        num_filled=None,
+    )
+
+
+def test_zone_limit_runs_keeps_only_matching_b_plan_runs() -> None:
+    """분석 탭 조회 필터(WAN-199): 이 (심볼·TF)의 B안(존-지정가) 실행만, 입력 순서 유지.
+
+    종가(A안) 실행은 사용자의 실매매가 아니라 제외하고, 다른 심볼·TF는 섞이지 않는다 —
+    판별은 라벨이 아니라 지문(`entry_mode`)으로 한다.
+    """
+    close_run = _summary(entry_mode="close", run_id="a" * 32)
+    b_match = _summary(entry_mode="zone_limit", run_id="b" * 32)
+    b_other_tf = _summary(entry_mode="zone_limit", timeframe="15m", run_id="c" * 32)
+    b_other_symbol = _summary(entry_mode="zone_limit", symbol="ETH/USDT:USDT", run_id="d" * 32)
+
+    picked = zone_limit_runs(
+        [close_run, b_match, b_other_tf, b_other_symbol], symbol="BTC/USDT:USDT", timeframe="1h"
+    )
+
+    assert [s.run_id for s in picked] == ["b" * 32]
+    assert zone_limit_runs([close_run], symbol="BTC/USDT:USDT", timeframe="1h") == []
 
 
 def test_run_label_keeps_the_engine_visible() -> None:

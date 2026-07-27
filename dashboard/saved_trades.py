@@ -11,7 +11,7 @@ Streamlit에 의존하지 않는다 — 필터·라벨·표 변환이 전부 순
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 
 import pandas as pd
 
@@ -22,6 +22,25 @@ from backtest.trade_store import RunSummary
 #: 이 필터라, 라벨은 표에 실제로 찍히는 한글 사유(`EXIT_REASON_LABELS`)와 **같은 값**을
 #: 쓴다 — 두 벌로 갈라지면 "손절"을 골랐는데 아무것도 안 나오는 화면이 된다.
 ALL_REASONS = "전체"
+
+
+def zone_limit_runs(
+    summaries: Iterable[RunSummary], *, symbol: str, timeframe: str
+) -> list[RunSummary]:
+    """이 (심볼·TF)의 적재된 **B안(존-지정가)** 실행만, 입력 순서(= `list_runs` 최신순) 유지.
+
+    분석 탭이 화면 재계산(A안, ~7분) 대신 이 조회 결과를 그린다(WAN-199) — 저장된 거래
+    탭과 **같은 저장·조회 인프라**(`BacktestRunStore`)를 재사용하고 로직을 이중화하지
+    않는다. 종가(A안) 실행은 사용자의 실매매가 아니므로 제외하며, 판별은 라벨이 아니라
+    지문(`entry_mode`)으로 한다 — "라벨은 B안인데 실은 A안"(WAN-95 부류)을 막는다.
+    """
+    return [
+        s
+        for s in summaries
+        if s.fingerprint.entry_mode == "zone_limit"
+        and s.fingerprint.symbol == symbol
+        and s.fingerprint.timeframe == timeframe
+    ]
 
 
 def exit_reason_options() -> tuple[str, ...]:

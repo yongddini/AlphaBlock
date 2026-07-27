@@ -1,10 +1,15 @@
 """통합 트레이딩 웹 대시보드 (WAN-15 · WAN-30).
 
-**분석 탭**: 캔들+오더블록+시그널 차트와 백테스트 성과(1분봉을 안 읽으므로 A안 종가
-진입이다). 기본 기간은 **최근 구간**이고 결과는 디스크에 캐시된다 — 전 구간을 매번 다시
-계산하지 않는다(WAN-188).
+**분석 탭**: 캔들+오더블록 차트 위에, 적재된 **채택 엔진(B안 존-지정가)** 실행의 거래
+마커·성과를 **조회로** 얹는다(WAN-199). 화면에서 B안 백테스트(1분봉 substep, 단일 조합
+~7분)를 다시 돌리지 않는다 — 손익·거래는 `backtest.run --persist`가 넣어 둔 결과를
+저장된 거래 탭과 **같은 인프라**(`BacktestRunStore`)로 읽는다. 차트의 존은 컨플루언스
+파라미터와 무관한 오더블록 탐지(상위TF에서 수 초)로 그리고, 기간 슬라이더는 그 **차트
+뷰**만 좁힌다(성과 지표는 적재된 전체 실행 기준). 적재본이 없으면 재계산 대신 넣는
+방법을 안내한다.
 **저장된 거래 탭(WAN-106)**: `backtest.run --persist`가 적재해 둔 **채택 엔진(B안
-지정가)** 거래를 계산 없이 조회한다(손절/익절 필터 · 미체결 셋업 · 차트 점프).
+지정가)** 거래를 계산 없이 조회한다(손절/익절 필터 · 미체결 셋업 · 차트 점프). 분석 탭과
+같은 조회 인프라를 쓰되 존을 그리지 않는다(거래 감사 전용).
 **운영 상태(Health) 탭**: 데이터 신선도·펀딩·러너 생존·페이퍼 포지션·최근 신호를
 한눈에 보여, 수집이 멈췄는지/러너가 살아있는지 즉시 식별한다.
 
@@ -25,18 +30,14 @@ import streamlit as st
 
 from backtest.models import BacktestConfig, BacktestMetrics, BacktestResult
 from backtest.report import COL_EXIT_REASON, trades_to_dataframe, trades_to_display_frame
-from backtest.sweep import default_backtest_config
 from backtest.trade_store import BacktestRunStore, RunFingerprint, RunSummary, engine_revision
 from common.timefmt import KST, format_kst_zoned
 from config import get_settings
 from config.settings import Settings
-from dashboard.analysis_cache import AnalysisCache, cache_key
 from dashboard.charts import (
-    DEFAULT_ZONE_CATEGORIES,
     ZONE_CATEGORY_LABELS,
     ZoneCategory,
     build_equity_chart,
-    entered_zone_keys,
     filter_zones,
 )
 from dashboard.data_access import list_series, load_ohlcv, series_bounds
@@ -50,13 +51,13 @@ from dashboard.health import (
 from dashboard.health_data import HealthView, OpenPositionView, build_health_view
 from dashboard.lightweight_chart import BAND_LINE_COLOR, build_chart_html
 from dashboard.live_chart import LIVE_INTERVALS, build_live_config
-from dashboard.pipeline import PipelineResult, run_pipeline
 from dashboard.saved_trades import (
     exit_reason_options,
     filter_by_exit_reason,
     run_label,
     selected_trade_no,
     setups_display_frame,
+    zone_limit_runs,
 )
 from dashboard.trade_table import (
     engine_label_caption,
@@ -84,6 +85,7 @@ from strategy.models import (
     SignalExitReason,
     select_active,
 )
+from strategy.order_blocks import OrderBlockDetector
 
 
 def _ms_to_datetime(ms: int) -> datetime:
@@ -207,41 +209,26 @@ def _cached_revision() -> str:
     return engine_revision()
 
 
-@st.cache_data(ttl=_HEAVY_TTL_SECONDS, show_spinner="오더블록 탐지·백테스트 계산 중…")
-def _cached_pipeline(
-    db_path: str,
-    symbol: str,
-    timeframe: str,
-    start_ms: int,
-    end_ms: int,
+@st.cache_data(ttl=_HEAVY_TTL_SECONDS, show_spinner="오더블록 탐지 중…")
+def _cached_detection(
     params_key: str,
+    _df: pd.DataFrame,
     _ob_params: OrderBlockParams,
-    _conf_params: ConfluenceParams,
-    _bt_config: BacktestConfig,
-) -> PipelineResult:
-    """오더블록 탐지 + 백테스트. **디스크 캐시를 먼저 본다**(WAN-188).
+) -> tuple[list[OrderBlock], list[OrderBlock]]:
+    """차트용 오더블록 탐지(전체 아카이브 + 마지막 봉 렌더 뷰) — **조회이지 백테스트가
+    아니다**(WAN-199).
 
-    `st.cache_data`는 프로세스가 살아 있는 동안만 유효해, 대시보드를 다시 띄우면 안 바뀐
-    옛 구간까지 통째로 다시 계산했다(6년 15m 실측 6.80초). 디스크 캐시가 그 재계산을
-    0.89초로 줄인다. 키에 **코드 리비전**이 들어가므로 엔진이 바뀌면 옛 결과를 꺼내 오지
-    않는다(WAN-106 원칙 — `dashboard.analysis_cache` 참고).
+    오더블록 탐지는 컨플루언스 파라미터와 무관하고(WAN-59) 상위TF에서 수 초면 끝난다
+    (WAN-188 실측: 6년 15m ≈ 6.80초). B안 진입가·손익을 만드는 1분봉 substep 백테스트
+    (단일 조합 ~7분)와 전혀 다른 계산이라, 화면에서 그 7분을 다시 돌리지 않는다는 약속을
+    깨지 않는다. 진입 마커·성과는 적재된 B안 실행에서 조회한다(`_cached_saved_run`).
+
+    `params_key`(심볼·TF·기간·오더블록 파라미터·코드 리비전)가 캐시 키다 — 리비전이 들어가
+    엔진이 바뀌면 옛 탐지를 꺼내 오지 않는다(WAN-106 원칙). `_df`는 해시 불가라 키에서
+    빼되 `params_key`가 그 구간을 유일하게 가리킨다.
     """
-    cache = AnalysisCache.for_db(db_path)
-    key = cache_key(
-        symbol=symbol,
-        timeframe=timeframe,
-        start_ms=start_ms,
-        end_ms=end_ms,
-        params_key=params_key,
-        revision=_cached_revision(),
-    )
-    cached = cache.load(key)
-    if cached is not None:
-        return cached
-    df = _cached_ohlcv(db_path, symbol, timeframe, start_ms, end_ms)
-    result = run_pipeline(df, _ob_params, _conf_params, _bt_config)
-    cache.store(key, result)
-    return result
+    detection = OrderBlockDetector(_ob_params).run(_df)
+    return detection.order_blocks, detection.rendered_order_blocks
 
 
 # --- 분석 탭 ----------------------------------------------------------------
@@ -288,7 +275,7 @@ def _current_chart_theme() -> str:
 
 
 def _select_chart_zones(
-    result: PipelineResult,
+    order_blocks: list[OrderBlock],
     df: pd.DataFrame,
     ob_params: OrderBlockParams,
     *,
@@ -302,21 +289,24 @@ def _select_chart_zones(
       ``zone_limit``개, 병합)만 `select_active`로 파생하고, 캔들도 T까지 잘라 그
       시점 화면을 정확히 재현한다(≤6개).
     - **전체 아카이브**: 생성된 모든 존(무거움).
-    - 그 외: 선택된 범주(진입/활성/지지/깨짐/소멸)로 필터.
+    - 그 외: 선택된 범주(활성/지지/깨짐/소멸)로 필터.
+
+    ⚠️ **"진입한 존"(ENTERED) 범주는 여기서 못 만든다** — 그건 A안 시그널 재생의
+    산물인데(WAN-52) 분석 탭은 이제 B안 실행을 **조회**만 하므로 시그널이 없다(WAN-199).
+    실제 진입 자리는 적재된 B안 거래 마커가 차트에 직접 보여 준다.
     """
     if replay_ms is not None:
         chart_df = df[df["open_time"] <= replay_ms]
         zones = select_active(
-            result.order_blocks,
+            order_blocks,
             replay_ms,
             limit=ob_params.zone_limit,
             combine=ob_params.combine_obs,
         )
         return chart_df, zones
     if show_all_archive:
-        return df, list(result.order_blocks)
-    entered = entered_zone_keys(result.signals)
-    return df, filter_zones(result.order_blocks, categories, entered)
+        return df, list(order_blocks)
+    return df, filter_zones(order_blocks, categories)
 
 
 def _run_config_badge_text(
@@ -403,6 +393,35 @@ def _render_trade_table(
         )
 
 
+#: 분석 탭 존 표시 필터의 기본/선택지. "진입한 존"(ENTERED)은 A안 시그널 재생이 있어야
+#: 만들 수 있는데 분석 탭은 이제 B안 실행을 **조회**만 하므로(WAN-199) 제외한다 — 실제
+#: 진입 자리는 적재된 거래 마커가 차트에 직접 보여 준다. 기본은 활성 + 지지(탭)한 존.
+_ANALYSIS_ZONE_CATEGORIES: tuple[ZoneCategory, ...] = tuple(
+    c for c in ZoneCategory if c is not ZoneCategory.ENTERED
+)
+_ANALYSIS_DEFAULT_CATEGORIES: frozenset[ZoneCategory] = frozenset(
+    {ZoneCategory.ACTIVE, ZoneCategory.TAPPED}
+)
+
+
+def _analysis_persist_hint(db_path: str, symbol: str, timeframe: str) -> None:
+    """이 (심볼·TF)에 적재된 B안 실행이 없을 때 — **빈 화면 대신 넣는 방법**을 보여준다.
+
+    분석 탭은 더 이상 화면에서 A안으로 재계산하지 않는다(WAN-199). 채택 엔진(B안 지정가)
+    거래를 한 번 적재해 두면 여기서 계산 없이 조회한다 — 저장된 거래 탭과 같은 인프라다.
+    """
+    st.info(
+        f"**{symbol} · {timeframe}** 에 적재된 채택 엔진(B안 존-지정가) 실행이 없습니다.\n\n"
+        "분석 탭은 화면에서 B안 백테스트(1분봉 substep, ~7분)를 다시 돌리지 않고 적재된 "
+        "결과를 조회합니다(WAN-199). 아래처럼 한 번 계산해 넣어 두세요:\n\n"
+        "```bash\n"
+        "uv run python -m backtest.run --symbol BTCUSDT --tf 15m --persist\n"
+        "```\n\n"
+        "적재하면 이 탭이 캔들·오더블록 위에 그 실행의 거래 마커·성과를 조회로 얹습니다. "
+        f"적재 대상 DB: `{db_path}`"
+    )
+
+
 def _render_analysis(settings: Settings) -> None:
     db_path = settings.db_path
 
@@ -422,8 +441,38 @@ def _render_analysis(settings: Settings) -> None:
         timeframes = sorted({tf for s, tf in series if s == symbol})
         timeframe = st.selectbox("타임프레임", timeframes)
 
-    # 기간 위젯 범위는 경계 두 개면 충분하다 — 예전처럼 전 구간을 로드해 min/max를 구하지
-    # 않는다(WAN-188: 6년 15m ≈ 21만 봉·19MB를 매 재실행마다 읽던 자리).
+    # 채택 엔진(B안 지정가) 실행을 **조회**한다 — 저장된 거래 탭과 같은 인프라(WAN-199).
+    # 화면에서 B안 백테스트(1분봉 substep, ~7분)를 다시 돌리지 않는다. 적재본이 없으면
+    # 재계산 대신 넣는 방법을 안내한다(조용한 7분 대기 금지).
+    runs = zone_limit_runs(_cached_saved_runs(db_path), symbol=symbol, timeframe=timeframe)
+    if not runs:
+        _analysis_persist_hint(db_path, symbol, timeframe)
+        return
+
+    with st.sidebar:
+        if len(runs) > 1:
+            run_labels = {run_label(s): s for s in runs}
+            chosen = st.selectbox(
+                "적재된 실행(실행 지문)", list(run_labels), key="analysis_run_choice"
+            )
+            summary = run_labels[chosen]
+        else:
+            summary = runs[0]
+    fingerprint = summary.fingerprint
+    # 배지·표시선·존 탐지에 쓰는 파라미터는 **적재된 실행의 지문**에서 복원한다 — 화면이
+    # 임의 값을 지어내지 않고, 배지가 지문의 `entry_mode`를 읽어 자동으로 "B안(존-지정가)"가
+    # 된다(라벨과 실제가 갈라지는 WAN-95 부류 방지).
+    conf_params = ConfluenceParams.model_validate_json(fingerprint.confluence_json)
+    ob_params = OrderBlockParams.model_validate_json(fingerprint.order_block_json)
+    bt_config = BacktestConfig.model_validate_json(fingerprint.config_json)
+
+    # 거래·성과·미체결 셋업은 **조회**다(계산 없음). 지표의 정본은 적재된 요약이지만
+    # B안은 엔진이 `build_result_from_trades`로 결과를 만들어 복원 결과와 같다(WAN-106).
+    result, setups = _cached_saved_run(db_path, summary.run_id)
+
+    # 차트 뷰(기간) 슬라이더 — 성과·거래는 적재된 **전체 실행** 기준이고, 이 슬라이더는
+    # 캔들·존 탐지만 좁혀 페이로드를 관리한다(WAN-188 규율 유지). 범위는 경계 두 개면
+    # 충분하다(전 구간을 min/max 구하려 통째로 읽지 않는다).
     bounds = _cached_bounds(db_path, symbol, timeframe)
     if bounds is None:
         st.warning("선택한 심볼/타임프레임에 데이터가 없습니다.")
@@ -433,16 +482,15 @@ def _render_analysis(settings: Settings) -> None:
     min_dt = _ms_to_datetime(first_ms)
     max_dt = _ms_to_datetime(last_ms)
     with st.sidebar:
-        # 기본은 **최근 구간**이다(WAN-188). 전 구간이 기본이면 아무것도 안 골라도 6년치를
-        # 탐지·백테스트하고 브라우저로 보낸다(실측: 계산 6.80초 + 페이로드 75.65MB).
-        # 최근 6개월이면 같은 화면이 0.25초 + 2.79MB다. 옛 구간은 아래 체크박스로 편다.
+        # 기본은 **최근 구간**이다(WAN-188). 전 구간이 기본이면 6년치 캔들·존을 매번 탐지해
+        # 브라우저로 보낸다(실측: 탐지 6.80초 + 페이로드 수십 MB). 옛 구간은 아래 체크박스로.
         show_full_range = st.checkbox(
             "전 구간 보기(느림)",
             value=False,
             help=(
-                f"기본은 최근 {_DEFAULT_WINDOW_DAYS}일입니다. 전 구간을 켜면 가진 데이터 "
-                "전부를 탐지·백테스트하고 차트로 보냅니다(6년 15m 기준 수십 MB — 느립니다). "
-                "기간 슬라이더로 원하는 구간만 골라 보는 편이 빠릅니다."
+                f"기본은 최근 {_DEFAULT_WINDOW_DAYS}일입니다. 전 구간을 켜면 가진 캔들 전부에서 "
+                "오더블록을 탐지해 차트로 보냅니다(6년 15m 기준 수십 MB — 느립니다). 성과·거래는 "
+                "어느 경우든 적재된 전체 실행 기준입니다(이 슬라이더는 차트 뷰만 좁힙니다)."
             ),
         )
         default_start_dt = (
@@ -471,33 +519,14 @@ def _render_analysis(settings: Settings) -> None:
         st.warning("선택한 기간에 데이터가 없습니다.")
         return
 
-    ob_params = OrderBlockParams()
-    # 대시보드는 상위TF OHLCV만 로드하므로 지정가 체결(채택 기본값 `zone_limit`)에
-    # 필요한 1분봉 서브스텝을 돌릴 수 없다 → **종가 진입(A안)으로 명시적으로 내린다**
-    # (WAN-95). 이 차트/성과는 사용자의 실매매(존 지정가)가 아니라 근사치이며, 화면
-    # 배지가 "A안(봉 마감 종가)"로 그 사실을 항상 드러낸다. 대시보드를 채택 기본값과
-    # 일치시키려면 1분봉 로딩 + `run_zone_limit_backtest` 배선이 필요하다(WAN-45 계열).
-    conf_params = ConfluenceParams(
-        entry_mode="close",
-        rsi_mode="closed_bar",
-        zone_limit_offset_bps=0.0,
-        # A안은 존폭 필터(B안 전용)를 읽지 않는다 — 채택 기본값 1.28을 들고 있으면
-        # `evaluate`가 거부한다(WAN-159, `CLOSE_ENTRY_DEFAULTS`와 같은 처리).
-        max_zone_width_atr=None,
+    # 존은 오더블록 탐지로 그린다 — 탐지는 컨플루언스 파라미터와 무관하고(WAN-59) 상위TF에서
+    # 수 초면 끝나므로 B안 백테스트의 1분봉 재계산(~7분)이 아니다(WAN-199). 진입가·손익은
+    # 위에서 조회한 적재 실행(`result`)이 갖고 있다.
+    detection_key = (
+        f"{symbol}|{timeframe}|{start_ms}|{end_ms}"
+        f"|{ob_params.model_dump_json()}|{_cached_revision()}"
     )
-    # CLI 리포트와 동일한 설정 소스(`default_backtest_config`)에서 백테스트 설정을
-    # 가져온다 — 대시보드와 CLI가 서로 다른 설정을 들고 갈라지지 않게 한다(WAN-59).
-    bt_config = default_backtest_config(timeframe)
-    # 캐시 키에 심볼·타임프레임·기간·파라미터를 모두 포함시킨다(누락 시 잘못된
-    # 결과를 캐시하게 됨). 파라미터는 직렬화해 params_key로 키에 싣는다.
-    params_key = (
-        f"{ob_params.model_dump_json()}|{conf_params.model_dump_json()}"
-        f"|{bt_config.model_dump_json()}"
-    )
-    result = _cached_pipeline(
-        db_path, symbol, timeframe, start_ms, end_ms, params_key, ob_params, conf_params, bt_config
-    )
-    backtest = result.backtest
+    order_blocks, _rendered = _cached_detection(detection_key, df, ob_params)
 
     label_to_category = {label: cat for cat, label in ZONE_CATEGORY_LABELS.items()}
     with st.sidebar:
@@ -511,7 +540,7 @@ def _render_analysis(settings: Settings) -> None:
             ),
         )
         replay_ms: int | None = None
-        categories = DEFAULT_ZONE_CATEGORIES
+        categories = _ANALYSIS_DEFAULT_CATEGORIES
         show_all_archive = False
         if replay_on:
             chart_min = _ms_to_datetime(int(df["open_time"].min()))
@@ -529,15 +558,18 @@ def _render_analysis(settings: Settings) -> None:
             replay_ms = _datetime_to_ms(replay_dt)
         else:
             default_labels = [
-                ZONE_CATEGORY_LABELS[c] for c in ZoneCategory if c in DEFAULT_ZONE_CATEGORIES
+                ZONE_CATEGORY_LABELS[c]
+                for c in _ANALYSIS_ZONE_CATEGORIES
+                if c in _ANALYSIS_DEFAULT_CATEGORIES
             ]
             selected_labels = st.multiselect(
                 "표시 필터",
-                options=list(ZONE_CATEGORY_LABELS.values()),
+                options=[ZONE_CATEGORY_LABELS[c] for c in _ANALYSIS_ZONE_CATEGORIES],
                 default=default_labels,
                 help=(
-                    "진입·활성·지지(탭)·깨짐(무효화)·소멸 중 골라 봅니다. "
-                    "기본은 진입한 존 + 활성 존(전체 아님)."
+                    "활성·지지(탭)·깨짐(무효화)·소멸 중 골라 봅니다. 기본은 활성 + 지지한 존. "
+                    "실제 진입 자리는 아래 차트의 거래 마커가 보여 줍니다(조회 경로라 '진입한 존' "
+                    "필터는 없습니다 — WAN-199)."
                 ),
             )
             categories = frozenset(label_to_category[label] for label in selected_labels)
@@ -561,7 +593,7 @@ def _render_analysis(settings: Settings) -> None:
             help=(
                 "브라우저가 바이낸스 웹소켓에 직접 붙어 형성 중인 봉과 볼린저 하단선을 "
                 "갱신합니다(트레이딩뷰와 같은 방식). 표시 계층 전용이라 아래 거래 표·"
-                "성과 지표는 확정봉 기준 백테스트 결과 그대로이고, 받은 데이터는 "
+                "성과 지표는 적재된 백테스트 결과 그대로이고, 받은 데이터는 "
                 "저장하지 않습니다."
             ),
         )
@@ -593,7 +625,7 @@ def _render_analysis(settings: Settings) -> None:
                 visible_lines.add(key)
 
     chart_df, zones = _select_chart_zones(
-        result,
+        order_blocks,
         df,
         ob_params,
         replay_ms=replay_ms,
@@ -601,13 +633,13 @@ def _render_analysis(settings: Settings) -> None:
         show_all_archive=show_all_archive,
     )
     # 시점 재생은 그 시점 화면 재현이 목적이라 미래 거래 마커를 겹치지 않는다.
-    chart_backtest = None if replay_ms is not None else backtest
+    chart_backtest = None if replay_ms is not None else result
 
     # 실시간 차트(WAN-147) — 표시 계층 전용이다. 브라우저가 바이낸스 웹소켓에 직접 붙어
-    # 형성 중인 봉과 볼린저 하단선만 갱신하고, 아래 거래 표·성과 지표는 확정봉 기준
-    # 백테스트 결과 그대로다(실시간 값이 섞이지 않는다). 시점 재생 중이거나 기간을
-    # 과거로 잘라 본 화면에서는 켜지 않는다 — 지나간 구간에 현재 봉을 붙이면 화면이
-    # "그때 무엇을 봤나"를 더는 재현하지 못한다.
+    # 형성 중인 봉과 볼린저 하단선만 갱신하고, 아래 거래 표·성과 지표는 적재된 백테스트
+    # 결과 그대로다(실시간 값이 섞이지 않는다). 시점 재생 중이거나 기간을 과거로 잘라 본
+    # 화면에서는 켜지 않는다 — 지나간 구간에 현재 봉을 붙이면 화면이 "그때 무엇을 봤나"를
+    # 더는 재현하지 못한다.
     showing_tail = end_ms >= last_ms
     live_config = (
         build_live_config(
@@ -624,19 +656,21 @@ def _render_analysis(settings: Settings) -> None:
     # 거래 표에서 고른 행 → 차트 이동 구간(WAN-146). 표는 차트보다 아래에 그려지므로
     # 지난 실행의 선택 상태를 읽는다. 시점 재생 중이면(거래 마커 자체를 안 그린다) 이동도
     # 하지 않고, 선택된 거래가 현재 기간 밖이면 빈 화면으로 뛰지 않게 무시한다.
-    focus = selected_trade_window(backtest, _selected_trade_rows()) if replay_ms is None else None
+    focus = selected_trade_window(result, _selected_trade_rows()) if replay_ms is None else None
     if focus is not None and not (start_ms <= focus[0] <= end_ms):
         focus = None
 
     st.subheader(f"{symbol} · {timeframe}")
-    _render_run_config_badge(conf_params, ob_params, bt_config, backtest.metrics)
+    # 지금 보고 있는 게 어느 엔진의 거래인지 항상 드러낸다(WAN-65/95) — 저장된 거래 탭과
+    # 같은 지문 배지. 그 아래 실행 설정 배지는 지문의 `entry_mode`를 읽어 "B안(존-지정가)".
+    st.caption(f"🔒 실행 지문: {fingerprint.label()} · run_id `{summary.run_id}`")
+    _render_run_config_badge(conf_params, ob_params, bt_config, result.metrics)
     chart_height = 700
     st.iframe(
         build_chart_html(
             chart_df,
             zones,
             chart_backtest,
-            result.signals,
             conf_params=conf_params,
             visible_lines=frozenset(visible_lines),
             theme=chart_theme,
@@ -646,6 +680,11 @@ def _render_analysis(settings: Settings) -> None:
         ),
         height=chart_height,
     )
+    st.caption(
+        "성과 지표·거래·미체결 셋업은 적재된 **전체 실행** 기준입니다(조회). 위 기간 슬라이더는 "
+        "차트에 그릴 캔들·존만 좁힙니다 — 뷰 밖의 거래 마커는 화면에 안 보일 뿐 지표에는 그대로 "
+        "반영됩니다(WAN-199)."
+    )
     if focus is not None:
         st.caption(
             "🔎 선택한 거래 구간을 보고 있습니다. 표에서 선택을 해제하면 전체 구간으로 돌아갑니다."
@@ -654,12 +693,12 @@ def _render_analysis(settings: Settings) -> None:
         st.caption(
             "🟢 실시간: 형성 중인 봉과 볼린저 하단선만 옅은 색으로 라이브 갱신됩니다"
             "(바이낸스 웹소켓 직접 구독 · 저장하지 않음). **아래 거래 표·성과 지표는 "
-            "확정봉 기준 백테스트 결과**라 실시간 값에 영향받지 않습니다."
+            "적재된 백테스트 결과**라 실시간 값에 영향받지 않습니다."
         )
     elif live_on:
         st.caption("⚪ 실시간 갱신 꺼짐: 시점 재생 중이거나 기간 끝을 과거로 잘라 본 화면입니다.")
 
-    metrics = backtest.metrics
+    metrics = result.metrics
     cols = st.columns(6)
     cols[0].metric("Total Return", f"{metrics.total_return * 100:.2f}%")
     cols[1].metric("Max Drawdown", f"{metrics.max_drawdown * 100:.2f}%")
@@ -670,9 +709,21 @@ def _render_analysis(settings: Settings) -> None:
     cols[4].metric("Sharpe", f"{sharpe:.2f}" if sharpe is not None else "N/A")
     cols[5].metric("Trades", str(metrics.num_trades))
 
-    st.plotly_chart(build_equity_chart(backtest, theme=chart_theme), use_container_width=True)
+    st.plotly_chart(build_equity_chart(result, theme=chart_theme), use_container_width=True)
 
-    _render_trade_table(backtest, conf_params, ob_params, bt_config)
+    _render_trade_table(result, conf_params, ob_params, bt_config)
+
+    # 미체결 셋업 — 저장된 거래 탭과 같은 조회(WAN-106). "살 뻔했는데 못 산 자리"는
+    # 규칙 판단에 체결된 거래만큼 중요하다.
+    unfilled = setups[~setups["filled"]] if not setups.empty else setups
+    with st.expander(f"미체결 셋업 — 살 뻔했는데 못 산 자리 ({len(unfilled)}건)"):
+        if setups.empty:
+            st.caption(
+                "이 실행에는 셋업 진단이 없습니다(종가 진입·다중 포지션 경로는 미체결이라는 "
+                "개념이 없거나 진단을 내지 않습니다)."
+            )
+        else:
+            st.dataframe(setups_display_frame(unfilled), use_container_width=True, hide_index=True)
 
 
 # --- 저장된 거래 탭 (WAN-106) ------------------------------------------------
