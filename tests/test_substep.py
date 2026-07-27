@@ -87,6 +87,41 @@ def test_clean_fill_then_take_profit() -> None:
     assert out.exit_reason is SignalExitReason.TAKE_PROFIT
 
 
+def test_start_offset_is_bit_identical_to_slicing() -> None:
+    """WAN-203 성능: `substeps` 전체 + `start` 오프셋 = 그 지점부터 슬라이스한 것과 동일.
+
+    호출부가 `substeps[start:]`를 복사해 넘기던 것을 전체 리스트 + `start`로 바꿔 `islice`로
+    순회한다. `start` 이전 봉(다른 htf_bar_time이라 순회하면 RSI 커밋·경과 봉 수를 바꿀 값)이
+    **정확히 건너뛰어져** 슬라이스 버전과 비트 동일해야 한다 — 안 그러면 모든 지정가
+    백테스트가 조용히 어긋난다.
+    """
+    tail = [
+        _step(1_000_000, high=101, low=99, close=99, htf=1_000_000),
+        _step(1_060_000, high=111, low=100, close=110, htf=1_000_000),
+    ]
+    # start 이전 봉: 다른 htf(순회되면 current_htf·경과 봉 수를 바꾼다)·가격도 무관하게 큼.
+    lead = [
+        _step(0, high=200, low=190, close=195, htf=0),
+        _step(60_000, high=200, low=190, close=195, htf=0),
+    ]
+    full = lead + tail
+
+    def _run(steps: list[SubStep], start: int) -> ZoneLimitOutcome:
+        return simulate_zone_limit_trade(
+            direction=OrderBlockDirection.BULLISH,
+            limit_price=_LIMIT,
+            stop_price=_STOP,
+            substeps=steps,
+            start=start,
+            rsi_state=_long_state(),
+            rsi_oversold=30.0,
+            rsi_overbought=70.0,
+            take_profit_price=_TP,
+        )
+
+    assert _run(full, len(lead)) == _run(tail, 0)
+
+
 # ---------------------------------------------------- ⚠️ 관통(같은 스텝 진입+손절)
 
 

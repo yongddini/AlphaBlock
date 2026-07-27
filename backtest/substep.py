@@ -36,6 +36,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
+from itertools import islice
 from typing import Protocol
 
 import pandas as pd
@@ -205,6 +206,7 @@ def simulate_zone_limit_trade(
     live_limit: LiveLimitProvider | None = None,
     stop_price: float,
     substeps: Sequence[SubStep],
+    start: int = 0,
     rsi_state: RealtimeRsi,
     rsi_oversold: float,
     rsi_overbought: float,
@@ -300,7 +302,10 @@ def simulate_zone_limit_trade(
 
     # 상수 지정가는 탭 봉부터 이미 주문판에 걸려 있다. live는 밴드가 값을 낸 순간부터다.
     order_rested = live_limit is None
-    current_htf = substeps[0].htf_bar_time
+    # WAN-203 성능: 호출부가 전체 `substeps`(수백만 개)와 시작 오프셋 `start`를 넘긴다 —
+    # `substeps[start:]`로 복사하면 후보마다 O(전체 길이)라 15m·긴 창이 초선형으로 느려진다.
+    # `islice`로 복사 없이 `start`부터 순회하면 **비트 단위로 동일**(같은 순서·같은 원소).
+    current_htf = substeps[start].htf_bar_time
     htf_elapsed = 0  # 주문 이후 마감된 상위TF 봉 수
     running_close: float | None = None
     position_open = False
@@ -308,7 +313,7 @@ def simulate_zone_limit_trade(
     entry_price: float | None = None
     entry_rsi: float | None = None
 
-    for step in substeps:
+    for step in islice(substeps, start, None):
         # 상위TF 봉 경계: 직전 봉을 확정 종가로 커밋하고 경과 봉 수를 늘린다.
         if step.htf_bar_time != current_htf:
             if running_close is not None:
