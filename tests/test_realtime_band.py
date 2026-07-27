@@ -134,3 +134,66 @@ def test_close_anchor_uses_live_price() -> None:
     pct = DeviationFilterParams(anchor="close", width_kind="pct", width_value=0.02)
     band = RealtimeBand.seed_from_closed(_closes()[:30], pct)
     assert band.value(200.0, 1) == pytest.approx(200.0 * 0.98, rel=1e-12)
+
+
+def _naive_seed(
+    closes: list[float], filter_params: DeviationFilterParams, *, end: int | None = None
+) -> RealtimeBand:
+    """WAN-204 최적화 **이전**의 시딩 — 전체 이력을 순서대로 `commit`한다.
+
+    존 탭마다 `closes[:end]` 전체를 커밋하던 O(N×M) 병목의 원본 동작이다. 최적화판
+    (`RealtimeBand.seed_from_closed`, 꼬리 `window_size`개만 커밋)이 이것과 **비트 단위로
+    같은 상태**를 내는지가 회귀 검증의 핵심이다.
+    """
+    state = RealtimeBand(filter_params=filter_params)
+    seq = closes if end is None else closes[:end]
+    for close in seq:
+        state.commit(float(close))
+    return state
+
+
+@pytest.mark.parametrize(
+    "filt",
+    [
+        _BOLLINGER,  # anchor=sma, width=stdev → 창 필요
+        DeviationFilterParams(anchor="sma", sma_length=5, width_kind="stdev", width_value=2.0),
+        DeviationFilterParams(anchor="close", width_kind="pct", width_value=0.02),  # 창 불필요
+        DeviationFilterParams(anchor="sma", sma_length=1, width_kind="stdev", width_value=2.0),
+    ],
+)
+def test_tail_seeding_is_bit_identical_to_full_history(filt: DeviationFilterParams) -> None:
+    """WAN-204: 꼬리만 커밋해도 창 상태·`value()`가 전체 이력 커밋과 비트 단위로 같다.
+
+    `_window`가 bounded deque(`sma_length-1`)라 그보다 오래된 종가는 커밋 즉시 굴러
+    나간다 — 그래서 O(cut) 재커밋을 O(window_size)로 줄여도 최종 상태가 동일하다.
+    존 탭마다 새로 시딩하는 긴 창(15m·6년) 백테스트의 O(N×M) 병목을 없앤 이 등가성이
+    깨지면 채택 엔진의 진입가가 통째로 달라진다.
+    """
+    closes = _closes()
+    # cut < window / == window / > window / == len / 경계값을 모두 훑는다.
+    for cut in [0, 1, 2, 18, 19, 20, 30, 45, len(closes)]:
+        opt = RealtimeBand.seed_from_closed(closes, filt, end=cut)
+        ref = _naive_seed(closes, filt, end=cut)
+        # 창 내용(밴드 상태)이 비트 단위로 같다.
+        assert list(opt._window) == list(ref._window), f"window mismatch at cut={cut}"
+        assert opt.ready == ref.ready
+        # 조회값도 같다(다양한 현재가·부호에서).
+        for price in (closes[min(cut, len(closes) - 1)], 123.456, 200.0):
+            for sign in (1, -1):
+                assert opt.value(price, sign) == ref.value(price, sign), (
+                    f"value mismatch at cut={cut} price={price} sign={sign}"
+                )
+
+
+def test_end_argument_matches_pre_sliced_closes() -> None:
+    """`end=cut`가 `closes[:cut]`를 미리 잘라 넘긴 것과 같다(호출부 사본 제거의 등가성).
+
+    최적화가 호출부의 `closes[:cut]` 사본을 없애려고 `end` 인자를 도입했으므로, 두
+    형태가 같은 상태를 내는지를 못 박는다.
+    """
+    closes = _closes()
+    for cut in [0, 5, 19, 25, len(closes), len(closes) + 10]:
+        via_end = RealtimeBand.seed_from_closed(closes, _BOLLINGER, end=cut)
+        via_slice = RealtimeBand.seed_from_closed(closes[:cut], _BOLLINGER)
+        assert list(via_end._window) == list(via_slice._window)
+        assert via_end.value(150.0, 1) == via_slice.value(150.0, 1)

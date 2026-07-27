@@ -22,6 +22,7 @@ python -m backtest.run --symbol BTCUSDT,ETHUSDT,SOLUSDT --tf 1h --fill pen_5bp -
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
 
@@ -35,6 +36,7 @@ from backtest.harness import (
     RunRow,
     load_market_data,
 )
+from backtest.models import BacktestConfig
 from backtest.run import (
     JOBS_AUTO,
     RunOptions,
@@ -43,7 +45,9 @@ from backtest.run import (
     parse_date_ms,
     run_grid,
 )
-from strategy.models import BandBar, RsiGateMode
+from backtest.zone_limit_backtest import build_zone_limit_candidates
+from strategy.models import BandBar, ConfluenceParams, DeviationFilterParams, RsiGateMode
+from strategy.realtime_band import RealtimeBand
 
 _WAN99_CSV = Path("backtest/reports/wan99_zone_limit_offset.csv")
 
@@ -264,3 +268,63 @@ def test_jobs_does_not_change_real_data_numbers() -> None:
         assert [r.model_dump() for r in parallel] == [r.model_dump() for r in serial], (
             f"--jobs {jobs}의 결과가 직렬과 다르다"
         )
+
+
+def _naive_band_seed_from_closed(
+    cls: type[RealtimeBand],
+    closes: Sequence[float],
+    filter_params: DeviationFilterParams,
+    *,
+    end: int | None = None,
+) -> RealtimeBand:
+    """WAN-204 최적화 **이전**의 밴드 시딩 — `closes[:end]` 전체를 커밋한다(O(N×M))."""
+    state = cls(filter_params=filter_params)
+    seq = closes if end is None else closes[:end]
+    for close in seq:
+        state.commit(float(close))
+    return state
+
+
+def test_intrabar_live_seeding_preserves_real_filled_trades(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """완료기준(WAN-204): 밴드 시딩 O(N×M)→O(1)가 **실데이터 체결 거래**를 안 바꾼다.
+
+    합성 데이터는 볼린저 필터가 후보를 전부 걸러 `filled=0`이라(위 병렬 테스트 각주와
+    같은 한계) 시딩 등가성을 체결 손익까지 증명하지 못한다. 실데이터는 채택 기본값
+    (`intrabar_live` 밴드)이 실제로 수십 건을 체결하므로, 최적화판과 전체 이력 커밋
+    원본이 **같은 진입/청산/사유**를 내는지를 여기서만 진짜로 못 박는다.
+    """
+    market = load_market_data(_SYMBOL, _TIMEFRAME, start_ms=_START_MS, end_ms=_END_MS)
+    assert market.df_1m is not None and not market.df_1m.empty
+    params = ConfluenceParams()  # 채택 기본값 = intrabar_live 밴드
+    cfg = BacktestConfig()
+
+    def snapshot() -> tuple[list[tuple[object, ...]], tuple[int, int, int, int]]:
+        cands, stats = build_zone_limit_candidates(
+            market.htf_df, market.df_1m, _TIMEFRAME, params=params, cfg=cfg
+        )
+        rows: list[tuple[object, ...]] = [
+            (
+                c.trigger_time,
+                c.entry_time,
+                c.entry_price,
+                c.stop_price,
+                c.exit_time,
+                c.exit_price,
+                c.reason,
+                c.mfe_r,
+                c.mae_r,
+            )
+            for c in cands
+        ]
+        return rows, (stats.eligible, stats.filled, stats.penetrations, stats.dropped)
+
+    opt_rows, opt_stats = snapshot()
+    assert opt_stats[1] > 0, "실데이터가 체결 거래를 내지 않았다(시딩 등가성 검증 무의미)"
+
+    monkeypatch.setattr(RealtimeBand, "seed_from_closed", classmethod(_naive_band_seed_from_closed))
+    ref_rows, ref_stats = snapshot()
+
+    assert opt_stats == ref_stats
+    assert opt_rows == ref_rows
