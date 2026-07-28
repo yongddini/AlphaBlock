@@ -45,6 +45,9 @@ _TRADE_COLUMNS = [
     "r_multiple",
     "stop_price",
     "take_profit_price",
+    "notional",
+    "risk_amount",
+    "realized_pnl",
 ]
 
 # 성과 요약 표 컬럼 순서.
@@ -60,6 +63,9 @@ _PERF_COLUMNS = [
     "payoff_ratio",
     "profit_factor",
     "max_drawdown_pct",
+    "total_notional",
+    "total_risk_amount",
+    "total_realized_pnl",
 ]
 
 
@@ -83,6 +89,9 @@ def records_to_dataframe(records: Sequence[PaperTradeRecord]) -> pd.DataFrame:
             "r_multiple": r.r_multiple,
             "stop_price": r.stop_price,
             "take_profit_price": r.take_profit_price,
+            "notional": r.notional,
+            "risk_amount": r.risk_amount,
+            "realized_pnl": r.realized_pnl,
         }
         for r in records
     ]
@@ -102,6 +111,9 @@ def _metrics_row(scope: str, m: PerfMetrics) -> dict[str, object]:
         "payoff_ratio": m.payoff_ratio,
         "profit_factor": m.profit_factor,
         "max_drawdown_pct": m.max_drawdown_pct,
+        "total_notional": m.total_notional,
+        "total_risk_amount": m.total_risk_amount,
+        "total_realized_pnl": m.total_realized_pnl,
     }
 
 
@@ -133,6 +145,9 @@ COL_RISK_PCT = "리스크%"
 COL_R_MULTIPLE = "R배수"
 COL_STOP_PRICE = "손절가"
 COL_TAKE_PROFIT_PRICE = "익절가"
+COL_NOTIONAL = "투입명목$"
+COL_RISK_AMOUNT = "리스크$"
+COL_REALIZED_PNL = "손익$"
 
 #: 성과 요약 화면 컬럼(한글).
 COL_SCOPE = "구분"
@@ -146,6 +161,9 @@ COL_AVG_R = "평균R"
 COL_PAYOFF = "손익비"
 COL_PROFIT_FACTOR = "PF"
 COL_MAX_DD = "MDD%"
+COL_TOTAL_NOTIONAL = "총투입$"
+COL_TOTAL_RISK = "총리스크$"
+COL_TOTAL_PNL = "총손익$"
 
 #: `bull`/`bear` → 롱/숏. "저장된 거래" 탭의 `SIDE_LABELS`(롱/숏)와 같은 용어.
 _DIRECTION_LABELS: Mapping[OrderBlockDirection, str] = {
@@ -188,6 +206,9 @@ def records_to_display_frame(records: Sequence[PaperTradeRecord]) -> pd.DataFram
             COL_R_MULTIPLE: r.r_multiple,
             COL_STOP_PRICE: r.stop_price,
             COL_TAKE_PROFIT_PRICE: r.take_profit_price,
+            COL_NOTIONAL: r.notional,
+            COL_RISK_AMOUNT: r.risk_amount,
+            COL_REALIZED_PNL: r.realized_pnl,
         }
         for r in records
     ]
@@ -203,6 +224,9 @@ _DISPLAY_TRADE_COLUMNS = [
     COL_EXIT_KST,
     COL_EXIT_PRICE,
     COL_EXIT_REASON,
+    COL_NOTIONAL,
+    COL_RISK_AMOUNT,
+    COL_REALIZED_PNL,
     COL_GROSS_PCT,
     COL_FEE_PCT,
     COL_FUNDING_PCT,
@@ -227,6 +251,9 @@ def _display_metrics_row(scope: str, m: PerfMetrics) -> dict[str, object]:
         COL_PAYOFF: m.payoff_ratio,
         COL_PROFIT_FACTOR: m.profit_factor,
         COL_MAX_DD: m.max_drawdown_pct,
+        COL_TOTAL_NOTIONAL: m.total_notional,
+        COL_TOTAL_RISK: m.total_risk_amount,
+        COL_TOTAL_PNL: m.total_realized_pnl,
     }
 
 
@@ -249,6 +276,9 @@ _DISPLAY_PERF_COLUMNS = [
     COL_PAYOFF,
     COL_PROFIT_FACTOR,
     COL_MAX_DD,
+    COL_TOTAL_NOTIONAL,
+    COL_TOTAL_RISK,
+    COL_TOTAL_PNL,
 ]
 
 

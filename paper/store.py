@@ -75,6 +75,11 @@ CREATE TABLE IF NOT EXISTS paper_trades (
     r_multiple         REAL,
     stop_price         REAL,
     take_profit_price  REAL,
+    quantity           REAL,
+    notional           REAL,
+    risk_amount        REAL,
+    realized_pnl       REAL,
+    equity_after       REAL,
     PRIMARY KEY (symbol, timeframe, entry_time, exit_time)
 )
 """
@@ -83,8 +88,9 @@ _UPSERT = """
 INSERT INTO paper_trades
     (symbol, timeframe, direction, entry_time, entry_price, exit_time, exit_price,
      reason, gross_pct, fee_pct, slippage_pct, funding_pct, net_pct, risk_pct,
-     r_multiple, stop_price, take_profit_price)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     r_multiple, stop_price, take_profit_price,
+     quantity, notional, risk_amount, realized_pnl, equity_after)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(symbol, timeframe, entry_time, exit_time) DO UPDATE SET
     direction         = excluded.direction,
     entry_price       = excluded.entry_price,
@@ -98,7 +104,12 @@ ON CONFLICT(symbol, timeframe, entry_time, exit_time) DO UPDATE SET
     risk_pct          = excluded.risk_pct,
     r_multiple        = excluded.r_multiple,
     stop_price        = excluded.stop_price,
-    take_profit_price = excluded.take_profit_price
+    take_profit_price = excluded.take_profit_price,
+    quantity          = excluded.quantity,
+    notional          = excluded.notional,
+    risk_amount       = excluded.risk_amount,
+    realized_pnl      = excluded.realized_pnl,
+    equity_after      = excluded.equity_after
 """
 
 # `list_records`가 조회·반환하는 컬럼 순서.
@@ -120,6 +131,11 @@ _COLUMNS = [
     "r_multiple",
     "stop_price",
     "take_profit_price",
+    "quantity",
+    "notional",
+    "risk_amount",
+    "realized_pnl",
+    "equity_after",
 ]
 
 # 열린 페이퍼 포지션(재시작 복구용, WAN-34). (symbol, timeframe)당 최대 하나.
@@ -199,6 +215,19 @@ class PaperTradeRecord(BaseModel):
     """리스크 대비 손익 배수(net_pct / risk_pct). risk_pct가 없으면 None."""
     stop_price: float | None = None
     take_profit_price: float | None = None
+    # -- 달러 금액(WAN-207) — 청산 시 실제 지갑에서 집계한 값. 옛 행은 없어서 None. ---
+    quantity: float | None = None
+    """진입 체결 수량(코인). 사이징(리스크 역산·레버리지 clamp) 결과. 옛 행은 None."""
+    notional: float | None = None
+    """투입 명목 금액(달러) = 진입가 × 수량. "얼마 들어갔는지". 옛 행은 None."""
+    risk_amount: float | None = None
+    """진입 시 감수한 리스크 금액(달러) = 진입 시점 자본 × risk_per_trade. 옛 행은 None."""
+    realized_pnl: float | None = None
+    """청산으로 실현한 달러 손익(수수료 반영). 옛 행은 None."""
+    equity_after: float | None = None
+    """이 거래를 정산한 **직후** 페이퍼 지갑 자본(달러). 전액배팅이 아닌 실제 지갑
+    곡선을 재구성하는 기준이다(WAN-207) — 청산 순서(청산시각)로 정렬하면 러너의 실제
+    equity 경로와 일치한다. 옛 행은 None."""
 
     @property
     def is_win(self) -> bool:
@@ -225,12 +254,34 @@ class PaperTradeRecord(BaseModel):
             self.r_multiple,
             self.stop_price,
             self.take_profit_price,
+            self.quantity,
+            self.notional,
+            self.risk_amount,
+            self.realized_pnl,
+            self.equity_after,
         )
 
 
 def _round_trip_fee_pct(fee_rate: float) -> float:
     """왕복(진입+청산) 수수료 비용률(%). 진입 노셔널 대비 근사."""
     return 2.0 * fee_rate * 100.0
+
+
+class TradeDollars(BaseModel):
+    """청산 시 실제 지갑에서 집계한 달러 금액(WAN-207).
+
+    손익률(%)만으로는 전액배팅 곡선밖에 못 그린다 — 실제 지갑은 `risk_per_trade`로
+    사이징하고 레버리지 상한에 clamp되므로, 진짜 자본 곡선을 재구성하려면 청산 시점의
+    실현 손익·직후 자본을 그대로 실어 와야 한다. 러너(`live.executor`)가 채운다.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    quantity: float | None = None
+    notional: float | None = None
+    risk_amount: float | None = None
+    realized_pnl: float | None = None
+    equity_after: float | None = None
 
 
 def build_record(
@@ -242,6 +293,7 @@ def build_record(
     exit_liquidity: Liquidity = Liquidity.TAKER,
     funding_rates: list[FundingRate] | None = None,
     include_predicted: bool = False,
+    dollars: TradeDollars | None = None,
 ) -> PaperTradeRecord:
     """`ClosedTrade`를 손익·비용을 산출해 `PaperTradeRecord`로 변환한다.
 
@@ -301,6 +353,7 @@ def build_record(
         else:
             risk_pct = None
 
+    money = dollars if dollars is not None else TradeDollars()
     return PaperTradeRecord(
         symbol=position.symbol,
         timeframe=position.timeframe,
@@ -319,6 +372,11 @@ def build_record(
         r_multiple=r_multiple,
         stop_price=stop,
         take_profit_price=position.take_profit_price,
+        quantity=money.quantity,
+        notional=money.notional,
+        risk_amount=money.risk_amount,
+        realized_pnl=money.realized_pnl,
+        equity_after=money.equity_after,
     )
 
 
@@ -360,6 +418,11 @@ class PaperTradeStore:
             self._conn.execute(
                 "ALTER TABLE paper_trades ADD COLUMN slippage_pct REAL NOT NULL DEFAULT 0"
             )
+        # 달러 금액 열(WAN-207)은 나중에 도입됐다 — 옛 행은 판별 불가라 NULL로 둔다
+        # (백필하려면 청산 시점의 자본·수량을 재구성해야 하는데 그 값이 없다).
+        for column in ("quantity", "notional", "risk_amount", "realized_pnl", "equity_after"):
+            if column not in cols:
+                self._conn.execute(f"ALTER TABLE paper_trades ADD COLUMN {column} REAL")
 
     def __enter__(self) -> PaperTradeStore:
         return self
@@ -427,6 +490,40 @@ class PaperTradeStore:
             )
             for row in rows
         ]
+
+    def get_open_position(self, symbol: str, timeframe: str) -> OpenPosition | None:
+        """한 시리즈의 열린 포지션을 읽는다(청산 시 진입 리스크 금액 회수용, WAN-207).
+
+        청산 기록에 "진입 시 감수한 리스크 금액"을 실으려면 진입 때 저장한 값을 삭제
+        전에 회수해야 한다 — 이 값은 엔진 장부(수량·가격)에는 없고 `open_positions`에만
+        있다. 없으면 None.
+        """
+        with self._lock:
+            cur = self._conn.execute(
+                """
+                SELECT symbol, timeframe, direction, quantity, entry_price, entry_time,
+                       stop_price, take_profit_price, risk_amount, entry_fee
+                FROM open_positions WHERE symbol = ? AND timeframe = ?
+                """,
+                (symbol, timeframe),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return None
+        return OpenPosition(
+            position=Position(
+                symbol=str(row[0]),
+                timeframe=str(row[1]),
+                direction=OrderBlockDirection(str(row[2])),
+                quantity=float(row[3]),
+                entry_price=float(row[4]),
+                entry_time=int(row[5]),
+                stop_price=None if row[6] is None else float(row[6]),
+                take_profit_price=None if row[7] is None else float(row[7]),
+            ),
+            risk_amount=float(row[8]),
+            entry_fee=float(row[9]),
+        )
 
     def remove_open_position(self, symbol: str, timeframe: str) -> None:
         """청산·취소된 시리즈의 열린 포지션을 삭제한다(없으면 무해)."""
@@ -532,6 +629,11 @@ def _row_to_record(row: Sequence[Any]) -> PaperTradeRecord:
         r_multiple,
         stop_price,
         take_profit_price,
+        quantity,
+        notional,
+        risk_amount,
+        realized_pnl,
+        equity_after,
     ) = row
     return PaperTradeRecord(
         symbol=str(symbol),
@@ -551,6 +653,11 @@ def _row_to_record(row: Sequence[Any]) -> PaperTradeRecord:
         r_multiple=None if r_multiple is None else float(r_multiple),
         stop_price=None if stop_price is None else float(stop_price),
         take_profit_price=(None if take_profit_price is None else float(take_profit_price)),
+        quantity=None if quantity is None else float(quantity),
+        notional=None if notional is None else float(notional),
+        risk_amount=None if risk_amount is None else float(risk_amount),
+        realized_pnl=None if realized_pnl is None else float(realized_pnl),
+        equity_after=None if equity_after is None else float(equity_after),
     )
 
 
@@ -585,8 +692,15 @@ class PaperTradeRecorder:
         self._funding_store = funding_store
         self._include_predicted = include_predicted
 
-    def record(self, trade: ClosedTrade) -> PaperTradeRecord | None:
-        """청산 거래를 기록한다. 성공 시 저장된 레코드, 실패 시 None."""
+    def record(
+        self, trade: ClosedTrade, *, dollars: TradeDollars | None = None
+    ) -> PaperTradeRecord | None:
+        """청산 거래를 기록한다. 성공 시 저장된 레코드, 실패 시 None.
+
+        `dollars`(WAN-207)를 주면 청산 시 실제 지갑에서 집계한 달러 금액(투입 명목·리스크·
+        실현손익·직후 자본)을 함께 영속화한다 — 성과 곡선을 전액배팅이 아니라 실제 지갑
+        기준으로 재구성하는 데 쓴다. 안 주면 옛 %-only 행과 같다.
+        """
         try:
             funding_rates: list[FundingRate] | None = None
             if self._funding_store is not None:
@@ -604,6 +718,7 @@ class PaperTradeRecorder:
                 exit_liquidity=self._exit_liquidity,
                 funding_rates=funding_rates,
                 include_predicted=self._include_predicted,
+                dollars=dollars,
             )
             self._store.upsert_record(record)
             return record

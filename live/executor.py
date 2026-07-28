@@ -24,7 +24,7 @@ from execution.engine import EntryIntent, ExecutionEngine, ExecutionOutcome
 from execution.models import Position
 from execution.sizing import PositionSizingParams
 from live.paper import ClosedTrade, PaperPosition
-from paper.store import PaperTradeRecorder, PaperTradeStore
+from paper.store import PaperTradeRecorder, PaperTradeStore, TradeDollars
 from strategy.models import SignalExitReason
 
 _logger = logging.getLogger(__name__)
@@ -136,6 +136,9 @@ class PaperExecutor:
         now_ms: int,
     ) -> TradeReport:
         """오픈 포지션을 청산한다. 정산되면 라운드트립을 성과 테이블에 기록한다."""
+        # 진입 시 감수한 리스크 금액은 open_positions에만 있다 — 삭제 전에 회수해
+        # 청산 기록에 실어 성과 곡선을 지갑 기준으로 재구성한다(WAN-207).
+        open_pos = self._store.get_open_position(symbol, timeframe)
         outcome = self._engine.on_exit(
             symbol, timeframe, exit_price=exit_price, reason=reason, now_ms=now_ms
         )
@@ -146,8 +149,18 @@ class PaperExecutor:
                 exit_time=exit_time,
                 reason=reason,
             )
+            # 달러 금액: 명목·수량은 청산된 포지션에서, 실현손익은 엔진이 정산한 값,
+            # 리스크 금액은 진입 때 저장분, equity_after는 정산 직후 자본(WAN-207).
+            position = outcome.position
+            dollars = TradeDollars(
+                quantity=position.quantity,
+                notional=position.notional,
+                risk_amount=None if open_pos is None else open_pos.risk_amount,
+                realized_pnl=outcome.realized_pnl,
+                equity_after=self._engine.equity,
+            )
             # WAN-33 성과 스키마(paper_trades)에 위임 — 리포트가 읽는 테이블과 동일.
-            self._recorder.record(closed)
+            self._recorder.record(closed, dollars=dollars)
             self._store.remove_open_position(symbol, timeframe)
         return TradeReport(
             outcome=outcome,

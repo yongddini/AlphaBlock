@@ -89,7 +89,12 @@ def main(argv: list[str] | None = None) -> None:
     out_dir: Path = args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    performance = build_performance(records)
+    # 전체 성과는 실제 지갑 기준(전액배팅 아님, WAN-207).
+    performance = build_performance(
+        records,
+        risk_per_trade=settings.risk_sizing.risk_per_trade,
+        initial_equity=settings.paper_equity,
+    )
     print(format_performance(performance))
 
     trades_path = out_dir / "paper_trades.csv"

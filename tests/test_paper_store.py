@@ -10,6 +10,7 @@ from paper.store import (
     PaperTradeRecord,
     PaperTradeRecorder,
     PaperTradeStore,
+    TradeDollars,
     build_record,
 )
 from strategy.models import OrderBlockDirection, SignalExitReason
@@ -81,6 +82,31 @@ def test_store_upsert_is_idempotent_and_lists() -> None:
         assert len(loaded) == 1
         assert loaded[0] == record
         assert store.time_span() == (1000, 2000)
+
+
+def test_dollar_amounts_round_trip() -> None:
+    """달러 금액(WAN-207)이 저장·조회를 비트로 왕복하고, 옛 %-only 행은 NULL로 남는다."""
+    dollars = TradeDollars(
+        quantity=0.5,
+        notional=50.0,
+        risk_amount=100.0,
+        realized_pnl=58.0,
+        equity_after=10_058.0,
+    )
+    with_money = build_record(_closed_long_trade(), fee_rate=0.0, dollars=dollars)
+    without_money = build_record(_closed_long_trade(), fee_rate=0.0)  # 옛 경로: 달러 없음
+    assert without_money.realized_pnl is None
+    assert without_money.notional is None
+
+    with PaperTradeStore(":memory:") as store:
+        store.upsert_record(with_money)
+        loaded = store.list_records()[0]
+        assert loaded.quantity == 0.5
+        assert loaded.notional == 50.0
+        assert loaded.risk_amount == 100.0
+        assert loaded.realized_pnl == 58.0
+        assert loaded.equity_after == 10_058.0
+        assert loaded == with_money
 
 
 def test_store_list_records_filters_by_entry_time() -> None:

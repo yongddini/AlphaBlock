@@ -1099,18 +1099,34 @@ def _render_paper(settings: Settings) -> None:
         )
         return
 
-    performance = build_performance(records)
+    # 전체 성과는 실제 지갑 기준(전액배팅 아님, WAN-207) — 러너 초기 자본·사이징 비율을
+    # 주면 총수익률이 실제 잔고 변화와 부호·크기로 정합한다.
+    performance = build_performance(
+        records,
+        risk_per_trade=settings.risk_sizing.risk_per_trade,
+        initial_equity=settings.paper_equity,
+    )
     overall = performance.overall
+
+    def _usd(value: float | None) -> str:
+        return "N/A" if value is None else f"{value:+,.2f}"
 
     st.subheader("전체 성과")
     cols = st.columns(6)
-    cols[0].metric("총수익률(복리)", f"{overall.total_return_pct:+.2f}%")
-    cols[1].metric("총 R", f"{overall.total_r:+.2f}")
+    cols[0].metric("총수익률(지갑)", f"{overall.total_return_pct:+.2f}%")
+    cols[1].metric("총 손익($)", _usd(overall.total_realized_pnl))
     cols[2].metric("승률", f"{overall.win_rate * 100:.1f}%")
     payoff = overall.payoff_ratio
     cols[3].metric("손익비", f"{payoff:.2f}" if payoff is not None else "N/A")
     cols[4].metric("MDD", f"{overall.max_drawdown_pct:.2f}%")
     cols[5].metric("거래 수", str(overall.num_trades))
+
+    invested = overall.total_notional
+    risk_total = overall.total_risk_amount
+    cols2 = st.columns(6)
+    cols2[0].metric("총 투입($)", "N/A" if invested is None else f"{invested:,.2f}")
+    cols2[1].metric("총 리스크($)", "N/A" if risk_total is None else f"{risk_total:,.2f}")
+    cols2[2].metric("총 R", f"{overall.total_r:+.2f}")
 
     st.subheader("시리즈별 성과")
     # 화면은 한글 컬럼, CSV 내보내기는 데이터 축이라 영문·UTC 그대로(WAN-190/172).

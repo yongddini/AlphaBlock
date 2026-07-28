@@ -108,6 +108,9 @@ def test_csv_frame_unchanged_utc_and_english() -> None:
         "r_multiple",
         "stop_price",
         "take_profit_price",
+        "notional",
+        "risk_amount",
+        "realized_pnl",
     ]
     # 시각은 변환 없이 epoch ms 원본(저장·계산 축은 UTC 불변).
     assert df.iloc[0]["entry_time"] == _ENTRY_MS
