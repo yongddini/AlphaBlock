@@ -43,9 +43,9 @@ B안의 병목은 1분봉 서브스텝 시뮬레이션(`simulate_zone_limit_trad
 
 ## IS/OOS
 
-`backtest.wan68_short_gate_analysis`의 `_split_bars`(단순 2/3·1/3 분할)를 그대로
-재사용한다. 지표 워밍업은 IS 꼬리에서만 빌리고(OOS 데이터 누수 없음), 오더블록
-탐지는 구간(`[context_start, seg_end)`)에 한정한다.
+`harness.split_bars`(단순 2/3·1/3 분할, 구 `wan68_short_gate_analysis._split_bars`에서
+WAN-198로 이관)를 그대로 재사용한다. 지표 워밍업은 IS 꼬리에서만 빌리고(OOS 데이터
+누수 없음), 오더블록 탐지는 구간(`[context_start, seg_end)`)에 한정한다.
 
 ## 게이트 on/off
 
@@ -354,8 +354,7 @@ def _segment_window(
     seg_start: int,
     seg_end: int,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """`backtest.wan68_short_gate_analysis._evaluate_zone_limit_segment`와 동일한
-    누수 방지 절단(지표 워밍업은 IS 꼬리에서만, 성과 집계는 구간 시간창으로 한정)."""
+    """누수 방지 절단 — 지표 워밍업은 IS 꼬리에서만, 성과 집계는 구간 시간창으로 한정."""
     htf_ms = timeframe_to_ms(timeframe)
     htf_seg = frame.iloc[context_start:seg_end].reset_index(drop=True)
     if htf_seg.empty:

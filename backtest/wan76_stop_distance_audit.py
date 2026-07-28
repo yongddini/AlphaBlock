@@ -32,7 +32,6 @@ from unittest.mock import patch
 import pandas as pd
 from pydantic import BaseModel, ConfigDict
 
-from backtest import wan68_short_gate_analysis as wan68
 from backtest import wan70_random_control_b as wan70
 from backtest import wan73_validation as wan73
 from backtest import wan74_discrepancy_audit as wan74
@@ -71,7 +70,7 @@ RECHECK_FLOOR = 0.005
 #: 재검증 대상 TF. 원 리포트 전부(15m/1h/4h/1d) 대신 **1h·4h만** 재실행한다 — 15m은
 #: 후보(1분봉 서브스텝) 수가 압도적으로 많아 재시뮬레이션 비용이 가장 크고, 1d는
 #: 원 리포트에서도 표본(n<20)이 너무 작아 대다수 셀이 유의성 판정에서 이미 제외됐다
-#: (wan68/70/73_summary.md 참고). 1h·4h는 원 리포트에서 표본이 충분했던 핵심 셀이라
+#: (wan70/73_summary.md 참고). 1h·4h는 원 리포트에서 표본이 충분했던 핵심 셀이라
 #: "방향이 뒤집히는가"라는 재검증 질문에 가장 정보량이 크면서, 전체 재실행(시간 단위)
 #: 대신 이 세션 내에 끝낼 수 있는 비용으로 줄인다. §1~3(주 산출물)은 4TF 전부를 쓴다.
 RECHECK_TIMEFRAMES: tuple[str, ...] = ("1h", "4h")
@@ -451,63 +450,6 @@ def recheck_wan74(
     )
 
 
-def recheck_wan68(
-    floor: float = RECHECK_FLOOR,
-    *,
-    timeframes: tuple[str, ...] = RECHECK_TIMEFRAMES,
-    iterations: int = RECHECK_ITERATIONS,
-) -> RecheckResult:
-    """WAN-68(숏 게이트 3안) — 하한 적용 후에도 '무게이트 대비 우위/무작위 대비 약한 엣지' 방향이
-    유지되는지. 이 이슈는 단일 채택/기각 판정 함수가 없어(WAN-69가 이미 롱온리로 확정) 헤드라인
-    수치(변형별 평균 OOS 수익률, 무게이트 대비 우월 셀 수, 무작위 대조군 유의 셀 수)만 재현한다.
-    """
-    with patch.object(wan68, "default_backtest_config", _patched_default_backtest_config(floor)):
-        variant_rows, random_results = wan68.run_experiment(
-            timeframes=timeframes, random_iterations=iterations
-        )
-
-    by_variant: dict[str, list[float]] = {}
-    superior_counts: dict[str, int] = {}
-    for row in variant_rows:
-        by_variant.setdefault(row.variant, []).append(row.oos_total_return)
-        if row.oos_superior_to_baseline:
-            superior_counts[row.variant] = superior_counts.get(row.variant, 0) + 1
-    n_cells = len(random_results)
-    sig_random = sum(
-        1 for r in random_results if r.random_p_value is not None and r.random_p_value <= 0.05
-    )
-    lines = []
-    for variant, returns in sorted(by_variant.items()):
-        mean_return = sum(returns) / len(returns) if returns else None
-        sup = superior_counts.get(variant, 0)
-        lines.append(f"{variant}: 평균OOS={mean_return:.4f}, 우월셀={sup}/{len(returns)}")
-    detail = "; ".join(lines) + f" | 무작위대조군 유의(p<=0.05) 셀={sig_random}/{n_cells}"
-    # WAN-68 원 결론의 핵심 방향: (1) 숏 억제 변형들이 무게이트 대비 대체로 우위,
-    # (2) 무작위 대조군 대비 유의 셀은 극소수(원 리포트 1/12). 두 방향이 모두 유지되면 hold.
-    long_only_mean = None
-    baseline_mean = None
-    for variant, returns in by_variant.items():
-        if "나_숏제거" in variant:
-            long_only_mean = sum(returns) / len(returns) if returns else None
-        if "baseline_B안" in variant:
-            baseline_mean = sum(returns) / len(returns) if returns else None
-    direction_holds = (
-        long_only_mean is not None and baseline_mean is not None and long_only_mean >= baseline_mean
-    )
-    weak_edge_holds = n_cells == 0 or (sig_random / n_cells) <= 0.5
-    holds = direction_holds and weak_edge_holds
-    return RecheckResult(
-        issue="WAN-68",
-        baseline_verdict=(
-            "숏 억제 변형 전부 무게이트보다 평균 OOS 우위(롱온리 +1.58% vs 무게이트 +0.78%); "
-            "무작위 대조군 유의 셀 1/12 (backtest/reports/wan68_summary.md)"
-        ),
-        floor_verdict=detail,
-        holds=holds,
-        detail=f"하한={floor} 적용 재실행, 변형 {len(by_variant)}종 × 셀 {n_cells}개",
-    )
-
-
 # --------------------------------------------------------------------------- #
 # 리포트 산출
 # --------------------------------------------------------------------------- #
@@ -560,8 +502,6 @@ def run_all(
         rechecks.append(recheck_wan73(recheck_floor))
         print("[wan76] 재검증: WAN-74 재실행")
         rechecks.append(recheck_wan74(recheck_floor))
-        print("[wan76] 재검증: WAN-68 재실행")
-        rechecks.append(recheck_wan68(recheck_floor))
 
     return AuditResult(
         diagnostics=diagnostics,

@@ -51,8 +51,9 @@ WAN-84가 재실행한 세 모듈은 `funding_rates`를 **넘기지 않았다**.
 
 ## IS/OOS 분할 — WAN-84와 같은 경계
 
-`wan68_short_gate_analysis._split_bars`(앞 2/3 IS, 뒤 1/3 OOS) + `_segment_window`
-(워밍업은 IS 꼬리에서만 빌려 OOS 누수 없음)를 그대로 쓴다. 대조표가 성립하려면 WAN-84와
+`harness.split_bars`(앞 2/3 IS, 뒤 1/3 OOS, 구 `wan68_short_gate_analysis._split_bars`에서
+WAN-198로 이관) + `_segment_window`(워밍업은 IS 꼬리에서만 빌려 OOS 누수 없음)를 그대로
+쓴다. 대조표가 성립하려면 WAN-84와
 **같은 자리에서 자른** 셀이어야 하기 때문이다 — 경계가 다르면 "숏을 뺐더니 달라졌다"와
 "자른 데가 달라서 달라졌다"를 구분할 수 없다.
 
