@@ -66,10 +66,8 @@ from dashboard.trade_table import (
     style_trade_frame,
 )
 from live.runtime_state import EventRecord
-from paper.parity import build_parity_report
 from paper.performance import build_performance
 from paper.report import (
-    parity_to_display_frame,
     performance_to_dataframe,
     performance_to_display_frame,
     records_to_dataframe,
@@ -1134,26 +1132,6 @@ def _render_paper(settings: Settings) -> None:
         file_name="paper_trades.csv",
         mime="text/csv",
     )
-
-    st.subheader("백테스트 대비 패리티")
-    st.caption("같은 기간·시리즈를 백테스트로 재실행해 거래 수·승률·평균 R을 비교합니다.")
-    try:
-        report = build_parity_report(db_path, settings=settings, series=series)
-    except Exception as exc:  # noqa: BLE001 — 대시보드는 실패해도 다른 섹션을 살린다.
-        st.warning(f"패리티 리포트를 만들지 못했습니다: {exc}")
-        return
-    st.dataframe(parity_to_display_frame(report), use_container_width=True, hide_index=True)
-    st.download_button(
-        "패리티 CSV",
-        report.to_dataframe().to_csv(index=False),
-        file_name="paper_parity.csv",
-        mime="text/csv",
-    )
-    if report.flagged_rows:
-        flagged = ", ".join(f"{r.symbol} {r.timeframe}" for r in report.flagged_rows)
-        st.warning(f"⚠ 페이퍼와 백테스트 차이가 큰 시리즈: {flagged}")
-    else:
-        st.success("모든 시리즈가 백테스트와 임계값 내로 일치합니다.")
 
 
 def main() -> None:

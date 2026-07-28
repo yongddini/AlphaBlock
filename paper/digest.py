@@ -1,6 +1,6 @@
 """페이퍼 성과 주간/일간 다이제스트 텍스트 (WAN-36).
 
-WAN-33의 성과 집계(`paper.performance`)와 패리티 결과(`paper.parity`)를 재사용해, 한
+WAN-33의 성과 집계(`paper.performance`)를 재사용해, 한
 기간의 페이퍼 거래 성과를 폰으로 받아볼 짧은 마크다운 요약으로 만든다. 여기에는
 **순수 함수만** 둔다(파일·네트워크·DB I/O 없음) — 합성 성과 객체로 문자열을 그대로
 검증할 수 있게 하기 위해서다. 저장소 조회·텔레그램 발송 배선은
@@ -11,7 +11,6 @@ WAN-33의 성과 집계(`paper.performance`)와 패리티 결과(`paper.parity`)
 * 기간 라벨(UTC 날짜 범위)
 * 전체 거래 수·승률·순손익률(%)·합계 R·MDD(%)
 * 심볼·TF 시리즈별 상위/하위(순손익률 기준)
-* 백테스트 패리티에서 `flagged`된(불일치가 큰) 시리즈 요약
 * 거래가 0건이면 "거래 없음 + 러너 상태 한 줄"로 짧게(무음 실패 방지)
 """
 
@@ -91,15 +90,15 @@ def build_digest(
     performance: PaperPerformance,
     *,
     period_label: str,
-    parity_flagged: Sequence[tuple[str, str]] | None = None,
     runner_line: str | None = None,
     top_n: int = DEFAULT_TOP_N,
 ) -> str:
     """성과 집계를 텔레그램용 마크다운 다이제스트 문자열로 만든다.
 
-    `parity_flagged`는 3상태다: ``None``=패리티 미실행, ``[]``=실행했고 불일치 없음,
-    ``[(symbol, timeframe), ...]``=불일치가 큰 시리즈. `runner_line`은 거래가 0건일 때
-    붙일 러너 상태 한 줄이며, 거래가 있으면 무시한다.
+    `runner_line`은 거래가 0건일 때 붙일 러너 상태 한 줄이며, 거래가 있으면 무시한다.
+
+    ⚠️ 옛 `parity_flagged`(백테스트 패리티 불일치 요약)는 **WAN-200 §C로 제거됐다** —
+    패리티 리포트가 페이퍼(B안 지정가)를 A안 재실행과 비교하던 잔재라 함께 삭제했다.
     """
     overall = performance.overall
     if overall.num_trades == 0:
@@ -127,13 +126,5 @@ def build_digest(
         if bottom:
             lines.append("*하위 시리즈*")
             lines.extend(_series_line(s) for s in bottom)
-
-    if parity_flagged is not None:
-        lines.append("")
-        if parity_flagged:
-            labels = ", ".join(f"`{sym} {tf}`" for sym, tf in parity_flagged)
-            lines.append(f"⚠️ *백테스트 패리티 불일치*: {labels}")
-        else:
-            lines.append("✅ 백테스트 패리티 정상")
 
     return "\n".join(lines)

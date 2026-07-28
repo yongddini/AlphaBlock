@@ -7,15 +7,15 @@ WAN-25 페이퍼 러너가 `paper_trades` 테이블에 누적한 가상 거래�
 
 데이터는 `ALPHABLOCK_DB_PATH`(기본 `data/ohlcv.db`)의 `paper_trades`(성과)·`ohlcv`
 (패리티 백테스트)·`funding_rate`(펀딩비)에서 읽는다. 결과 표는 `--out-dir`에 CSV로
-저장한다(거래 원장·성과 요약·패리티).
+저장한다(거래 원장·성과 요약).
 
 사용법::
 
-    # 저장된 페이퍼 거래로 성과 + 패리티 리포트
+    # 저장된 페이퍼 거래로 성과 리포트
     uv run python scripts/paper_report.py
 
-    # 특정 기간·심볼만, 패리티 없이 성과만
-    uv run python scripts/paper_report.py --symbols BTC/USDT:USDT --start 2024-01-01 --no-parity
+    # 특정 기간·심볼만
+    uv run python scripts/paper_report.py --symbols BTC/USDT:USDT --start 2024-01-01
 """
 
 from __future__ import annotations
@@ -26,7 +26,6 @@ from pathlib import Path
 import pandas as pd
 
 from config.settings import get_settings
-from paper.parity import ParityThresholds, build_parity_report
 from paper.performance import build_performance
 from paper.report import (
     format_performance,
@@ -46,7 +45,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--out-dir", type=Path, default=Path("out/paper"), help="결과 CSV 저장 디렉터리"
     )
-    parser.add_argument("--no-parity", action="store_true", help="패리티(백테스트 비교) 생략")
     return parser.parse_args(argv)
 
 
@@ -100,25 +98,6 @@ def main(argv: list[str] | None = None) -> None:
     performance_to_dataframe(performance).to_csv(perf_path, index=False)
     print(f"\n거래 원장 CSV: {trades_path}")
     print(f"성과 요약 CSV: {perf_path}")
-
-    if args.no_parity:
-        return
-
-    report = build_parity_report(
-        db_path,
-        settings=settings,
-        series=target_series,
-        start_ms=start_ms,
-        end_ms=end_ms,
-        thresholds=ParityThresholds(),
-    )
-    print("\n" + report.to_table())
-    parity_path = out_dir / "parity.csv"
-    report.to_dataframe().to_csv(parity_path, index=False)
-    print(f"\n패리티 CSV: {parity_path}")
-    if report.flagged_rows:
-        flagged = ", ".join(f"{r.symbol} {r.timeframe}" for r in report.flagged_rows)
-        print(f"⚠ 불일치가 큰 시리즈: {flagged}")
 
 
 if __name__ == "__main__":

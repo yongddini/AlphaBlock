@@ -68,7 +68,7 @@ def test_build_digest_single_series_exact() -> None:
     )
 
 
-def test_build_digest_top_bottom_and_parity() -> None:
+def test_build_digest_top_bottom() -> None:
     perf = build_performance(
         [
             _rec("BTC/USDT:USDT", "1h", entry_time=1, exit_time=1, net_pct=2.0, r=2.0),
@@ -77,30 +77,15 @@ def test_build_digest_top_bottom_and_parity() -> None:
             _rec("SOL/USDT:USDT", "15m", entry_time=4, exit_time=4, net_pct=1.0, r=1.0),
         ]
     )
-    text = build_digest(
-        perf,
-        period_label="P",
-        parity_flagged=[("ETH/USDT:USDT", "4h")],
-        top_n=1,
-    )
+    text = build_digest(perf, period_label="P", top_n=1)
     lines = text.splitlines()
     # 상위: SOL(+1.00), 하위: ETH(-2.00). BTC(+0.98)는 상·하위 사이라 생략.
     assert "*상위 시리즈*" in lines
     assert "• `SOL/USDT:USDT 15m` `+1.00%` (1건)" in lines
     assert "*하위 시리즈*" in lines
     assert "• `ETH/USDT:USDT 4h` `-2.00%` (1건)" in lines
-    assert "⚠️ *백테스트 패리티 불일치*: `ETH/USDT:USDT 4h`" in lines
     # 상위 섹션이 하위 섹션보다 먼저 나온다.
     assert lines.index("*상위 시리즈*") < lines.index("*하위 시리즈*")
-
-
-def test_build_digest_parity_clean() -> None:
-    perf = build_performance(
-        [_rec("BTC/USDT:USDT", "1h", entry_time=1, exit_time=1, net_pct=1.0, r=1.0)]
-    )
-    text = build_digest(perf, period_label="P", parity_flagged=[])
-    assert "✅ 백테스트 패리티 정상" in text
-    assert "패리티 불일치" not in text
 
 
 def test_build_digest_empty_exact() -> None:
@@ -141,7 +126,6 @@ def test_generate_digest_reads_store(tmp_path: Path) -> None:
         until_ms=None,
         symbols=None,
         timeframes=None,
-        include_parity=False,
     )
     assert "페이퍼 성과 다이제스트" in text
     assert "거래 *1*건" in text
@@ -155,7 +139,6 @@ def test_generate_digest_missing_db_is_empty(tmp_path: Path) -> None:
         until_ms=None,
         symbols=None,
         timeframes=None,
-        include_parity=True,  # 0건이면 패리티 조립 전에 반환 → 예외 없음
     )
     assert "청산된 페이퍼 거래가 없습니다" in text
 
@@ -179,7 +162,7 @@ def test_main_sends_when_enabled(tmp_path: Path, monkeypatch) -> None:  # type: 
     monkeypatch.setattr(paper_digest, "get_settings", lambda: settings)
     monkeypatch.setattr(paper_digest, "build_telegram_client", lambda _s: fake)
 
-    rc = paper_digest.main(["--no-parity"])
+    rc = paper_digest.main([])
     assert rc == 0
     assert fake.sent and "페이퍼 성과 다이제스트" in fake.sent[0]
 
@@ -194,7 +177,7 @@ def test_main_disabled_does_not_send(tmp_path: Path, monkeypatch, capsys) -> Non
     monkeypatch.setattr(paper_digest, "get_settings", lambda: settings)
     monkeypatch.setattr(paper_digest, "build_telegram_client", lambda _s: fake)
 
-    rc = paper_digest.main(["--no-parity"])
+    rc = paper_digest.main([])
     assert rc == 0
     assert fake.sent == []  # 발송 안 함
     assert "페이퍼 성과 다이제스트" in capsys.readouterr().out  # 미리보기 출력
@@ -206,7 +189,7 @@ def test_main_dry_run_prints_only(tmp_path: Path, monkeypatch, capsys) -> None: 
     monkeypatch.setattr(paper_digest, "get_settings", lambda: settings)
     monkeypatch.setattr(paper_digest, "build_telegram_client", lambda _s: fake)
 
-    rc = paper_digest.main(["--dry-run", "--no-parity"])
+    rc = paper_digest.main(["--dry-run"])
     assert rc == 0
     assert fake.sent == []
     assert "청산된 페이퍼 거래가 없습니다" in capsys.readouterr().out

@@ -23,7 +23,6 @@ from backtest.report import (
     COL_SIDE,
     format_time_kst,
 )
-from paper.parity import ParityReport
 from paper.performance import PaperPerformance, PerfMetrics
 from paper.store import PaperTradeRecord
 from strategy.models import OrderBlockDirection, SignalExitReason
@@ -116,8 +115,8 @@ def performance_to_dataframe(perf: PaperPerformance) -> pd.DataFrame:
 # --------------------------------------------------------------------------- #
 # 화면 표시용 프레임 (WAN-190) — KST 시각 + 한글 컬럼.
 #
-# ⚠️ 위의 `records_to_dataframe`/`performance_to_dataframe`/`ParityReport.to_dataframe`
-# 는 **CSV·데이터 축이라 UTC(epoch ms) + 영문 컬럼 그대로다**(WAN-172/106 규약). 아래
+# ⚠️ 위의 `records_to_dataframe`/`performance_to_dataframe`는 **CSV·데이터 축이라
+# UTC(epoch ms) + 영문 컬럼 그대로다**(WAN-172/106 규약). 아래
 # 함수들은 화면(`st.dataframe`) 전용이고, 시각 포맷은 "저장된 거래" 탭과 같은
 # `format_time_kst` 하나만 쓴다(포맷터 이중화 금지).
 # --------------------------------------------------------------------------- #
@@ -147,21 +146,6 @@ COL_AVG_R = "평균R"
 COL_PAYOFF = "손익비"
 COL_PROFIT_FACTOR = "PF"
 COL_MAX_DD = "MDD%"
-
-#: 패리티 화면 컬럼(한글).
-COL_PAPER_TRADES = "페이퍼 거래수"
-COL_BACKTEST_TRADES = "백테 거래수"
-COL_TRADE_DIFF = "거래수차"
-COL_PAPER_WIN_RATE = "페이퍼 승률%"
-COL_BACKTEST_WIN_RATE = "백테 승률%"
-COL_WIN_RATE_DIFF = "승률차%p"
-COL_PAPER_AVG_R = "페이퍼 평균R"
-COL_BACKTEST_AVG_R = "백테 평균R"
-COL_AVG_R_DIFF = "평균R차"
-COL_PAPER_RETURN = "페이퍼 총수익%"
-COL_BACKTEST_RETURN = "백테 총수익%"
-COL_RETURN_DIFF = "총수익차%p"
-COL_FLAGGED = "불일치"
 
 #: `bull`/`bear` → 롱/숏. "저장된 거래" 탭의 `SIDE_LABELS`(롱/숏)와 같은 용어.
 _DIRECTION_LABELS: Mapping[OrderBlockDirection, str] = {
@@ -265,53 +249,6 @@ _DISPLAY_PERF_COLUMNS = [
     COL_PAYOFF,
     COL_PROFIT_FACTOR,
     COL_MAX_DD,
-]
-
-
-def parity_to_display_frame(report: ParityReport) -> pd.DataFrame:
-    """패리티 비교 행을 **화면용** 표로 (한글 컬럼, WAN-190).
-
-    승률·승률차는 분수라 화면에서는 %로 환산한다(CSV `to_dataframe`는 분수 그대로).
-    """
-    rows = [
-        {
-            COL_SYMBOL: r.symbol,
-            COL_TIMEFRAME: r.timeframe,
-            COL_PAPER_TRADES: r.paper.num_trades,
-            COL_BACKTEST_TRADES: r.backtest.num_trades,
-            COL_TRADE_DIFF: r.trade_count_diff,
-            COL_PAPER_WIN_RATE: r.paper.win_rate * 100.0,
-            COL_BACKTEST_WIN_RATE: r.backtest.win_rate * 100.0,
-            COL_WIN_RATE_DIFF: r.win_rate_diff * 100.0,
-            COL_PAPER_AVG_R: r.paper.avg_r,
-            COL_BACKTEST_AVG_R: r.backtest.avg_r,
-            COL_AVG_R_DIFF: r.avg_r_diff,
-            COL_PAPER_RETURN: r.paper.total_return_pct,
-            COL_BACKTEST_RETURN: r.backtest.total_return_pct,
-            COL_RETURN_DIFF: r.total_return_diff,
-            COL_FLAGGED: "⚠" if r.flagged else "",
-        }
-        for r in report.rows
-    ]
-    return pd.DataFrame(rows, columns=_DISPLAY_PARITY_COLUMNS)
-
-
-_DISPLAY_PARITY_COLUMNS = [
-    COL_SYMBOL,
-    COL_TIMEFRAME,
-    COL_PAPER_TRADES,
-    COL_BACKTEST_TRADES,
-    COL_TRADE_DIFF,
-    COL_PAPER_WIN_RATE,
-    COL_BACKTEST_WIN_RATE,
-    COL_WIN_RATE_DIFF,
-    COL_PAPER_AVG_R,
-    COL_BACKTEST_AVG_R,
-    COL_AVG_R_DIFF,
-    COL_PAPER_RETURN,
-    COL_BACKTEST_RETURN,
-    COL_RETURN_DIFF,
-    COL_FLAGGED,
 ]
 
 

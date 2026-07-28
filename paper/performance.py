@@ -2,8 +2,7 @@
 
 저장된 페이퍼 거래(`paper.store.PaperTradeRecord`)로부터 총 PnL(R 배수 및 %)·승률·
 손익비·MDD·거래 수를 계산한다. 백테스트 거래도 동일한 지표로 비교하려고, 지표 계산은
-최소 통계 단위(`TradeStat`: 순손익률·R 배수·청산시각)에만 의존하도록 분리한다. 이렇게
-하면 패리티(`paper.parity`)가 페이퍼·백테스트 양쪽을 **같은 함수**로 집계할 수 있다.
+최소 통계 단위(`TradeStat`: 순손익률·R 배수·청산시각)에만 의존하도록 분리한다.
 """
 
 from __future__ import annotations
