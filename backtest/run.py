@@ -1113,8 +1113,9 @@ def _default_offsets_bps(entry_modes: tuple[str, ...]) -> tuple[float, ...]:
     단 **종가 진입이 격자에 섞이면 0bp로 내린다**: A안은 오프셋을 읽지 않으므로
     (`apply_zone_limit_offset` 호출부가 B안뿐) 종가 팔에 2bp를 얹을 방법이 없다. 그
     상태로 지정가 팔만 2bp를 물리면 두 팔이 **진입 방식 말고도 오프셋까지 달라져**,
-    진입 방식을 격리하려던 대조표가 두 변수를 섞어 버린다(WAN-95 `CLOSE_ENTRY_PARAMS`가
-    같은 이유로 다른 필드를 전부 맞춘다). 오프셋을 명시로 주면 `Grid`가 이 조합을 거부한다.
+    진입 방식을 격리하려던 대조표가 두 변수를 섞어 버린다(WAN-95의 옛 종가 대조군도 같은
+    이유로 다른 필드를 전부 맞췄다 — 그 A안 비교팔은 WAN-200 §A로 제거됐다). 오프셋을
+    명시로 주면 `Grid`가 이 조합을 거부한다.
     """
     if "close" in entry_modes:
         return (0.0,)
