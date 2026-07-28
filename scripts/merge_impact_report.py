@@ -130,7 +130,7 @@ def build_report(
         "부풀려져 있었다. 병합 존은 경계가 합집합이라 손절 거리도 달라진다(위 표).",
         "",
         "> 이 수치는 신호 단계 직접 비교다(RSI·백테스트 엔진 미적용). RSI 게이트·청산까지",
-        "> 포함한 성과 재산출은 `scripts/backtest_report.py` 등을 재실행하면 나온다.",
+        "> 포함한 성과 재산출은 `python -m backtest.run` 등을 재실행하면 나온다.",
     ]
     return "\n".join(lines) + "\n"
 

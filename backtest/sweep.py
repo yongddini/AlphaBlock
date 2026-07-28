@@ -104,8 +104,7 @@ def default_backtest_config(
     (WAN-26)을 `BacktestConfig.risk_sizing`에 실어, 손절 거리에 반비례하는 리스크
     기반 사이징이 기본으로 켜지게 한다 — 이 배선이 빠지면 모든 진입이 조용히 자본
     100%를 쓰는 `position_fraction` 경로로 되돌아간다(WAN-65가 고친 조용한 실패).
-    스윕(`run_sweep`)·CLI 리포트(`scripts/backtest_report.py`)·워크포워드
-    (`backtest.walkforward`)·대시보드(`dashboard.app`)가
+    스윕(`run_sweep`)·CLI(`backtest.run`)·대시보드(`dashboard.app`)가
     모두 이 함수(또는 이 함수의 결과를 `model_copy`로 덮어쓴 설정)를 거쳐
     `BacktestConfig`를 만든다 — `BacktestConfig()`를 진입점에서 직접 생성하지 않는다.
 
