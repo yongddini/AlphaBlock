@@ -27,6 +27,7 @@ from live.order_journal import OrderJournal
 from live.runtime_state import RuntimeStateStore
 from live.zone_limit_notifier import ZoneLimitNotifier
 from live.zone_limit_runner import ZoneLimitPaperRunner
+from paper.performance import build_performance
 from paper.store import PaperTradeRecorder, PaperTradeStore
 from strategy.models import (
     ConfluenceParams,
@@ -184,6 +185,40 @@ def test_reserve_fill_open_and_exit_roundtrip(rig: dict[str, object]) -> None:
     assert executor.open_positions == []
     paper_store: PaperTradeStore = rig["paper_store"]  # type: ignore[assignment]
     assert paper_store.count(_SYMBOL, _TF) == 1
+
+
+def test_wallet_reconstruction_matches_runner_equity(rig: dict[str, object]) -> None:
+    """청산 시 달러 금액이 남고, 그것으로 재구성한 자본 곡선이 러너 실제 지갑과 일치한다.
+
+    §2 완료 기준(WAN-207): 전액배팅이 아니라 실제 지갑 기준 total_return — 재구성 곡선의
+    최종 자본이 러너의 실제 `equity`와 같고, 총수익률이 (최종−초기)/초기와 정합한다.
+    """
+    store: OhlcvStore = rig["store"]  # type: ignore[assignment]
+    runner: ZoneLimitPaperRunner = rig["runner"]  # type: ignore[assignment]
+    executor: PaperExecutor = rig["executor"]  # type: ignore[assignment]
+    paper_store: PaperTradeStore = rig["paper_store"]  # type: ignore[assignment]
+
+    initial = executor.equity  # 거래 전 초기 자본.
+
+    store.upsert_candles([_m1(_FORMING + _M, 94.9, 99.0, 95.2)])
+    runner.poll_once()
+    store.upsert_candles([_m1(_FORMING + 2 * _M, 95.0, 103.5, 103.0)])
+    runner.poll_once()
+
+    records = paper_store.list_records(_SYMBOL, _TF)
+    assert len(records) == 1
+    rec = records[0]
+    # 달러 금액이 영속됐다("얼마 들어갔는지").
+    assert rec.quantity is not None and rec.quantity > 0.0
+    assert rec.notional == pytest.approx(rec.entry_price * rec.quantity)
+    assert rec.risk_amount is not None and rec.risk_amount > 0.0
+    assert rec.realized_pnl is not None
+    assert rec.equity_after == pytest.approx(executor.equity)
+
+    perf = build_performance(records, initial_equity=initial)
+    expected = (executor.equity - initial) / initial * 100.0
+    assert perf.overall.total_return_pct == pytest.approx(expected)
+    assert perf.overall.total_realized_pnl == pytest.approx(rec.realized_pnl)
 
 
 def test_stop_loss_exit(rig: dict[str, object]) -> None:
@@ -393,6 +428,127 @@ def test_accepted_entry_records_entered_disposition(rig: dict[str, object]) -> N
     assert (stats.entered, stats.entry_rejected, stats.entry_unrecorded) == (1, 0, 0)
     assert stats.entry_rate == 1.0
     assert journal.orphan_fills() == []
+
+
+def test_fill_on_later_poll_records_disposition(
+    rig: dict[str, object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """예약과 체결이 **다른 폴링 배치**에서 나도 처분·진입이 남는다 (WAN-207 근본 원인).
+
+    이전 버그: 체결 처리가 `order.journal_id`를 읽었는데 `order`는 `placed` 분기에서만
+    대입되는 지역 변수였다. 주문이 걸린 뒤 나중 폴링에서 가격이 닿아 체결되면 그 배치엔
+    `placed`가 없어 `UnboundLocalError`가 진입 **직후** 터졌고 — 포지션은 열렸는데
+    `entry_status`는 NULL, 진입 알림도 유실됐다. 이제 체결 이벤트가 실어 온 주문을 쓴다.
+    """
+    store: OhlcvStore = rig["store"]  # type: ignore[assignment]
+    runner: ZoneLimitPaperRunner = rig["runner"]  # type: ignore[assignment]
+    executor: PaperExecutor = rig["executor"]  # type: ignore[assignment]
+    journal: OrderJournal = rig["journal"]  # type: ignore[assignment]
+
+    # 하락 시딩(130→101)으로 밴드(≈98.8)를 넓은 존(90~99.5) 안에 앉혀 "예약은 됐지만
+    # 아직 터치는 아닌" 대기 상태를 만든다(test_pending_order_exposed와 같은 장치).
+    desc_zone = OrderBlock(
+        direction=OrderBlockDirection.BULLISH,
+        top=99.5,
+        bottom=90.0,
+        start_time=0,
+        confirmed_time=_H,
+        ob_volume=1.0,
+        ob_low_volume=0.5,
+        ob_high_volume=0.5,
+    )
+    result = OrderBlockResult(order_blocks=[desc_zone], signals=[])
+
+    class _Stub:
+        def __init__(self, params: object = None) -> None:
+            pass
+
+        def run(self, df: pd.DataFrame) -> OrderBlockResult:
+            return result
+
+    monkeypatch.setattr(limit_engine, "OrderBlockDetector", _Stub)
+    store.upsert_candles([_htf_candle(i, close=130.0 - i) for i in range(_N_CLOSED)])
+
+    # 폴링 1: 존 탭(저가 99.4)이되 지정가(≈98.8)엔 안 닿음 → 주문이 쉰다(대기).
+    store.upsert_candles([_m1(_FORMING, 99.4, 101.5, 100.0)])
+    runner.poll_once()
+    assert executor.open_positions == []
+    assert journal.fill_stats()[0].pending == 1
+
+    # 폴링 2: 지정가를 관통하는 1분봉 → 체결(이 배치엔 placed가 없다 = 옛 버그의 방아쇠).
+    store.upsert_candles([_m1(_FORMING + _M, 96.0, 99.0, 98.0)])
+    runner.poll_once()
+
+    assert len(executor.open_positions) == 1
+    stats = journal.fill_stats()[0]
+    assert stats.filled == 1
+    assert (stats.entered, stats.entry_unrecorded) == (1, 0)
+    assert journal.orphan_fills() == []
+
+
+def test_notifier_exception_does_not_lose_disposition(rig: dict[str, object]) -> None:
+    """알림기가 예외를 던져도 처분은 남고 러너는 계속 돈다 (WAN-207 예외 주입).
+
+    처분 기록은 알림보다 먼저이고 알림 실패는 삼켜 로그로만 드러내므로, 다운스트림
+    예외가 `entry_status`를 NULL로 남기지 않는다.
+    """
+    store: OhlcvStore = rig["store"]  # type: ignore[assignment]
+    runner: ZoneLimitPaperRunner = rig["runner"]  # type: ignore[assignment]
+    executor: PaperExecutor = rig["executor"]  # type: ignore[assignment]
+    journal: OrderJournal = rig["journal"]  # type: ignore[assignment]
+
+    class _Boom:
+        def note_placed(self) -> None: ...
+        def note_expired(self) -> None: ...
+        def tick(self, equity: float, *, now_ms: int | None = None) -> None: ...
+        def handle_fill(self, fill: object, report: object) -> None:
+            raise RuntimeError("텔레그램 다운")
+
+        def handle_exit(
+            self, report: object, *, exit_price: float, reason: object, exit_time: int
+        ) -> None: ...
+
+    runner._notifier = _Boom()  # type: ignore[assignment]
+
+    store.upsert_candles([_m1(_FORMING + _M, 94.9, 99.0, 95.2)])
+    runner.poll_once()  # 예외가 poll을 죽이지 않는다.
+
+    assert len(executor.open_positions) == 1
+    stats = journal.fill_stats()[0]
+    assert (stats.entered, stats.entry_unrecorded) == (1, 0)
+    assert journal.orphan_fills() == []
+
+
+def test_enter_exception_still_records_disposition(
+    rig: dict[str, object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """진입 집행이 예외로 끊겨도 처분이 NULL로 남지 않는다 (WAN-207 try/finally).
+
+    `filled` + `entry_status IS NULL`은 "쓰기 사이의 유실"의 유일한 서명이라(WAN-194),
+    진입 처리가 터지면 최소한 사유를 붙인 `rejected`를 남겨 그 서명을 오염시키지 않는다.
+    """
+    store: OhlcvStore = rig["store"]  # type: ignore[assignment]
+    runner: ZoneLimitPaperRunner = rig["runner"]  # type: ignore[assignment]
+    executor: PaperExecutor = rig["executor"]  # type: ignore[assignment]
+    journal: OrderJournal = rig["journal"]  # type: ignore[assignment]
+
+    def _boom(*args: object, **kwargs: object) -> object:
+        raise RuntimeError("DB busy")
+
+    monkeypatch.setattr(executor, "enter", _boom)
+
+    store.upsert_candles([_m1(_FORMING + _M, 94.9, 99.0, 95.2)])
+    runner.poll_once()
+
+    stats = journal.fill_stats()[0]
+    assert stats.filled == 1
+    assert stats.entry_unrecorded == 0  # NULL로 남지 않았다.
+    assert stats.entry_rejected == 1
+    assert journal.orphan_fills() == []
+    reason = journal._conn.execute(  # noqa: SLF001 — 폴백 사유가 찍혔는지 보는 회귀 테스트.
+        "SELECT entry_reject_reason FROM live_limit_orders WHERE status = 'filled'"
+    ).fetchone()[0]
+    assert reason and "WAN-207" in reason
 
 
 def test_rejected_entry_notifies(rig: dict[str, object], monkeypatch: pytest.MonkeyPatch) -> None:

@@ -219,50 +219,94 @@ class ZoneLimitPaperRunner:
                     order.tap_index,
                 )
             elif event.kind == "filled" and event.fill is not None:
-                fill = event.fill
-                report = self._executor.enter(
-                    EntryIntent(
-                        symbol=fill.symbol,
-                        timeframe=fill.timeframe,
-                        direction=fill.direction,
-                        entry_price=fill.price,
-                        entry_time=fill.time,
-                        stop_price=fill.stop_price,
-                        take_profit_price=fill.take_profit_price,
-                    ),
-                    now_ms=fill.time,
-                )
-                # 체결의 하류 처분을 장부에 남긴다(WAN-194). 거부일 때도 반드시 남긴다 —
-                # 안 남기면 `filled`인데 포지션이 없는 행이 "정상 거부"인지 "쓰기 사이의
-                # 유실"인지 구분되지 않는다(이 이슈가 손상 의심으로 시작한 이유).
-                journal_id = order.journal_id
-                if journal_id is not None:
-                    self._journal.record_entry_result(
-                        journal_id,
-                        entered=report.accepted,
-                        reason=report.outcome.reason,
-                    )
-                # 거부는 WARNING이다 — 체결이 거래가 되지 않은 것이라 조용히 흘리면
-                # 장부와 성과가 어긋난 채로 운영이 계속된다.
-                log = _logger.info if report.accepted else _logger.warning
-                log(
-                    "지정가 체결: %s %s %s @%.6g 관통=%.2fbp 대기=%s → 페이퍼 진입 %s",
-                    fill.symbol,
-                    fill.timeframe,
-                    format_kst_zoned(fill.time),
-                    fill.price,
-                    fill.penetration_bps,
-                    f"{fill.waited_ms}ms" if fill.waited_ms is not None else "?",
-                    "성공" if report.accepted else f"거부({report.outcome.reason})",
-                )
-                if self._notifier is not None:
-                    self._notifier.handle_fill(fill, report)
+                self._handle_fill(event)
             else:
                 if self._notifier is not None and event.kind == "cancelled_expired":
                     self._notifier.note_expired()  # 만료는 실시간 없음 — 일일 요약에만.
                 _logger.info(
                     "지정가 주문 종결: %s %s %s", event.symbol, event.timeframe, event.kind
                 )
+
+    def _handle_fill(self, event: EngineEvent) -> None:
+        """체결 이벤트를 집행·처분 기록·알림한다 — 셋 중 하나가 끊겨도 나머지를 유실하지 않는다.
+
+        체결(장부 `filled` 기록됨) 직후 진입을 집행하는데, WAN-207 이전에는 세 가지가
+        연쇄로 묶여 하나만 어긋나도 **처분 기록과 진입 알림이 함께 조용히 유실**됐다:
+
+        * ⚠️ **근본 원인(WAN-207)**: 처분 기록이 `order.journal_id`를 읽었는데 `order`는
+          위쪽 `placed` 분기에서만 대입되는 지역 변수였다. 체결이 예약과 **다른 폴링
+          배치**에서 나면(주문이 걸린 뒤 몇 분 후 가격이 닿는 흔한 경우) 이 배치엔
+          `placed`가 없어 `order`가 **미대입** → `UnboundLocalError`가 `enter()`로
+          포지션을 연 **직후** 터졌다. 그래서 `entry_status`는 NULL로 남고(WAN-194가
+          "쓰기 사이의 유실"로 부르던 그 모양) 진입 텔레그램도 건너뛰어졌는데, 러너는
+          죽지 않고(폴링 루프의 시리즈별 `except`가 삼킴) 이후 청산은 정상 처리돼
+          "진입 알림 없이 익절 알림만 온" 거래가 됐다. 이제 체결 이벤트가 실어 온
+          `event.order`(= 그 주문 자신)를 쓴다.
+        * **belt-and-suspenders**: 처분은 `try/finally`로 **반드시** 남기고(예외가 나면
+          최소 사유를 붙여 `rejected`로), 알림 실패는 삼키지 않고 로그로 드러낸다. 그래야
+          `filled` + `entry_status IS NULL`이 도입 이후에는 진짜 "쓰기 사이 유실"만
+          가리키고(WAN-194의 고아 판정), 진입 알림 누락이 조용히 넘어가지 않는다.
+        """
+        fill = event.fill
+        assert fill is not None
+        journal_id = event.order.journal_id
+        report = None
+        disposition_done = False
+        try:
+            report = self._executor.enter(
+                EntryIntent(
+                    symbol=fill.symbol,
+                    timeframe=fill.timeframe,
+                    direction=fill.direction,
+                    entry_price=fill.price,
+                    entry_time=fill.time,
+                    stop_price=fill.stop_price,
+                    take_profit_price=fill.take_profit_price,
+                ),
+                now_ms=fill.time,
+            )
+            if journal_id is not None:
+                self._journal.record_entry_result(
+                    journal_id, entered=report.accepted, reason=report.outcome.reason
+                )
+            disposition_done = True
+            # 거부는 WARNING이다 — 체결이 거래가 되지 않은 것이라 조용히 흘리면
+            # 장부와 성과가 어긋난 채로 운영이 계속된다.
+            log = _logger.info if report.accepted else _logger.warning
+            log(
+                "지정가 체결: %s %s %s @%.6g 관통=%.2fbp 대기=%s → 페이퍼 진입 %s",
+                fill.symbol,
+                fill.timeframe,
+                format_kst_zoned(fill.time),
+                fill.price,
+                fill.penetration_bps,
+                f"{fill.waited_ms}ms" if fill.waited_ms is not None else "?",
+                "성공" if report.accepted else f"거부({report.outcome.reason})",
+            )
+            if self._notifier is not None:
+                try:
+                    self._notifier.handle_fill(fill, report)
+                except Exception:  # noqa: BLE001 — 알림 실패가 처분·루프를 막지 않도록(로그로 드러낸다).
+                    _logger.exception("진입 알림 실패: %s %s", fill.symbol, fill.timeframe)
+        finally:
+            if not disposition_done and journal_id is not None:
+                # 진입 처리가 예외로 끊겼다 — 처분을 조용히 유실하지 않도록 남긴다(WAN-207).
+                # 포지션이 실제로 열렸으면(enter 성공 후 기록 단계 실패) entered로, 그 전에
+                # 끊겼으면 사유를 붙여 rejected로 남긴다. NULL로 두는 것보다 항상 낫다.
+                entered = report is not None and report.accepted
+                reason = (
+                    ""
+                    if entered
+                    else (
+                        report.outcome.reason
+                        if report is not None
+                        else "진입 처리 중 예외(처분 유실 방지, WAN-207)"
+                    )
+                )
+                try:
+                    self._journal.record_entry_result(journal_id, entered=entered, reason=reason)
+                except Exception:  # noqa: BLE001 — 폴백 처분마저 실패하면 로그만 남긴다.
+                    _logger.exception("처분 기록 폴백 실패: journal_id=%d", journal_id)
 
     def _check_exits(
         self, symbol: str, timeframe: str, *, low: float, high: float, time_ms: int
