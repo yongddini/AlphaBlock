@@ -113,17 +113,37 @@ class RealtimeBand:
 
     @classmethod
     def seed_from_closed(
-        cls, closes: Sequence[float], filter_params: DeviationFilterParams
+        cls,
+        closes: Sequence[float],
+        filter_params: DeviationFilterParams,
+        *,
+        end: int | None = None,
     ) -> RealtimeBand:
         """확정봉 종가 시퀀스로 시딩된 상태 머신을 만든다.
 
         `closes`는 **탭 봉 직전까지의** 상위TF 확정봉 종가(시간 오름차순)여야 한다 —
         탭 봉 자신의 종가를 넣으면 그것이 곧 WAN-115가 잡아낸 룩어헤드다. 각 종가를
         순서대로 `commit`한 것과 동일하며, 창을 넘는 옛 종가는 자동으로 밀려난다.
+
+        `end`가 주어지면 `closes[:end]`(반개구간)까지만 시딩한 것과 동일하다 —
+        호출부가 `closes[:cut]` 사본을 만들지 않고 원본을 그대로 넘길 수 있게 한다.
+
+        ⚠️ **성능(WAN-204)**: `_window`가 `sma_length-1` 크기의 bounded deque라 그보다
+        오래된 종가는 커밋 즉시 굴러 나간다. 그래서 전체를 커밋하지 않고 **꼬리
+        `window_size`개만** 커밋한다 — 최종 창 상태(deque 내용)가 비트 단위로 동일하다.
+        이로써 존 탭마다 O(cut) 재커밋(+`closes[:cut]` 복사)이던 시딩이
+        O(window_size)=O(1)이 된다. `intrabar_live`/`intrabar_causal` 밴드를 셋업마다
+        새로 시딩하는 긴 창(15m·6년) 백테스트의 O(N×M) 병목을 없앤다.
         """
         state = cls(filter_params=filter_params)
-        for close in closes:
-            state.commit(float(close))
+        window_size = state._window_size
+        if window_size == 0:
+            # 창이 필요 없다(sma_length<=1) — 커밋해도 즉시 버려지므로 순회 자체를 생략한다.
+            return state
+        hi = len(closes) if end is None else min(end, len(closes))
+        lo = max(0, hi - window_size)
+        for i in range(lo, hi):
+            state.commit(float(closes[i]))
         return state
 
     @property

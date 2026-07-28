@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 
 import pandas as pd
 import pytest
@@ -138,6 +139,82 @@ def test_default_gates_off_preserve_zone_limit_behavior() -> None:
     a = run_zone_limit_backtest(htf, one_min, "1h", confluence_params=default_params)
     b = run_zone_limit_backtest(htf, one_min, "1h", confluence_params=explicit_off)
     assert [t.realized_pnl for t in a.trades] == [t.realized_pnl for t in b.trades]
+
+
+# --------------------------------------- 봉내 밴드 시딩 최적화 회귀 (WAN-204)
+
+
+def _naive_band_seed_from_closed(
+    cls: type[RealtimeBand],
+    closes: Sequence[float],
+    filter_params: DeviationFilterParams,
+    *,
+    end: int | None = None,
+) -> RealtimeBand:
+    """WAN-204 최적화 **이전**의 밴드 시딩 — `closes[:end]` 전체를 커밋한다(O(N×M)).
+
+    최적화판은 bounded deque라 꼬리 `window_size`개만 커밋한다. 두 경로가 백테스트
+    산출을 비트 단위로 같게 내는지가 이 회귀의 검증 대상이다.
+    """
+    state = cls(filter_params=filter_params)
+    seq = closes if end is None else closes[:end]
+    for close in seq:
+        state.commit(float(close))
+    return state
+
+
+@pytest.mark.parametrize("band_bar", ["intrabar_live", "intrabar_causal"])
+def test_intrabar_band_seeding_is_bitwise_output_preserving(
+    band_bar: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """WAN-204: 밴드 시딩을 O(N×M)→O(1)로 줄여도 후보·통계가 비트 단위로 같다.
+
+    봉내 밴드(`intrabar_live`/`intrabar_causal`)는 셋업마다 `RealtimeBand`를 새로
+    시딩하는데, 최적화판은 꼬리만 커밋한다. 전체 이력을 커밋하던 원본(`_naive_...`)과
+    같은 후보(진입/청산/사유)·같은 통계를 내야 한다 — 채택 엔진의 진입가가 시딩 방식에
+    좌우돼선 안 된다. 존폭 필터는 꺼 셋업 수를 늘려 시딩 경로를 더 넓게 훑는다.
+    """
+    htf, one_min = _synthetic_pair(bars=800, span=200)
+    deviation = ConfluenceParams().deviation_filter
+    assert deviation is not None
+    params = ConfluenceParams(
+        entry_mode="zone_limit",
+        rsi_mode="realtime",
+        short_enabled=True,
+        max_zone_width_atr=None,
+        deviation_filter=deviation.model_copy(update={"band_bar": band_bar}),
+    )
+    cfg = BacktestConfig()
+
+    def snapshot() -> tuple[list[tuple[object, ...]], tuple[int, int, int, int]]:
+        cands, stats = build_zone_limit_candidates(htf, one_min, "1h", params=params, cfg=cfg)
+        rows: list[tuple[object, ...]] = [
+            (
+                c.trigger_time,
+                c.entry_time,
+                c.entry_price,
+                c.stop_price,
+                c.exit_time,
+                c.exit_price,
+                c.reason,
+                c.mfe_r,
+                c.mae_r,
+            )
+            for c in cands
+        ]
+        return rows, (stats.eligible, stats.filled, stats.penetrations, stats.dropped)
+
+    # 최적화판(현행).
+    opt_rows, opt_stats = snapshot()
+    # 시딩 경로가 실제로 exercise됐는지 — 아무 셋업도 없으면 이 테스트는 무의미하다.
+    assert opt_stats[0] > 0, "합성 시나리오가 봉내 밴드 시딩을 태우지 못했다"
+
+    # 원본(전체 이력 커밋)으로 교체해 다시 돌린다.
+    monkeypatch.setattr(RealtimeBand, "seed_from_closed", classmethod(_naive_band_seed_from_closed))
+    ref_rows, ref_stats = snapshot()
+
+    assert opt_stats == ref_stats
+    assert opt_rows == ref_rows
 
 
 # ---------------------------------------------------- 체결 가정 보수화 (WAN-96)

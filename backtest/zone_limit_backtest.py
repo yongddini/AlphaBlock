@@ -940,7 +940,7 @@ def build_zone_limit_candidates(
             # `intrabar_live`와 체결 기회가 어긋나고, 그 차이가 밴드 표본 차이로 오인된다.
             pending = float(substeps[start - 1].close) if causal_band_mode and start > 0 else None
             live_limit = _IntrabarLiveLimit(
-                band=RealtimeBand.seed_from_closed(closes[:cut], deviation),
+                band=RealtimeBand.seed_from_closed(closes, deviation, end=cut),
                 order_block=seed_ob,
                 is_long=is_long,
                 params=params,
