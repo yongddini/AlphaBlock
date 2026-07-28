@@ -34,6 +34,15 @@ WAN-154 §3-B가 최소 손절폭 가드(`min_stop_distance_fraction=0.003`)를 
 1d 제외). **신규 3종목(DOGE·LINK·LTC)은 펀딩 대리 규칙**(WAN-180/182 — 기존 종목 중 확정
 펀딩 평균 최고 종목의 시계열)을 얹는다. 안 얹으면 그 종목 수익률이 펀딩비 0으로 부풀려진다.
 
+## WAN-205 확장 (사용자 질문 2026-07-28) — 촘촘 스윕 + `pen_5bp`
+
+WAN-197은 가드를 거친 5값(0/0.22/0.30/0.33/0.55%) × `baseline`으로만 쟀다. WAN-205가 두
+사각을 메운다: (1) **0.15/0.20/0.25%를 끼운 촘촘 스윕**(`FINE_GUARDS` 8값) — 순수 수익
+정점이 0.22% 근처라 그 사이를 봐야 0.3%가 최적 근처인지 확정된다. (2) **`pen_5bp` 렌즈**
+— 좁은 손절 = 마진 체결이라 관통 요구에 특히 취약할 수 있다. 렌즈는 체결 집합을 바꾸므로
+셀을 렌즈당 다시 빌드하고(WAN-154 §4 패턴), 가드는 그 위에서 재시퀀싱만 한다. **기존 5값 ×
+`baseline`은 `wan197_guard_grid.csv`를 비트 재현한다**(가드는 후보와 무관한 재시퀀싱 축).
+
 재현: `python -m backtest.wan197_guard_with_filter --timeframes 1h` →
 `--timeframes 15m --append` → `--timeframes 4h --append`(요약만 재생성: `--from-csv`).
 """
@@ -79,7 +88,20 @@ from strategy.models import ConfluenceParams
 # --------------------------------------------------------------------------- #
 
 LENS_PRIMARY = "baseline"
-"""공식 렌즈(WAN-104/128) 단독. `pen_5bp` 체결 보수화는 이 이슈 범위 밖이다(WAN-154 §4)."""
+"""공식 렌즈(WAN-104/128) — 판정의 주 수치."""
+
+LENS_PEN = "pen_5bp"
+"""체결 보수화 렌즈(WAN-205 = 사용자 질문 2026-07-28). 주문가를 5bp **관통**해야 체결.
+체결 집합을 바꾸므로 셀을 이 렌즈 파라미터로 **다시 빌드**한 뒤 이름을 넘긴다(WAN-154 §4 패턴).
+좁은 손절 = 마진 체결이라 관통 요구에 특히 취약할 수 있다는 것이 이 축의 질문이다."""
+
+LENSES: tuple[str, ...] = (LENS_PRIMARY, LENS_PEN)
+
+#: WAN-205 촘촘 스윕 — WAN-197 거친 5값(0/0.22/0.30/0.33/0.55%)에 0.15/0.20/0.25%를 끼운다.
+#: 순수 수익 정점이 0.22% 근처라(WAN-197) 0.3%가 최적 근처인지 확정하려면 그 사이를 촘촘히
+#: 봐야 한다. 기존 5값은 그대로 있어 `baseline` 재시퀀싱이 `wan197_guard_grid.csv`를 비트
+#: 재현한다(가드는 후보와 무관한 재시퀀싱 축 — 값을 추가해도 기존 값의 행은 안 움직인다).
+FINE_GUARDS: tuple[float, ...] = tuple(sorted({*GUARD_VALUES, 0.0015, 0.0020, 0.0025}))
 
 RET_EPS = 0.001
 """수익률 델타 ±0.1%p 미만은 「효과 없음」으로 읽는다 — 0을 어느 한쪽 부호로 세면
@@ -181,9 +203,19 @@ def guard_reject_rate(cands: Sequence[_Candidate], guard: float) -> float | None
 
 
 def guard_rows_for_cell(
-    market: MarketData, cands: Sequence[_Candidate], is_boundary: int, guards: Sequence[float]
+    market: MarketData,
+    cands: Sequence[_Candidate],
+    is_boundary: int,
+    guards: Sequence[float],
+    *,
+    lens: str = LENS_PRIMARY,
 ) -> list[GuardRow]:
-    """한 (심볼, TF)의 구간 × 가드 손익 행. 후보는 한 번 빌드하고 값마다 재시퀀싱한다."""
+    """한 (심볼, TF, 렌즈)의 구간 × 가드 손익 행. 후보는 한 번 빌드하고 값마다 재시퀀싱한다.
+
+    `lens`는 좌표 라벨일 뿐이다(WAN-152 규약) — 렌즈(`pen_5bp`)는 체결 집합을 바꾸므로
+    호출부가 그 렌즈 파라미터로 빌드한 `cands`를 넘겨야 한다. 가드는 시퀀싱에서만 걸리므로
+    그 위에서 값마다 재시퀀싱만 한다.
+    """
     rows: list[GuardRow] = []
     for segment in (SEGMENT_IS, SEGMENT_OOS):
         seg = [c for c in cands if (c.trigger_time < is_boundary) == (segment == SEGMENT_IS)]
@@ -195,6 +227,7 @@ def guard_rows_for_cell(
                     timeframe=market.timeframe,
                     segment=segment,
                     guard=guard,
+                    lens=lens,
                     num_candidates=float(len(seg)),
                     num_trades=float(s.num_trades),
                     total_return=s.total_return,
@@ -229,10 +262,16 @@ def run_audit(
     timeframes: tuple[str, ...] = harness.DEFAULT_TIMEFRAMES,
     start: str = harness.DEFAULT_START,
     end: str = harness.DEFAULT_END,
-    guards: Sequence[float] = GUARD_VALUES,
+    guards: Sequence[float] = FINE_GUARDS,
+    lenses: Sequence[str] = LENSES,
     db_path: str = harness.DB_PATH,
 ) -> AuditResult:
-    """9심볼 × TF × 가드 5값 — 후보는 (심볼, TF)당 한 번, 필터 1.28 켠 채택 엔진."""
+    """9심볼 × TF × 렌즈 2 × 가드 8값 — 필터 1.28 켠 채택 엔진.
+
+    후보는 (심볼, TF, 렌즈)당 한 번 빌드한다 — 렌즈(`pen_5bp`)는 체결 집합을 바꾸므로 셀을
+    다시 빌드하고(WAN-154 §4), 가드는 그 위에서 재시퀀싱만 한다. 두 렌즈 모두 존폭 필터
+    1.28을 켠 채다(끄지 않는다 — 이 이슈는 「필터 켠 오늘 엔진」의 가드를 잰다).
+    """
     start_ms, end_ms = parse_date_ms(start), parse_date_ms(end)
     result = AuditResult()
     funding_by_symbol, funding_note = load_proxied_funding(
@@ -241,7 +280,11 @@ def run_audit(
     result.funding_note = funding_note
     if funding_note:
         print(f"[wan197] {funding_note}", flush=True)
-    params = harness.build_params()  # 채택 기본값 — 필터 1.28 포함
+    # 렌즈별 채택 파라미터 — 필터 1.28은 UNSET 규약으로 그대로 물려받는다(끄지 않는다).
+    params_by_lens = {
+        LENS_PRIMARY: harness.build_params(),
+        LENS_PEN: harness.build_params(fill=harness.fill_preset(LENS_PEN)),
+    }
     for timeframe in timeframes:
         for symbol in symbols:
             # 6년 1분봉(심볼당 ~315만 행)은 두 심볼 몫이 겹치는 순간이 메모리 피크다 —
@@ -263,12 +306,15 @@ def run_audit(
             market = dataclasses.replace(
                 market, funding_rates=funding_by_symbol.get(norm, market.funding_rates)
             )
-            cands = production_candidates(market, params)
             is_boundary = is_boundary_ms(market.htf_df)
-            result.rows.extend(guard_rows_for_cell(market, cands, is_boundary, guards))
-            note = f"{_bare(norm)} {timeframe}: 필터 켠 후보 {len(cands)}개"
-            result.pool_notes.append(note)
-            print(f"[wan197] {note}", flush=True)
+            for lens in lenses:
+                cands = production_candidates(market, params_by_lens[lens])
+                result.rows.extend(
+                    guard_rows_for_cell(market, cands, is_boundary, guards, lens=lens)
+                )
+                note = f"{_bare(norm)} {timeframe} [{lens}]: 필터 켠 후보 {len(cands)}개"
+                result.pool_notes.append(note)
+                print(f"[wan197] {note}", flush=True)
     return result
 
 
@@ -278,20 +324,33 @@ def run_audit(
 
 
 def _rows(
-    rows: Sequence[GuardRow], *, timeframe: str, segment: str, guard: float
+    rows: Sequence[GuardRow],
+    *,
+    timeframe: str,
+    segment: str,
+    guard: float,
+    lens: str = LENS_PRIMARY,
 ) -> list[GuardRow]:
     return [
         r
         for r in rows
-        if r.timeframe == timeframe and r.segment == segment and abs(r.guard - guard) < 1e-12
+        if r.timeframe == timeframe
+        and r.segment == segment
+        and r.lens == lens
+        and abs(r.guard - guard) < 1e-12
     ]
 
 
 def symbol_mean(
-    rows: Sequence[GuardRow], *, timeframe: str, segment: str, guard: float
+    rows: Sequence[GuardRow],
+    *,
+    timeframe: str,
+    segment: str,
+    guard: float,
+    lens: str = LENS_PRIMARY,
 ) -> dict[str, float | None]:
     """심볼평균(수익·MDD·승률은 단순평균, 거래·후보는 합). 거래 20건 미만 셀은 제외한다."""
-    sub_all = _rows(rows, timeframe=timeframe, segment=segment, guard=guard)
+    sub_all = _rows(rows, timeframe=timeframe, segment=segment, guard=guard, lens=lens)
     excluded = [r for r in sub_all if r.num_trades < MIN_TRADES_FOR_PNL]
     sub = [r for r in sub_all if r.num_trades >= MIN_TRADES_FOR_PNL]
     if not sub:
@@ -320,12 +379,17 @@ def symbol_mean(
 
 
 def leave_one_out(
-    rows: Sequence[GuardRow], *, timeframe: str, guard: float, segment: str = SEGMENT_OOS
+    rows: Sequence[GuardRow],
+    *,
+    timeframe: str,
+    guard: float,
+    segment: str = SEGMENT_OOS,
+    lens: str = LENS_PRIMARY,
 ) -> str:
     """심볼 하나씩 빼고 본 total_return 심볼평균 — 편중 확인."""
     sub = [
         r
-        for r in _rows(rows, timeframe=timeframe, segment=segment, guard=guard)
+        for r in _rows(rows, timeframe=timeframe, segment=segment, guard=guard, lens=lens)
         if r.num_trades >= MIN_TRADES_FOR_PNL
     ]
     if len(sub) < 2:
@@ -337,12 +401,14 @@ def leave_one_out(
     return " · ".join(parts)
 
 
-def collapsed_cells(rows: Sequence[GuardRow], *, guard: float) -> list[str]:
+def collapsed_cells(
+    rows: Sequence[GuardRow], *, guard: float, lens: str = LENS_PRIMARY
+) -> list[str]:
     """가드 `guard`에서 거래 20건 미만으로 무너진 (TF, 구간, 심볼) 셀."""
     return [
         f"`{r.timeframe}` {r.segment} {_bare(r.symbol)}({r.num_trades:.0f}거래)"
         for r in rows
-        if abs(r.guard - guard) < 1e-12 and r.num_trades < MIN_TRADES_FOR_PNL
+        if r.lens == lens and abs(r.guard - guard) < 1e-12 and r.num_trades < MIN_TRADES_FOR_PNL
     ]
 
 
@@ -376,14 +442,18 @@ def _ra(m: dict[str, float | None]) -> float | None:
     return ret / mdd if mdd > 0 else 0.0
 
 
-def guard_verdict(rows: Sequence[GuardRow], *, timeframe: str) -> Judgement:
+def guard_verdict(
+    rows: Sequence[GuardRow], *, timeframe: str, lens: str = LENS_PRIMARY
+) -> Judgement:
     """한 TF에서 가드(0.3%)가 (a) 이득 / (b) 손해 / (c) 중립·갈림인가. OOS `default` 팔.
 
     분모는 가드 0%(끔). `total_return`만으로 내지 않는다 — 수익/MDD(위험조정)를 함께 본다
     (가드는 수익 장치가 아니라 신뢰성 장치라는 WAN-76 취지).
     """
-    on = symbol_mean(rows, timeframe=timeframe, segment=SEGMENT_OOS, guard=STOP_GUARD_FRACTION)
-    off = symbol_mean(rows, timeframe=timeframe, segment=SEGMENT_OOS, guard=0.0)
+    on = symbol_mean(
+        rows, timeframe=timeframe, segment=SEGMENT_OOS, guard=STOP_GUARD_FRACTION, lens=lens
+    )
+    off = symbol_mean(rows, timeframe=timeframe, segment=SEGMENT_OOS, guard=0.0, lens=lens)
     if (on.get("n_symbols") or 0.0) < 3 or (off.get("n_symbols") or 0.0) < 3:
         return Judgement(
             GuardKind.INDETERMINATE,
@@ -423,6 +493,74 @@ def guard_verdict(rows: Sequence[GuardRow], *, timeframe: str) -> Judgement:
     )
 
 
+def best_guard(
+    rows: Sequence[GuardRow],
+    *,
+    timeframe: str,
+    segment: str,
+    guards: Sequence[float],
+    metric: str,
+    lens: str = LENS_PRIMARY,
+) -> tuple[float, float] | None:
+    """`metric`("return" = 순수 수익 · "risk_adjusted" = 수익/MDD)을 최대화하는 가드와 그 값.
+
+    유효 심볼 3개 미만인 가드 값은 후보에서 뺀다(표본 게이트). 두 값이 같으면 **작은 가드**를
+    고른다(신뢰성 장치를 최소로 — 동률에서 굳이 더 조이지 않는다). 없으면 `None`.
+    """
+    best: tuple[float, float] | None = None
+    for guard in guards:
+        m = symbol_mean(rows, timeframe=timeframe, segment=segment, guard=guard, lens=lens)
+        if (m.get("n_symbols") or 0.0) < 3:
+            continue
+        score = _ra(m) if metric == "risk_adjusted" else m.get("total_return")
+        if score is None:
+            continue
+        if best is None or score > best[1] + 1e-12:
+            best = (guard, score)
+    return best
+
+
+def optimal_guard_note(
+    rows: Sequence[GuardRow],
+    *,
+    timeframe: str,
+    guards: Sequence[float],
+    lens: str = LENS_PRIMARY,
+    segment: str = SEGMENT_OOS,
+) -> str:
+    """한 (TF, 렌즈, 구간)의 순수 수익 정점 가드 · 위험조정 정점 가드 + 현행 0.3%가 고원인지."""
+    by_ret = best_guard(
+        rows, timeframe=timeframe, segment=segment, guards=guards, metric="return", lens=lens
+    )
+    by_ra = best_guard(
+        rows,
+        timeframe=timeframe,
+        segment=segment,
+        guards=guards,
+        metric="risk_adjusted",
+        lens=lens,
+    )
+    cur = symbol_mean(
+        rows, timeframe=timeframe, segment=segment, guard=STOP_GUARD_FRACTION, lens=lens
+    )
+    if by_ret is None or by_ra is None or not cur.get("n_symbols"):
+        return f"{timeframe} `{lens}` {segment}: ⚠️ 판정 불가(유효 표본 부족)"
+    cur_ra = _ra(cur)
+    ra_best = by_ra[1]
+    plateau = (
+        cur_ra is not None
+        and ra_best is not None
+        and ra_best > 0
+        and (ra_best - cur_ra) / ra_best <= 0.05
+    )
+    plateau_txt = "0.3%는 위험조정 고원 안" if plateau else "0.3%는 위험조정 고원 **밖**"
+    return (
+        f"{timeframe} `{lens}` {segment}: 순수 수익 정점 **{by_ret[0] * 100:.2f}%**"
+        f"({by_ret[1] * 100:+.2f}%) · 위험조정 정점 **{by_ra[0] * 100:.2f}%**({ra_best:.2f}) · "
+        f"현행 0.3% 위험조정 {_ra_txt(cur)} → {plateau_txt}"
+    )
+
+
 # --------------------------------------------------------------------------- #
 # 요약 마크다운
 # --------------------------------------------------------------------------- #
@@ -451,19 +589,29 @@ def build_summary_markdown(result: AuditResult, *, timeframes: Sequence[str]) ->
     rows = result.rows
     symbols = sorted({_bare(r.symbol) for r in rows}) or ["—"]
     lines: list[str] = []
-    lines.append("# WAN-197 손절폭 가드(0.3%) — 존폭 필터 1.28 켠 오늘 엔진에서 켜고/끈 수익률\n")
+    lines.append(
+        "# WAN-205 손절폭 가드 촘촘 스윕 + `pen_5bp` — 존폭 필터 1.28 켠 오늘 엔진 (WAN-197 확장)\n"
+    )
     lines.append(
         f"{len(symbols)}심볼({'/'.join(symbols)}) × {'·'.join(timeframes)}, 못 박은 창 "
         f"**{harness.DEFAULT_START} ~ {harness.DEFAULT_END}**(WAN-182), **오늘의 채택 기본값**"
         "(`ConfluenceParams()` — 오프셋 2bp · `intrabar_live` 밴드 · `unconditional` 게이트 · "
-        "고정 1.5R · 롱 온리 · `combine_obs=False` · **`max_zone_width_atr=1.28`(필터 켜짐)**). "
-        "공식 렌즈 `baseline` 단독(WAN-128).\n"
+        "고정 1.5R · 롱 온리 · `combine_obs=False` · **`max_zone_width_atr=1.28`(필터 켜짐)**).\n"
+    )
+    guard_txt = " · ".join(f"{g * 100:.2f}%" for g in FINE_GUARDS)
+    lines.append(
+        f"가드 축({len(FINE_GUARDS)}값): {guard_txt} — 0%는 판정의 분모(끔), **0.3%가 현행"
+        f"(WAN-79)**. WAN-197의 거친 5값(0/0.22/0.30/0.33/0.55%, 왕복 비용 "
+        f"{ROUND_TRIP_COST:.2%}의 배수)에 **0.15/0.20/0.25%를 끼운 촘촘 스윕**이다(WAN-205 — "
+        "순수 수익 정점이 0.22% 근처라 그 사이를 봐야 0.3%가 최적 근처인지 확정된다). "
+        "가드는 시퀀싱(`position_size`)에서만 걸리므로 후보를 렌즈당 한 번만 빌드하고 값마다 "
+        "재시퀀싱만 한다.\n"
     )
     lines.append(
-        "가드 축: 0%(끔 — 판정의 분모) · 0.22%/0.33%/0.55%(왕복 비용 "
-        f"{ROUND_TRIP_COST:.2%}의 2/3/5배) · **0.3%(현행, WAN-79)**. 가드는 시퀀싱"
-        "(`position_size`)에서만 걸리므로 후보를 한 번만 빌드하고 값마다 재시퀀싱만 한다 — "
-        "체결 집합은 다섯 값이 같다.\n"
+        "렌즈 축(2): 공식 `baseline`(닿으면 체결, 주 수치) + **`pen_5bp`**(주문가 5bp 관통 "
+        "요구, WAN-205). `pen_5bp`는 체결 집합을 바꾸므로 셀을 다시 빌드한다 — 좁은 손절 = "
+        "마진 체결이라 관통 요구에 특히 취약할 수 있다는 것이 이 축의 질문이다(WAN-128 이후 "
+        "옵트인 민감도 병기).\n"
     )
     lines.append(
         "🚨 **WAN-154 §3-B와의 차이**: 그 표는 필터를 **끈 채**(엔진 필터 off + 존폭 필터를 "
@@ -479,8 +627,24 @@ def build_summary_markdown(result: AuditResult, *, timeframes: Sequence[str]) ->
     )
 
     lines.append("## 판정 — 필터 켠 상태에서 가드(0.3%)가 이득인가 (OOS · `default` 팔)\n")
-    for timeframe in timeframes:
-        lines.append(f"* {guard_verdict(rows, timeframe=timeframe).text}")
+    present_lenses = [lens for lens in LENSES if any(r.lens == lens for r in rows)]
+    for lens in present_lenses:
+        lines.append(f"**렌즈 `{lens}`:**\n")
+        for timeframe in timeframes:
+            lines.append(f"* {guard_verdict(rows, timeframe=timeframe, lens=lens).text}")
+        lines.append("")
+
+    lines.append("## 촘촘 스윕 판정 — 위험조정 최적 가드 · 순수 수익 정점 (OOS)\n")
+    lines.append(
+        "「위험조정 정점」 = 수익/MDD 최대 가드, 「순수 수익 정점」 = total_return 최대 가드"
+        "(유효 심볼 3개 미만 가드 값은 제외). 현행 0.3%가 위험조정 고원(정점 대비 5% 이내) "
+        "안인지 병기한다.\n"
+    )
+    for lens in present_lenses:
+        for timeframe in timeframes:
+            lines.append(
+                f"* {optimal_guard_note(rows, timeframe=timeframe, guards=FINE_GUARDS, lens=lens)}"
+            )
     lines.append("")
 
     lines.append(_pool_section(result))
@@ -500,56 +664,66 @@ def _pool_section(result: AuditResult) -> str:
 
 
 def _metrics_section(result: AuditResult, timeframes: Sequence[str]) -> str:
-    lines = ["## 가드 × 구간 심볼평균 (`default` 팔 · 필터 1.28)\n"]
+    present_lenses = [lens for lens in LENSES if any(r.lens == lens for r in result.rows)]
+    lines = ["## 가드 × 구간 × 렌즈 심볼평균 (`default` 팔 · 필터 1.28)\n"]
     lines.append(
         f"⚠️ 심볼평균은 거래 {MIN_TRADES_FOR_PNL}건 미만 셀을 제외한다(유효/제외 심볼 병기). "
         "`mean_net_r` = 거래당 (실현 손익 ÷ 리스크 금액), 수수료·슬리피지·펀딩 반영 후. "
         "가드 탈락률 = 후보 중 |진입−손절| < guard·진입가인 비율.\n"
     )
     lines.append(
-        "| TF | 구간 | 가드 | 유효(제외) | 거래 | total_return | MDD | 수익/MDD | 승률 | "
-        "mean_net_r | cost_r | PF | 가드 탈락률 |\n" + "| -- " * 13 + "|"
+        "| TF | 구간 | 렌즈 | 가드 | 유효(제외) | 거래 | total_return | MDD | 수익/MDD | 승률 | "
+        "mean_net_r | cost_r | PF | 가드 탈락률 |\n" + "| -- " * 14 + "|"
     )
     for timeframe in timeframes:
         for segment in (SEGMENT_IS, SEGMENT_OOS):
-            for guard in GUARD_VALUES:
-                m = symbol_mean(result.rows, timeframe=timeframe, segment=segment, guard=guard)
-                if not m.get("n_symbols"):
-                    continue
-                mark = " ←현행" if abs(guard - STOP_GUARD_FRACTION) < 1e-12 else ""
-                nt = m.get("num_trades")
-                lines.append(
-                    f"| {timeframe} | {segment} | {guard * 100:.2f}%{mark} | "
-                    f"{m['n_symbols']:.0f}({m['n_excluded']:.0f}) | "
-                    f"{'—' if nt is None else f'{nt:.0f}'} | "
-                    f"{_pct(m.get('total_return'), signed=True)} | {_pct(m.get('max_drawdown'))} | "
-                    f"{_ra_txt(m)} | {_pct(m.get('win_rate'))} | {_num(m.get('mean_net_r'))} | "
-                    f"{_num(m.get('cost_r_median'), signed=False)} | "
-                    f"{_num(m.get('profit_factor'), signed=False, digits=2)} | "
-                    f"{_pct(m.get('guard_reject_rate'), digits=1)} |"
-                )
+            for lens in present_lenses:
+                for guard in FINE_GUARDS:
+                    m = symbol_mean(
+                        result.rows, timeframe=timeframe, segment=segment, guard=guard, lens=lens
+                    )
+                    if not m.get("n_symbols"):
+                        continue
+                    mark = " ←현행" if abs(guard - STOP_GUARD_FRACTION) < 1e-12 else ""
+                    nt = m.get("num_trades")
+                    lines.append(
+                        f"| {timeframe} | {segment} | `{lens}` | {guard * 100:.2f}%{mark} | "
+                        f"{m['n_symbols']:.0f}({m['n_excluded']:.0f}) | "
+                        f"{'—' if nt is None else f'{nt:.0f}'} | "
+                        f"{_pct(m.get('total_return'), signed=True)} | "
+                        f"{_pct(m.get('max_drawdown'))} | "
+                        f"{_ra_txt(m)} | {_pct(m.get('win_rate'))} | {_num(m.get('mean_net_r'))} | "
+                        f"{_num(m.get('cost_r_median'), signed=False)} | "
+                        f"{_num(m.get('profit_factor'), signed=False, digits=2)} | "
+                        f"{_pct(m.get('guard_reject_rate'), digits=1)} |"
+                    )
     lines.append("")
     lines.append("**심볼 편중(OOS `default` 팔 leave-one-out · 가드 0.3% vs 끔):**\n")
-    for timeframe in timeframes:
-        on = leave_one_out(result.rows, timeframe=timeframe, guard=STOP_GUARD_FRACTION)
-        off = leave_one_out(result.rows, timeframe=timeframe, guard=0.0)
-        lines.append(f"* {timeframe} 가드 0.3%: {on}")
-        lines.append(f"* {timeframe} 가드 끔: {off}")
+    for lens in present_lenses:
+        for timeframe in timeframes:
+            on = leave_one_out(
+                result.rows, timeframe=timeframe, guard=STOP_GUARD_FRACTION, lens=lens
+            )
+            off = leave_one_out(result.rows, timeframe=timeframe, guard=0.0, lens=lens)
+            lines.append(f"* {timeframe} `{lens}` 가드 0.3%: {on}")
+            lines.append(f"* {timeframe} `{lens}` 가드 끔: {off}")
     lines.append("")
-    collapse = collapsed_cells(result.rows, guard=STOP_GUARD_FRACTION)
-    lines.append(
-        f"**가드 0.3%에서 유효 표본(거래 {MIN_TRADES_FOR_PNL}건) 붕괴 셀:** "
-        + (" · ".join(collapse) if collapse else "없음")
-        + " (WAN-154/155/161의 TRX 충돌 재현 여부)\n"
-    )
+    for lens in present_lenses:
+        collapse = collapsed_cells(result.rows, guard=STOP_GUARD_FRACTION, lens=lens)
+        lines.append(
+            f"**`{lens}` 가드 0.3%에서 유효 표본(거래 {MIN_TRADES_FOR_PNL}건) 붕괴 셀:** "
+            + (" · ".join(collapse) if collapse else "없음")
+            + " (WAN-154/155/161의 TRX 충돌 재현 여부)"
+        )
+    lines.append("")
     return "\n".join(lines)
 
 
 def _symbol_section(result: AuditResult, timeframes: Sequence[str]) -> str:
-    lines = ["## 종목별 가드 켜고/끈 수익 (OOS · `default` 팔)\n"]
+    lines = ["## 종목별 가드 켜고/끈 수익 (OOS · `default` 팔 · `baseline` 렌즈)\n"]
     lines.append(
-        "「종목에 갈리는가」를 보기 위한 종목 단위 대조다. 거래 수는 가드 0.3% 기준 "
-        "(끔은 후보 전부 시퀀싱). 🚨 = 가드 0.3%에서 거래 20건 미달.\n"
+        "「종목에 갈리는가」를 보기 위한 종목 단위 대조다(공식 렌즈 `baseline`). 거래 수는 "
+        "가드 0.3% 기준(끔은 후보 전부 시퀀싱). 🚨 = 가드 0.3%에서 거래 20건 미달.\n"
     )
     lines.append(
         "| TF | 심볼 | 후보 | 거래(끔→0.3%) | 수익(끔) | 수익(0.3%) | Δ수익 | "
@@ -557,7 +731,11 @@ def _symbol_section(result: AuditResult, timeframes: Sequence[str]) -> str:
     )
     for timeframe in timeframes:
         symbols = sorted(
-            {r.symbol for r in result.rows if r.timeframe == timeframe and r.segment == SEGMENT_OOS}
+            {
+                r.symbol
+                for r in result.rows
+                if r.timeframe == timeframe and r.segment == SEGMENT_OOS and r.lens == LENS_PRIMARY
+            }
         )
         for symbol in symbols:
             off = next(
@@ -567,6 +745,7 @@ def _symbol_section(result: AuditResult, timeframes: Sequence[str]) -> str:
                     if r.symbol == symbol
                     and r.timeframe == timeframe
                     and r.segment == SEGMENT_OOS
+                    and r.lens == LENS_PRIMARY
                     and abs(r.guard - 0.0) < 1e-12
                 ),
                 None,
@@ -578,6 +757,7 @@ def _symbol_section(result: AuditResult, timeframes: Sequence[str]) -> str:
                     if r.symbol == symbol
                     and r.timeframe == timeframe
                     and r.segment == SEGMENT_OOS
+                    and r.lens == LENS_PRIMARY
                     and abs(r.guard - STOP_GUARD_FRACTION) < 1e-12
                 ),
                 None,
@@ -598,27 +778,50 @@ def _symbol_section(result: AuditResult, timeframes: Sequence[str]) -> str:
 
 
 def _conclusion(result: AuditResult, timeframes: Sequence[str]) -> str:
-    verdicts = [guard_verdict(result.rows, timeframe=tf) for tf in timeframes]
+    verdicts = [guard_verdict(result.rows, timeframe=tf, lens=LENS_PRIMARY) for tf in timeframes]
     kinds = {v.kind for v in verdicts if v.kind != GuardKind.INDETERMINATE}
     if kinds == {GuardKind.BENEFIT}:
-        head = "**필터 켠 오늘 엔진에서도 가드(0.3%)는 (a) 이득이다 — 판정 TF 전부.**"
+        head = "**필터 켠 오늘 엔진에서도 가드(0.3%)는 (a) 이득이다 — 판정 TF 전부(`baseline`).**"
     elif kinds == {GuardKind.HARM}:
-        head = "**필터 켠 오늘 엔진에서 가드(0.3%)는 (b) 손해다 — 판정 TF 전부.**"
+        head = "**필터 켠 오늘 엔진에서 가드(0.3%)는 (b) 손해다 — 판정 TF 전부(`baseline`).**"
     elif GuardKind.BENEFIT in kinds and (GuardKind.HARM in kinds or GuardKind.NEUTRAL in kinds):
-        head = "**(c) TF에 갈린다 — 가드 효과가 TF마다 다르다(판정 모음이 정본).**"
+        head = "**(c) TF에 갈린다 — 가드 효과가 TF마다 다르다(`baseline` · 판정 모음이 정본).**"
     elif kinds == {GuardKind.NEUTRAL}:
-        head = "**(c) 중립 — 필터가 이미 좁은 존만 남겨 가드에 걸리는 거래가 적다.**"
+        head = "**(c) 중립 — 필터가 이미 좁은 존만 남겨 가드에 걸리는 거래가 적다(`baseline`).**"
     else:
         head = "**판정 모음이 정본이다(일부 TF는 표본 게이트로 판정 불가).**"
+
+    has_pen = any(r.lens == LENS_PEN for r in result.rows)
+    pen_txt = ""
+    if has_pen:
+        base_v = {
+            tf: guard_verdict(result.rows, timeframe=tf, lens=LENS_PRIMARY).kind
+            for tf in timeframes
+        }
+        pen_v = {
+            tf: guard_verdict(result.rows, timeframe=tf, lens=LENS_PEN).kind for tf in timeframes
+        }
+        shifted = [tf for tf in timeframes if base_v[tf] != pen_v[tf]]
+        if shifted:
+            pen_txt = (
+                f" 📌 **`pen_5bp`에서 판정이 바뀌는 TF**: {', '.join(shifted)} — 좁은 손절이 "
+                "관통 요구에 취약하다는 신호(위 「판정」의 `pen_5bp` 블록이 정본)."
+            )
+        else:
+            pen_txt = (
+                " 📌 **`pen_5bp`에서도 TF별 판정 종류는 그대로다** — 두 팔이 같이 깎이지 "
+                "부호가 뒤집히지 않는다(위 「촘촘 스윕 판정」의 렌즈별 정점 병기가 정본)."
+            )
     return (
-        head + " 각 TF 판정 문장은 위 「판정」이 정본이다.\n\n"
-        "🚨 **「엣지 찾았다」로 인용 금지** — 이 표는 `baseline`(닿으면 체결) 위의 값이고, "
-        "「엣지 없음」(WAN-84/88/111/114/124/151)은 다른 질문이라 뒤집히지 않는다. ⚠️ **측정 "
-        "전용 · 기본값 변경 아님** — 가드 기본값(0.3%) 전환은 WAN-76/79 소관이고 재-베이스라인 "
-        "= 사용자 결정이다(`ConfluenceParams()` 불변, `min_stop_distance_fraction=0.003` 불변, "
-        "실거래 보류 `ALPHABLOCK_LIVE_TRADING=false` 유지). ⚠️ 4h는 표본 게이트로 대조군이다"
-        "(OOS 심볼당 거래가 유효 기준 미달이면 판정 불가). ⚠️ WAN-76/79 원 감사 수치는 옛 "
-        "엔진이라 이 표와 섞지 말 것."
+        head + pen_txt + " 각 TF 판정 문장은 위 「판정」이 정본이다.\n\n"
+        "🚨 **「엣지 찾았다」로 인용 금지** — `baseline`은 닿으면 체결(낙관)이고 `pen_5bp`는 "
+        "옵트인 민감도 병기다. 「엣지 없음」(WAN-84/88/111/114/124/151)은 다른 질문이라 "
+        "뒤집히지 않는다. ⚠️ **측정 전용 · 기본값 변경 아님** — 가드 기본값(0.3%) 전환은 "
+        "WAN-76/79 소관이고 재-베이스라인 = 사용자 결정이다(`ConfluenceParams()` 불변, "
+        "`min_stop_distance_fraction=0.003` 불변, 실거래 보류 `ALPHABLOCK_LIVE_TRADING=false` "
+        "유지). ⚠️ 순수 수익 argmax만 보고 「0.3%는 틀렸다」로 인용 금지 — 위험조정은 고원이라 "
+        "0.3%가 나쁜 선택이 아니다(WAN-90/161 계열 IS→OOS 뒤집힘 주의). ⚠️ 4h는 표본 게이트로 "
+        "대조군이다. ⚠️ WAN-76/79 원 감사 수치는 옛 엔진이라 이 표와 섞지 말 것."
     )
 
 
