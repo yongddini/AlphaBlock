@@ -801,16 +801,42 @@ def _conclusion(result: AuditResult, timeframes: Sequence[str]) -> str:
         pen_v = {
             tf: guard_verdict(result.rows, timeframe=tf, lens=LENS_PEN).kind for tf in timeframes
         }
-        shifted = [tf for tf in timeframes if base_v[tf] != pen_v[tf]]
+        # (b)손해 < (c)중립 < (a)이득 — pen 아래서 가드 판정이 좋아졌는지/나빠졌는지로
+        # 방향을 읽는다(판정 종류가 바뀐 방향을 잘못 해석하지 않도록).
+        rank = {GuardKind.HARM: 0, GuardKind.NEUTRAL: 1, GuardKind.BENEFIT: 2}
+        labels = {
+            GuardKind.HARM: "(b)손해",
+            GuardKind.NEUTRAL: "(c)중립",
+            GuardKind.BENEFIT: "(a)이득",
+        }
+        shifted = [
+            tf
+            for tf in timeframes
+            if base_v[tf] != pen_v[tf] and base_v[tf] in rank and pen_v[tf] in rank
+        ]
         if shifted:
+            parts = [f"{tf} ({labels[base_v[tf]]}→{labels[pen_v[tf]]})" for tf in shifted]
+            worsened = any(rank[pen_v[tf]] < rank[base_v[tf]] for tf in shifted)
+            improved = any(rank[pen_v[tf]] > rank[base_v[tf]] for tf in shifted)
+            if worsened and not improved:
+                read = "가드 우위가 관통 요구에 무너진다는 신호(좁은 손절이 마진 체결이라 취약)"
+            elif improved and not worsened:
+                read = (
+                    "가드가 관통 요구 아래서 **오히려 더 유용해진다** — 가드가 걷어내는 좁은 "
+                    "손절이 곧 관통에 가장 취약한 마진 체결이라, 그걸 미리 버린 팔이 덜 다친다"
+                    "(무너지는 반대 방향이 아니다)"
+                )
+            else:
+                read = "TF마다 방향이 갈린다"
             pen_txt = (
-                f" 📌 **`pen_5bp`에서 판정이 바뀌는 TF**: {', '.join(shifted)} — 좁은 손절이 "
-                "관통 요구에 취약하다는 신호(위 「판정」의 `pen_5bp` 블록이 정본)."
+                f" 📌 **`pen_5bp`에서 판정 종류가 바뀌는 TF**: {', '.join(parts)} — {read}"
+                "(위 「판정」의 `pen_5bp` 블록이 정본)."
             )
         else:
             pen_txt = (
                 " 📌 **`pen_5bp`에서도 TF별 판정 종류는 그대로다** — 두 팔이 같이 깎이지 "
-                "부호가 뒤집히지 않는다(위 「촘촘 스윕 판정」의 렌즈별 정점 병기가 정본)."
+                "가드 우위의 부호가 뒤집히지 않는다(위 「촘촘 스윕 판정」의 렌즈별 정점 병기가 "
+                "정본)."
             )
     return (
         head + pen_txt + " 각 TF 판정 문장은 위 「판정」이 정본이다.\n\n"

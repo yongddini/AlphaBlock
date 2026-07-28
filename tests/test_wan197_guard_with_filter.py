@@ -261,12 +261,14 @@ def _grow(
     trades: float = 50.0,
     timeframe: str = _TIMEFRAME,
     segment: str = SEGMENT_OOS,
+    lens: str = LENS_PRIMARY,
 ) -> GuardRow:
     return GuardRow(
         symbol=symbol,
         timeframe=timeframe,
         segment=segment,
         guard=guard,
+        lens=lens,
         num_candidates=trades,
         num_trades=trades,
         total_return=ret,
@@ -325,6 +327,47 @@ def test_guard_verdict_split_direction() -> None:
     got = guard_verdict(_pair("15m", on=0.15, off=0.10, mdd_on=0.30, mdd_off=0.10), timeframe="15m")
     assert got.kind == GuardKind.NEUTRAL
     assert "갈림" in got.text
+
+
+def _both_lens_pair(
+    tf: str,
+    *,
+    base_on: float,
+    base_off: float,
+    pen_on: float,
+    pen_off: float,
+) -> list[GuardRow]:
+    """세 심볼 × 가드(0.3%·끔) × 렌즈 2 — `_conclusion` 방향 판정용."""
+    rows: list[GuardRow] = []
+    for i in range(3):
+        sym = f"S{i}/USDT:USDT"
+        rows.append(_grow(sym, guard=STOP_GUARD_FRACTION, ret=base_on, timeframe=tf))
+        rows.append(_grow(sym, guard=0.0, ret=base_off, timeframe=tf))
+        rows.append(_grow(sym, guard=STOP_GUARD_FRACTION, ret=pen_on, timeframe=tf, lens=LENS_PEN))
+        rows.append(_grow(sym, guard=0.0, ret=pen_off, timeframe=tf, lens=LENS_PEN))
+    return rows
+
+
+def test_conclusion_pen_shift_toward_benefit_reads_reinforced() -> None:
+    """baseline (c)중립 → pen (a)이득이면 「무너진다」가 아니라 「더 유용」으로 읽는다."""
+    from backtest.wan197_guard_with_filter import AuditResult, _conclusion
+
+    rows = _both_lens_pair("1h", base_on=0.10, base_off=0.10, pen_on=0.20, pen_off=0.10)
+    text = _conclusion(AuditResult(rows=rows), timeframes=("1h",))
+    assert "1h ((c)중립→(a)이득)" in text
+    assert "더 유용" in text
+    assert "무너진다는 신호" not in text  # 손해 방향의 해석이 아니다
+
+
+def test_conclusion_pen_shift_toward_harm_reads_vulnerable() -> None:
+    """baseline (a)이득 → pen (b)손해면 「관통에 무너진다(취약)」로 읽는다."""
+    from backtest.wan197_guard_with_filter import AuditResult, _conclusion
+
+    rows = _both_lens_pair("1h", base_on=0.20, base_off=0.10, pen_on=0.05, pen_off=0.10)
+    text = _conclusion(AuditResult(rows=rows), timeframes=("1h",))
+    assert "1h ((a)이득→(b)손해)" in text
+    assert "무너진다는 신호" in text
+    assert "더 유용" not in text
 
 
 def test_guard_verdict_indeterminate_when_too_few_symbols() -> None:
