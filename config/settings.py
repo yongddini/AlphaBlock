@@ -252,7 +252,7 @@ class Settings(BaseSettings):
     paper_equity: float = Field(default=10_000.0, gt=0)
 
     # 체결 비용 모델(WAN-37). 메이커/테이커 수수료 + 슬리피지의 **단일 소스**로,
-    # 백테스트와 페이퍼가 같은 값을 공유해 패리티 비교를 유의미하게 한다(paper.parity·
+    # 백테스트와 페이퍼가 같은 값을 공유해 두 경로의 손익이 같은 산식으로 나오게 한다(
     # live.runner 가 이 값을 읽어 손익 비용을 산정한다). 펀딩비는 funding_enabled
     # 수집분(WAN-16/20)을 별도로 가감한다. 개별 필드는 ALPHABLOCK_COSTS__<필드명>로
     # 덮어쓴다. 예: ALPHABLOCK_COSTS__TAKER_FEE_RATE=0.0005

@@ -13,10 +13,8 @@ from backtest.report import (
     COL_SIDE,
     format_time_kst,
 )
-from paper.parity import ParityThresholds, build_parity_row
-from paper.performance import TradeStat, build_performance
+from paper.performance import build_performance
 from paper.report import (
-    parity_to_display_frame,
     performance_to_dataframe,
     performance_to_display_frame,
     records_to_dataframe,
@@ -133,31 +131,3 @@ def test_performance_display_frame_korean_and_scope_all() -> None:
     assert "scope" in csv.columns
     assert csv.iloc[0]["scope"] == "ALL"
     assert csv.iloc[0]["win_rate"] == perf.overall.win_rate
-
-
-def test_parity_display_frame_korean_columns() -> None:
-    paper = [_record(net_pct=2.0, r=2.0)]
-    backtest = [TradeStat(net_pct=2.0, r_multiple=2.0, exit_time=_EXIT_MS)]
-    row = build_parity_row(
-        symbol="BTC/USDT:USDT",
-        timeframe="1h",
-        paper_records=paper,
-        backtest_stats=backtest,
-        thresholds=ParityThresholds(),
-    )
-
-    from paper.parity import ParityReport
-
-    report = ParityReport(rows=[row], thresholds=ParityThresholds())
-    disp = parity_to_display_frame(report)
-
-    assert "종목" in disp.columns
-    assert "페이퍼 거래수" in disp.columns
-    assert "symbol" not in disp.columns
-    # 승률은 %로 환산.
-    assert disp.iloc[0]["페이퍼 승률%"] == row.paper.win_rate * 100.0
-
-    # CSV(회귀)는 영문 + 분수.
-    csv = report.to_dataframe()
-    assert "symbol" in csv.columns
-    assert csv.iloc[0]["paper_win_rate"] == row.paper.win_rate

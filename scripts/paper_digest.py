@@ -17,7 +17,7 @@ WAN-33이 `paper_trades`에 누적한 가상 거래를 읽어 한 기간의 성�
     uv run python scripts/paper_digest.py --dry-run
 
     # 특정 기간, 패리티 비교 없이
-    uv run python scripts/paper_digest.py --since 2024-01-01 --until 2024-01-08 --no-parity
+    uv run python scripts/paper_digest.py --since 2024-01-01 --until 2024-01-08
 """
 
 from __future__ import annotations
@@ -51,7 +51,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="--since 미지정 시 집계 창(일). 기본: 설정값(paper_digest_days)",
     )
-    parser.add_argument("--no-parity", action="store_true", help="패리티(백테스트 비교) 생략")
     parser.add_argument(
         "--dry-run", action="store_true", help="발송 없이 다이제스트를 stdout으로만 출력"
     )
@@ -125,7 +124,6 @@ def generate_digest(
     until_ms: int | None,
     symbols: list[str] | None,
     timeframes: list[str] | None,
-    include_parity: bool,
 ) -> str:
     """저장소에서 읽어 다이제스트 문자열을 만든다(발송 없음, DB 없음/0건도 안전)."""
     db_path = settings.db_path
@@ -157,27 +155,9 @@ def generate_digest(
             runner_line=_runner_status_line(settings),
         )
 
-    parity_flagged: list[tuple[str, str]] | None = None
-    if include_parity:
-        try:
-            from paper.parity import build_parity_report
-
-            report = build_parity_report(
-                db_path,
-                settings=settings,
-                series=target_series,
-                start_ms=since_ms,
-                end_ms=until_ms,
-            )
-            parity_flagged = [(r.symbol, r.timeframe) for r in report.flagged_rows]
-        except Exception:  # noqa: BLE001 — 패리티 재실행 실패가 성과 발송을 막지 않도록.
-            _logger.warning("패리티 리포트 조립 실패 — 패리티 요약 생략", exc_info=True)
-            parity_flagged = None
-
     return build_digest(
         performance,
         period_label=period_label,
-        parity_flagged=parity_flagged,
     )
 
 
@@ -198,7 +178,6 @@ def main(argv: list[str] | None = None) -> int:
         until_ms=until_ms,
         symbols=_split(args.symbols),
         timeframes=_split(args.timeframes),
-        include_parity=not args.no_parity,
     )
 
     if args.dry_run:
