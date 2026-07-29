@@ -119,6 +119,24 @@ SEGMENT_ORDER: tuple[str, ...] = ("full", SEGMENT_IS, SEGMENT_OOS_WARM, SEGMENT_
 PRIMARY_OOS = SEGMENT_OOS_WARM
 STRESS_OOS = SEGMENT_OOS
 
+#: 메인 비교 배수(채택값, WAN-81/90). **이 배수에서만** 전체 격자(2렌즈 × 2팔)를 돌린다.
+MAIN_R = 1.5
+
+
+def sweep_arms(r_multiple: float, lenses: Sequence[str]) -> list[tuple[str, str]]:
+    """이 R배수에서 돌릴 (렌즈, 익절 규칙) 목록.
+
+    메인 배수(`MAIN_R`)에서는 **전체 격자**(2렌즈 × entry_r·zone_height)를 낸다 — 렌즈
+    병기·현행 대조·후보 집합 검산이 여기서 성립한다. 그 외 스윕 배수(1.0/2.0/3.0)에서는
+    **`baseline × zone_height` 한 팔만** 낸다: 요약의 R 스윕 섹션이 실제로 읽는 곡선이
+    그것뿐이고(`best_r(..., LENS_BASELINE, TP_ZONE)`), 나머지 팔은 어느 표에도 안 쓰여
+    격자를 4배로 부풀리기만 하기 때문이다(사용자 결정 2026-07-29: 스윕 축소). entry_r은
+    R배수와 무관하게 같은 청산이라 스윕에서 재도 정보가 없다.
+    """
+    if r_multiple == MAIN_R:
+        return [(lens, rule) for lens in lenses for rule in TP_RULES]
+    return [(LENS_BASELINE, TP_ZONE)]
+
 
 def arm_label(tp_rule: str) -> str:
     return tp_rule
@@ -303,38 +321,33 @@ def run_cell(
     obr: OrderBlockResult = OrderBlockDetector(OrderBlockParams()).run(seg_market.htf_df)
 
     rows: list[TpRow] = []
-    for lens_name in lenses:
-        fill = harness.fill_preset(lens_name)
-        for r_multiple in r_multiples:
-            sets: dict[str, list[int]] = {}
-            for tp_rule in TP_RULES:
-                outcome = run_arm(
-                    seg_market,
-                    params_fill=fill,
-                    tp_rule=tp_rule,
-                    r_multiple=r_multiple,
-                    obr=obr,
-                    eval_from_ms=eval_from_ms,
-                )
-                rows.append(
-                    build_row(
-                        seg_market,
-                        segment.name,
-                        lens_name,
-                        tp_rule,
-                        r_multiple,
-                        outcome,
-                        harness.build_config(seg_market.timeframe),
-                    )
-                )
-                sets[tp_rule] = outcome.entry_times
-            # 검산: 같은 렌즈·R에서 두 익절 규칙의 체결 셋업 집합은 비트 단위로 같다.
-            if sets[TP_ENTRY] != sets[TP_ZONE]:
+    cfg = harness.build_config(seg_market.timeframe)
+    for r_multiple in r_multiples:
+        # (렌즈, R) 안에서 entry_r·zone_height를 대조하려고 그 둘을 붙여 모은다.
+        sets: dict[tuple[str, str], list[int]] = {}
+        for lens_name, tp_rule in sweep_arms(r_multiple, lenses):
+            outcome = run_arm(
+                seg_market,
+                params_fill=harness.fill_preset(lens_name),
+                tp_rule=tp_rule,
+                r_multiple=r_multiple,
+                obr=obr,
+                eval_from_ms=eval_from_ms,
+            )
+            rows.append(
+                build_row(seg_market, segment.name, lens_name, tp_rule, r_multiple, outcome, cfg)
+            )
+            sets[(lens_name, tp_rule)] = outcome.entry_times
+        # 검산: 같은 렌즈·R에서 두 익절 규칙을 모두 돈 경우(= 메인 배수) 체결 셋업 집합은
+        # 비트 단위로 같아야 한다. 스윕 배수는 zone_height 한 팔만 돌아 대조 대상이 없다.
+        for lens_name in lenses:
+            entry = sets.get((lens_name, TP_ENTRY))
+            zone = sets.get((lens_name, TP_ZONE))
+            if entry is not None and zone is not None and entry != zone:
                 raise AssertionError(
                     f"후보 집합 불일치 — {seg_market.symbol} {seg_market.timeframe} "
                     f"{segment.name} {lens_name} R={r_multiple}: "
-                    f"{len(sets[TP_ZONE])} vs entry_r {len(sets[TP_ENTRY])}. "
-                    "익절이 진입을 바꾸는 배선 버그다."
+                    f"{len(zone)} vs entry_r {len(entry)}. 익절이 진입을 바꾸는 배선 버그다."
                 )
     return rows
 

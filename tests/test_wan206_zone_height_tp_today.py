@@ -282,6 +282,27 @@ def test_arm_label_is_the_bare_rule() -> None:
     assert "|" not in arm_label(TP_ZONE)
 
 
+def test_sweep_arms_full_grid_at_main_multiple() -> None:
+    """메인 배수(1.5)에서는 2렌즈 × 2팔 전체를 돈다 — 렌즈 병기·현행 대조가 여기서 성립."""
+    from backtest.wan206_zone_height_tp_today import LENSES, sweep_arms
+
+    arms = sweep_arms(1.5, LENSES)
+    assert set(arms) == {
+        (LENS_BASELINE, TP_ENTRY),
+        (LENS_BASELINE, TP_ZONE),
+        (LENS_PEN, TP_ENTRY),
+        (LENS_PEN, TP_ZONE),
+    }
+
+
+def test_sweep_arms_only_baseline_zone_height_off_the_main_multiple() -> None:
+    """스윕 배수(1.0/2.0/3.0)는 요약이 실제로 읽는 baseline×zone_height 한 팔만 돈다."""
+    from backtest.wan206_zone_height_tp_today import LENSES, sweep_arms
+
+    for r in (1.0, 2.0, 3.0):
+        assert sweep_arms(r, LENSES) == [(LENS_BASELINE, TP_ZONE)]
+
+
 # --------------------------------------------------------------------------- #
 # 검산 — entry_r 팔 ≡ run_once (실데이터가 있을 때만)
 # --------------------------------------------------------------------------- #
