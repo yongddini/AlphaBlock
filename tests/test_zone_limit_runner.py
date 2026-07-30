@@ -337,7 +337,8 @@ def test_default_settings_dispatch_to_zone_limit_runner(
     """`python -m live.runner` 기본값(`entry_mode="zone_limit"`)이 이 러너로 위임된다.
 
     WAN-95 이후 채택 기본값에서 옛 A안 경로가 도는 것이 비정상이라는 이슈 배너 1번의
-    완료 기준이다. A안은 `entry_mode="close"`로 명시했을 때만 돈다.
+    완료 기준이다. 옛 A안(종가 시그널) 경로는 WAN-208에서 제거돼, 진입점은 항상 이
+    존-지정가 러너로 위임한다.
     """
     calls: list[bool] = []
     monkeypatch.setattr(zlr, "run_zone_limit_runner", lambda settings, once: calls.append(once))

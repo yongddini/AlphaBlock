@@ -28,8 +28,25 @@ from backtest.harness import (
 from backtest.run import Grid, build_parser, grid_from_args, iter_combos
 from backtest.synthetic import make_synthetic_ohlcv
 from dashboard.charts import ZoneCategory, entered_zone_keys, filter_zones, zone_key
-from dashboard.pipeline import run_pipeline
-from strategy.models import ConfluenceParams, OrderBlockParams
+from strategy.confluence import ConfluenceStrategy
+from strategy.models import ConfluenceParams, OrderBlock, OrderBlockParams, OrderBlockSignal
+from strategy.order_blocks import OrderBlockDetector
+
+
+def _signals_and_archive(
+    df: pd.DataFrame, ob_params: OrderBlockParams, conf_params: ConfluenceParams
+) -> tuple[list[OrderBlockSignal], list[OrderBlock]]:
+    """§6 차트 회귀에 필요한 (확정 진입 시그널, 존 아카이브)를 만든다.
+
+    옛 `dashboard.pipeline.run_pipeline`(A안 백테스트 경로)은 WAN-208에서 제거됐다 —
+    §6가 쓰던 것은 탐지 존과 확정 진입 시그널뿐이라, 탐지+전략으로 같은 값을 만든다
+    (백테스트는 이 테스트와 무관하다). `entry_mode`·`max_zone_width_atr`는
+    `ConfluenceStrategy`의 시그널에 영향을 주지 않는다.
+    """
+    detection = OrderBlockDetector(ob_params).run(df)
+    confluence = ConfluenceStrategy(conf_params, ob_params).run(df, detection)
+    return confluence.order_block_signals, detection.order_blocks
+
 
 # --------------------------------------------------------------------------- #
 # §1 기본값 전환
@@ -169,18 +186,18 @@ def test_every_entry_signal_has_a_zone_box_in_the_archive() -> None:
     그대로 싣게 되므로 맞아떨어진다 — 그 해소를 동작으로 고정한다.
     """
     df = make_synthetic_ohlcv(symbol="BTC/USDT:USDT", timeframe="1h", bars=800, seed=7)
-    pipeline = run_pipeline(
+    signals, order_blocks = _signals_and_archive(
         df,
         OrderBlockParams(),
-        ConfluenceParams(entry_mode="close", rsi_mode="closed_bar", max_zone_width_atr=None),
+        ConfluenceParams(rsi_mode="closed_bar"),
     )
-    entered = entered_zone_keys(pipeline.signals)
+    entered = entered_zone_keys(signals)
     assert entered, "합성 데이터에서 진입 시그널이 나와야 이 회귀 테스트가 의미가 있다"
 
-    archive_keys = {zone_key(ob) for ob in pipeline.order_blocks}
+    archive_keys = {zone_key(ob) for ob in order_blocks}
     assert entered <= archive_keys
 
-    drawn = filter_zones(pipeline.order_blocks, {ZoneCategory.ENTERED}, entered)
+    drawn = filter_zones(order_blocks, {ZoneCategory.ENTERED}, entered)
     assert {zone_key(ob) for ob in drawn} == entered
 
 
@@ -192,13 +209,13 @@ def test_merged_path_still_has_the_known_chart_limitation() -> None:
     편의를 위해 존 식별을 흐리는 거래다(진입 근거를 화면에서 특정할 수 없게 된다).
     """
     df = make_synthetic_ohlcv(symbol="BTC/USDT:USDT", timeframe="1h", bars=800, seed=7)
-    pipeline = run_pipeline(
+    signals, order_blocks = _signals_and_archive(
         df,
         OrderBlockParams(combine_obs=True),
-        ConfluenceParams(entry_mode="close", rsi_mode="closed_bar", max_zone_width_atr=None),
+        ConfluenceParams(rsi_mode="closed_bar"),
     )
-    entered = entered_zone_keys(pipeline.signals)
-    archive_keys = {zone_key(ob) for ob in pipeline.order_blocks}
+    entered = entered_zone_keys(signals)
+    archive_keys = {zone_key(ob) for ob in order_blocks}
     assert entered - archive_keys, (
         "병합 경로에서는 합쳐진 존의 키가 원본 아카이브에 없어야 한다 — 이 성질이 "
         "사라졌다면 §6 한계가 해소된 것이니 결정문서를 갱신할 것."

@@ -14,7 +14,7 @@ import pytest
 from common.telegram import TelegramClient, TelegramResponse
 from execution.engine import ExecutionOutcome
 from execution.models import Fill, Order, OrderSide, OrderStatus, OrderType, Position
-from live import message_format, notifier, zone_limit_notifier
+from live import message_format, zone_limit_notifier
 from live.executor import TradeReport
 from live.limit_orders import LimitFill
 from live.zone_limit_notifier import (
@@ -296,14 +296,12 @@ def test_daily_summary_toggle_off() -> None:
 
 
 def test_format_helpers_are_shared_single_source() -> None:
-    """지정가 러너 알림과 옛 시그널 러너가 같은 포맷 함수를 공유한다(WAN-189).
+    """지정가 러너 알림이 저수준 포맷 함수를 `live.message_format` 단일 소스에서 쓴다(WAN-189).
 
     별칭이 아니라 사본이 되는 순간 두 경로가 갈라질 수 있으므로 `is`로 고정한다.
     `vars(...)`로 모듈 네임스페이스를 직접 보는 것은 재수출한 이름의 런타임 동일성만
-    보기 때문이다(정적 재수출 규칙과 무관).
+    보기 때문이다(정적 재수출 규칙과 무관). (옛 A안 `live.notifier` 포맷 별칭은
+    WAN-208에서 제거됐다.)
     """
     assert vars(zone_limit_notifier)["fmt_price"] is message_format.fmt_price
     assert vars(zone_limit_notifier)["fmt_time"] is message_format.fmt_time
-    # 옛 notifier의 사설 별칭도 같은 구현을 가리킨다(중복 정의 아님).
-    assert notifier._fmt_price is message_format.fmt_price
-    assert notifier._fmt_time is message_format.fmt_time

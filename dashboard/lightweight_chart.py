@@ -52,10 +52,9 @@ v5 네이티브 멀티패인(`addSeries(..., paneIndex=1)`)을 쓰면 시간축�
 
 ## 이 모듈이 다루지 않는 것
 
-`dashboard.pipeline`(탐지·백테스트 계산), `dashboard.charts`의
-`ZoneCategory`/`filter_zones`/`entered_zone_keys`(표시 필터 분류 — 렌더 엔진과
-무관해 그대로 재사용) — 모두 건드리지 않는다. `build_equity_chart`(단순 자본곡선,
-점 개수가 적어 성능 문제가 없음)도 Plotly로 남긴다.
+`dashboard.charts`의 `ZoneCategory`/`filter_zones`/`entered_zone_keys`(표시 필터
+분류 — 렌더 엔진과 무관해 그대로 재사용)는 건드리지 않는다. `build_equity_chart`
+(단순 자본곡선, 점 개수가 적어 성능 문제가 없음)도 Plotly로 남긴다.
 """
 
 from __future__ import annotations

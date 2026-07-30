@@ -317,7 +317,8 @@ def _run_config_badge_text(
     프로젝트의 반복 버그 패턴(WAN-47/56/59/63/65)에 대한 방어책 — 대시보드가 지금
     무슨 설정으로 백테스트를 돌리고 있는지 화면에 항상 드러낸다.
     """
-    entry_label = "A안(봉 마감 종가)" if conf_params.entry_mode == "close" else "B안(존-지정가)"
+    # 채택 진입은 존-지정가(B안) 단독이다 — A안(종가) 경로는 WAN-208에서 제거됐다.
+    entry_label = "B안(존-지정가)"
     rsi_label = "확정봉" if conf_params.rsi_mode == "closed_bar" else "실시간"
     if bt_config.risk_sizing is not None:
         sizing_label = f"리스크 {bt_config.risk_sizing.risk_per_trade * 100:.1f}%"

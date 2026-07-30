@@ -171,14 +171,18 @@ def test_period_widget_datetime_conversion_is_kst_and_roundtrips() -> None:
 
 
 def test_run_config_badge_text_reports_current_settings() -> None:
-    """WAN-65: 배지 문구가 진입 방식·RSI·사이징·병합·펀딩비 반영 여부를 담는다."""
-    conf = ConfluenceParams(entry_mode="close", rsi_mode="closed_bar", max_zone_width_atr=None)
+    """WAN-65: 배지 문구가 진입 방식·RSI·사이징·병합·펀딩비 반영 여부를 담는다.
+
+    진입 방식은 채택 엔진(B안 존-지정가) 단독이다 — A안(종가) 배지 분기는
+    WAN-208에서 제거됐다.
+    """
+    conf = ConfluenceParams(rsi_mode="closed_bar", max_zone_width_atr=None)
     ob = OrderBlockParams(combine_obs=True)
     sized = BacktestConfig(
         risk_sizing=PositionSizingParams(risk_per_trade=0.01), funding_enabled=True
     )
     text = _run_config_badge_text(conf, ob, sized)
-    assert "A안" in text
+    assert "B안(존-지정가)" in text
     assert "확정봉" in text
     assert "리스크 1.0%" in text
     assert "병합: ON" in text

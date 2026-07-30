@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 
 import dashboard.app as dashboard_app
 import live.fill_report as fill_report
-import live.notifier as notifier
+import live.message_format as message_format
 from backtest.report import format_time_kst
 from cli.main import _fmt_time as cli_fmt_time
 from common import timefmt
@@ -83,8 +83,12 @@ def test_dashboard_health_time_uses_shared_kst_formatter() -> None:
 
 
 def test_live_outputs_use_shared_kst_formatter() -> None:
-    """텔레그램 알림·체결률 리포트가 같은 함수를 쓴다."""
-    assert notifier._fmt_time(_UTC_MIDNIGHT_MS) == format_kst_zoned(_UTC_MIDNIGHT_MS)
+    """텔레그램 알림(존-지정가 러너)·체결률 리포트가 같은 함수를 쓴다.
+
+    옛 A안 알림기(`live.notifier`)의 KST 별칭은 WAN-208에서 제거됐다 — 지금 텔레그램
+    알림의 저수준 포맷 단일 소스는 `live.message_format`이다(WAN-189).
+    """
+    assert message_format.fmt_time(_UTC_MIDNIGHT_MS) == format_kst_zoned(_UTC_MIDNIGHT_MS)
     assert fill_report._fmt_ms(_UTC_MIDNIGHT_MS) == format_kst(_UTC_MIDNIGHT_MS)
 
 
