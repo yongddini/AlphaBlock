@@ -129,10 +129,21 @@ def test_row_carries_the_value_actually_detected() -> None:
     """
     df = make_synthetic_ohlcv(symbol="BTC/USDT:USDT", timeframe="1h", bars=300, seed=3)
     market = MarketData("BTC/USDT:USDT", "1h", df, pd.DataFrame(), [])
-    params = ConfluenceParams(entry_mode="close", rsi_mode="closed_bar", max_zone_width_atr=None)
-    from backtest.harness import build_config, run_once, segments_for
+    params = ConfluenceParams()
+    from backtest.harness import RunOutcome, build_config, segments_for
+    from backtest.metrics import build_metrics
+    from backtest.models import BacktestResult
 
-    outcome = run_once(market, params=params, cfg=build_config("1h"))
+    # A안 엔진(run_once + close, 1분봉 불필요)이 WAN-215로 제거돼, build_row가 읽을 최소
+    # outcome을 직접 구성한다 — 이 테스트가 지키는 것은 `build_row`가 `combine_obs`를
+    # **라벨이 아니라 넘긴 order_block 객체**에서 읽는다는 불변이지, 엔진 손익이 아니다.
+    empty_metrics = build_metrics(initial_capital=10_000.0, equities=[10_000.0], trades=[])
+    outcome = RunOutcome(
+        result=BacktestResult(
+            config=build_config("1h"), trades=[], equity_curve=[], metrics=empty_metrics
+        ),
+        stats=None,
+    )
     (segment,) = segments_for(oos=False, walkforward=0)
 
     merged_row = build_row(
@@ -158,7 +169,6 @@ def test_each_arm_carries_its_own_detection_params() -> None:
     grid = Grid(
         symbols=("BTC/USDT:USDT",),
         timeframes=("1h",),
-        entry_modes=("zone_limit",),
         take_profit_rs=(1.5,),
         offsets_bps=(2.0,),
         fills=(BASELINE_FILL,),
@@ -237,7 +247,7 @@ def test_dashboard_badge_says_merge_off_on_the_adopted_default() -> None:
     from dashboard.app import _run_config_badge_text
 
     text = _run_config_badge_text(
-        ConfluenceParams(entry_mode="close", rsi_mode="closed_bar", max_zone_width_atr=None),
+        ConfluenceParams(),
         OrderBlockParams(),
         BacktestConfig(),
     )

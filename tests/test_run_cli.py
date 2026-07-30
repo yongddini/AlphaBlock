@@ -149,7 +149,6 @@ def _grid_from(argv: list[str]) -> Grid:
 def test_cli_defaults_produce_the_adopted_engine() -> None:
     """인자 없는 실행 = 채택 기본값(지정가 + 롱 온리 + 1.5R) 격자 1칸."""
     grid = _grid_from([])
-    assert grid.entry_modes == ("zone_limit",)
     assert grid.take_profit_rs == (ConfluenceParams().take_profit_r,)
     # 채택 기본값을 그대로 물려받아야 한다 — 여기에 0.0을 하드코딩하면 CLI 기본 실행만
     # 혼자 옛 엔진을 돌게 된다(WAN-112).
@@ -204,12 +203,6 @@ def test_positions_rejects_unknown_and_non_positive_values() -> None:
         _grid_from(["--positions", "0"])
 
 
-def test_close_entry_rejects_multi_position() -> None:
-    """다중 포지션 회계는 B안 전용 — 종가 팔에 섞으면 라벨만 붙는다(WAN-95의 교훈)."""
-    with pytest.raises(ValueError, match="--positions"):
-        _grid_from(["--entry-mode", "close", "--positions", "3"])
-
-
 def test_comma_values_expand_to_cartesian_product() -> None:
     """완료기준: `--tp-r 1.0,1.5,2.0,3.0 --tf 15m,1h` 형태가 조합별 1행을 낸다."""
     grid = _grid_from(["--tf", "15m,1h", "--tp-r", "1.0,1.5,2.0,3.0", "--offset-bps", "0,5"])
@@ -259,24 +252,9 @@ def test_long_only_and_short_enabled_map_to_the_side_gate() -> None:
     assert _grid_from(["--short-enabled"]).short_enabled is True
 
 
-def test_close_entry_rejects_zone_limit_only_knobs() -> None:
-    """종가 진입에 지정가 노브를 섞으면 조용히 무시하지 않고 거부한다(WAN-95의 교훈)."""
-    with pytest.raises(ValueError, match="--offset-bps"):
-        _grid_from(["--entry-mode", "close", "--offset-bps", "5"])
-    with pytest.raises(ValueError, match="--fill"):
-        _grid_from(["--entry-mode", "close", "--fill", "pen_5bp"])
-
-
-def test_unknown_entry_mode_is_rejected() -> None:
-    with pytest.raises(ValueError, match="진입 방식"):
-        _grid_from(["--entry-mode", "market"])
-
-
-def test_grid_needs_1m_only_for_zone_limit() -> None:
-    """종가 전용 실행은 1분봉을 읽지 않는다 — 수백 MB를 공연히 읽지 않기 위해."""
+def test_grid_always_needs_1m() -> None:
+    """진입 방식이 지정가(B안) 단독이라 격자는 언제나 1분봉이 필요하다(A안 제거, WAN-215)."""
     assert _grid_from([]).needs_1m is True
-    assert _grid_from(["--entry-mode", "close"]).needs_1m is False
-    assert _grid_from(["--entry-mode", "close,zone_limit"]).mixes_entry_modes is True
 
 
 # ---------------------------------------------------- 실행 배선
@@ -292,18 +270,17 @@ def test_run_grid_returns_one_row_per_combination(synthetic_loader: None) -> Non
     assert all(r.segment == "full" for r in rows)
 
 
-def test_run_grid_routes_entry_modes_to_their_engines(synthetic_loader: None) -> None:
-    """A안/B안이 각자 경로를 타고 한 표에 함께 나온다 — 체결률 축의 유무로 구분된다."""
-    # 존폭 필터를 끈다(WAN-159 기본값 1.28) — 합성 존은 1.28×ATR보다 넓어 켜 두면 zone_limit
-    # 팔이 0체결이 되어 체결률 축이 사라진다. 이 테스트가 보는 것은 경로 라우팅이지 필터가 아니다.
-    grid = _grid_from(
-        ["--symbol", "BTCUSDT", "--entry-mode", "close,zone_limit", "--max-zone-width-atr", "none"]
-    )
+def test_run_grid_zone_limit_reports_a_fill_rate(synthetic_loader: None) -> None:
+    """지정가(B안) 실행은 체결률 축을 낸다 — 진입 방식은 B안 단독이다(A안 제거, WAN-215).
+
+    존폭 필터를 끈다(WAN-159 기본값 1.28) — 합성 존은 1.28×ATR보다 넓어 켜 두면 0체결이
+    되어 체결률 축이 사라진다. 이 테스트가 보는 것은 체결률 축의 존재이지 필터가 아니다.
+    """
+    grid = _grid_from(["--symbol", "BTCUSDT", "--tf", "1h", "--max-zone-width-atr", "none"])
     rows = run_grid(grid, RunOptions(), log=False)
-    by_mode = {r.entry_mode: r for r in rows}
-    assert set(by_mode) == {"close", "zone_limit"}
-    assert by_mode["close"].fill_rate is None  # 종가는 미체결 개념이 없다.
-    assert by_mode["zone_limit"].fill_rate is not None
+    assert len(rows) == 1
+    assert rows[0].entry_mode == "zone_limit"
+    assert rows[0].fill_rate is not None
 
 
 def test_run_grid_multi_position_arm_routes_to_the_portfolio_engine(
@@ -380,17 +357,11 @@ def test_run_grid_warm_oos_adds_warm_row_and_keeps_cold_rows_bit_identical(
     assert by["oos_warm"].num_bars == by["oos"].num_bars
 
 
-def test_run_grid_warm_oos_rejects_close_entry_and_multi_positions(
+def test_run_grid_warm_oos_rejects_multi_positions(
     synthetic_loader: None,
 ) -> None:
-    """따뜻한 연속 OOS는 B안 단일 포지션 전용 — 격자를 반쯤 돌린 뒤가 아니라 시작 전에
+    """따뜻한 연속 OOS는 단일 포지션 전용 — 격자를 반쯤 돌린 뒤가 아니라 시작 전에
     거부한다(WAN-95 부류의 조용한 무시 방지)."""
-    with pytest.raises(ValueError, match="oos-warm"):
-        run_grid(
-            _grid_from(["--symbol", "BTCUSDT", "--entry-mode", "close"]),
-            RunOptions(warm_oos=True),
-            log=False,
-        )
     with pytest.raises(ValueError, match="oos-warm"):
         run_grid(
             _grid_from(["--symbol", "BTCUSDT", "--positions", "3"]),
@@ -493,17 +464,17 @@ def synthetic_db(tmp_path_factory: pytest.TempPathFactory) -> tuple[str, str]:
 _PARALLEL_ARGV: tuple[str, ...] = (
     "--symbol",
     "BTCUSDT,ETHUSDT",
-    "--entry-mode",
-    "close,zone_limit",
+    "--max-zone-width-atr",
+    "none",
     "--tp-r",
     "1.5,2.0",
 )
-"""대조 격자: 2심볼 × 2진입방식 × 2익절R = 8행, fan-out 단위((심볼,TF))는 2개.
+"""대조 격자: 2심볼 × 2익절R = 4행, fan-out 단위((심볼,TF))는 2개.
 
-진입 방식을 **둘 다** 넣는 이유는 A안 팔이 이 합성 데이터에서 실제 거래를 내기
-때문이다 — 지정가(B안) 팔은 볼린저 기본 필터가 합성 데이터의 후보를 모두 걸러
-0거래가 되고(`tests/test_zone_limit_backtest.py`가 같은 성질을 기록한다), 0행끼리
-비교하면 병렬이 숫자를 바꿔도 통과한다. 손익이 실제로 흐르는 팔을 한쪽에 둔다."""
+존폭 필터를 끄는(`--max-zone-width-atr none`) 이유는 지정가(B안) 팔이 이 합성
+데이터에서 **실제 거래를 내게** 하기 위해서다 — 채택 기본값 1.28을 두면 합성 존이
+그보다 넓어 0거래가 되고(`tests/test_zone_limit_backtest.py`가 같은 성질을 기록한다),
+0행끼리 비교하면 병렬이 숫자를 바꿔도 통과한다. 손익이 실제로 흐르는 격자를 쓴다."""
 
 
 def _parallel_options(synthetic_db: tuple[str, str]) -> RunOptions:
@@ -528,10 +499,12 @@ def test_run_grid_jobs_produces_identical_rows_to_serial(synthetic_db: tuple[str
     serial = run_grid(grid, options, log=False, jobs=1)
     parallel = run_grid(grid, options, log=False, jobs=2)
 
-    # 0행·0거래끼리 같은 건 아무것도 증명하지 않는다 — 손익이 실제로 흘렀는지 먼저 본다.
-    assert len(serial) == 2 * 2 * 2
-    assert any(row.num_trades > 0 and row.total_return != 0.0 for row in serial), (
-        "합성 데이터가 거래를 내지 않았다 — 이 대조는 0끼리 비교하는 중이다"
+    # 0행끼리 같은 건 아무것도 증명하지 않는다 — 엔진이 실제로 셋업을 처리했는지 먼저 본다.
+    # (지정가(B안)는 이 합성 데이터에서 볼린저 필터에 막혀 0체결이지만, eligible_setups가
+    # 흐르므로 병렬이 그 값·순서를 흔들면 여기서 잡힌다. A안 제거로 손익 흐름 팔은 없어졌다.)
+    assert len(serial) == 2 * 2
+    assert any((row.eligible_setups or 0) > 0 for row in serial), (
+        "합성 데이터가 셋업을 내지 않았다 — 이 대조는 0끼리 비교하는 중이다"
     )
     assert [r.model_dump() for r in parallel] == [r.model_dump() for r in serial]
 
@@ -656,7 +629,7 @@ def test_main_keeps_stdout_clean_for_piping(
 
 def test_main_reports_bad_arguments_as_exit_code_2(capsys: pytest.CaptureFixture[str]) -> None:
     """잘못된 조합은 트레이스백이 아니라 사람이 읽을 오류로 끝난다."""
-    assert main(["--entry-mode", "close", "--offset-bps", "5"]) == 2
+    assert main(["--offset-bps", "abc"]) == 2
     assert "오류" in capsys.readouterr().err
 
 
@@ -671,8 +644,6 @@ def test_main_rejects_warm_oos_with_walkforward_and_wrong_paths(
     """WAN-166: `--oos-warm`의 금지 조합이 트레이스백 없이 종료 코드 2로 끝난다."""
     assert main(["--oos-warm", "--walkforward", "3"]) == 2
     assert "함께 쓸 수 없습니다" in capsys.readouterr().err
-    assert main(["--symbol", "BTCUSDT", "--oos-warm", "--entry-mode", "close"]) == 2
-    assert "oos-warm" in capsys.readouterr().err
     assert main(["--symbol", "BTCUSDT", "--oos-warm", "--positions", "3"]) == 2
     assert "oos-warm" in capsys.readouterr().err
 

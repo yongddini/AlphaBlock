@@ -104,7 +104,6 @@ def test_grid_follows_adoption_defaults() -> None:
     grid = build_grid(ALL_SYMBOLS)
     assert grid.offsets_bps == (defaults.zone_limit_offset_bps,)
     assert grid.take_profit_rs == (defaults.take_profit_r,)
-    assert grid.entry_modes == ("zone_limit",), "채택 진입 방식은 존 지정가다(토대 1)"
 
 
 def test_grid_normalizes_symbols() -> None:

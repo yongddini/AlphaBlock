@@ -285,22 +285,19 @@ def test_fill_presets_match_wan99_fill_assumptions() -> None:
 
 
 def test_build_params_pairs_rsi_mode_with_entry_mode() -> None:
-    """`entry_mode`와 `rsi_mode`는 한 세트다(WAN-41) — 어긋나면 판정 시점이 체결과 갈린다."""
+    """`entry_mode`와 `rsi_mode`는 한 세트다(WAN-41) — 어긋나면 판정 시점이 체결과 갈린다.
+
+    진입 방식은 지정가(B안) 단독이다(A안은 WAN-208/WAN-215로 제거).
+    """
     assert build_params(entry_mode="zone_limit").rsi_mode == "realtime"
-    assert build_params(entry_mode="close").rsi_mode == "closed_bar"
-
-
-def test_build_params_rejects_zone_limit_knobs_on_close_entry() -> None:
-    """종가 진입에 지정가 노브를 주면 거부한다 — 조용히 무시하면 라벨이 거짓말을 한다."""
-    with pytest.raises(ValueError, match="오프셋"):
-        build_params(entry_mode="close", offset_bps=5.0)
-    with pytest.raises(ValueError, match="체결 가정"):
-        build_params(entry_mode="close", fill=fill_preset("pen_5bp"))
 
 
 def test_build_params_rejects_unknown_entry_mode() -> None:
+    # 옛 A안 "close"도 이제 알 수 없는 진입 방식이라 같은 자리에서 거부된다.
     with pytest.raises(ValueError, match="진입 방식"):
         build_params(entry_mode="market")
+    with pytest.raises(ValueError, match="진입 방식"):
+        build_params(entry_mode="close")
 
 
 def test_build_params_only_touches_requested_axes() -> None:
@@ -317,7 +314,7 @@ def test_build_params_only_touches_requested_axes() -> None:
         "max_zone_width_atr",
     }
     default = ConfluenceParams().model_dump()
-    params = build_params(entry_mode="close", take_profit_r=3.0, short_enabled=True).model_dump()
+    params = build_params(take_profit_r=3.0, short_enabled=True).model_dump()
     diff = {k for k, v in params.items() if v != default[k]}
     assert diff <= tunable
 
@@ -567,14 +564,12 @@ def test_run_once_warm_counts_stats_over_eval_window_only() -> None:
     assert len(sink) == warm.stats.eligible
 
 
-def test_run_once_warm_rejects_close_entry_and_portfolio() -> None:
-    """따뜻한 연속 OOS는 B안 단일 포지션 전용 — 조용히 무시하지 않고 거부한다(WAN-95 부류)."""
+def test_run_once_warm_rejects_multi_position() -> None:
+    """따뜻한 연속 OOS는 단일 포지션 전용 — 다중 포지션을 조용히 무시하지 않고 거부한다."""
     from backtest.portfolio import PortfolioParams
 
     market = _market()
     cfg = build_config(_TIMEFRAME)
-    with pytest.raises(ValueError, match="따뜻한 연속 OOS"):
-        run_once(market, params=build_params(entry_mode="close"), cfg=cfg, eval_from_ms=1)
     with pytest.raises(ValueError, match="따뜻한 연속 OOS"):
         run_once(
             market,
@@ -668,43 +663,6 @@ def test_run_once_zone_limit_matches_report_engine_call() -> None:
     assert outcome.stats == expected_stats
 
 
-def test_run_once_close_entry_matches_sweep_evaluate() -> None:
-    """종가 경로 == `backtest.sweep.evaluate` 그대로(A안 엔진)."""
-    from backtest.sweep import evaluate
-
-    market = _market()
-    cfg = build_config(_TIMEFRAME)
-    params = build_params(entry_mode="close")
-    ob_result = detect_order_blocks(market)
-
-    outcome = run_once(market, params=params, cfg=cfg, order_block_result=ob_result)
-    expected = evaluate(
-        market.htf_df,
-        confluence_params=params,
-        backtest_config=cfg,
-        order_block_result=ob_result,
-        funding_rates=market.funding_rates,
-    )
-    assert outcome.result.metrics == expected.metrics
-    assert outcome.stats is None  # 종가 진입은 체결률 축이 없다.
-
-
-def test_run_once_close_entry_fair_window_limits_to_1m_coverage() -> None:
-    """공정 창을 켜면 종가 거래가 1분봉 커버 구간으로 한정된다(WAN-41/95)."""
-    market = _market(bars=400, span=100)
-    cfg = build_config(_TIMEFRAME)
-    params = build_params(entry_mode="close")
-    ob_result = detect_order_blocks(market)
-
-    full = run_once(market, params=params, cfg=cfg, order_block_result=ob_result)
-    windowed = run_once(
-        market, params=params, cfg=cfg, order_block_result=ob_result, fair_window=True
-    )
-    start = int(market.df_1m["open_time"].iloc[0])
-    assert windowed.result.metrics.num_trades <= full.result.metrics.num_trades
-    assert all(t.entry_time >= start for t in windowed.result.trades)
-
-
 def test_run_once_portfolio_matches_the_multi_position_engine() -> None:
     """WAN-130: 하네스의 다중 포지션 경로 == WAN-103 엔진 직접 호출."""
     from backtest.portfolio import PortfolioParams
@@ -731,20 +689,6 @@ def test_run_once_portfolio_matches_the_multi_position_engine() -> None:
     )
     assert outcome.result.metrics == expected.metrics
     assert outcome.stats == expected_stats
-
-
-def test_run_once_portfolio_rejects_close_entry() -> None:
-    """다중 포지션 회계는 B안 전용 — A안에 붙이면 조용히 무시하지 않고 거부한다."""
-    from backtest.portfolio import PortfolioParams
-
-    market = _market()
-    with pytest.raises(ValueError, match="다중 포지션"):
-        run_once(
-            market,
-            params=build_params(entry_mode="close"),
-            cfg=build_config(_TIMEFRAME),
-            portfolio=PortfolioParams(leverage=2.0),
-        )
 
 
 def test_run_row_survives_csv_round_trip_with_empty_leverage() -> None:

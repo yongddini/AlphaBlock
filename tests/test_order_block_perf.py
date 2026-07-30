@@ -14,8 +14,6 @@ from __future__ import annotations
 
 import time
 
-from backtest.engine import BacktestEngine
-from backtest.models import BacktestConfig
 from backtest.synthetic import make_synthetic_ohlcv
 from strategy.models import OrderBlock, OrderBlockParams, OrderBlockSignal
 from strategy.order_blocks import OrderBlockDetector
@@ -96,18 +94,21 @@ def test_bisect_signals_match_linear_reference() -> None:
     assert result.signals
 
 
-def test_three_year_detection_and_backtest_within_budget() -> None:
-    """26,280봉 단일 탐지+백테스트가 시간 예산 내에 끝난다(O(n²) 회귀 방지)."""
+def test_three_year_detection_within_budget() -> None:
+    """26,280봉 단일 탐지가 시간 예산 내에 끝난다(O(n²) 회귀 방지).
+
+    옛 A안 엔진(`BacktestEngine`)이 WAN-208/WAN-215로 제거돼 이 벤치마크는 탐지만
+    잰다 — O(봉수 × 존수) 퇴화의 원천은 탐지의 존 순회이므로 회귀 감시력은 유지된다.
+    """
     df = make_synthetic_ohlcv(timeframe="1h", bars=_THREE_YEARS_1H_BARS, seed=3)
 
     start = time.perf_counter()
     detection = OrderBlockDetector(OrderBlockParams()).run(df)
-    BacktestEngine(BacktestConfig()).run(df, detection.signals)
     elapsed = time.perf_counter() - start
 
     # 수백 개 존이 생성되는 규모여야 벤치마크가 유의미하다(순회 대상이 실제로 누적됨).
     assert len(detection.order_blocks) > 100
     assert elapsed < _MAX_SECONDS, (
-        f"3년치 탐지+백테스트가 {elapsed:.2f}s 걸림 (상한 {_MAX_SECONDS}s). "
+        f"3년치 탐지가 {elapsed:.2f}s 걸림 (상한 {_MAX_SECONDS}s). "
         "O(봉수 × 존수) 퇴화가 재발했을 수 있음."
     )

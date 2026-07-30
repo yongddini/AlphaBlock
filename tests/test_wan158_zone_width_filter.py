@@ -31,8 +31,8 @@ from backtest.harness import (
     segments_for,
 )
 from backtest.models import BacktestConfig
-from backtest.run import Grid, build_parser, grid_from_args, iter_combos
-from backtest.sweep import default_backtest_config, evaluate, timeframe_to_ms
+from backtest.run import build_parser, grid_from_args, iter_combos
+from backtest.sweep import default_backtest_config, timeframe_to_ms
 from backtest.synthetic import make_synthetic_ohlcv
 from backtest.zone_limit_backtest import (
     _Candidate,
@@ -289,41 +289,6 @@ def test_threshold_must_be_positive() -> None:
     """0 이하는 "필터 없음"이 아니라 무의미한 값이다 — `None`으로만 끈다."""
     with pytest.raises(ValueError):
         ConfluenceParams(max_zone_width_atr=0.0)
-
-
-# --------------------------------------------------------------------------- #
-# 5. 종가 진입(A안)과 함께 쓰면 거부
-# --------------------------------------------------------------------------- #
-
-
-def test_close_entry_engine_rejects_the_filter() -> None:
-    htf = make_synthetic_ohlcv(timeframe=_TF, bars=300, seed=7)
-    params = ConfluenceParams(
-        entry_mode="close",
-        rsi_mode="closed_bar",
-        zone_limit_offset_bps=0.0,
-        max_zone_width_atr=1.2,
-    )
-    with pytest.raises(ValueError, match="존폭 필터"):
-        evaluate(htf, confluence_params=params)
-
-
-def test_build_params_rejects_filter_on_close_entry() -> None:
-    with pytest.raises(ValueError, match="존폭 필터"):
-        build_params(entry_mode="close", max_zone_width_atr=1.24)
-
-
-def test_grid_rejects_filter_on_close_entry() -> None:
-    with pytest.raises(ValueError, match="존폭"):
-        Grid(
-            symbols=("BTC/USDT:USDT",),
-            timeframes=(_TF,),
-            entry_modes=("close",),
-            take_profit_rs=(1.5,),
-            offsets_bps=(0.0,),
-            fills=(BASELINE_FILL,),
-            max_zone_widths_atr=(1.24,),
-        )
 
 
 # --------------------------------------------------------------------------- #

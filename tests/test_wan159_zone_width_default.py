@@ -18,8 +18,6 @@ from __future__ import annotations
 
 import pickle
 
-import pytest
-
 from backtest.harness import (
     BASELINE_FILL,
     LEGACY_MAX_ZONE_WIDTH_ATR,
@@ -54,7 +52,6 @@ def test_unset_survives_pickle_as_a_singleton() -> None:
     grid = Grid(
         symbols=("BTC/USDT:USDT",),
         timeframes=("1h",),
-        entry_modes=("zone_limit",),
         take_profit_rs=(1.5,),
         offsets_bps=(2.0,),
         fills=(BASELINE_FILL,),
@@ -77,38 +74,6 @@ def test_cli_none_is_off_and_unspecified_is_the_adopted_default() -> None:
     assert off.max_zone_widths_atr == (None,)
     (off_combo,) = iter_combos(off)
     assert build_params(max_zone_width_atr=off_combo.max_zone_width_atr).max_zone_width_atr is None
-
-
-def test_close_entry_forces_the_filter_off_but_rejects_a_positive_threshold() -> None:
-    # 미지정/끄기는 A안에서 안전하게 꺼진다.
-    assert build_params(entry_mode="close").max_zone_width_atr is None
-    assert build_params(entry_mode="close", max_zone_width_atr=None).max_zone_width_atr is None
-    # 양수 문턱은 "A안이 조용히 무시하는 필터를 켰다"는 오해라 거부한다.
-    with pytest.raises(ValueError, match="존폭"):
-        build_params(entry_mode="close", max_zone_width_atr=1.24)
-
-
-def test_close_grid_allows_off_but_rejects_a_threshold() -> None:
-    """혼합 격자(close,zone_limit)에서 끄기는 무해하므로 허용, 양수 문턱은 거부."""
-    Grid(
-        symbols=("BTC/USDT:USDT",),
-        timeframes=("1h",),
-        entry_modes=("close", "zone_limit"),
-        take_profit_rs=(1.5,),
-        offsets_bps=(0.0,),
-        fills=(BASELINE_FILL,),
-        max_zone_widths_atr=(None,),
-    )
-    with pytest.raises(ValueError, match="존폭"):
-        Grid(
-            symbols=("BTC/USDT:USDT",),
-            timeframes=("1h",),
-            entry_modes=("close",),
-            take_profit_rs=(1.5,),
-            offsets_bps=(0.0,),
-            fills=(BASELINE_FILL,),
-            max_zone_widths_atr=(1.28,),
-        )
 
 
 def test_pin_zone_width_turns_the_filter_off_by_default() -> None:

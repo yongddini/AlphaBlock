@@ -1,32 +1,23 @@
 """공용 체결 비용 모델 테스트 (WAN-37).
 
 `common.costs.CostModel`의 메이커/테이커 수수료·슬리피지 산식과, 그 모델이 페이퍼
-(`paper.store.build_record`)와 백테스트(`backtest.engine`)에 **동일하게** 적용돼
-같은 진입/청산에 대해 같은 순손익을 내는지(패리티) 검증한다.
+(`paper.store.build_record`)에 적용돼 각 비용(수수료·슬리피지·펀딩)이 순손익에서
+개별적으로 반영되는지 검증한다.
+
+⚠️ 옛 페이퍼 ↔ A안 백테스트 패리티 테스트(`run_backtest`)는 A안 엔진이 WAN-208/
+WAN-215로 제거되면서 함께 삭제됐다. 지정가(B안) 엔진의 비용 반영은
+`test_zone_limit_backtest`가 덮는다.
 """
 
 from __future__ import annotations
 
-import math
-
-import pandas as pd
 import pytest
 
-from backtest.engine import run_backtest
-from backtest.models import BacktestConfig, ExitReason
 from common.costs import CostModel, Liquidity
 from data.models import FundingRate
 from live.paper import ClosedTrade, PaperPosition
 from paper.store import build_record
-from strategy.models import (
-    OrderBlock,
-    OrderBlockDirection,
-    OrderBlockSignal,
-    SignalExitReason,
-)
-
-_STEP = 3_600_000  # 1h in ms
-
+from strategy.models import OrderBlockDirection, SignalExitReason
 
 # --------------------------------------------------------------------------- #
 # CostModel 단위
@@ -141,145 +132,3 @@ def test_build_record_legacy_fee_rate_path_unchanged() -> None:
     assert rec.fee_pct == pytest.approx(0.08)  # 2 × 0.0004 × 100
     assert rec.slippage_pct == 0.0
     assert rec.net_pct == pytest.approx(9.92)
-
-
-# --------------------------------------------------------------------------- #
-# 페이퍼 ↔ 백테스트 패리티: 동일 진입/청산 → 동일 순손익
-# --------------------------------------------------------------------------- #
-
-
-def _signal(direction: OrderBlockDirection, price: float) -> OrderBlockSignal:
-    ob = OrderBlock(
-        direction=direction,
-        top=price * 1.01,
-        bottom=price * 0.99,
-        start_time=0,
-        confirmed_time=0,
-        ob_volume=1.0,
-        ob_low_volume=0.5,
-        ob_high_volume=0.5,
-    )
-    return OrderBlockSignal(
-        direction=direction, trigger_time=0, price=price, order_block=ob, status="active"
-    )
-
-
-def _make_df(closes: list[float]) -> pd.DataFrame:
-    # 손절·익절에 닿지 않는 완만한 봉들. 마지막 봉 종가로 강제 청산(END_OF_DATA)된다.
-    rows = [(c, c + 0.5, c - 0.5, c, 10.0) for c in closes]
-    return pd.DataFrame(
-        {
-            "open_time": [i * _STEP for i in range(len(rows))],
-            "open": [r[0] for r in rows],
-            "high": [r[1] for r in rows],
-            "low": [r[2] for r in rows],
-            "close": [r[3] for r in rows],
-            "volume": [r[4] for r in rows],
-        }
-    )
-
-
-def _parity_check(
-    direction: OrderBlockDirection,
-    *,
-    entry: float,
-    exit_close: float,
-    cfg: BacktestConfig,
-    entry_liquidity: Liquidity,
-    funding: list[FundingRate] | None,
-) -> None:
-    """같은 진입/청산·같은 비용 모델에서 백테스트와 페이퍼 순손익률이 일치하는지."""
-    # 진입가에 닿게 첫 봉을 entry로, 이후 완만히 이동해 마지막 봉 종가에서 강제 청산.
-    df = _make_df([entry, (entry + exit_close) / 2.0, exit_close])
-    result = run_backtest(df, [_signal(direction, entry)], cfg, funding)
-    assert len(result.trades) == 1
-    trade = result.trades[0]
-    assert trade.exits[-1].reason is ExitReason.END_OF_DATA
-
-    is_long = direction is OrderBlockDirection.BULLISH
-    closed = ClosedTrade(
-        position=PaperPosition(
-            symbol="BTC/USDT:USDT",
-            timeframe="1h",
-            direction=direction,
-            entry_time=0,
-            entry_price=entry,
-        ),
-        exit_time=2 * _STEP,
-        exit_price=exit_close,
-        reason=SignalExitReason.TAKE_PROFIT if is_long else SignalExitReason.STOP_LOSS,
-    )
-    rec = build_record(
-        closed,
-        cost_model=cfg.cost_model,
-        entry_liquidity=entry_liquidity,
-        exit_liquidity=Liquidity.TAKER,
-        funding_rates=funding,
-    )
-
-    # 백테스트 실현손익을 진입 원(raw) 노셔널로 정규화하면 페이퍼 net_pct와 같아야 한다
-    # (net cash는 노셔널 기준에 무관하므로 정확히 일치).
-    raw_notional = entry * trade.quantity
-    backtest_net_pct = trade.realized_pnl / raw_notional * 100.0
-    assert math.isclose(rec.net_pct, backtest_net_pct, rel_tol=1e-9, abs_tol=1e-9)
-
-
-def test_parity_taker_fees_and_slippage_long() -> None:
-    cfg = BacktestConfig(
-        initial_capital=10_000.0,
-        fee_rate=0.0004,
-        maker_fee_rate=0.0002,
-        slippage=0.0005,
-        position_fraction=1.0,
-        entry_liquidity=Liquidity.TAKER,
-    )
-    _parity_check(
-        OrderBlockDirection.BULLISH,
-        entry=100.0,
-        exit_close=108.0,
-        cfg=cfg,
-        entry_liquidity=Liquidity.TAKER,
-        funding=None,
-    )
-
-
-def test_parity_taker_fees_and_slippage_short() -> None:
-    cfg = BacktestConfig(
-        initial_capital=10_000.0,
-        fee_rate=0.0004,
-        slippage=0.0005,
-        position_fraction=1.0,
-        entry_liquidity=Liquidity.TAKER,
-    )
-    _parity_check(
-        OrderBlockDirection.BEARISH,
-        entry=100.0,
-        exit_close=94.0,
-        cfg=cfg,
-        entry_liquidity=Liquidity.TAKER,
-        funding=None,
-    )
-
-
-def test_parity_with_funding_matches_when_no_slippage() -> None:
-    """슬리피지 0(진입 체결가=참조가)이면 펀딩까지 포함해 순손익이 정확히 일치한다."""
-    cfg = BacktestConfig(
-        initial_capital=10_000.0,
-        fee_rate=0.0004,
-        slippage=0.0,
-        position_fraction=1.0,
-        entry_liquidity=Liquidity.TAKER,
-        funding_enabled=True,
-    )
-    funding = [
-        FundingRate(symbol="BTC/USDT:USDT", funding_time=_STEP, rate=0.0002),
-        FundingRate(symbol="BTC/USDT:USDT", funding_time=2 * _STEP - 1, rate=-0.0001),
-    ]
-    _parity_check(
-        OrderBlockDirection.BULLISH,
-        entry=100.0,
-        exit_close=106.0,
-        cfg=cfg,
-        entry_liquidity=Liquidity.TAKER,
-        funding=funding,
-    )

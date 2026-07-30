@@ -15,8 +15,15 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from backtest.engine import run_backtest
-from backtest.models import BacktestConfig, ExitReason, PositionSide
+from backtest.metrics import build_metrics
+from backtest.models import (
+    BacktestConfig,
+    BacktestResult,
+    ExitReason,
+    PositionSide,
+    Trade,
+    TradeFill,
+)
 from dashboard.lightweight_chart import (
     _BAND_LINE_WIDTH,
     _EMA_LENGTH_COLORS_DARK,
@@ -55,6 +62,35 @@ def _df(n: int) -> pd.DataFrame:
             "volume": [10.0] * n,
         }
     )
+
+
+def _long_trade_backtest(*, entry_step: int = 20, exit_step: int = 24) -> BacktestResult:
+    """진입/청산 마커가 뜨도록 롱 거래 하나를 담은 결과 — 옛 A안 `run_backtest`의 대체.
+
+    마커는 `trade.side`·`entry_time`·`exits[].time`만 읽으므로(가격·손익은 무관),
+    A안 엔진(WAN-208/WAN-215 제거) 없이 최소 거래로 렌더링 계층만 격리 검증한다.
+    """
+    trade = Trade(
+        side=PositionSide.LONG,
+        entry_time=entry_step * _STEP,
+        entry_price=100.0,
+        quantity=1.0,
+        entry_fee=0.0,
+        exits=[
+            TradeFill(
+                time=exit_step * _STEP,
+                price=110.0,
+                quantity=1.0,
+                fee=0.0,
+                reason=ExitReason.TAKE_PROFIT,
+            )
+        ],
+        funding_cost=0.0,
+        realized_pnl=10.0,
+        return_pct=0.1,
+    )
+    metrics = build_metrics(initial_capital=10_000.0, equities=[10_000.0, 10_010.0], trades=[trade])
+    return BacktestResult(config=BacktestConfig(), trades=[trade], equity_curve=[], metrics=metrics)
 
 
 def _order_block(
@@ -144,14 +180,7 @@ def test_build_chart_html_one_box_per_zone_no_consolidation() -> None:
 def test_markers_are_text_free_arrows() -> None:
     """WAN-146: 마커는 화살표만 — 진입의 RSI 문구도, 청산의 손익 문구도 없다."""
     df = _df(30)
-    signal = OrderBlockSignal(
-        direction=OrderBlockDirection.BULLISH,
-        trigger_time=20 * _STEP,
-        price=100.0,
-        order_block=_order_block(),
-        status="active",
-    )
-    backtest = run_backtest(df, [signal], BacktestConfig(take_profit_pct=0.5))
+    backtest = _long_trade_backtest()
 
     payload = _payload(build_chart_html(df, [], backtest))
 
@@ -530,14 +559,7 @@ def test_zone_fill_follows_theme() -> None:
 
 def test_markers_follow_theme() -> None:
     df = _df(30)
-    signal = OrderBlockSignal(
-        direction=OrderBlockDirection.BULLISH,
-        trigger_time=20 * _STEP,
-        price=100.0,
-        order_block=_order_block(),
-        status="active",
-    )
-    backtest = run_backtest(df, [signal], BacktestConfig(take_profit_pct=0.5))
+    backtest = _long_trade_backtest()
 
     dark_entry = _payload(build_chart_html(df, [], backtest))["markers"][0]  # type: ignore[index]
     light_entry = _payload(build_chart_html(df, [], backtest, theme="light"))["markers"][0]  # type: ignore[index]

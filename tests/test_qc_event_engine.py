@@ -174,8 +174,6 @@ def test_validate_supported_rejects_out_of_scope_params() -> None:
         validate_supported(ConfluenceParams(rsi_gate_mode=harness.LEGACY_RSI_GATE_MODE))
     with pytest.raises(ValueError, match="fill_dropout_rate"):
         validate_supported(harness.build_params(fill=harness.fill_preset("pen_5bp_drop_50")))
-    with pytest.raises(ValueError, match="B안"):
-        validate_supported(harness.build_params(entry_mode="close"))
 
 
 def test_event_engine_rejects_out_of_order_minutes() -> None:

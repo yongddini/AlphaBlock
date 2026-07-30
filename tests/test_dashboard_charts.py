@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import pandas as pd
 
-from backtest.engine import run_backtest
+from backtest.metrics import build_metrics
+from backtest.models import BacktestConfig, BacktestResult, EquityPoint
 from dashboard.charts import (
     ZoneCategory,
     build_equity_chart,
@@ -32,6 +33,20 @@ def _df(n: int) -> pd.DataFrame:
             "close": [100.0 + i for i in range(n)],
             "volume": [10.0] * n,
         }
+    )
+
+
+def _flat_backtest(n: int) -> BacktestResult:
+    """거래 없는 평평한 자본곡선(봉당 1점)의 결과 — 옛 A안 `run_backtest(df, [])`의 대체.
+
+    A안 엔진이 WAN-208/WAN-215로 제거돼, 자본곡선 차트가 읽는 `equity_curve`만 직접
+    구성한다(엔진 없이 렌더링 계층만 격리 검증).
+    """
+    equities = [10_000.0] * n
+    metrics = build_metrics(initial_capital=10_000.0, equities=equities or [10_000.0], trades=[])
+    equity_curve = [EquityPoint(time=i * _STEP, equity=10_000.0) for i in range(n)]
+    return BacktestResult(
+        config=BacktestConfig(), trades=[], equity_curve=equity_curve, metrics=metrics
     )
 
 
@@ -110,8 +125,7 @@ def test_filter_zones_empty_selection_returns_nothing() -> None:
 
 
 def test_build_equity_chart_has_one_point_per_equity_curve_entry() -> None:
-    df = _df(5)
-    backtest = run_backtest(df, [])
+    backtest = _flat_backtest(5)
 
     fig = build_equity_chart(backtest)
 
@@ -120,7 +134,7 @@ def test_build_equity_chart_has_one_point_per_equity_curve_entry() -> None:
 
 
 def test_build_equity_chart_theme_selects_template() -> None:
-    backtest = run_backtest(_df(5), [])
+    backtest = _flat_backtest(5)
 
     dark = build_equity_chart(backtest)  # 기본 다크
     light = build_equity_chart(backtest, theme="light")

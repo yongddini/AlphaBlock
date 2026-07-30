@@ -103,7 +103,6 @@ def test_grid_pins_the_gate_and_follows_adopted_defaults_elsewhere() -> None:
     # 익절 R·오프셋을 상수로 박으면 기본값이 움직일 때 이 리포트만 옛 엔진을 돈다.
     assert grid.take_profit_rs == (defaults.take_profit_r,)
     assert grid.offsets_bps == (defaults.zone_limit_offset_bps,)
-    assert grid.entry_modes == ("zone_limit",)
     assert tuple(f.name for f in grid.fills) == LENS_NAMES
     assert grid.symbols == ("BTC/USDT:USDT",)  # 축약형 정규화.
 
