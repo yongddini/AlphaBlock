@@ -7,10 +7,11 @@
 # scripts/uninstall-daemons.sh.
 #
 # 사용:
-#   ./scripts/uninstall-systemd.sh               # 셋 다
+#   ./scripts/uninstall-systemd.sh               # 넷 다
 #   ./scripts/uninstall-systemd.sh collector     # 수집기만
 #   ./scripts/uninstall-systemd.sh live          # 러너만
 #   ./scripts/uninstall-systemd.sh dashboard     # 대시보드만
+#   ./scripts/uninstall-systemd.sh doctor        # DB 무결성 타이머만
 set -euo pipefail
 
 if [[ "$(uname -s)" != "Linux" ]] || ! command -v systemctl >/dev/null; then
@@ -33,6 +34,18 @@ uninstall_one() {
     fi
 }
 
+uninstall_doctor() {
+    local timer="alphablock-doctor.timer"
+    local svc="alphablock-doctor.service"
+    if [[ -f "$UNIT_DIR/$timer" || -f "$UNIT_DIR/$svc" ]]; then
+        sudo systemctl disable --now "$timer" || true
+        sudo rm -f "$UNIT_DIR/$timer" "$UNIT_DIR/$svc"
+        echo "🗑️  해제: $timer + $svc"
+    else
+        echo "ℹ️  설치돼 있지 않음: $timer"
+    fi
+}
+
 TARGET="${1:-all}"
 case "$TARGET" in
     collector)
@@ -44,13 +57,17 @@ case "$TARGET" in
     dashboard)
         uninstall_one dashboard
         ;;
+    doctor)
+        uninstall_doctor
+        ;;
     all)
         uninstall_one collector
         uninstall_one live
         uninstall_one dashboard
+        uninstall_doctor
         ;;
     *)
-        echo "사용법: $0 [collector|live|dashboard|all]" >&2
+        echo "사용법: $0 [collector|live|dashboard|doctor|all]" >&2
         exit 1
         ;;
 esac

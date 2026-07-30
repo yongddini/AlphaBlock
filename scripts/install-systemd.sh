@@ -9,10 +9,14 @@
 # 불가하므로(WAN-174) 수집·페이퍼 러너를 서버에서 돌린다.
 #
 # 사용 (저장소 루트가 서버에 clone 돼 있고 `uv sync` 를 마친 상태에서):
-#   ./scripts/install-systemd.sh                 # 셋 다(수집기 + 러너 + 대시보드)
+#   ./scripts/install-systemd.sh                 # 넷 다(수집기 + 러너 + 대시보드 + 무결성 타이머)
 #   ./scripts/install-systemd.sh collector       # 수집기만
 #   ./scripts/install-systemd.sh live            # 러너만
 #   ./scripts/install-systemd.sh dashboard       # 대시보드만
+#   ./scripts/install-systemd.sh doctor          # DB 무결성 주기 점검 타이머만(WAN-185)
+#
+# 무결성 점검 간격은 ALPHABLOCK_DOCTOR_INTERVAL(기본 15min)로 지정한다. 예:
+#   ALPHABLOCK_DOCTOR_INTERVAL=1h ./scripts/install-systemd.sh doctor
 #
 # 대시보드 포트는 ALPHABLOCK_DASHBOARD_PORT(기본 8501)로 지정한다. 예:
 #   ALPHABLOCK_DASHBOARD_PORT=9000 ./scripts/install-systemd.sh dashboard
@@ -40,6 +44,7 @@ TEMPLATE_DIR="$REPO_DIR/scripts/systemd"
 UNIT_DIR="/etc/systemd/system"
 LOG_DIR="${ALPHABLOCK_LOG_DIR:-$REPO_DIR/logs}"
 DASHBOARD_PORT="${ALPHABLOCK_DASHBOARD_PORT:-8501}"
+DOCTOR_INTERVAL="${ALPHABLOCK_DOCTOR_INTERVAL:-15min}"
 RUN_USER="$(id -un)"
 
 # uv 실행 파일 절대 경로(systemd 는 셸 PATH 를 물려받지 않는다).
@@ -67,14 +72,7 @@ install_one() {
         exit 1
     fi
 
-    sed \
-        -e "s|__UV_BIN__|${UV_BIN}|g" \
-        -e "s|__WORKDIR__|${REPO_DIR}|g" \
-        -e "s|__PATH__|${SERVICE_PATH}|g" \
-        -e "s|__LOG_DIR__|${LOG_DIR}|g" \
-        -e "s|__RUN_USER__|${RUN_USER}|g" \
-        -e "s|__DASHBOARD_PORT__|${DASHBOARD_PORT}|g" \
-        "$template" > "$rendered"
+    render_unit "$template" "$rendered"
 
     sudo install -m 644 "$rendered" "$UNIT_DIR/$unit"
     rm -f "$rendered"
@@ -82,6 +80,43 @@ install_one() {
     sudo systemctl daemon-reload
     sudo systemctl enable --now "$unit"
     echo "✅ 설치·시작: $unit (로그: $LOG_DIR/${label}.log)"
+}
+
+# 템플릿의 __PLACEHOLDER__ 를 실제 값으로 치환해 $2 에 렌더한다.
+render_unit() {
+    local template="$1" out="$2"
+    if [[ ! -f "$template" ]]; then
+        echo "❌ 템플릿이 없습니다: $template" >&2
+        exit 1
+    fi
+    sed \
+        -e "s|__UV_BIN__|${UV_BIN}|g" \
+        -e "s|__WORKDIR__|${REPO_DIR}|g" \
+        -e "s|__PATH__|${SERVICE_PATH}|g" \
+        -e "s|__LOG_DIR__|${LOG_DIR}|g" \
+        -e "s|__RUN_USER__|${RUN_USER}|g" \
+        -e "s|__DASHBOARD_PORT__|${DASHBOARD_PORT}|g" \
+        -e "s|__DOCTOR_INTERVAL__|${DOCTOR_INTERVAL}|g" \
+        "$template" > "$out"
+}
+
+# DB 무결성 주기 점검(WAN-185): oneshot 서비스 + 타이머 한 쌍.
+# 서비스는 부팅 자동 시작하지 않고(타이머가 트리거), 타이머만 enable --now 한다.
+install_doctor() {
+    local svc="alphablock-doctor.service"
+    local timer="alphablock-doctor.timer"
+    local rendered
+    rendered="$(mktemp)"
+
+    render_unit "$TEMPLATE_DIR/${svc}.template" "$rendered"
+    sudo install -m 644 "$rendered" "$UNIT_DIR/$svc"
+    render_unit "$TEMPLATE_DIR/${timer}.template" "$rendered"
+    sudo install -m 644 "$rendered" "$UNIT_DIR/$timer"
+    rm -f "$rendered"
+
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now "$timer"
+    echo "✅ 설치·시작: $timer (간격 ${DOCTOR_INTERVAL} · 로그: $LOG_DIR/doctor.log)"
 }
 
 TARGET="${1:-all}"
@@ -95,17 +130,22 @@ case "$TARGET" in
     dashboard)
         install_one dashboard
         ;;
+    doctor)
+        install_doctor
+        ;;
     all)
         install_one collector
         install_one live
         install_one dashboard
+        install_doctor
         ;;
     *)
-        echo "사용법: $0 [collector|live|dashboard|all]" >&2
+        echo "사용법: $0 [collector|live|dashboard|doctor|all]" >&2
         exit 1
         ;;
 esac
 
 echo
 echo "상태 확인: systemctl status alphablock-collector alphablock-live alphablock-dashboard"
+echo "타이머 확인: systemctl list-timers alphablock-doctor.timer   (DB 무결성 주기 점검 = WAN-185)"
 echo "수집 확인: uv run -- alphablock status   (웹소켓이 1분봉을 받는지 = WAN-174 완료 기준)"

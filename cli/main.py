@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import socket
 from collections.abc import Sequence
 from datetime import datetime
 from typing import TYPE_CHECKING
@@ -22,7 +23,10 @@ from dashboard.health import HealthLevel
 from dashboard.health_data import HealthView, build_health_view
 
 if TYPE_CHECKING:
+    from data.integrity import IntegrityReport
     from data.verify import VerifyReport
+
+logger = logging.getLogger(__name__)
 
 _LEVEL_TEXT = {
     HealthLevel.OK: "[OK]",
@@ -405,7 +409,49 @@ def cmd_doctor(args: argparse.Namespace, settings: Settings) -> int:
 
     report = inspect(db_path, quick_check=not args.skip_quick_check, orphan_since_ms=since_ms)
     print(render_report(report))
+
+    if not report.healthy and args.notify_on_failure:
+        _notify_doctor_failure(report, settings)
+
     return 0 if report.healthy else 1
+
+
+def _doctor_alert_text(report: IntegrityReport, hostname: str) -> str:
+    """doctor 이상을 폰에서 한눈에 읽을 짧은 경고로 요약한다(WAN-185).
+
+    `render_report`는 화면·로그용 전체 마크다운이라 텔레그램엔 길다 — 무결성 판정
+    (`healthy`)을 무너뜨린 카테고리만 골라 한 줄로 만든다.
+    """
+    reasons: list[str] = []
+    if not report.quick_check_ok:
+        reasons.append("PRAGMA quick_check 손상")
+    if report.recovery_artifacts:
+        reasons.append(f"복구 산출물 {len(report.recovery_artifacts)}개")
+    if report.orphan_fills:
+        reasons.append(f"처분 미기록 체결 {len(report.orphan_fills)}건")
+    if report.empty_ledgers:
+        names = ", ".join(t.name for t in report.empty_ledgers)
+        reasons.append(f"빈 장부({names})")
+    body = "; ".join(reasons) if reasons else "이상 감지"
+    return (
+        f"🚨 *AlphaBlock DB 이상* — `{hostname}`\n"
+        f"DB: `{report.db_path}`\n"
+        f"{body}\n"
+        f"서버에서 `alphablock doctor`로 확인하세요."
+    )
+
+
+def _notify_doctor_failure(report: IntegrityReport, settings: Settings) -> None:
+    """무결성 이상을 텔레그램으로 알린다 — 설정이 없으면 로그로만 남긴다(경고 유실 방지)."""
+    from common.telegram import build_telegram_client
+
+    text = _doctor_alert_text(report, socket.gethostname())
+    client = build_telegram_client(settings)
+    if client is None:
+        logger.warning("doctor 이상 감지 — 텔레그램 미설정으로 경고 미전송:\n%s", text)
+        return
+    if not client.send_message(text):
+        logger.warning("doctor 이상 경고의 텔레그램 전송이 실패했습니다.")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -563,6 +609,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help="복원 가능한 유일본이 남아 있어도 드롭한다(기본은 거부 — WAN-195)",
+    )
+    p_doctor.add_argument(
+        "--notify-on-failure",
+        action="store_true",
+        help="무결성 이상 시 텔레그램 경고를 보낸다(systemd 타이머·cron 감시용 — WAN-185)",
     )
     p_doctor.set_defaults(func=cmd_doctor)
 
