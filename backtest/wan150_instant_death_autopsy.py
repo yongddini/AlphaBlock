@@ -518,8 +518,13 @@ def permutation_test(
     positive: Axis,
     permutations: int = _PERMUTATIONS,
     seed: int = _SEED,
+    hypothesis_sign: int | None = None,
 ) -> PermutationRow:
-    """특징↔즉사 연관의 심볼 층화 라벨 순열 검정(WAN-117 자, 타깃만 3분류로 일반화)."""
+    """특징↔즉사 연관의 심볼 층화 라벨 순열 검정(WAN-117 자, 타깃만 3분류로 일반화).
+
+    `hypothesis_sign`을 주면 모듈 전역 `HYPOTHESIS_SIGN` 조회 대신 그 값을 쓴다 — WAN-209처럼
+    이 모듈에 없는 특징을 재사용 검정할 때만 쓴다. `None`(기본)이면 기존 동작과 비트 동일.
+    """
     rows = [
         (v, lt)
         for lt in labeled
@@ -529,7 +534,7 @@ def permutation_test(
         and (v := lt.features.get(feature)) is not None
     ]
     n = len(rows)
-    hyp = HYPOTHESIS_SIGN.get(feature, 0)
+    hyp = HYPOTHESIS_SIGN.get(feature, 0) if hypothesis_sign is None else hypothesis_sign
     target = [1.0 if positive(lt) else 0.0 for _, lt in rows]
     positive_rate = sum(target) / n if n else 0.0
 
