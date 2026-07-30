@@ -1,0 +1,24 @@
+# AlphaBlock DB 무결성 주기 점검 oneshot (WAN-185, doctor = WAN-194).
+#
+# scripts/install-systemd.sh 가 __PLACEHOLDER__ 를 치환해
+# /etc/systemd/system/alphablock-doctor.service 로 설치한다. 이 유닛은 부팅 시
+# 자동 시작하지 않는다 — 짝인 alphablock-doctor.timer 가 주기적으로 트리거한다.
+#
+# doctor 는 손상·복구 산출물·빈 장부·처분 미기록 체결이 하나라도 있으면 종료 코드 1을
+# 낸다 → systemd 가 이 유닛을 "failed" 로 기록한다(`systemctl --failed` 로 감시 가능).
+# --notify-on-failure 로 이상 시 텔레그램 경고도 보낸다(ALPHABLOCK_TELEGRAM_* 설정 시).
+
+[Unit]
+Description=AlphaBlock DB integrity check (doctor, WAN-194)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=__RUN_USER__
+WorkingDirectory=__WORKDIR__
+Environment=PATH=__PATH__
+ExecStart=__UV_BIN__ run -- alphablock doctor --notify-on-failure
+
+# 수집기·러너·대시보드와 같은 파일 로그 규약.
+StandardOutput=append:__LOG_DIR__/doctor.log
+StandardError=append:__LOG_DIR__/doctor.log

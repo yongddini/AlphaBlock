@@ -72,12 +72,18 @@ scp data/ohlcv.db <서버>:~/AlphaBlock/data/ohlcv.db
 
 ```bash
 cd ~/AlphaBlock
-./scripts/install-systemd.sh            # 수집기 + 러너 + 대시보드 셋 다
-# 또는 개별: ./scripts/install-systemd.sh collector|live|dashboard
+./scripts/install-systemd.sh            # 수집기 + 러너 + 대시보드 + DB 무결성 타이머 넷 다
+# 또는 개별: ./scripts/install-systemd.sh collector|live|dashboard|doctor
 ```
 
 systemd 시스템 서비스로 등록되어 **부팅 시 자동 시작 + 크래시 시 10초 후 자동 재시작**된다
 (launchd 판 WAN-31/48과 대칭). 로그는 `~/AlphaBlock/logs/{collector,live,dashboard}.log`.
+
+`doctor` 는 서비스가 아니라 **타이머**로 등록된다(WAN-185) — 부팅 5분 뒤부터 기본 15분마다
+`alphablock doctor` 를 돌려 DB 무결성(손상·복구 산출물·빈 장부·처분 미기록 체결)을 점검하고,
+이상이면 종료 코드 1로 systemd 에 실패를 남기고(`systemctl --failed`) 텔레그램 경고를 보낸다
+(`ALPHABLOCK_TELEGRAM_*` 설정 시). 07-22 손상처럼 "봉은 오는데 DB가 조용히 깨지는" 상태를
+사람이 화면을 안 봐도 잡는다. 간격 조정: `ALPHABLOCK_DOCTOR_INTERVAL=1h ./scripts/install-systemd.sh doctor`.
 
 ## 4a. 재배포 — 코드 갱신 시 (서버에서, WAN-185)
 
@@ -114,7 +120,12 @@ cd ~/AlphaBlock
    `systemctl status alphablock-collector alphablock-live alphablock-dashboard`.
 4. **가동 커버리지**: 며칠 가동 후 `alphablock status`의 신선도/갭으로 "구멍 없이 돈다" 확인.
    갭이 보이면 `uv run -- alphablock backfill`로 1회 복구(WAN-35). 조용히 멈춘 스트림의
-   자동 재접속은 WAN-173(워치독) 소관 — 서버에 함께 얹으면 좋다.
+   자동 재접속은 WAN-173(워치독)이 담당한다.
+5. **DB 무결성(WAN-185)**: 무결성 타이머가 도는지 `systemctl list-timers alphablock-doctor.timer`,
+   최근 실행 결과는 `systemctl status alphablock-doctor.service`(또는 `logs/doctor.log`).
+   한 번 손으로 돌려 초록불 확인: `uv run -- alphablock doctor`(종료 코드 0). ⚠️ `data/`가
+   FUSE/네트워크 마운트 위면 07-22 손상이 재발하므로 **로컬 디스크인지 먼저 확인**(WAN-195):
+   `df -T data`가 ext4/xfs 등 로컬 파일시스템이어야 한다.
 
 ## 6. 대시보드 접속 (로컬 맥에서)
 

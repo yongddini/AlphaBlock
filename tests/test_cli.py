@@ -9,6 +9,8 @@ from typing import Any
 import pytest
 
 from cli.main import (
+    _doctor_alert_text,
+    _notify_doctor_failure,
     build_parser,
     cmd_collect,
     cmd_doctor,
@@ -209,11 +211,13 @@ def test_parser_routes_doctor() -> None:
     parser = build_parser()
     args = parser.parse_args(["doctor"])
     assert args.func is cmd_doctor
-    # 파괴적 옵션은 기본이 꺼져 있다.
+    # 파괴적 옵션·경고 옵션은 기본이 꺼져 있다.
     assert args.drop_recovery_artifacts is False
     assert args.skip_quick_check is False
     assert args.orphans_since is None
+    assert args.notify_on_failure is False
     assert parser.parse_args(["doctor", "--skip-quick-check"]).skip_quick_check is True
+    assert parser.parse_args(["doctor", "--notify-on-failure"]).notify_on_failure is True
 
 
 def test_cmd_doctor_exit_code_signals_findings(
@@ -239,6 +243,7 @@ def test_cmd_doctor_exit_code_signals_findings(
         salvage_ohlcv=None,
         dry_run=False,
         force=False,
+        notify_on_failure=False,
     )
     assert cmd_doctor(args, settings) == 1
     assert "lost_and_found" in capsys.readouterr().out
@@ -267,6 +272,7 @@ def test_cmd_doctor_drop_is_explicit_and_reports(
         salvage_ohlcv=None,
         dry_run=False,
         force=False,
+        notify_on_failure=False,
     )
     cmd_doctor(args, settings)
     out = capsys.readouterr().out
@@ -302,6 +308,7 @@ def test_cmd_doctor_orphans_since_is_kst(
         "salvage_ohlcv": None,
         "dry_run": False,
         "force": False,
+        "notify_on_failure": False,
     }
     # 그 날 자정(KST) 이후로 자르면 00:30 체결이 포함된다.
     cmd_doctor(argparse.Namespace(orphans_since="2026-07-26", **base), settings)
@@ -309,3 +316,138 @@ def test_cmd_doctor_orphans_since_is_kst(
     # 다음 날로 자르면 빠진다.
     cmd_doctor(argparse.Namespace(orphans_since="2026-07-27", **base), settings)
     assert "모든 체결에 진입/거부 처분이 남아 있다" in capsys.readouterr().out
+
+
+# --- doctor 이상 시 텔레그램 경고 (WAN-185) ----------------------------------
+
+
+class _CaptureTelegram:
+    """send_message 를 잡아 두는 가짜 텔레그램 클라이언트."""
+
+    def __init__(self, ok: bool = True) -> None:
+        self.ok = ok
+        self.sent: list[str] = []
+
+    def send_message(self, text: str, *, parse_mode: str | None = "Markdown") -> bool:
+        self.sent.append(text)
+        return self.ok
+
+
+def _Cat(name: str) -> Any:
+    return type("Cat", (), {"name": name})()
+
+
+def test_doctor_alert_text_lists_tripped_categories() -> None:
+    """경고 문구는 healthy 를 무너뜨린 카테고리만 짧게 나열한다."""
+
+    report = type(
+        "R",
+        (),
+        {
+            "db_path": "/srv/ohlcv.db",
+            "quick_check_ok": False,
+            "recovery_artifacts": [_Cat("lost_and_found")],
+            "orphan_fills": [object(), object()],
+            "empty_ledgers": [_Cat("paper_trades")],
+        },
+    )()
+    text = _doctor_alert_text(report, "orderblock")
+
+    assert "orderblock" in text
+    assert "/srv/ohlcv.db" in text
+    assert "quick_check 손상" in text
+    assert "복구 산출물 1개" in text
+    assert "처분 미기록 체결 2건" in text
+    assert "빈 장부(paper_trades)" in text
+
+
+def test_notify_doctor_failure_sends_when_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _CaptureTelegram()
+    monkeypatch.setattr("common.telegram.build_telegram_client", lambda _s: client)
+
+    report = type(
+        "R",
+        (),
+        {
+            "db_path": "/srv/ohlcv.db",
+            "quick_check_ok": True,
+            "recovery_artifacts": [_Cat("lost_and_found")],
+            "orphan_fills": [],
+            "empty_ledgers": [],
+        },
+    )()
+    _notify_doctor_failure(report, Settings())
+
+    assert len(client.sent) == 1
+    assert "복구 산출물 1개" in client.sent[0]
+
+
+def test_notify_doctor_failure_logs_when_unconfigured(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """텔레그램 미설정이면 던지지 않고 로그로만 남긴다(경고 유실 방지)."""
+    monkeypatch.setattr("common.telegram.build_telegram_client", lambda _s: None)
+
+    report = type(
+        "R",
+        (),
+        {
+            "db_path": "/srv/ohlcv.db",
+            "quick_check_ok": False,
+            "recovery_artifacts": [],
+            "orphan_fills": [],
+            "empty_ledgers": [],
+        },
+    )()
+    with caplog.at_level("WARNING"):
+        _notify_doctor_failure(report, Settings())  # 예외 없이 통과해야 한다.
+    assert any("미전송" in r.message for r in caplog.records)
+
+
+def _unhealthy_db(settings: Settings) -> None:
+    import sqlite3
+
+    journal = OrderJournal(settings.db_path)
+    journal.start_session(now_ms=0)
+    journal.close()
+    conn = sqlite3.connect(settings.db_path)
+    with conn:  # 복구 산출물 = 이상 신호.
+        conn.execute("CREATE TABLE lost_and_found (rootpgno INTEGER)")
+    conn.close()
+
+
+def _doctor_args(**overrides: Any) -> argparse.Namespace:
+    base = {
+        "db": None,
+        "skip_quick_check": True,
+        "orphans_since": None,
+        "drop_recovery_artifacts": False,
+        "salvage_ohlcv": None,
+        "dry_run": False,
+        "force": False,
+        "notify_on_failure": False,
+    }
+    base.update(overrides)
+    return argparse.Namespace(**base)
+
+
+def test_cmd_doctor_notifies_only_with_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """--notify-on-failure 없이는 이상이어도 경고를 보내지 않는다."""
+    import importlib
+
+    # `cli` 패키지가 `main` 함수를 재노출해 `cli.main` 이름이 모듈이 아니라 그 함수로
+    # 섀도잉된다 — 실제 모듈 객체는 importlib 로 가져온다.
+    cli_main = importlib.import_module("cli.main")
+
+    settings = _settings(tmp_path)
+    _unhealthy_db(settings)
+    calls: list[str] = []
+    monkeypatch.setattr(cli_main, "_notify_doctor_failure", lambda r, s: calls.append(r.db_path))
+
+    assert cmd_doctor(_doctor_args(notify_on_failure=False), settings) == 1
+    assert calls == []  # 플래그 없으면 조용하다.
+
+    assert cmd_doctor(_doctor_args(notify_on_failure=True), settings) == 1
+    assert len(calls) == 1  # 플래그 + 이상 → 한 번 보낸다.
