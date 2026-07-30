@@ -544,7 +544,7 @@ def _validate_live_params(params: ConfluenceParams) -> None:
     if params.entry_mode != "zone_limit":
         raise ValueError(
             f"존-지정가 라이브 엔진은 entry_mode='zone_limit' 전용입니다: {params.entry_mode!r}"
-            " — 종가 진입(A안)은 기존 SignalRunner가 담당합니다."
+            " (종가 진입 A안 경로는 WAN-208에서 제거됐습니다)."
         )
     deviation = params.deviation_filter
     if deviation is not None and deviation.band_bar in ("tap", "prev_closed"):

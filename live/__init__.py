@@ -13,7 +13,8 @@ WAN-23 컨플루언스 전략을 최근 저장분(WAN-6 수집)에 반복 평가
 지연 로딩으로 `from live.paper import ClosedTrade` 한 줄이 러너·페이퍼 스토어 전체를
 끌어오지 않게 해 이 고리를 끊는다. (레이어 규칙: `docs/architecture-layers.md`)
 
-`from live import SignalRunner` 같은 기존 사용법은 그대로 동작한다.
+`from live import SignalEvent` 같은 사용법은 그대로 동작한다. (옛 A안 심볼
+`SignalRunner`·`WatermarkStore`·`Notifier` 재-export는 WAN-208에서 제거됐다.)
 """
 
 from __future__ import annotations
@@ -23,31 +24,18 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:  # 정적 타입 검사·IDE용 — 런타임에는 아래 __getattr__ 가 로딩한다.
     from common.telegram import TelegramClient, TelegramResponse, TransportError  # noqa: F401
-    from live.notifier import (  # noqa: F401
-        Notifier,
-        SignalEvent,
-        collect_events,
-        format_entry,
-        format_exit,
-    )
+    from live.notifier import SignalEvent  # noqa: F401
     from live.paper import ClosedTrade, PaperBook, PaperPosition  # noqa: F401
-    from live.runner import SignalRunner, WatermarkStore  # noqa: F401
 
 #: 공개 심볼 → 실제 정의 모듈. `__getattr__` 가 최초 접근 시 해당 모듈만 임포트한다.
 _LAZY_EXPORTS: dict[str, str] = {
     "TelegramClient": "common.telegram",
     "TelegramResponse": "common.telegram",
     "TransportError": "common.telegram",
-    "Notifier": "live.notifier",
     "SignalEvent": "live.notifier",
-    "collect_events": "live.notifier",
-    "format_entry": "live.notifier",
-    "format_exit": "live.notifier",
     "ClosedTrade": "live.paper",
     "PaperBook": "live.paper",
     "PaperPosition": "live.paper",
-    "SignalRunner": "live.runner",
-    "WatermarkStore": "live.runner",
 }
 
 __all__ = sorted(_LAZY_EXPORTS)
