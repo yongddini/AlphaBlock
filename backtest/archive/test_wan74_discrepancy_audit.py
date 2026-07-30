@@ -10,8 +10,8 @@ from __future__ import annotations
 
 from backtest.sweep import default_backtest_config, timeframe_to_ms
 from backtest.synthetic import make_synthetic_ohlcv
-from backtest.wan73_validation import WAN73_NEW_PARAMS
-from backtest.wan74_discrepancy_audit import (
+from backtest.archive.wan73_validation import WAN73_NEW_PARAMS
+from backtest.archive.wan74_discrepancy_audit import (
     FillDecomposition,
     TradeRecord,
     b_engine_trades,

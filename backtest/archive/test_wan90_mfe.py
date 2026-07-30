@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 
 from backtest.substep import SubStep
-from backtest.wan90_mfe_distribution import simulate_excursion
+from backtest.archive.wan90_mfe_distribution import simulate_excursion
 
 
 def _step(high: float, low: float, close: float) -> SubStep:

@@ -13,7 +13,7 @@ import pytest
 from backtest.harness import LEGACY_BAND_BAR, LEGACY_RSI_GATE_MODE, fill_preset
 from backtest.wan114_entry_rule_ablation import RUNGS_BY_NAME as WAN114_RUNGS
 from backtest.wan114_entry_rule_ablation import rung_params as wan114_rung_params
-from backtest.wan115_bollinger_lookahead_recheck import (
+from backtest.archive.wan115_bollinger_lookahead_recheck import (
     BASE_RUNG,
     DEFAULT_END,
     DEFAULT_START,

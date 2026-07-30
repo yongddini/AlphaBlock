@@ -8,7 +8,7 @@ series(개별 시리즈) 범위와 global(전역 포지션 공유) 범위가 실
 from __future__ import annotations
 
 from backtest.models import ExitReason, PositionSide
-from backtest.wan83_position_conflict_report import classify
+from backtest.archive.wan83_position_conflict_report import classify
 from backtest.zone_limit_backtest import _Candidate
 from strategy.models import OrderBlock, OrderBlockDirection, OrderBlockSignal
 

@@ -11,9 +11,9 @@ from __future__ import annotations
 import pytest
 
 from backtest.harness import LEGACY_BAND_BAR, LEGACY_RSI_GATE_MODE, fill_preset
-from backtest.wan115_bollinger_lookahead_recheck import RUNGS_BY_NAME as WAN115_RUNGS
-from backtest.wan115_bollinger_lookahead_recheck import rung_params as wan115_rung_params
-from backtest.wan119_intrabar_live_band import (
+from backtest.archive.wan115_bollinger_lookahead_recheck import RUNGS_BY_NAME as WAN115_RUNGS
+from backtest.archive.wan115_bollinger_lookahead_recheck import rung_params as wan115_rung_params
+from backtest.archive.wan119_intrabar_live_band import (
     BASE_RUNG,
     DEFAULT_END,
     DEFAULT_START,
@@ -162,8 +162,8 @@ def test_shared_rungs_match_wan115_bit_for_bit(level: str) -> None:
 
 def test_window_is_pinned_like_wan115() -> None:
     """창이 미끄러지면(`--years N`) 두 리포트가 다른 기간을 봐 검산이 깨진다."""
-    from backtest.wan115_bollinger_lookahead_recheck import DEFAULT_END as W115_END
-    from backtest.wan115_bollinger_lookahead_recheck import DEFAULT_START as W115_START
+    from backtest.archive.wan115_bollinger_lookahead_recheck import DEFAULT_END as W115_END
+    from backtest.archive.wan115_bollinger_lookahead_recheck import DEFAULT_START as W115_START
 
     assert (DEFAULT_START, DEFAULT_END) == (W115_START, W115_END)
 

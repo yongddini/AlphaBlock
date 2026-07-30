@@ -236,7 +236,7 @@ WAN-87의 숏 제거는 절대 수익률을 크게 끌어올렸지만(음수 셀
 
 ⚠️ **채택 수치는 3심볼 표본에 크게 기대고 있었다 — 심볼을 6개로 넓히면 사실상 0이 된다**
 (WAN-111): `backtest/reports/wan111_symbol_universe_summary.md`(재현: `uv run python -m
-backtest.wan111_symbol_universe_report`, 요약만 재생성은 `--from-csv`). 공식 렌즈
+backtest.archive.wan111_symbol_universe_report`, 요약만 재생성은 `--from-csv`). 공식 렌즈
 (`baseline`) **OOS 심볼평균이 15m +19.01%→+3.91%(−15.10%p) · 1h +8.53%→+1.22%(−7.32%p)**
 로 내려앉고, **`pen_5bp` 한 단계에 둘 다 마이너스**(−0.76% · −1.44%)가 된다. 창을
 **2023-07-14~2026-07-15로 못 박고** 6심볼이 동일한 봉 수를 보도록 맞춘 격자다.
@@ -342,7 +342,7 @@ backtest.wan131_selection_vs_price --tf 1h --jobs 6` → `--tf 15m --jobs 6 --ap
 **숫자는 전부 유효하고 해석이 틀렸다**: `prev_closed`는 미래 정보를 빼는 동시에 **현재 봉을
 통째로 버리는데**, 그 −4.88%p는 전자가 아니라 **후자의 대가**였다(WAN-119가 둘을 갈랐다).
 [`docs/decisions/wan115.md`](docs/decisions/wan115.md)(재현: `uv run python -m
-backtest.wan115_bollinger_lookahead_recheck`, 요약만 재생성은 `--from-csv`). 밴드를 탭 봉
+backtest.archive.wan115_bollinger_lookahead_recheck`, 요약만 재생성은 `--from-csv`). 밴드를 탭 봉
 SMA20 대신 **직전 확정봉 SMA20**으로 바꾼 옵트인 모드(`DeviationFilterParams.band_bar`)로
 채택 기본값을 재산출했다. 창·격자는 WAN-111/114와 같고, **`L1`·`L2` 행이
 `wan114_entry_ablation.csv`와 비트 단위로 일치**하므로 같은 엔진의 재검이다.
@@ -382,7 +382,7 @@ SMA20 대신 **직전 확정봉 SMA20**으로 바꾼 옵트인 모드(`Deviation
 
 📌 **봉내 라이브 밴드(WAN-119): 15m 플러스는 룩어헤드 없이도 남는다 — 판정 (a) 되살아남.**
 [`docs/decisions/wan119.md`](docs/decisions/wan119.md)(재현: `uv run python -m
-backtest.wan119_intrabar_live_band`, 요약만 재생성은 `--from-csv`). 사용자 관찰("트레이딩뷰는
+backtest.archive.wan119_intrabar_live_band`, 요약만 재생성은 `--from-csv`). 사용자 관찰("트레이딩뷰는
 봉 시작과 동시에 띠가 생기고 봉이 움직이는 대로 값이 달라진다")대로, SMA20의 20번째 표본에
 **체결 순간의 현재가**를 넣는 셋째 밴드 정의(`band_bar="intrabar_live"`)를 만들어 3자 비교했다.
 창·격자는 WAN-111/114/115와 같고 **`L1`·`L2`·`L2p` 행이 `wan115_bollinger_recheck.csv`와
@@ -420,7 +420,7 @@ backtest.wan119_intrabar_live_band`, 요약만 재생성은 `--from-csv`). 사�
 
 📌 **엄격 인과 밴드(WAN-120): 잔여 1분은 판정을 흔들지 않는다 — 단 렌즈 주장 하나는 빠진다.**
 [`docs/decisions/wan120.md`](docs/decisions/wan120.md)(재현: `uv run python -m
-backtest.wan120_strict_causal_band`, 요약만 재생성은 `--from-csv`). WAN-119 §6-3이 남긴 격자
+backtest.archive.wan120_strict_causal_band`, 요약만 재생성은 `--from-csv`). WAN-119 §6-3이 남긴 격자
 재측정이다 — 밴드 표본을 **직전 1분봉 종가**로 미뤄 잔여 룩어헤드를 **0**으로 만든 넷째 정의
 (`band_bar="intrabar_causal"`, 옵트인)로 4단 사다리(`L1`·`L2`·`L2i`·`L2c`)를 돌렸다. 창·격자는
 WAN-111/114/115/119와 같고, **`L1`·`L2`·`L2i`의 504행이 `wan119_intrabar_live_band.csv`와
@@ -633,7 +633,7 @@ backtest.wan123_fill_conservatism`, 요약만 재생성은 `--from-csv`).
 
 📌 **익절 R 측정(WAN-90 Phase 1): `take_profit_r=1.5`는 검증됐고 유지다 — 두 작업 TF 모두 (b).**
 [`docs/decisions/wan90.md`](docs/decisions/wan90.md)(재현: `uv run python -m
-backtest.wan90_mfe_distribution`, 요약만 재생성은 `--from-csv`). WAN-81이 익절을 선 도달에서
+backtest.archive.wan90_mfe_distribution`, 요약만 재생성은 `--from-csv`). WAN-81이 익절을 선 도달에서
 고정 1.5R로 당겼지만 그 값이 다른 값과 비교된 적이 없었다. 이 표가 **거래가 실제로 어디까지
 가는가**(MFE 분포)와 **사용자 제안(1.5R 부분익절+본절스탑+R재산정)의 손익 부호**(= E[러너]가
 1.5R보다 큰지, 이슈 §2 부호식)를 한 번에 잰다.
@@ -658,7 +658,7 @@ backtest.wan90_mfe_distribution`, 요약만 재생성은 `--from-csv`). WAN-81�
 📌 **저항-OB 익절(WAN-137 = WAN-90 변형 C): Phase 1(도달률) + Phase 2(손익) — 판정 (c) TF·
 위험조정에 갈린다, 기본값(`take_profit_r=1.5`) 유지.** [`docs/decisions/wan137.md`](docs/decisions/wan137.md)
 (재현: `uv run python -m backtest.wan137_resistance_distance` · `uv run python -m
-backtest.wan137_phase2_pnl`, 요약만 재생성은 `--from-csv`). 사용자 제안("가장 가까운 저항
+backtest.archive.wan137_phase2_pnl`, 요약만 재생성은 `--from-csv`). 사용자 제안("가장 가까운 저항
 오더블록에 판다")을 익절 목표로 검정했다. 저항 탐지·룩어헤드 클리핑·하위TF 아카이브 캐시는
 WAN-126 재사용.
 - 🔁 **Phase 1만의 판정 (b)「도달 불가」는 PM 변경요청이 철회했다 — 도달률은 손익을 예측하지
@@ -1664,7 +1664,7 @@ backtest.wan108_multi_position_reappraisal`). 여러 존에 동시 진입하는 
   다중 포지션은 **체결에 더 의존**하므로(OOS 거래 772→838건) 체결 보수화 축의 재검이
   선행돼야 한다 — 그게 15m 축 후속 이슈의 질문이었다.
   🔁 **WAN-110이 그 재검을 끝냈다: 통과하지 못했다**(wan103.md §F, 재현: `python -m
-  backtest.wan110_multi_position_fill_conservatism`). 같은 셋업 풀에 렌즈만 조이면 **15m
+  backtest.archive.wan110_multi_position_fill_conservatism`). 같은 셋업 풀에 렌즈만 조이면 **15m
   다중 우위가 +15.54%p → +2.28%p(`pen_5bp`)로 마진의 85%가 사라진다**(거래는 5%만 감소).
   WAN-96 비대칭도 **다중에서 더 심하다**(`pen_5bp` 잔존 수익 단일 48.9% vs 3배 35.2%) —
   즉 다중이 더 버는 몫은 유독 "스치듯 닿은 체결"에 몰려 있다. **기본값 유지 결론은

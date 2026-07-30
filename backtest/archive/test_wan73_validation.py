@@ -10,7 +10,7 @@ from __future__ import annotations
 from backtest.sweep import timeframe_to_ms
 from backtest.synthetic import make_synthetic_ohlcv
 from backtest.wan70_random_control_b import RandomControlBResult
-from backtest.wan73_validation import (
+from backtest.archive.wan73_validation import (
     WAN73_NEW_PARAMS,
     FillRateExpectancy,
     compute_fill_rate_expectancy,
