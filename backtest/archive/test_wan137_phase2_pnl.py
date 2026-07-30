@@ -17,7 +17,7 @@ from backtest.models import BacktestConfig
 from backtest.multi_tf_overlap import ZoneProvider, indexed_zone_provider
 from backtest.sweep import timeframe_to_ms
 from backtest.synthetic import make_synthetic_ohlcv
-from backtest.wan137_phase2_pnl import _OverrideStats, make_resistance_override
+from backtest.archive.wan137_phase2_pnl import _OverrideStats, make_resistance_override
 from backtest.zone_limit_backtest import TakeProfitContext, build_zone_limit_candidates
 from strategy.models import ConfluenceParams, OrderBlock, OrderBlockDirection, OrderBlockResult
 

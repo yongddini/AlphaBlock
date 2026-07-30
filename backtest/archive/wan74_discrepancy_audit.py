@@ -50,7 +50,7 @@ from backtest.harness import LEGACY_OB_PARAMS
 from backtest.models import BacktestConfig, PositionSide
 from backtest.sweep import default_backtest_config
 from backtest.wan70_random_control_b import DEFAULT_SYMBOLS, DEFAULT_YEARS
-from backtest.wan73_validation import WAN73_NEW_PARAMS, _r_multiple
+from backtest.archive.wan73_validation import WAN73_NEW_PARAMS, _r_multiple
 from backtest.zone_limit_backtest import _Candidate, build_zone_limit_candidates
 from strategy.confluence import ConfluenceStrategy
 from strategy.models import (

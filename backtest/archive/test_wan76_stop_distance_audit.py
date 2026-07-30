@@ -17,7 +17,7 @@ import pytest
 from backtest.models import BacktestConfig, ExitReason, PositionSide
 from backtest.sweep import default_backtest_config, timeframe_to_ms
 from backtest.synthetic import make_synthetic_ohlcv
-from backtest.wan76_stop_distance_audit import (
+from backtest.archive.wan76_stop_distance_audit import (
     CURRENT_DEFAULT_PARAMS,
     TradeDiagnostic,
     _diagnose_trades,

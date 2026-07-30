@@ -38,6 +38,9 @@ packages = ["common", "config", "data", "strategy", "execution", "backtest", "da
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# 옛 엔진에 못 박힌(pin) 리포트 스크립트 아카이브 — 결론이 이미 났고 오늘 엔진 수치가
+# 아니므로 품질검사 대상에서 제외한다(WAN-163). 코드·테스트는 감사·재현을 위해 보존된다.
+extend-exclude = ["backtest/archive"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
@@ -61,6 +64,9 @@ files = [
     "scripts",
     "qc",
 ]
+# 옛 엔진 핀 리포트 아카이브는 strict 타입 검사에서 제외한다(WAN-163). 아카이브 모듈을
+# import하는 검사 대상 코드는 없으므로(완전 분리) follow-imports로 되살아나지 않는다.
+exclude = ['^backtest/archive/']
 
 # QC 클라우드 전용 셸 — `AlgorithmImports`(QC SDK)가 로컬에 없어 타입 검사가 성립하지
 # 않는다(WAN-181). 로컬에서 검증되는 로직은 전부 `qc.event_engine`(strict 검사 대상)에
@@ -77,3 +83,6 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+# 아카이브된 옛 엔진 테스트는 수집하지 않는다(WAN-163). testpaths가 이미 tests/로
+# 한정하지만, backtest/를 직접 지정해 돌려도 아카이브가 걸리지 않도록 명시한다.
+norecursedirs = ["backtest/archive"]

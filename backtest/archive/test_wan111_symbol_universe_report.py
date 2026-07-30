@@ -13,7 +13,7 @@ import pandas as pd
 import pytest
 
 from backtest.harness import FILL_PRESETS_BY_NAME, RunRow, build_params
-from backtest.wan111_symbol_universe_report import (
+from backtest.archive.wan111_symbol_universe_report import (
     ALL_SYMBOLS,
     DEFAULT_END,
     DEFAULT_START,
