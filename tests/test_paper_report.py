@@ -7,6 +7,8 @@ UTC(epoch ms) + 영문 컬럼 그대로인지(회귀)를 고정한다. 포맷터
 
 from __future__ import annotations
 
+import pytest
+
 from backtest.report import (
     COL_ENTRY_KST,
     COL_EXIT_KST,
@@ -102,6 +104,7 @@ def test_csv_frame_unchanged_utc_and_english() -> None:
         "reason",
         "gross_pct",
         "fee_pct",
+        "slippage_pct",
         "funding_pct",
         "net_pct",
         "risk_pct",
@@ -115,6 +118,85 @@ def test_csv_frame_unchanged_utc_and_english() -> None:
     # 시각은 변환 없이 epoch ms 원본(저장·계산 축은 UTC 불변).
     assert df.iloc[0]["entry_time"] == _ENTRY_MS
     assert df.iloc[0]["direction"] == "bull"
+
+
+def _reconcilable_record() -> PaperTradeRecord:
+    """비용 항등식(net = gross − fee − slippage − funding)과 R 정의를 지키는 손절 거래.
+
+    사용자가 본 BTC 1h 손절 거래를 본떠, 좁은 손절(진입 대비 ~0.35%)에서 비용이 R로
+    크게 잡히는 상황을 재현한다: 가격은 정확히 -1R(손절선 체결)인데 비용까지 더하면 -1.5R.
+    """
+    entry, stop = 63_985.89, 63_760.5
+    risk_pct = abs(entry - stop) / entry * 100.0  # ≈ 0.35226
+    gross_pct = -risk_pct  # 손절선에 정확히 체결 → 가격만 보면 -1R
+    fee_pct, slippage_pct, funding_pct = 0.08, 0.09, 0.01
+    net_pct = gross_pct - fee_pct - slippage_pct - funding_pct
+    return PaperTradeRecord(
+        symbol="BTC/USDT:USDT",
+        timeframe="1h",
+        direction=OrderBlockDirection.BULLISH,
+        entry_time=_ENTRY_MS,
+        entry_price=entry,
+        exit_time=_EXIT_MS,
+        exit_price=stop,
+        reason=SignalExitReason.STOP_LOSS,
+        gross_pct=gross_pct,
+        fee_pct=fee_pct,
+        slippage_pct=slippage_pct,
+        funding_pct=funding_pct,
+        net_pct=net_pct,
+        risk_pct=risk_pct,
+        r_multiple=net_pct / risk_pct,
+        stop_price=stop,
+    )
+
+
+def test_display_frame_has_slippage_and_gross_is_pre_cost() -> None:
+    """WAN-212: 슬리피지 열이 화면에 있고 gross 라벨이 비용 전임을 명시한다.
+
+    슬리피지가 빠져 있으면 `가격손익% − 수수료% − 펀딩%`이 `순손익%`와 안 맞아
+    "비용이 안 맞아" 보인다(사용자 발견). 그리고 gross 라벨이 "총손익%"이면 net으로
+    오해된다.
+    """
+    df = records_to_display_frame([_reconcilable_record()])
+    assert "슬리피지%" in df.columns
+    # gross 라벨은 net과 헷갈리지 않게 비용 전임을 명시한다("총손익%" 단독 금지).
+    assert "가격손익%(비용전)" in df.columns
+    assert "총손익%" not in df.columns
+
+
+def test_display_frame_cost_decomposition_reconciles() -> None:
+    """WAN-212: 한 화면에서 gross − fee − slippage − funding = net 이 재구성된다."""
+    df = records_to_display_frame([_reconcilable_record()])
+    row = df.iloc[0]
+    reconstructed = row["가격손익%(비용전)"] - row["수수료%"] - row["슬리피지%"] - row["펀딩%"]
+    assert reconstructed == pytest.approx(row["순손익%"])
+    # R배수는 net 기준(net_pct / risk_pct) — 원장 한 줄에서 재계산과 일치.
+    assert row["R배수"] == pytest.approx(row["순손익%"] / row["리스크%"])
+
+
+def test_ledger_csv_summary_share_the_same_net_r() -> None:
+    """WAN-212: 원장(화면)·CSV·요약이 같은 거래에 같은 net R을 쓴다(WAN-146/207 취지).
+
+    사용자가 본 모순(-0.35% vs -1.5R)의 근원은 두 화면이 비용 전/후를 엇갈려 적은
+    것이었다. 세 경로가 같은 net R을 쓰는지 동작으로 고정한다.
+    """
+    record = _reconcilable_record()
+    disp = records_to_display_frame([record]).iloc[0]
+    csv = records_to_dataframe([record]).iloc[0]
+    perf = build_performance([record])
+
+    # 세 경로가 같은 net R.
+    assert disp["R배수"] == pytest.approx(record.r_multiple)
+    assert csv["r_multiple"] == pytest.approx(record.r_multiple)
+    assert perf.overall.total_r == pytest.approx(record.r_multiple)
+    # 비용까지 반영하면 -1R(가격)이 아니라 ~-1.5R(비용 포함)임이 드러난다.
+    assert record.r_multiple is not None
+    assert record.r_multiple < -1.0
+    # CSV도 슬리피지를 실어 net이 재구성된다.
+    assert csv["net_pct"] == pytest.approx(
+        csv["gross_pct"] - csv["fee_pct"] - csv["slippage_pct"] - csv["funding_pct"]
+    )
 
 
 def test_performance_display_frame_korean_and_scope_all() -> None:
