@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Sequence
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -73,7 +74,7 @@ from paper.report import (
     records_to_dataframe,
     records_to_display_frame,
 )
-from paper.store import PaperTradeStore
+from paper.store import PaperTradeRecord, PaperTradeStore
 from strategy.confluence import SignalKind
 from strategy.models import (
     ConfluenceParams,
@@ -1086,6 +1087,19 @@ def _render_health(settings: Settings, *, run_every: int | None) -> None:
 # --- 페이퍼 성과 탭 (WAN-33) -------------------------------------------------
 
 
+def _latest_equity_after(records: Sequence[PaperTradeRecord]) -> float | None:
+    """가장 최근(청산시각 최신) 거래의 청산 직후 자본 = 현재 지갑 잔고(WAN-212).
+
+    옛 %-only 행은 `equity_after`가 None이라 건너뛰고, 값이 있는 거래 중 청산이 가장
+    늦은 것을 고른다. 하나도 없으면 None(재구성 불가)을 반환한다 — 폴백 역산은 실제와
+    어긋나므로 하지 않는다(WAN-207/95 교훈).
+    """
+    dated = [r for r in records if r.equity_after is not None]
+    if not dated:
+        return None
+    return max(dated, key=lambda r: r.exit_time).equity_after
+
+
 def _render_paper(settings: Settings) -> None:
     db_path = settings.db_path
     with PaperTradeStore(db_path) as store:
@@ -1127,6 +1141,26 @@ def _render_paper(settings: Settings) -> None:
     cols2[0].metric("총 투입($)", "N/A" if invested is None else f"{invested:,.2f}")
     cols2[1].metric("총 리스크($)", "N/A" if risk_total is None else f"{risk_total:,.2f}")
     cols2[2].metric("총 R", f"{overall.total_r:+.2f}")
+
+    # 현재 잔고($) — 정본은 마지막(청산시각 최신) 거래의 청산 직후 자본(`equity_after`).
+    # 옛 %-only 행은 NULL이라, 폴백 %로 역산하면 실제 잔고와 어긋난다(WAN-207 사례:
+    # -2.73%로 역산하면 ~$9,727인데 실제 +$10,179) — 잘못된 잔고를 찍느니 안 찍는다
+    # (WAN-95 교훈). NULL이면 러너 재배포(WAN-185) 전까지 재구성 불가로 명시한다(WAN-212).
+    balance = _latest_equity_after(records)
+    initial_cap = settings.paper_equity
+    if balance is None:
+        cols2[3].metric(
+            "현재 잔고($)",
+            "재구성 불가",
+            help=(
+                "청산 직후 자본(equity_after)이 기록되지 않았습니다(WAN-207 이전 서버 코드). "
+                "억지 %-역산은 실제 잔고와 어긋나므로 표시하지 않습니다 — 러너 재배포(WAN-185) "
+                "후 새 거래부터 채워집니다."
+            ),
+        )
+    else:
+        delta = None if initial_cap is None else f"{balance - initial_cap:+,.2f}"
+        cols2[3].metric("현재 잔고($)", f"{balance:,.2f}", delta=delta)
 
     st.subheader("시리즈별 성과")
     # 화면은 한글 컬럼, CSV 내보내기는 데이터 축이라 영문·UTC 그대로(WAN-190/172).

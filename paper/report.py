@@ -27,7 +27,9 @@ from paper.performance import PaperPerformance, PerfMetrics
 from paper.store import PaperTradeRecord
 from strategy.models import OrderBlockDirection, SignalExitReason
 
-# 거래 CSV 컬럼 순서.
+# 거래 CSV 컬럼 순서. 비용은 `gross_pct − fee_pct − slippage_pct − funding_pct = net_pct`
+# 순서로 나열해 파일만 봐도 순손익이 재구성된다(WAN-212 — 슬리피지가 빠져 있으면
+# 수수료·펀딩만으로는 gross와 net의 차이가 설명되지 않아 "비용이 안 맞아" 보인다).
 _TRADE_COLUMNS = [
     "symbol",
     "timeframe",
@@ -39,6 +41,7 @@ _TRADE_COLUMNS = [
     "reason",
     "gross_pct",
     "fee_pct",
+    "slippage_pct",
     "funding_pct",
     "net_pct",
     "risk_pct",
@@ -83,6 +86,7 @@ def records_to_dataframe(records: Sequence[PaperTradeRecord]) -> pd.DataFrame:
             "reason": r.reason.value,
             "gross_pct": r.gross_pct,
             "fee_pct": r.fee_pct,
+            "slippage_pct": r.slippage_pct,
             "funding_pct": r.funding_pct,
             "net_pct": r.net_pct,
             "risk_pct": r.risk_pct,
@@ -137,8 +141,14 @@ def performance_to_dataframe(perf: PaperPerformance) -> pd.DataFrame:
 #: "저장된 거래" 탭과 **글자까지 동일**하게 맞춘다.
 COL_SYMBOL = "종목"
 COL_TIMEFRAME = "시간대"
-COL_GROSS_PCT = "총손익%"
+#: ⚠️ **gross(비용 전 가격 손익률)이다** — 예전 라벨 "총손익%"는 net으로 오해를 불러
+#: (사용자가 -0.35%를 실현 손실로 읽었으나 실제 순손실은 -0.53%였다, WAN-212), "가격손익%"
+#: 로 명시하고 "(비용전)"을 붙여 `순손익%`(net)와 한 화면에서 대비되게 한다.
+COL_GROSS_PCT = "가격손익%(비용전)"
 COL_FEE_PCT = "수수료%"
+#: 슬리피지 비용률(%). 예전엔 화면·CSV 어디에도 없어 `가격손익% − 수수료% − 펀딩%`이
+#: `순손익%`와 안 맞아 보였다(net = gross − fee − slippage − funding, WAN-212).
+COL_SLIPPAGE_PCT = "슬리피지%"
 COL_FUNDING_PCT = "펀딩%"
 COL_NET_PCT = "순손익%"
 COL_RISK_PCT = "리스크%"
@@ -200,6 +210,7 @@ def records_to_display_frame(records: Sequence[PaperTradeRecord]) -> pd.DataFram
             COL_EXIT_REASON: _EXIT_REASON_LABELS.get(r.reason, r.reason.value),
             COL_GROSS_PCT: r.gross_pct,
             COL_FEE_PCT: r.fee_pct,
+            COL_SLIPPAGE_PCT: r.slippage_pct,
             COL_FUNDING_PCT: r.funding_pct,
             COL_NET_PCT: r.net_pct,
             COL_RISK_PCT: r.risk_pct,
@@ -227,8 +238,11 @@ _DISPLAY_TRADE_COLUMNS = [
     COL_NOTIONAL,
     COL_RISK_AMOUNT,
     COL_REALIZED_PNL,
+    # 비용 분해를 왼→오로: 가격손익%(gross) − 수수료% − 슬리피지% − 펀딩% = 순손익%(net).
+    # 그 뒤에 리스크%·R배수(net 기준)·손절가를 두어 원장 한 줄에서 R이 재구성된다(WAN-212).
     COL_GROSS_PCT,
     COL_FEE_PCT,
+    COL_SLIPPAGE_PCT,
     COL_FUNDING_PCT,
     COL_NET_PCT,
     COL_RISK_PCT,

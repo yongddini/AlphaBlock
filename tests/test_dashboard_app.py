@@ -18,6 +18,7 @@ from dashboard.app import _run_config_badge_text
 from data.models import Candle
 from data.storage import OhlcvStore
 from execution import PositionSizingParams
+from paper.store import PaperTradeRecord
 from strategy.models import ConfluenceParams, OrderBlockParams
 
 _STEP = 3_600_000
@@ -336,3 +337,43 @@ def test_saved_trades_tab_renders_stored_trades_with_fingerprint(seeded_db_path:
     # 사용자의 원 요청("어디서 손절났는지")이 선택지로 실제로 있다.
     reason_radio = next(r for r in at.radio if r.label == "청산사유")
     assert "손절" in list(reason_radio.options)
+
+
+def _paper_record(*, exit_time: int, equity_after: float | None) -> PaperTradeRecord:
+    from strategy.models import OrderBlockDirection, SignalExitReason
+
+    return PaperTradeRecord(
+        symbol="BTC/USDT:USDT",
+        timeframe="1h",
+        direction=OrderBlockDirection.BULLISH,
+        entry_time=exit_time - _STEP,
+        entry_price=100.0,
+        exit_time=exit_time,
+        exit_price=101.0,
+        reason=SignalExitReason.TAKE_PROFIT,
+        gross_pct=1.0,
+        fee_pct=0.0,
+        funding_pct=0.0,
+        net_pct=1.0,
+        equity_after=equity_after,
+    )
+
+
+def test_latest_equity_after_picks_most_recent_dated_trade() -> None:
+    """WAN-212: 현재 잔고는 청산시각이 가장 늦은, equity_after가 있는 거래에서 온다."""
+    from dashboard.app import _latest_equity_after
+
+    records = [
+        _paper_record(exit_time=3 * _STEP, equity_after=None),  # 최신이지만 값 없음(옛 행)
+        _paper_record(exit_time=1 * _STEP, equity_after=10_000.0),
+        _paper_record(exit_time=2 * _STEP, equity_after=10_180.0),
+    ]
+    assert _latest_equity_after(records) == 10_180.0
+
+
+def test_latest_equity_after_none_when_all_missing() -> None:
+    """WAN-212: equity_after가 하나도 없으면 None(재구성 불가) — 억지 역산 금지."""
+    from dashboard.app import _latest_equity_after
+
+    records = [_paper_record(exit_time=_STEP, equity_after=None)]
+    assert _latest_equity_after(records) is None
