@@ -1,17 +1,15 @@
 """백테스팅 엔진 패키지.
 
-오더블록 전략 시그널(`strategy.order_blocks`)을 과거 OHLCV에 대해
-시뮬레이션해 성과 지표를 산출한다.
+지정가(B안, `zone_limit`) 백테스트는 `backtest.zone_limit_backtest`가, 격자·스윕은
+범용 CLI `backtest.run`이 담당한다. 이 패키지 최상위는 그 진입점들이 공유하는 모델·
+지표·리포트·합성데이터·타임프레임 유틸을 재-export한다.
 
-    from backtest import BacktestConfig, run_backtest, format_summary
-
-    result = run_backtest(ohlcv_df, signals, BacktestConfig(take_profit_pct=0.05))
-    print(format_summary(result))
+⚠️ 옛 A안(종가 진입) 엔진(`BacktestEngine`/`run_backtest`)과 A안 스윕 기계
+(`evaluate`/`run_sweep`/`Sweep*`)는 WAN-208/WAN-215로 제거됐다.
 """
 
 from __future__ import annotations
 
-from backtest.engine import BacktestEngine, run_backtest
 from backtest.metrics import build_metrics, max_drawdown, sharpe_ratio
 from backtest.models import (
     BacktestConfig,
@@ -31,51 +29,29 @@ from backtest.report import (
     write_equity_csv,
     write_trades_csv,
 )
-from backtest.sweep import (
-    MultiSweepReport,
-    ParamGrid,
-    SweepPoint,
-    SweepReport,
-    SweepRunRow,
-    apply_sweep_point,
-    bars_per_year,
-    evaluate,
-    run_sweep,
-    timeframe_to_ms,
-    write_sweep_csv,
-)
+from backtest.sweep import bars_per_year, default_backtest_config, timeframe_to_ms
 from backtest.synthetic import make_synthetic_ohlcv
 
 __all__ = [
     "BacktestConfig",
-    "BacktestEngine",
     "BacktestMetrics",
     "BacktestResult",
     "EquityPoint",
     "ExitReason",
-    "MultiSweepReport",
-    "ParamGrid",
     "PositionSide",
-    "SweepPoint",
-    "SweepReport",
-    "SweepRunRow",
     "Trade",
     "TradeFill",
-    "apply_sweep_point",
     "bars_per_year",
     "build_metrics",
+    "default_backtest_config",
     "equity_to_dataframe",
-    "evaluate",
     "format_summary",
     "make_synthetic_ohlcv",
     "max_drawdown",
-    "run_backtest",
-    "run_sweep",
     "sharpe_ratio",
     "summary_dict",
     "timeframe_to_ms",
     "trades_to_dataframe",
     "write_equity_csv",
-    "write_sweep_csv",
     "write_trades_csv",
 ]

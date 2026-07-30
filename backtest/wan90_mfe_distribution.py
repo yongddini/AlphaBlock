@@ -325,7 +325,6 @@ def run_sweep(
     grid = Grid(
         symbols=tuple(symbols),
         timeframes=tuple(timeframes),
-        entry_modes=("zone_limit",),
         take_profit_rs=R_SWEEP,
         offsets_bps=(ConfluenceParams().zone_limit_offset_bps,),
         fills=(BASELINE_FILL,),

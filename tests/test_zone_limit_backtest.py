@@ -1264,16 +1264,6 @@ def test_entry_is_maker_and_exit_is_taker() -> None:
             assert fill.fee == pytest.approx(fill.price * fill.quantity * 0.0004, rel=1e-9)
 
 
-def test_zone_limit_rejects_close_entry_params() -> None:
-    """B안 진입점에 종가 진입 파라미터가 들어오면 거부한다(WAN-95)."""
-    htf, one_min = _synthetic_pair()
-    close_params = ConfluenceParams(
-        entry_mode="close", rsi_mode="closed_bar", max_zone_width_atr=None
-    )
-    with pytest.raises(ValueError, match="지정가 진입"):
-        run_zone_limit_backtest(htf, one_min, "1h", confluence_params=close_params)
-
-
 def test_funding_cost_is_deducted_over_hold_window() -> None:
     """WAN-95: 보유 구간에 정산된 펀딩이 B안 거래 손익에서 실제로 차감된다.
 

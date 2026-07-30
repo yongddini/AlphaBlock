@@ -80,11 +80,9 @@ fan-out한다. 병렬화는 일을 나눠 맡길 뿐 계산 로직을 건드리�
 
 ## 진입 경로
 
-`--entry-mode close`는 A안(`backtest.sweep.evaluate` → `BacktestEngine`),
-`zone_limit`(기본)은 B안(`run_zone_limit_backtest_verbose`)을 탄다. `entry_mode`는
-라벨이 아니라 **경로 스위치**이며(WAN-95), 불일치는 엔진이 `ValueError`로 거부한다.
-두 방식을 한 표에 같이 올리면 종가 성과를 1분봉 커버 창으로 한정해 기간을 맞춘다
-(`--fair-window`, 기본 자동).
+진입 방식은 지정가(B안, `zone_limit`) 단독이다 — `run_zone_limit_backtest_verbose`
+(단일 포지션)/`run_zone_limit_portfolio_backtest`(다중)을 탄다. 옛 A안(종가 진입)
+경로는 WAN-208/WAN-215로 제거됐다.
 """
 
 from __future__ import annotations
@@ -106,7 +104,6 @@ from backtest.harness import (
     DEFAULT_SYMBOLS,
     DEFAULT_TIMEFRAMES,
     DEFAULT_YEARS,
-    ENTRY_MODES,
     FILL_PRESETS,
     FORMATS,
     RETAP_MODES,
@@ -241,7 +238,6 @@ class Grid:
 
     symbols: tuple[str, ...]
     timeframes: tuple[str, ...]
-    entry_modes: tuple[str, ...]
     take_profit_rs: tuple[float, ...]
     offsets_bps: tuple[float, ...]
     fills: tuple[FillPreset, ...]
@@ -304,55 +300,21 @@ class Grid:
     """
 
     def __post_init__(self) -> None:
-        for mode in self.entry_modes:
-            if mode not in ENTRY_MODES:
-                raise ValueError(f"알 수 없는 진입 방식: {mode!r} (지원: {', '.join(ENTRY_MODES)})")
         for retap in self.retap_modes:
             if retap not in RETAP_MODES:
                 supported = ", ".join(RETAP_MODES)
                 raise ValueError(f"알 수 없는 재탭 정책: {retap!r} (지원: {supported})")
-        # 종가 진입은 지정가 노브를 쓰지 않는다. 격자에 섞여 있으면 조용히 무시하는
-        # 대신 여기서 막는다 — 무시하면 `--offset-bps 5`가 아무 일도 하지 않은 표에
-        # `off_bp=5` 라벨만 붙는다(WAN-95가 고친 바로 그 거짓말).
-        if "close" in self.entry_modes:
-            if self.offsets_bps != (0.0,):
-                raise ValueError(
-                    "--entry-mode close와 --offset-bps를 같이 줄 수 없습니다. "
-                    "오프셋은 지정가 주문에만 얹힙니다."
-                )
-            if tuple(f.name for f in self.fills) != (BASELINE_FILL.name,):
-                raise ValueError(
-                    "--entry-mode close와 --fill을 같이 줄 수 없습니다. "
-                    "종가 진입은 탭이 곧 진입이라 미체결 개념이 없습니다."
-                )
-            if self.portfolio_leverages != (None,):
-                raise ValueError(
-                    "--entry-mode close와 --positions(다중 포지션)를 같이 줄 수 없습니다. "
-                    "동시 다중 포지션 회계는 지정가(B안) 경로에만 있습니다(WAN-103)."
-                )
-            # 끄기(`none`/`None`)·미지정(`UNSET`)은 A안에 무해하다(필터가 안 걸린다).
-            # 양수 문턱만 거부한다 — 그것만이 "A안이 조용히 무시하는 필터를 켰다"는 오해다.
-            if any(isinstance(z, float) for z in self.max_zone_widths_atr):
-                raise ValueError(
-                    "--entry-mode close와 --max-zone-width-atr(존폭 문턱)를 같이 줄 수 "
-                    "없습니다. 필터는 지정가 후보를 거르는 B안 경로에만 배선돼 "
-                    "있습니다(WAN-158). 끄기(none)는 무해하므로 허용됩니다."
-                )
 
     @property
     def needs_1m(self) -> bool:
-        return "zone_limit" in self.entry_modes
-
-    @property
-    def mixes_entry_modes(self) -> bool:
-        return len(set(self.entry_modes)) > 1
+        # 진입 방식은 지정가(B안) 단독이라 항상 1분봉이 필요하다(A안 제거, WAN-215).
+        return True
 
 
 @dataclass(frozen=True)
 class Combo:
     """격자의 한 셀(심볼·TF를 뺀 파라미터 조합)."""
 
-    entry_mode: str
     take_profit_r: float
     offset_bps: float
     retap_mode: str
@@ -389,28 +351,26 @@ class Combo:
 def iter_combos(grid: Grid) -> list[Combo]:
     """격자의 모든 조합을 결정적 순서로 열거한다."""
     combos: list[Combo] = []
-    for entry_mode in grid.entry_modes:
-        for retap_mode in grid.retap_modes:
-            for take_profit_r in grid.take_profit_rs:
-                for offset_bps in grid.offsets_bps:
-                    for leverage in grid.portfolio_leverages:
-                        for combine_obs in grid.combine_obs:
-                            for zone_width in grid.max_zone_widths_atr:
-                                for fill in grid.fills:
-                                    for seed in iter_seeds(fill, grid.seeds):
-                                        combos.append(
-                                            Combo(
-                                                entry_mode=entry_mode,
-                                                take_profit_r=take_profit_r,
-                                                offset_bps=offset_bps,
-                                                retap_mode=retap_mode,
-                                                portfolio_leverage=leverage,
-                                                combine_obs=combine_obs,
-                                                max_zone_width_atr=zone_width,
-                                                fill=fill,
-                                                seed=seed,
-                                            )
+    for retap_mode in grid.retap_modes:
+        for take_profit_r in grid.take_profit_rs:
+            for offset_bps in grid.offsets_bps:
+                for leverage in grid.portfolio_leverages:
+                    for combine_obs in grid.combine_obs:
+                        for zone_width in grid.max_zone_widths_atr:
+                            for fill in grid.fills:
+                                for seed in iter_seeds(fill, grid.seeds):
+                                    combos.append(
+                                        Combo(
+                                            take_profit_r=take_profit_r,
+                                            offset_bps=offset_bps,
+                                            retap_mode=retap_mode,
+                                            portfolio_leverage=leverage,
+                                            combine_obs=combine_obs,
+                                            max_zone_width_atr=zone_width,
+                                            fill=fill,
+                                            seed=seed,
                                         )
+                                    )
     return combos
 
 
@@ -446,8 +406,6 @@ class RunOptions:
     태워 존·지표를 데운 뒤 OOS 경계 이후 탭만 평가한 `oos_warm` 행(주 수치)을 내고,
     차가운 `oos` 행(과최적화 스트레스)을 병기한다. 둘의 차이가 강건성 신호다."""
     walkforward: int = 0
-    fair_window: bool | None = None
-    """None이면 자동 — 한 표에 종가·지정가가 같이 있을 때만 켠다."""
     db_path: str = DB_PATH
     cache_dir: str = CACHE_DIR
 
@@ -473,7 +431,6 @@ class _CellTask:
     timeframe: str
     grid: Grid
     options: RunOptions
-    fair_window: bool
 
 
 @dataclass(frozen=True)
@@ -548,7 +505,7 @@ def _run_cell(task: _CellTask) -> _CellOutcome:
         years=options.years,
         start_ms=options.start_ms,
         end_ms=options.end_ms,
-        need_1m=grid.needs_1m or task.fair_window,
+        need_1m=grid.needs_1m,
         funding=options.funding,
         db_path=options.db_path,
         cache_dir=options.cache_dir,
@@ -580,7 +537,7 @@ def _run_cell(task: _CellTask) -> _CellOutcome:
             continue
         eval_ms = eval_boundary_ms(window, segment)
         for combo in combos:
-            if combo.entry_mode == "zone_limit" and window.df_1m.empty:
+            if window.df_1m.empty:
                 continue
             ob_params = combo.order_block
             ob_key = (segment.start_fraction, segment.end_fraction, combo.combine_obs)
@@ -588,7 +545,6 @@ def _run_cell(task: _CellTask) -> _CellOutcome:
                 ob_cache[ob_key] = detect_order_blocks(window, ob_params)
             ob_result = ob_cache[ob_key]
             params = build_params(
-                entry_mode=combo.entry_mode,
                 take_profit_r=combo.take_profit_r,
                 offset_bps=combo.offset_bps,
                 fill=combo.fill,
@@ -599,16 +555,13 @@ def _run_cell(task: _CellTask) -> _CellOutcome:
                 base=_pinned_base(grid),
             )
             portfolio = combo.portfolio
-            wants_setups = (
-                options.collect_artifacts and combo.entry_mode == "zone_limit" and portfolio is None
-            )
+            wants_setups = options.collect_artifacts and portfolio is None
             setup_sink: list[SetupDiagnostic] | None = [] if wants_setups else None
             outcome = run_once(
                 window,
                 params=params,
                 cfg=cfg,
                 order_block_result=ob_result,
-                fair_window=task.fair_window,
                 portfolio=portfolio,
                 setup_sink=setup_sink,
                 eval_from_ms=eval_ms,
@@ -718,27 +671,19 @@ def run_grid_full(
     순서도 직렬과 같다 — 셀끼리 상태를 공유하지 않고(각자 자기 데이터를 로드한다),
     결과는 제출 순서로 모은다.
     """
-    if options.warm_oos:
-        # 따뜻한 연속 OOS(WAN-166)는 B안 단일 포지션 전용이다. 워커 안(run_once)에서도
-        # 거부하지만, 격자 절반을 돌린 뒤 터지는 것보다 시작 전에 막는 쪽이 낫다.
-        if "close" in grid.entry_modes:
-            raise ValueError(
-                "--oos-warm과 --entry-mode close를 같이 줄 수 없습니다 — 따뜻한 연속 "
-                "OOS는 지정가(B안) 전용입니다(WAN-166)."
-            )
-        if grid.portfolio_leverages != (None,):
-            raise ValueError(
-                "--oos-warm과 --positions(다중 포지션)를 같이 줄 수 없습니다 — 따뜻한 "
-                "연속 OOS는 단일 포지션 경로에만 배선돼 있습니다(WAN-166)."
-            )
-    fair_window = grid.mixes_entry_modes if options.fair_window is None else options.fair_window
+    # 따뜻한 연속 OOS(WAN-166)는 단일 포지션 전용이다. 워커 안(run_once)에서도 거부하지만,
+    # 격자 절반을 돌린 뒤 터지는 것보다 시작 전에 막는 쪽이 낫다.
+    if options.warm_oos and grid.portfolio_leverages != (None,):
+        raise ValueError(
+            "--oos-warm과 --positions(다중 포지션)를 같이 줄 수 없습니다 — 따뜻한 "
+            "연속 OOS는 단일 포지션 경로에만 배선돼 있습니다(WAN-166)."
+        )
     tasks = [
         _CellTask(
             symbol=symbol,
             timeframe=timeframe,
             grid=grid,
             options=options,
-            fair_window=fair_window,
         )
         for symbol in grid.symbols
         for timeframe in grid.timeframes
@@ -814,11 +759,6 @@ def build_parser() -> argparse.ArgumentParser:
     data.add_argument("--cache-dir", default=CACHE_DIR)
 
     strategy = parser.add_argument_group("전략 축 (콤마 복수 = 격자)")
-    strategy.add_argument(
-        "--entry-mode",
-        default="zone_limit",
-        help="close(A안) / zone_limit(B안, 기본). 콤마로 둘 다 주면 한 표에서 비교",
-    )
     strategy.add_argument("--tp-r", help="고정 R 익절 배수(기본: 채택 기본값 1.5)")
     strategy.add_argument("--offset-bps", help="지정가 오프셋 bp(기본 0). 지정가 전용")
     strategy.add_argument(
@@ -891,12 +831,6 @@ def build_parser() -> argparse.ArgumentParser:
     validation.add_argument(
         "--walkforward", type=int, default=0, metavar="N", help="N개 롤링 창으로 IS/OOS 반복"
     )
-    validation.add_argument(
-        "--fair-window",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="종가 성과를 1분봉 커버 창으로 한정(기본: 진입 방식이 섞일 때만 자동)",
-    )
 
     execution = parser.add_argument_group("실행")
     execution.add_argument(
@@ -968,18 +902,16 @@ def grid_from_args(args: argparse.Namespace) -> Grid:
         short_enabled = True
     elif args.long_only:
         short_enabled = False
-    entry_modes = split_list(args.entry_mode)
     return Grid(
         symbols=tuple(normalize_symbol(s) for s in split_list(args.symbol)),
         timeframes=split_list(args.tf),
-        entry_modes=entry_modes,
         take_profit_rs=(
             split_floats(args.tp_r, label="--tp-r") if args.tp_r else (_default_tp_r(),)
         ),
         offsets_bps=(
             split_floats(args.offset_bps, label="--offset-bps")
             if args.offset_bps
-            else _default_offsets_bps(entry_modes)
+            else _default_offsets_bps()
         ),
         retap_modes=(split_list(args.retap_mode) if args.retap_mode else _default_retap_modes()),
         fills=_fills_from_args(args),
@@ -1103,22 +1035,13 @@ def _default_retap_modes() -> tuple[str, ...]:
     return (build_params().retap_mode,)
 
 
-def _default_offsets_bps(entry_modes: tuple[str, ...]) -> tuple[float, ...]:
+def _default_offsets_bps() -> tuple[float, ...]:
     """오프셋을 안 주면 **채택 기본값 그대로**(WAN-112: 2bp).
 
     여기에 `(0.0,)`을 하드코딩하면 CLI가 `ConfluenceParams`의 기본 오프셋을 말없이
     덮어써서, 인자 없는 실행만 혼자 옛 엔진(0bp)을 도는 조용한 갈라짐이 생긴다 —
     "인자 없이 돌리면 채택 기본값 그대로"라는 이 CLI의 약속(WAN-101)이 깨진다.
-
-    단 **종가 진입이 격자에 섞이면 0bp로 내린다**: A안은 오프셋을 읽지 않으므로
-    (`apply_zone_limit_offset` 호출부가 B안뿐) 종가 팔에 2bp를 얹을 방법이 없다. 그
-    상태로 지정가 팔만 2bp를 물리면 두 팔이 **진입 방식 말고도 오프셋까지 달라져**,
-    진입 방식을 격리하려던 대조표가 두 변수를 섞어 버린다(WAN-95의 옛 종가 대조군도 같은
-    이유로 다른 필드를 전부 맞췄다 — 그 A안 비교팔은 WAN-200 §A로 제거됐다). 오프셋을
-    명시로 주면 `Grid`가 이 조합을 거부한다.
     """
-    if "close" in entry_modes:
-        return (0.0,)
     return (build_params().zone_limit_offset_bps,)
 
 
@@ -1149,7 +1072,6 @@ def options_from_args(args: argparse.Namespace) -> RunOptions:
         oos=args.oos,
         warm_oos=args.oos_warm,
         walkforward=args.walkforward,
-        fair_window=args.fair_window,
         db_path=args.db_path,
         cache_dir=args.cache_dir,
     )

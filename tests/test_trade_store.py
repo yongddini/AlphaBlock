@@ -17,7 +17,8 @@ from pathlib import Path
 
 import pytest
 
-from backtest import BacktestConfig, run_backtest
+from backtest import BacktestConfig
+from backtest.metrics import build_metrics
 from backtest.models import BacktestResult, PositionSide
 from backtest.report import COL_EQUITY_AFTER, trades_to_display_frame
 from backtest.substep import ZoneLimitStatus
@@ -240,30 +241,13 @@ def test_created_at_is_recorded(store: BacktestRunStore) -> None:
 
 def test_empty_result_persists_without_rows(store: BacktestRunStore) -> None:
     """거래 0건도 적재된다 — "안 돌렸다"와 "돌렸는데 거래가 없었다"는 다른 사실이다."""
-    empty = run_backtest(_win_then_loss_frame(), [], _CFG)
+    metrics = build_metrics(initial_capital=10_000.0, equities=[10_000.0], trades=[])
+    empty = BacktestResult(config=_CFG, trades=[], equity_curve=[], metrics=metrics)
 
     run_id = store.save_run(_fingerprint(), empty)
 
     assert store.summary(run_id).num_trades == 0
     assert store.load_result(run_id).trades == []
-
-
-def _win_then_loss_frame() -> object:
-    """`_win_then_loss`가 쓰는 캔들 — 시그널 없는 빈 실행을 만들기 위해 재사용한다."""
-    import pandas as pd
-
-    step = 3_600_000
-    start = int(datetime(2025, 3, 14, tzinfo=UTC).timestamp() * 1000)
-    return pd.DataFrame(
-        {
-            "open_time": [start + i * step for i in range(4)],
-            "open": [100.0] * 4,
-            "high": [101.0] * 4,
-            "low": [99.0] * 4,
-            "close": [100.0] * 4,
-            "volume": [10.0] * 4,
-        }
-    )
 
 
 def test_restored_result_is_not_a_recomputation(store: BacktestRunStore) -> None:

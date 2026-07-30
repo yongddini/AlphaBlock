@@ -117,7 +117,6 @@ def build_grid(symbols: Sequence[str]) -> Grid:
     return Grid(
         symbols=tuple(normalize_symbol(s) for s in symbols),
         timeframes=DEFAULT_TIMEFRAMES,
-        entry_modes=("zone_limit",),
         take_profit_rs=(defaults.take_profit_r,),
         offsets_bps=(defaults.zone_limit_offset_bps,),
         fills=tuple(fill_preset(name) for name in LENS_NAMES),

@@ -1,8 +1,8 @@
 """범용 백테스트 하네스 — 실행기가 공유하는 골격 (WAN-101).
 
 `backtest/wan68_*.py` … `wan99_*.py` 12개 스크립트는 저마다 같은 일을 다시 짰다:
-저장소에서 최근 N년을 로드하고, 1분봉·펀딩비를 붙이고, 파라미터를 조립하고, A안/B안
-엔진을 골라 태우고, 지표를 행으로 모아 표로 렌더한다. 그 반복이 "익절 1.5R 말고
+저장소에서 최근 N년을 로드하고, 1분봉·펀딩비를 붙이고, 파라미터를 조립하고, 지정가(B안)
+엔진에 태우고, 지표를 행으로 모아 표로 렌더한다. 그 반복이 "익절 1.5R 말고
 2R이면?" 같은 한 줄짜리 질문에도 새 스크립트 + PR을 요구하게 만들었다. 이 모듈은 그
 공통 골격을 한곳에 모아 `backtest.run`(범용 CLI)이 파라미터만 받아 즉시 답을 내게 한다.
 
@@ -11,11 +11,11 @@
 1. **데이터 로딩** — `load_market_data`가 (심볼, TF)의 상위TF·1분봉·펀딩비를 한 번에
    묶어 `MarketData`로 낸다. 심볼 축약형(`BTCUSDT`)도 저장소 표기(`BTC/USDT:USDT`)로
    정규화한다.
-2. **파라미터 조립** — `build_params`가 `entry_mode`에 맞는 `rsi_mode`를 **한 세트로**
-   묶고(WAN-41), 그 경로에서 무의미한 노브가 조용히 무시되지 않도록 거부한다.
-3. **경로 스위치** — `run_once`가 `entry_mode`에 따라 A안(`sweep.evaluate`)/B안
-   (`run_zone_limit_backtest_verbose`)을 태운다. `entry_mode`는 라벨이 아니라 경로
-   스위치라는 WAN-95 규칙을 CLI에서도 유지한다.
+2. **파라미터 조립** — `build_params`가 지정가(B안)에 맞는 `rsi_mode`(`realtime`)를
+   **한 세트로** 묶는다(WAN-41).
+3. **실행** — `run_once`가 지정가(B안) 엔진(`run_zone_limit_backtest_verbose`, 다중
+   포지션이면 `run_zone_limit_portfolio_backtest`)을 태운다. A안(종가 진입)은
+   WAN-208/WAN-215로 제거됐다.
 4. **구간 분할** — `segments_for` / `slice_window`가 IS/OOS·워크포워드 창을 **시간으로**
    가른다. 각 구간은 초기자본에서 새로 시작하는 독립 백테스트다(WAN-99와 동일 규칙).
 5. **렌더** — `render_table` / `render_csv` / `render_json`.
@@ -39,14 +39,12 @@ from pathlib import Path
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, field_validator
 
-from backtest.metrics import build_metrics
-from backtest.models import BacktestConfig, BacktestResult, ExitReason, Trade
+from backtest.models import BacktestConfig, BacktestResult, ExitReason
 from backtest.portfolio import PortfolioParams
-from backtest.sweep import bars_per_year, default_backtest_config, evaluate
+from backtest.sweep import default_backtest_config
 from backtest.zone_limit_backtest import (
     SetupDiagnostic,
     ZoneLimitStats,
-    build_result_from_trades,
     run_zone_limit_backtest_verbose,
     run_zone_limit_portfolio_backtest,
 )
@@ -231,8 +229,9 @@ def fill_preset(name: str) -> FillPreset:
 # --------------------------------------------------------------------------- #
 
 #: `entry_mode` → 짝이 되는 `rsi_mode`. 두 필드는 **한 세트**다(WAN-41/95): 지정가는 봉
-#: 중간에 체결되므로 확정봉 RSI를 쓰면 체결 시점과 판정 시점이 어긋난다.
-_RSI_MODE_FOR_ENTRY: dict[str, str] = {"close": "closed_bar", "zone_limit": "realtime"}
+#: 중간에 체결되므로 확정봉 RSI를 쓰면 체결 시점과 판정 시점이 어긋난다. A안(종가 진입)이
+#: WAN-208/WAN-215로 제거돼 지금은 지정가(B안) 단독이다.
+_RSI_MODE_FOR_ENTRY: dict[str, str] = {"zone_limit": "realtime"}
 
 ENTRY_MODES: tuple[str, ...] = tuple(_RSI_MODE_FOR_ENTRY)
 
@@ -397,30 +396,12 @@ def build_params(
     명시적 `None`이면 **끈다**(= `1.28`을 덮어써 `None`으로). 이래야 wan155/wan161·CLI의
     `none` 팔이 「필터 끔」 라벨을 단 채 조용히 1.28로 도는 이중 필터를 피한다.
 
-    지정가 전용 노브(`offset_bps`·`fill`)를 종가 진입에 주면 **거부한다**. 조용히
-    무시하면 "오프셋 5bp로 돌렸다"고 믿는 사용자에게 오프셋이 없는 결과를 주게 되는데,
-    그것이 WAN-91(`funding_enabled`만 켜고 펀딩을 안 넘김)·WAN-95(`entry_mode`가 라벨일
-    뿐이던 시절)가 각각 한 번씩 겪은 조용한 실패다.
+    진입 방식은 지정가(B안) 단독이다(A안은 WAN-208/WAN-215로 제거). 알 수 없는
+    `entry_mode`는 `ValueError`로 거부한다.
     """
     if entry_mode not in _RSI_MODE_FOR_ENTRY:
         supported = ", ".join(_RSI_MODE_FOR_ENTRY)
         raise ValueError(f"알 수 없는 진입 방식: {entry_mode!r} (지원: {supported})")
-    if entry_mode == "close":
-        if offset_bps:
-            raise ValueError(
-                "지정가 오프셋(--offset-bps)은 종가 진입(--entry-mode close)에 적용되지 "
-                "않습니다. 존에 거는 주문이 없으니 오프셋을 얹을 가격도 없습니다."
-            )
-        if fill.name != BASELINE_FILL.name:
-            raise ValueError(
-                f"체결 가정(--fill {fill.name})은 종가 진입(--entry-mode close)에 적용되지 "
-                "않습니다. 탭이 곧 진입이라 미체결이라는 개념이 없습니다."
-            )
-        if max_zone_width_atr is not UNSET and max_zone_width_atr is not None:
-            raise ValueError(
-                "존폭 필터(--max-zone-width-atr)는 종가 진입(--entry-mode close)에 적용되지 "
-                "않습니다. 필터는 지정가 후보를 거르는 B안 경로에만 배선돼 있습니다(WAN-158)."
-            )
 
     update: dict[str, object] = {
         "entry_mode": entry_mode,
@@ -429,21 +410,12 @@ def build_params(
         "fill_dropout_rate": fill.dropout_rate,
         "fill_dropout_seed": seed,
     }
-    if entry_mode == "close":
-        # A안은 오프셋을 읽지 않는다(`apply_zone_limit_offset` 호출부가 B안뿐). 채택
-        # 기본값의 2bp를 그대로 들고 있으면 리포트에 "오프셋 2bp"라 찍히면서 실제로는
-        # 아무 데도 안 쓰이는 거짓 라벨이 된다 — WAN-95가 고친 그 병이다.
-        update["zone_limit_offset_bps"] = 0.0
-        # 같은 이유로 존폭 필터도 끈다 — A안은 이 필드를 안 읽는데 채택 기본값 1.28을
-        # 들고 있으면 `evaluate()`가 거부하고(WAN-158), 리포트 라벨도 거짓이 된다.
-        update["max_zone_width_atr"] = None
-    else:
-        if offset_bps is not None:
-            update["zone_limit_offset_bps"] = offset_bps
-        if max_zone_width_atr is not UNSET:
-            # 명시적 `None`은 **끄기**다(채택 기본값 1.28을 덮어쓴다). `UNSET`이면
-            # `base`(= 채택 기본값)의 값을 그대로 물려받는다 — 위 독스트링 규약.
-            update["max_zone_width_atr"] = max_zone_width_atr
+    if offset_bps is not None:
+        update["zone_limit_offset_bps"] = offset_bps
+    if max_zone_width_atr is not UNSET:
+        # 명시적 `None`은 **끄기**다(채택 기본값 1.28을 덮어쓴다). `UNSET`이면
+        # `base`(= 채택 기본값)의 값을 그대로 물려받는다 — 위 독스트링 규약.
+        update["max_zone_width_atr"] = max_zone_width_atr
     if take_profit_r is not None:
         update["take_profit_r"] = take_profit_r
     if short_enabled is not None:
@@ -755,45 +727,6 @@ def eval_boundary_ms(market: MarketData, segment: Segment) -> int | None:
 # --------------------------------------------------------------------------- #
 
 
-def coverage_window(df_1m: pd.DataFrame) -> tuple[int, int]:
-    """1분봉이 커버하는 시간창 `[start, end]`(ms)."""
-    times = df_1m["open_time"].astype("int64")
-    return int(times.min()), int(times.max())
-
-
-def windowed_result(
-    trades: list[Trade],
-    cfg: BacktestConfig,
-    timeframe: str,
-    start: int,
-    end: int,
-    *,
-    funding_coverage: float | None = None,
-) -> BacktestResult:
-    """A안 거래를 창으로 한정해 B안과 동일한 방식으로 재집계한 결과(WAN-41/95 공정 창).
-
-    지정가(B안)는 1분봉이 커버하는 구간의 셋업만 평가하므로, 종가(A안) 성과도 같은
-    창으로 한정해야 두 진입 방식이 **같은 기간**을 놓고 비교된다.
-
-    `funding_coverage`는 원본 결과의 값을 그대로 물려받는다 — 창으로 자르는 건 거래
-    집계일 뿐 펀딩 커버리지를 바꾸지 않는데, 넘기지 않으면 재집계에서 `None`으로 사라져
-    "펀딩을 반영했는지"를 알 수 없게 된다(WAN-95).
-    """
-    in_window = [t for t in trades if start <= t.entry_time <= end]
-    if not in_window:
-        metrics = build_metrics(
-            initial_capital=cfg.initial_capital,
-            equities=[cfg.initial_capital],
-            trades=[],
-            annualization_factor=bars_per_year(timeframe),
-            funding_coverage=funding_coverage,
-        )
-        return BacktestResult(config=cfg, trades=[], equity_curve=[], metrics=metrics)
-    return build_result_from_trades(
-        in_window, cfg, timeframe, funding_coverage_value=funding_coverage
-    )
-
-
 def mean_r(result: BacktestResult, take_profit_r: float) -> float | None:
     """청산 사유로 매긴 거래당 평균 R(비용 반영 전).
 
@@ -817,7 +750,7 @@ def mean_r(result: BacktestResult, take_profit_r: float) -> float | None:
 
 @dataclass(frozen=True)
 class RunOutcome:
-    """한 번의 백테스트 결과 + 지정가 진단(종가 진입이면 `stats`가 None)."""
+    """한 번의 지정가(B안) 백테스트 결과 + 지정가 진단(`stats`)."""
 
     result: BacktestResult
     stats: ZoneLimitStats | None
@@ -829,20 +762,15 @@ def run_once(
     params: ConfluenceParams,
     cfg: BacktestConfig,
     order_block_result: OrderBlockResult | None = None,
-    fair_window: bool = False,
     portfolio: PortfolioParams | None = None,
     setup_sink: list[SetupDiagnostic] | None = None,
     eval_from_ms: int | None = None,
 ) -> RunOutcome:
-    """`entry_mode`에 따라 A안/B안 엔진을 태운다 (WAN-95 경로 스위치).
+    """지정가(B안) 백테스트를 실행한다.
 
-    `entry_mode="close"` → `backtest.sweep.evaluate`(→`BacktestEngine`),
-    `"zone_limit"` → `backtest.zone_limit_backtest.run_zone_limit_backtest_verbose`.
-    두 진입점은 자기 것이 아닌 `entry_mode`를 `ValueError`로 거부하므로, 이 함수가
-    경로를 잘못 고르면 조용한 오답이 아니라 예외로 드러난다.
-
-    `fair_window`는 종가 진입 성과를 1분봉 커버 창으로 한정한다 — 같은 표에서 지정가와
-    나란히 비교할 때만 의미가 있다(그때만 기간이 어긋나므로).
+    `backtest.zone_limit_backtest.run_zone_limit_backtest_verbose`(단일 포지션) 또는
+    `run_zone_limit_portfolio_backtest`(동시 다중 포지션, `portfolio` 지정 시)를 탄다.
+    A안(종가 진입) 경로는 WAN-208/WAN-215로 제거돼 진입 방식은 `zone_limit` 단독이다.
 
     `portfolio`를 주면 동시 다중 포지션 회계(WAN-103)로 돈다 — 셋업 탐색·체결
     시뮬레이션은 **완전히 같고**(같은 `build_zone_limit_candidates`) 후보를 배치하는
@@ -852,94 +780,56 @@ def run_once(
     (wan103 `series_rows`가 같은 이유로 대조군을 채택 엔진으로 낸다).
 
     `setup_sink`(WAN-106)를 주면 eligible 셋업별 `SetupDiagnostic`을 채운다 — **미체결
-    셋업**("살 뻔했는데 못 산 자리")을 DB에 적재하는 입력이다. 종가 진입·다중 포지션
-    경로에는 이 진단이 없으므로 **조용히 빈 리스트를 주는 대신 거부한다**: 미체결이
-    0건인 것과 미체결을 셀 줄 모르는 것이 화면에서 같아 보이면 안 된다(WAN-95 부류).
+    셋업**("살 뻔했는데 못 산 자리")을 DB에 적재하는 입력이다. 다중 포지션 경로에는 이
+    진단이 없으므로 **조용히 빈 리스트를 주는 대신 거부한다**: 미체결이 0건인 것과
+    미체결을 셀 줄 모르는 것이 화면에서 같아 보이면 안 된다(WAN-95 부류).
 
     `eval_from_ms`(WAN-166 따뜻한 연속 OOS)를 주면 `market` 전체를 연속으로 태워 존
     재고·지표를 데운 뒤, **탭이 그 시각 이후인 셋업만** 신선한 초기자본으로 시퀀싱한다.
-    B안(지정가) 단일 포지션 전용이다 — A안은 엔진이 봉 단위 자본을 굴려 평가 창만 뗄 수
-    없고(사이징 자본이 워밍업 손익에 오염된다), 다중 포지션 경로는 배선하지 않았다.
-    둘 다 조용히 무시하는 대신 거부한다(WAN-95 부류).
+    단일 포지션 전용이다 — 다중 포지션 경로는 배선하지 않았으므로 조용히 무시하는 대신
+    거부한다(WAN-95 부류).
     """
-    if eval_from_ms is not None:
-        if params.entry_mode != "zone_limit":
-            raise ValueError(
-                "따뜻한 연속 OOS(eval_from_ms)는 지정가(B안) 전용입니다 — 종가 진입(A안)은 "
-                "엔진이 봉 단위 자본을 굴려 평가 창을 신선한 자본으로 뗄 수 없습니다(WAN-166)."
-            )
-        if portfolio is not None:
-            raise ValueError(
-                "따뜻한 연속 OOS(eval_from_ms)는 동시 다중 포지션 경로에 아직 없습니다"
-                "(run_zone_limit_portfolio_backtest에 배선하지 않음, WAN-166). "
-                "단일 포지션(채택 기본값)으로 평가하세요."
-            )
-    if setup_sink is not None:
-        if params.entry_mode != "zone_limit":
-            raise ValueError(
-                "미체결 셋업 진단(setup_sink)은 지정가(B안) 전용입니다 — 종가 진입은 "
-                "탭이 곧 진입이라 미체결이라는 개념이 없습니다(WAN-95)."
-            )
-        if portfolio is not None:
-            raise ValueError(
-                "미체결 셋업 진단(setup_sink)은 동시 다중 포지션 경로에 아직 없습니다"
-                "(run_zone_limit_portfolio_backtest에 setup_sink 인자가 없음). "
-                "단일 포지션(채택 기본값)으로 적재하세요."
-            )
-    if portfolio is not None and params.entry_mode != "zone_limit":
+    if eval_from_ms is not None and portfolio is not None:
         raise ValueError(
-            "동시 다중 포지션(portfolio)은 지정가(B안) 전용인데 "
-            f'entry_mode="{params.entry_mode}"가 들어왔습니다(WAN-95/103).'
+            "따뜻한 연속 OOS(eval_from_ms)는 동시 다중 포지션 경로에 아직 없습니다"
+            "(run_zone_limit_portfolio_backtest에 배선하지 않음, WAN-166). "
+            "단일 포지션(채택 기본값)으로 평가하세요."
         )
-    if params.entry_mode == "zone_limit":
-        if market.df_1m.empty:
-            raise ValueError(
-                f"{market.symbol} {market.timeframe}: 지정가(zone_limit) 백테스트는 1분봉이 "
-                "필요한데 데이터가 없습니다. 종가 진입은 --entry-mode close를 쓰세요."
-            )
-        if portfolio is not None:
-            pf_result, pf_stats, _pf = run_zone_limit_portfolio_backtest(
-                market.htf_df,
-                market.df_1m,
-                market.timeframe,
-                portfolio=portfolio,
-                confluence_params=params,
-                backtest_config=cfg,
-                order_block_result=order_block_result,
-                funding_rates=market.funding_rates,
-            )
-            return RunOutcome(result=pf_result, stats=pf_stats)
-        result, stats = run_zone_limit_backtest_verbose(
+    if setup_sink is not None and portfolio is not None:
+        raise ValueError(
+            "미체결 셋업 진단(setup_sink)은 동시 다중 포지션 경로에 아직 없습니다"
+            "(run_zone_limit_portfolio_backtest에 setup_sink 인자가 없음). "
+            "단일 포지션(채택 기본값)으로 적재하세요."
+        )
+    if market.df_1m.empty:
+        raise ValueError(
+            f"{market.symbol} {market.timeframe}: 지정가(zone_limit) 백테스트는 1분봉이 "
+            "필요한데 데이터가 없습니다."
+        )
+    if portfolio is not None:
+        pf_result, pf_stats, _pf = run_zone_limit_portfolio_backtest(
             market.htf_df,
             market.df_1m,
             market.timeframe,
+            portfolio=portfolio,
             confluence_params=params,
             backtest_config=cfg,
             order_block_result=order_block_result,
             funding_rates=market.funding_rates,
-            setup_sink=setup_sink,
-            eval_from_ms=eval_from_ms,
         )
-        return RunOutcome(result=result, stats=stats)
-
-    result = evaluate(
+        return RunOutcome(result=pf_result, stats=pf_stats)
+    result, stats = run_zone_limit_backtest_verbose(
         market.htf_df,
+        market.df_1m,
+        market.timeframe,
         confluence_params=params,
         backtest_config=cfg,
         order_block_result=order_block_result,
         funding_rates=market.funding_rates,
+        setup_sink=setup_sink,
+        eval_from_ms=eval_from_ms,
     )
-    if fair_window and not market.df_1m.empty:
-        start, end = coverage_window(market.df_1m)
-        result = windowed_result(
-            result.trades,
-            cfg,
-            market.timeframe,
-            start,
-            end,
-            funding_coverage=result.metrics.funding_coverage,
-        )
-    return RunOutcome(result=result, stats=None)
+    return RunOutcome(result=result, stats=stats)
 
 
 def detect_order_blocks(

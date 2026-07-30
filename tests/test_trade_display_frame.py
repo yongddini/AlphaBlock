@@ -13,8 +13,9 @@ from datetime import UTC, datetime
 import pandas as pd
 import pytest
 
-from backtest import BacktestConfig, PositionSide, run_backtest
-from backtest.models import BacktestResult
+from backtest import BacktestConfig, PositionSide
+from backtest.metrics import build_metrics
+from backtest.models import BacktestResult, EquityPoint, ExitReason, Trade, TradeFill
 from backtest.report import (
     COL_ENTRY_KST,
     COL_ENTRY_UTC,
@@ -37,7 +38,7 @@ from dashboard.trade_table import (
     selected_trade_window,
     style_trade_frame,
 )
-from strategy.models import ConfluenceParams, OrderBlock, OrderBlockDirection, OrderBlockSignal
+from strategy.models import ConfluenceParams
 
 _STEP = 3_600_000  # 1시간
 
@@ -58,38 +59,63 @@ def _df(bars: Sequence[tuple[float, float, float, float]], *, start_ms: int) -> 
     )
 
 
-def _signal(trigger_ms: int, price: float) -> OrderBlockSignal:
-    ob = OrderBlock(
-        direction=OrderBlockDirection.BULLISH,
-        top=price * 1.01,
-        bottom=price * 0.99,
-        start_time=trigger_ms,
-        confirmed_time=trigger_ms,
-        ob_volume=1.0,
-        ob_low_volume=0.5,
-        ob_high_volume=0.5,
-    )
-    return OrderBlockSignal(
-        direction=OrderBlockDirection.BULLISH,
-        trigger_time=trigger_ms,
-        price=price,
-        order_block=ob,
-        status="active",
+def _long_trade(
+    *,
+    entry_ms: int,
+    entry_price: float,
+    exit_ms: int,
+    exit_price: float,
+    quantity: float,
+    reason: ExitReason,
+) -> Trade:
+    realized = (exit_price - entry_price) * quantity
+    return Trade(
+        side=PositionSide.LONG,
+        entry_time=entry_ms,
+        entry_price=entry_price,
+        quantity=quantity,
+        entry_fee=0.0,
+        exits=[
+            TradeFill(time=exit_ms, price=exit_price, quantity=quantity, fee=0.0, reason=reason)
+        ],
+        funding_cost=0.0,
+        realized_pnl=realized,
+        return_pct=(exit_price - entry_price) / entry_price,
     )
 
 
 def _win_then_loss() -> BacktestResult:
-    """익절 1건 + 손절 1건. 비용을 0으로 둬 손익이 손으로 계산된다."""
-    bars = [
-        (100.0, 101.0, 99.0, 100.0),  # 0: 진입
-        (100.0, 112.0, 99.0, 110.0),  # 1: 익절(110)
-        (110.0, 111.0, 109.0, 110.0),  # 2: 재진입
-        (110.0, 111.0, 100.0, 101.0),  # 3: 손절(104.5)
-    ]
-    df = _df(bars, start_ms=_UTC_MIDNIGHT_MS)
-    signals = [
-        _signal(_UTC_MIDNIGHT_MS, 100.0),
-        _signal(_UTC_MIDNIGHT_MS + 2 * _STEP, 110.0),
+    """익절 1건 + 손절 1건. 비용 0·전액 진입이라 손익이 손으로 계산된다.
+
+    옛 A안 엔진(`run_backtest`)이 WAN-208/WAN-215로 제거돼, 표시 계층이 읽는
+    `BacktestResult`(거래·지표)를 **직접 구성**한다 — 진입가 100→익절 110(+1,000),
+    시드 11,000에서 재진입 110→손절 104.5(−550) → 최종 10,450. 엔진이 내던 값과 같다.
+    """
+    win = _long_trade(
+        entry_ms=_UTC_MIDNIGHT_MS,
+        entry_price=100.0,
+        exit_ms=_UTC_MIDNIGHT_MS + _STEP,
+        exit_price=110.0,
+        quantity=100.0,
+        reason=ExitReason.TAKE_PROFIT,
+    )
+    loss = _long_trade(
+        entry_ms=_UTC_MIDNIGHT_MS + 2 * _STEP,
+        entry_price=110.0,
+        exit_ms=_UTC_MIDNIGHT_MS + 3 * _STEP,
+        exit_price=104.5,
+        quantity=100.0,
+        reason=ExitReason.STOP_LOSS,
+    )
+    trades = [win, loss]
+    equities = [10_000.0, 11_000.0, 11_000.0, 10_450.0]
+    metrics = build_metrics(
+        initial_capital=10_000.0,
+        equities=equities,
+        trades=trades,
+    )
+    equity_curve = [
+        EquityPoint(time=_UTC_MIDNIGHT_MS + i * _STEP, equity=eq) for i, eq in enumerate(equities)
     ]
     cfg = BacktestConfig(
         initial_capital=10_000.0,
@@ -97,10 +123,8 @@ def _win_then_loss() -> BacktestResult:
         slippage=0.0,
         position_fraction=1.0,
         risk_sizing=None,
-        take_profit_pct=0.10,
-        stop_loss_pct=0.05,
     )
-    return run_backtest(df, signals, cfg)
+    return BacktestResult(config=cfg, trades=trades, equity_curve=equity_curve, metrics=metrics)
 
 
 def test_times_are_rendered_in_korean_time() -> None:
@@ -199,7 +223,7 @@ def test_engine_labels_survive_in_the_caption() -> None:
 
     caption = engine_label_caption(
         result,
-        ConfluenceParams(entry_mode="close", rsi_mode="closed_bar", max_zone_width_atr=None),
+        ConfluenceParams(entry_mode="zone_limit", rsi_mode="realtime"),
         OrderBlockParams(combine_obs=True),
         result.config,
     )
@@ -211,8 +235,8 @@ def test_engine_labels_survive_in_the_caption() -> None:
 
 def test_display_columns_stable_when_no_trades() -> None:
     """거래 0건이어도 표 골격(컬럼)은 같다 — 빈 화면에서 컬럼이 사라지면 안 된다."""
-    df = _df([(100.0, 101.0, 99.0, 100.0)] * 3, start_ms=_UTC_MIDNIGHT_MS)
-    result = run_backtest(df, [], BacktestConfig())
+    metrics = build_metrics(initial_capital=10_000.0, equities=[10_000.0], trades=[])
+    result = BacktestResult(config=BacktestConfig(), trades=[], equity_curve=[], metrics=metrics)
 
     frame = trades_to_display_frame(result)
 

@@ -379,10 +379,6 @@ def test_journal_records_full_lifecycle(monkeypatch: pytest.MonkeyPatch, tmp_pat
 class TestLiveParamValidation:
     """라이브가 재현 못 하는 설정은 조용히 무시하지 않고 거부한다(WAN-95의 교훈)."""
 
-    def test_rejects_close_entry_mode(self) -> None:
-        with pytest.raises(ValueError, match="zone_limit"):
-            ZoneLimitLiveEngine(params=_params(entry_mode="close", rsi_mode="closed_bar"))
-
     def test_rejects_tap_band(self) -> None:
         params = _params()
         assert params.deviation_filter is not None

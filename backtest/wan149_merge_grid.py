@@ -101,7 +101,6 @@ def build_grid(symbols: Sequence[str] = ALL_SYMBOLS) -> Grid:
     return Grid(
         symbols=tuple(normalize_symbol(s) for s in symbols),
         timeframes=TIMEFRAMES,
-        entry_modes=("zone_limit",),
         take_profit_rs=(defaults.take_profit_r,),
         offsets_bps=(defaults.zone_limit_offset_bps,),
         fills=(BASELINE_FILL,),

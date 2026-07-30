@@ -13,8 +13,6 @@ import math
 import pandas as pd
 import pytest
 
-from backtest import run_backtest
-from backtest.models import ExitReason
 from strategy.confluence import (
     ConfluenceSignal,
     ConfluenceStrategy,
@@ -515,7 +513,13 @@ def test_confirmed_long_stop_loss_end_to_end() -> None:
     assert entry.planned_exit.price == pytest.approx(closes[break_pos])
 
 
-def test_backtest_consumes_planned_take_profit() -> None:
+def test_signal_carries_planned_take_profit() -> None:
+    """익절선 위로 반등하는 시나리오는 신호에 TAKE_PROFIT 계획 청산을 싣는다.
+
+    옛 A안 엔진(`run_backtest`)이 이 계획 청산을 소비하던 것을 검증하던 테스트였으나,
+    A안 경로가 WAN-208/WAN-215로 제거돼 지금은 **계획 청산이 신호에 실리는지**(전략
+    책임)만 검증한다. 지정가(B안) 엔진의 청산은 `test_zone_limit_backtest`가 덮는다.
+    """
     closes = _falling_then_rising(down=22, up=12)
     df = _df(closes, wick=1.0)
     trough = 21
@@ -530,15 +534,13 @@ def test_backtest_consumes_planned_take_profit() -> None:
     )
     signals = result.order_block_signals
     assert len(signals) == 1
-    assert signals[0].planned_exit is not None
-
-    bt = run_backtest(df, signals)
-    assert bt.metrics.num_trades == 1
-    trade = bt.trades[0]
-    assert trade.exits[-1].reason is ExitReason.TAKE_PROFIT
+    planned = signals[0].planned_exit
+    assert planned is not None
+    assert planned.reason is SignalExitReason.TAKE_PROFIT
 
 
-def test_backtest_consumes_planned_stop_loss() -> None:
+def test_signal_carries_planned_stop_loss() -> None:
+    """무효화 경계를 이탈하는 시나리오는 신호에 STOP_LOSS 계획 청산을 싣는다."""
     closes = [200.0 - i * 3.0 for i in range(25)]
     df = _df(closes)
     entry_pos = 18
@@ -552,13 +554,15 @@ def test_backtest_consumes_planned_stop_loss() -> None:
             order_blocks=[], signals=[_signal(_BULL, entry_pos, closes[entry_pos], ob)]
         ),
     )
-    bt = run_backtest(df, result.order_block_signals)
-    assert bt.metrics.num_trades == 1
-    assert bt.trades[0].exits[-1].reason is ExitReason.STOP_LOSS
+    signals = result.order_block_signals
+    assert len(signals) == 1
+    planned = signals[0].planned_exit
+    assert planned is not None
+    assert planned.reason is SignalExitReason.STOP_LOSS
 
 
-def test_no_planned_exit_falls_through_to_end_of_data() -> None:
-    """익절선·무효화가 모두 없으면 계획 청산이 없고, 백테스트는 데이터 끝에서 청산한다."""
+def test_no_planned_exit_when_no_tp_line_or_invalidation() -> None:
+    """익절선·무효화가 모두 없으면 계획 청산이 없다(전략이 미청산 신호를 낸다)."""
     closes = [200.0 - i * 3.0 for i in range(25)]  # 계속 하락, 롱 익절선 위 없음
     df = _df(closes)
     entry_pos = 20
@@ -575,9 +579,6 @@ def test_no_planned_exit_falls_through_to_end_of_data() -> None:
     assert entry.confirmed is True
     assert entry.planned_exit is None
     assert result.exits == []
-
-    bt = run_backtest(df, result.order_block_signals)
-    assert bt.trades[0].exits[-1].reason is ExitReason.END_OF_DATA
 
 
 # --------------------------------------------------------------------------- WAN-8 연동 / 엣지
