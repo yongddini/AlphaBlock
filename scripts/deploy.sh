@@ -100,15 +100,23 @@ echo "  대상 서비스: ${SERVICES[*]}"
 [[ "$DRY_RUN" -eq 1 ]] && echo "  (미리보기 — 실제로 실행하지 않습니다)"
 
 # --- 0. working tree 정합성 -------------------------------------------------
-# 손으로 얹힌 변경이 있으면 fast-forward pull 이 깨지거나 조용히 덮인다. 멈추고 알린다.
-if [[ -n "$(git status --porcelain)" ]]; then
-    echo "⚠️  working tree 가 깨끗하지 않습니다:" >&2
-    git status --short >&2
+# 추적 중인 파일에 손으로 얹힌 변경(수정·스테이지)이 있으면 fast-forward pull 이
+# 깨지거나 조용히 덮인다 → 멈추고 알린다. 반면 untracked 파일(백업 CSV 등)은
+# fast-forward 를 막지 않으므로 정보로만 알리고 계속 진행한다.
+tracked_changes="$(git status --porcelain --untracked-files=no)"
+if [[ -n "$tracked_changes" ]]; then
+    echo "⚠️  추적 중인 파일에 커밋 안 된 변경이 있습니다:" >&2
+    echo "$tracked_changes" >&2
     echo "    먼저 정리하세요: git stash  또는  git checkout -- <파일>" >&2
     if [[ "$DRY_RUN" -eq 0 ]]; then
         exit 1
     fi
     echo "    (--dry-run 이라 계속 진행합니다)" >&2
+fi
+untracked="$(git ls-files --others --exclude-standard)"
+if [[ -n "$untracked" ]]; then
+    echo "ℹ️  추적 안 되는 파일이 있습니다(진행에 지장 없음 — 정보용):"
+    echo "$untracked" | sed 's/^/     /'
 fi
 
 # --- 1. git 동기화 ----------------------------------------------------------
