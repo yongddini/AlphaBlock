@@ -79,6 +79,27 @@ cd ~/AlphaBlock
 systemd 시스템 서비스로 등록되어 **부팅 시 자동 시작 + 크래시 시 10초 후 자동 재시작**된다
 (launchd 판 WAN-31/48과 대칭). 로그는 `~/AlphaBlock/logs/{collector,live,dashboard}.log`.
 
+## 4a. 재배포 — 코드 갱신 시 (서버에서, WAN-185)
+
+설치 후 새 커밋을 서버에 반영할 때는 `deploy.sh` 한 줄로 한다. 서버가 main 을 깔끔히
+추적하지 못하거나 프로세스가 오래 떠 있으면 **디스크 소스는 새것인데 돌고 있는 프로세스나
+`__pycache__` 바이트코드가 옛 모듈을 붙들어** "코드는 고쳤는데 화면은 옛것"(ImportError·옛
+화면)이 재발한다(PM 운영 메모 2026-07-25, WAN-190 사건). 브라우저 새로고침으로는 안 고쳐진다.
+
+```bash
+cd ~/AlphaBlock
+./scripts/deploy.sh                 # git pull → __pycache__ 정리 → 셋 다 재시작 + 상태
+# 또는 개별: ./scripts/deploy.sh dashboard|collector|live
+# git 동기화 없이 캐시 정리 + 재시작만: ./scripts/deploy.sh --no-pull
+# 실행할 명령만 미리보기(리눅스 밖에서도): ./scripts/deploy.sh --dry-run
+```
+
+세 단계(fetch + fast-forward pull → `__pycache__`/`*.pyc` 정리 → `systemctl restart` + 상태)를
+항상 한 세트로 묶으므로 세 단계 중 하나를 빠뜨려 생기는 어긋남이 없다. working tree 가
+깨끗하지 않으면(손으로 얹힌 변경) 덮어쓰기 전에 멈추고 알린다 — 먼저 `git stash` 또는
+`git checkout` 하라. `.env`·DB 는 건드리지 않으므로 `ALPHABLOCK_LIVE_TRADING`(기본 false)은
+이 스크립트로 바뀌지 않는다(페이퍼 전용).
+
 ## 5. 검증 — WAN-174 완료 기준
 
 1. **웹소켓 수신(핵심)**: 로컬에서 막히던 그 스트림이 서버에서 뚫리는지.
