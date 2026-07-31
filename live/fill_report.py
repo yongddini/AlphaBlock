@@ -32,7 +32,7 @@ import argparse
 
 from common.timefmt import KST_LABEL, format_kst
 from config.settings import get_settings
-from live.order_journal import MARGINAL_FILL_BPS, OrderJournal
+from live.order_journal import MARGINAL_FILL_BPS, OrderJournal, SeriesFillStats
 
 
 def _fmt_ms(ms: int) -> str:
@@ -42,6 +42,36 @@ def _fmt_ms(ms: int) -> str:
 
 def _fmt_rate(value: float | None) -> str:
     return "-" if value is None else f"{value * 100:.1f}%"
+
+
+def _render_skip_funnel(stats: list[SeriesFillStats]) -> list[str]:
+    """주문 걸기 전 미진입 사유(깔때기 상단) 섹션(WAN-217).
+
+    체결률 표(WAN-45/194)가 "주문이 걸린 뒤" 깔때기를 보여 준다면, 이 표는 그 **위** —
+    지정가가 확정되기 전 걸러진 셋업(존폭 필터·슬롯 점유·재탭)과, 걸렸으나 밴드가 한 번도
+    유리하지 않아 끝난 볼린저 규칙 3 기각(deviation)을 센다. 데이터가 하나도 없으면
+    섹션을 통째로 생략한다(요약 표를 잡음으로 채우지 않는다)."""
+    if not any(s.skipped or s.unfilled_no_band for s in stats):
+        return []
+    lines = ["", "## 주문 걸기 전 미진입 사유 (WAN-217 — 깔때기 상단)", ""]
+    lines.append("| 심볼 | TF | 존폭기각 | 슬롯참 | 재탭 | 밴드기각(no_fill중) |")
+    lines.append("| -- | -- | --: | --: | --: | --: |")
+    for s in stats:
+        if not (s.skipped or s.unfilled_no_band):
+            continue
+        lines.append(
+            f"| {s.symbol} | {s.timeframe} | {s.skipped_zone_width} | {s.skipped_cell_busy} |"
+            f" {s.skipped_retap} | {s.unfilled_no_band} |"
+        )
+    lines.append("")
+    lines.append(
+        "존폭기각·슬롯참·재탭은 주문이 걸리기 **전** 걸러져 체결률 분모 밖이다(주문 생애를"
+        " 시작조차 안 했다). **밴드기각**은 만료(no_fill) 중 밴드가 한 번도 유리하지 않아"
+        " 주문판에 실린 적 없는 셋업 수다(볼린저 규칙 3 기각) — 걸렸다 안 닿은 순수 미체결과"
+        " 구분한다. 존폭기각이 많으면 존폭 필터(WAN-159)가 그만큼 셋업을 쳐내고 있다는"
+        " 실측이다."
+    )
+    return lines
 
 
 def render_report(journal: OrderJournal) -> str:
@@ -83,6 +113,8 @@ def render_report(journal: OrderJournal) -> str:
             " 포지션이 열리지 않는다. 백테스트도 같은 가드로 후보를 버리므로 파리티가 깨진"
             " 것은 아니다."
         )
+
+    lines.extend(_render_skip_funnel(stats))
 
     lines.append("")
     lines.append("## 처분 미기록 체결 (WAN-194 — 유실 후보)")

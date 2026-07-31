@@ -312,3 +312,122 @@ def test_render_report_flags_orphan_fills(tmp_path: Path) -> None:
     clean = render_report(journal)
     assert "없음 — 모든 체결에 진입/거부 처분이 남아 있습니다." in clean
     journal.close()
+
+
+class _NeverRestsProvider:
+    """밴드가 한 번도 유리하지 않은 라이브 지정가 공급자(볼린저 규칙 3 계속 기각).
+
+    `limit_price`가 항상 None이라 주문판에 실린 적이 없어 `first_rested_ms`가 NULL로 남는다
+    — deviation(밴드 기각) 만료의 실측 모양이다(WAN-217)."""
+
+    def commit(self, closed_price: float) -> None:
+        pass
+
+    def limit_price(self, live_price: float) -> float | None:
+        return None
+
+    def resolve_exits(self, limit_price: float) -> tuple[float, float | None] | None:
+        return None
+
+
+def test_record_skipped_persists_reason_and_stays_out_of_denominator(tmp_path: Path) -> None:
+    """주문 걸기 전 걸러진 셋업이 `skip_reason` 행으로 남고, 체결률 분모 밖이다(WAN-217)."""
+    journal = OrderJournal(tmp_path / "j.db")
+    session = journal.start_session(now_ms=0)
+
+    def skip(reason: str) -> int:
+        return journal.record_skipped(
+            session_id=session,
+            symbol="BTC/USDT:USDT",
+            timeframe="1h",
+            direction=OrderBlockDirection.BULLISH.value,
+            tap_index=0,
+            placed_ms=1_000,
+            reason=reason,
+            zone_start_time=0,
+            zone_confirmed_time=1,
+        )
+
+    skip("zone_width")
+    skip("zone_width")
+    skip("cell_busy")
+    skip("retap")
+    # 실제로 걸린 주문 하나와 섞여도 분리되는지 본다.
+    placed = journal.record_placed(
+        _order(), session_id=session, zone_start_time=0, zone_confirmed_time=1
+    )
+    journal.record_filled(placed, _fill())
+    journal.record_entry_result(placed, entered=True)
+
+    s = journal.fill_stats()[0]
+    assert (s.skipped_zone_width, s.skipped_cell_busy, s.skipped_retap) == (2, 1, 1)
+    assert s.skipped == 4
+    assert s.placed == 1  # 스킵 4건은 주문이 걸린 적 없어 placed에서 뺀다.
+    assert s.filled == 1
+    assert s.resolved == 1  # 스킵은 체결률 분모 밖(대기·폐기와 같은 부류가 아니라 더 위다).
+
+    rows = journal._conn.execute(  # noqa: SLF001 — 열이 실제로 찍혔는지 보는 회귀 테스트.
+        "SELECT status, skip_reason FROM live_limit_orders WHERE status = 'skipped' ORDER BY id"
+    ).fetchall()
+    assert rows == [
+        ("skipped", "zone_width"),
+        ("skipped", "zone_width"),
+        ("skipped", "cell_busy"),
+        ("skipped", "retap"),
+    ]
+    journal.close()
+
+
+def test_unfilled_no_band_separates_deviation_from_pure_no_fill(tmp_path: Path) -> None:
+    """밴드가 한 번도 유리하지 않은 만료(deviation)와 걸렸다 안 닿은 만료(no_fill)를
+    `first_rested_ms`로 가른다(WAN-217)."""
+    journal = OrderJournal(tmp_path / "j.db")
+    session = journal.start_session(now_ms=0)
+
+    # live_limit이 규칙 3을 계속 기각 → first_rested_ms NULL인 채 만료(deviation).
+    band_rejected = PendingLimitOrder(
+        symbol="BTC/USDT:USDT",
+        timeframe="1h",
+        direction=OrderBlockDirection.BULLISH,
+        stop_price=90.0,
+        rsi_state=RealtimeRsi(length=3),
+        live_limit=_NeverRestsProvider(),
+        placed_ms=1_000,
+    )
+    row = journal.record_placed(
+        band_rejected, session_id=session, zone_start_time=0, zone_confirmed_time=1
+    )
+    journal.record_cancelled(row, LimitOrderStatus.CANCELLED_EXPIRED, now_ms=2)
+
+    # 정적 지정가는 예약 즉시 주문판에 걸린다(first_rested_ms=placed_ms) → 순수 no_fill.
+    other = journal.record_placed(
+        _order(), session_id=session, zone_start_time=0, zone_confirmed_time=1
+    )
+    journal.record_cancelled(other, LimitOrderStatus.CANCELLED_EXPIRED, now_ms=3)
+
+    s = journal.fill_stats()[0]
+    assert s.cancelled_expired == 2
+    assert s.unfilled_no_band == 1  # 밴드 규칙 3 기각(deviation).
+    assert s.no_fill == 1  # 걸렸다 안 닿은 순수 미체결.
+    journal.close()
+
+
+def test_render_report_shows_skip_funnel(tmp_path: Path) -> None:
+    """리포트가 주문 걸기 전 미진입 사유를 별도 섹션으로 드러낸다(WAN-217)."""
+    journal = OrderJournal(tmp_path / "j.db")
+    session = journal.start_session(now_ms=0)
+    journal.record_skipped(
+        session_id=session,
+        symbol="BTC/USDT:USDT",
+        timeframe="1h",
+        direction=OrderBlockDirection.BULLISH.value,
+        tap_index=0,
+        placed_ms=1_000,
+        reason="zone_width",
+        zone_start_time=0,
+        zone_confirmed_time=1,
+    )
+    text = render_report(journal)
+    assert "주문 걸기 전 미진입 사유" in text
+    assert "존폭기각" in text
+    journal.close()

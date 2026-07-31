@@ -21,7 +21,14 @@
   주문은 별도 상태로 남겨 체결률 통계를 오염시키지 않는다.
 * **체결의 하류 처분**(`entry_status`·`entry_reject_reason`, WAN-194): 체결이 실제로
   페이퍼 포지션으로 **열렸는지**(`entered`) 아니면 집행 계층이 **거부했는지**(`rejected`,
-  사유 포함). 아래 문단이 이 열이 왜 1급 기록인지 설명한다.
+  사유 포함 — `cell_busy`·`notional`·`sizing`). 아래 문단이 이 열이 왜 1급 기록인지 설명한다.
+* **주문 걸기 전 미진입 사유**(`skip_reason`, WAN-217): 지정가가 확정되기 **전** 윗단계에서
+  걸러진 셋업(`zone_width`·`cell_busy`·`retap`). WAN-194가 체결의 하류를 남겼다면 이건
+  깔때기의 **상단**을 남긴다 — 이게 없으면 존폭 필터·슬롯 점유로 사라진 셋업이 아무 데도
+  안 남아 "왜 안 들어갔나"를 셀 수 없다. `record_skipped`가 `status='skipped'` 행으로 남기고
+  체결률 분모(주문이 걸린 표본)에는 넣지 않는다. **볼린저 규칙 3 기각**(deviation)은 별도
+  행이 아니라 `first_rested_ms IS NULL`인 만료로 남는다(주문은 걸렸으나 밴드가 한 번도
+  유리하지 않아 주문판에 실린 적 없다) — `SeriesFillStats.unfilled_no_band`가 그걸 센다.
 
 ## 체결 ≠ 진입 (WAN-194 — 이 열이 없어서 생긴 사고)
 
@@ -69,7 +76,11 @@ __all__ = [
     "ENTRY_STATUS_ENTERED",
     "ENTRY_STATUS_REJECTED",
     "MARGINAL_FILL_BPS",
+    "SKIP_REASON_CELL_BUSY",
+    "SKIP_REASON_RETAP",
+    "SKIP_REASON_ZONE_WIDTH",
     "STATUS_DISCARDED_RESTART",
+    "STATUS_SKIPPED",
     "OrderJournal",
     "OrphanFill",
     "SeriesFillStats",
@@ -89,6 +100,25 @@ ENTRY_STATUS_ENTERED = "entered"
 
 #: 체결이 집행 계층에서 거부됐다 — 사유는 `entry_reject_reason`(WAN-194).
 ENTRY_STATUS_REJECTED = "rejected"
+
+#: 주문이 걸리기 **전** 진입 깔때기 윗단계에서 걸러진 셋업(WAN-217). 지정가가 확정되기
+#: 전에 탈락해 주문 생애(pending→…)를 시작하지 못하므로, `record_placed`가 아니라
+#: `record_skipped`로 이 상태 행을 남긴다. 사유는 `skip_reason`. ⚠️ 체결률 분모(주문이
+#: 걸린 표본)에는 넣지 않는다 — `discarded_restart`처럼 "결말이 나지 않은" 게 아니라
+#: "주문이 걸린 적조차 없는" 표본이라 분자·분모 어디에도 안 들어간다.
+STATUS_SKIPPED = "skipped"
+
+#: 미진입 사유 코드(`skip_reason`, WAN-217). 백테스트 레버리지 북의 `SkippedSetup.reason`
+#: (`backtest.leverage_book`)과 같은 라벨을 써서 두 경로의 깔때기를 나란히 읽는다.
+#: 존폭 필터(`max_zone_width_atr`, WAN-159)에 걸려 넓은 존이 기각됐다.
+SKIP_REASON_ZONE_WIDTH = "zone_width"
+#: 슬롯이 이미 차 있어(오픈 포지션 또는 대기 주문) 새 지정가를 걸지 못했다. 라이브
+#: 단일-대기-주문 규칙에서 칸 점유의 실질 발생 지점이다(체결 후 `cell_busy` 거부는
+#: 드물다 — 주문을 걸 때 이미 슬롯을 봤으므로). 백테스트 북의 `cell_busy`와 짝.
+SKIP_REASON_CELL_BUSY = "cell_busy"
+#: `retap_mode="once"`(옵트인)에서 이미 한 번 진입한 존의 재탭이라 걸렀다. 채택
+#: 기본값(`every_tap`)에서는 발생하지 않는다.
+SKIP_REASON_RETAP = "retap"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS live_limit_orders (
@@ -113,7 +143,8 @@ CREATE TABLE IF NOT EXISTS live_limit_orders (
     take_profit_price    REAL,
     wait_ms              INTEGER,
     entry_status         TEXT,
-    entry_reject_reason  TEXT
+    entry_reject_reason  TEXT,
+    skip_reason          TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_live_limit_orders_series
     ON live_limit_orders (symbol, timeframe);
@@ -149,6 +180,28 @@ class SeriesFillStats:
     """체결 중 집행 계층이 거부한 수(사이징 가드·리스크 한도 등, WAN-194)."""
     entry_unrecorded: int = 0
     """체결 중 처분이 안 남은 수 — 열 도입 전 기록이거나 쓰기 사이의 유실(WAN-194)."""
+    skipped_zone_width: int = 0
+    """존폭 필터에 걸려 주문을 걸지 않은 셋업 수(WAN-217/159). 주문 생애 밖이라 `placed`·
+    체결률에 넣지 않는다."""
+    skipped_cell_busy: int = 0
+    """슬롯이 차 있어(오픈 포지션/대기 주문) 새 주문을 걸지 못한 셋업 수(WAN-217)."""
+    skipped_retap: int = 0
+    """`retap_mode="once"`에서 재탭이라 걸른 셋업 수(WAN-217, 옵트인)."""
+    unfilled_no_band: int = 0
+    """만료(`cancelled_expired`) 중 밴드가 한 번도 유리하지 않아 주문판에 **걸린 적 없이**
+    끝난 수(`first_rested_ms IS NULL`) — 볼린저 규칙 3 기각(deviation)의 실측이다(WAN-217).
+    나머지 만료(`cancelled_expired - unfilled_no_band`)가 순수 `no_fill`(걸렸으나 안 닿음)."""
+
+    @property
+    def skipped(self) -> int:
+        """주문이 걸리기 전 걸러진 셋업 총수(WAN-217) — 체결률 분모 밖."""
+        return self.skipped_zone_width + self.skipped_cell_busy + self.skipped_retap
+
+    @property
+    def no_fill(self) -> int:
+        """걸렸으나 유효 기간 내 안 닿아 만료된 수(순수 미체결). 밴드 규칙 3 기각
+        (`unfilled_no_band`)은 뺀다 — 그건 주문이 걸린 적 없는 다른 사유다(WAN-217)."""
+        return self.cancelled_expired - self.unfilled_no_band
 
     @property
     def entry_rate(self) -> float | None:
@@ -221,7 +274,7 @@ class OrderJournal:
         existing = {
             str(row[1]) for row in self._conn.execute("PRAGMA table_info(live_limit_orders)")
         }
-        for column in ("entry_status", "entry_reject_reason"):
+        for column in ("entry_status", "entry_reject_reason", "skip_reason"):
             if column not in existing:
                 self._conn.execute(f"ALTER TABLE live_limit_orders ADD COLUMN {column} TEXT")
 
@@ -286,6 +339,53 @@ class OrderJournal:
                     LimitOrderStatus.PENDING.value,
                     order.first_rested_ms,
                     order.last_limit_price,
+                ),
+            )
+        row_id = cur.lastrowid
+        assert row_id is not None
+        return row_id
+
+    def record_skipped(
+        self,
+        *,
+        session_id: int,
+        symbol: str,
+        timeframe: str,
+        direction: str,
+        tap_index: int,
+        placed_ms: int,
+        reason: str,
+        zone_start_time: int | None,
+        zone_confirmed_time: int | None,
+    ) -> int:
+        """주문이 걸리기 **전** 걸러진 셋업을 미진입 사유와 함께 기록한다(WAN-217).
+
+        `record_placed`와 달리 대기 주문(`PendingLimitOrder`)이 없다 — `zone_width`·
+        `cell_busy`·`retap`은 지정가가 확정되기 전 윗단계에서 탈락해 주문 생애를 시작조차
+        못 한다. 그 셋업이 아무 데도 안 남으면 "왜 안 들어갔나"(체결률 실측 깔때기의 상단)를
+        사후에 셀 수 없으므로, 같은 `live_limit_orders` 테이블에 `status='skipped'` 행으로
+        얹는다(장부를 두 벌로 만들지 않는다 — WAN-45/100 「같은 함수 공유」 원칙). 체결률
+        분모에는 넣지 않는다(주문이 걸린 적 없다 — `fill_stats`가 `placed`에서 뺀다).
+
+        `placed_ms`에는 탭이 감지된 1분봉 시각을 넣는다(주문을 걸었다면 예약했을 시각) —
+        `record_placed`의 `placed_ms`와 같은 축이라 시간순으로 함께 읽을 수 있다.
+        """
+        with self._lock, self._conn:
+            cur = self._conn.execute(
+                "INSERT INTO live_limit_orders (session_id, symbol, timeframe, direction,"
+                " zone_start_time, zone_confirmed_time, tap_index, placed_ms, status, skip_reason)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    session_id,
+                    symbol,
+                    timeframe,
+                    direction,
+                    zone_start_time,
+                    zone_confirmed_time,
+                    tap_index,
+                    placed_ms,
+                    STATUS_SKIPPED,
+                    reason,
                 ),
             )
         row_id = cur.lastrowid
@@ -409,15 +509,16 @@ class OrderJournal:
     def fill_stats(self) -> list[SeriesFillStats]:
         """심볼·TF별 체결률 요약(백테스트 `baseline` 가정과 나란히 놓는 표의 원자료)."""
         rows = self._conn.execute(
-            "SELECT symbol, timeframe, status, wait_ms, fill_penetration_bps, entry_status"
-            " FROM live_limit_orders ORDER BY symbol, timeframe"
+            "SELECT symbol, timeframe, status, wait_ms, fill_penetration_bps, entry_status,"
+            " first_rested_ms, skip_reason FROM live_limit_orders ORDER BY symbol, timeframe"
         ).fetchall()
         by_series: dict[
-            tuple[str, str], list[tuple[str, int | None, float | None, str | None]]
+            tuple[str, str],
+            list[tuple[str, int | None, float | None, str | None, int | None, str | None]],
         ] = {}
-        for symbol, timeframe, status, wait_ms, penetration, entry_status in rows:
+        for symbol, timeframe, status, wait_ms, penetration, entry_status, rested, skip in rows:
             by_series.setdefault((str(symbol), str(timeframe)), []).append(
-                (str(status), wait_ms, penetration, entry_status)
+                (str(status), wait_ms, penetration, entry_status, rested, skip)
             )
 
         stats: list[SeriesFillStats] = []
@@ -426,9 +527,18 @@ class OrderJournal:
             waits: list[int] = []
             marginal = 0
             entered = rejected = unrecorded = 0
-            for status, wait_ms, penetration, entry_status in entries:
+            no_band = 0
+            skip_counts: dict[str, int] = {}
+            for status, wait_ms, penetration, entry_status, rested, skip in entries:
                 counts[status] = counts.get(status, 0) + 1
-                if status == LimitOrderStatus.FILLED.value:
+                if status == STATUS_SKIPPED:
+                    skip_counts[str(skip)] = skip_counts.get(str(skip), 0) + 1
+                elif status == LimitOrderStatus.CANCELLED_EXPIRED.value:
+                    # 밴드가 한 번도 유리하지 않아 주문판에 걸린 적조차 없는 만료 =
+                    # 볼린저 규칙 3 기각(deviation). 걸렸다 안 닿은 순수 no_fill과 구분한다.
+                    if rested is None:
+                        no_band += 1
+                elif status == LimitOrderStatus.FILLED.value:
                     if wait_ms is not None:
                         waits.append(int(wait_ms))
                     if penetration is not None and penetration < MARGINAL_FILL_BPS:
@@ -440,11 +550,12 @@ class OrderJournal:
                     else:
                         unrecorded += 1
             discarded = counts.get(STATUS_DISCARDED_RESTART, 0)
+            skipped = counts.get(STATUS_SKIPPED, 0)
             stats.append(
                 SeriesFillStats(
                     symbol=symbol,
                     timeframe=timeframe,
-                    placed=len(entries) - discarded,
+                    placed=len(entries) - discarded - skipped,
                     pending=counts.get(LimitOrderStatus.PENDING.value, 0),
                     filled=counts.get(LimitOrderStatus.FILLED.value, 0),
                     cancelled_expired=counts.get(LimitOrderStatus.CANCELLED_EXPIRED.value, 0),
@@ -460,6 +571,10 @@ class OrderJournal:
                     entered=entered,
                     entry_rejected=rejected,
                     entry_unrecorded=unrecorded,
+                    skipped_zone_width=skip_counts.get(SKIP_REASON_ZONE_WIDTH, 0),
+                    skipped_cell_busy=skip_counts.get(SKIP_REASON_CELL_BUSY, 0),
+                    skipped_retap=skip_counts.get(SKIP_REASON_RETAP, 0),
+                    unfilled_no_band=no_band,
                 )
             )
         return stats

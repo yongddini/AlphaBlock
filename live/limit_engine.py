@@ -45,7 +45,12 @@ import pandas as pd
 from backtest.sweep import timeframe_to_ms
 from backtest.zone_limit_backtest import IntrabarLiveLimit
 from live.limit_orders import LimitFill, LimitOrderBook, PendingLimitOrder
-from live.order_journal import OrderJournal
+from live.order_journal import (
+    SKIP_REASON_CELL_BUSY,
+    SKIP_REASON_RETAP,
+    SKIP_REASON_ZONE_WIDTH,
+    OrderJournal,
+)
 from strategy.confluence import fixed_r_take_profit_price
 from strategy.indicators import atr
 from strategy.models import (
@@ -115,6 +120,11 @@ class _ZoneWatch:
     (탐지기 `_invalidate`의 `_inside` 상태와 같은 규칙)."""
     armed_forming_bar: int | None = None
     """이번 형성 중 봉에서 이미 예약을 시도한 봉 시각(중복 예약 시도 방지)."""
+    skip_recorded_forming_bar: int | None = None
+    """이번 형성 중 봉에서 이미 미진입 사유를 장부에 남긴 봉 시각(WAN-217). `_maybe_arm`이
+    매 서브스텝 재평가하므로 같은 봉·같은 존의 사유가 여러 번 찍히지 않게 한다. `armed`와
+    분리한 이유: 슬롯 점유(cell_busy) 사유는 armed를 설정하면 안 된다(같은 봉 뒤에 슬롯이
+    비면 예약이 살아나야 파리티가 유지된다) — 그래서 중복 방지용 별도 표식이 필요하다."""
 
 
 @dataclass
@@ -410,17 +420,28 @@ class ZoneLimitLiveEngine:
     def _maybe_arm(
         self, state: _SeriesState, symbol: str, timeframe: str, time_ms: int
     ) -> list[EngineEvent]:
-        """활성 존의 탭(바깥→안 전이)을 감지해 대기 지정가 주문을 예약한다."""
+        """활성 존의 탭(바깥→안 전이)을 감지해 대기 지정가 주문을 예약한다.
+
+        예약에 실패한 셋업은 미진입 사유를 장부에 남긴다(WAN-217) — 슬롯 점유
+        (`cell_busy`) · 존폭 필터(`zone_width`) · 재탭(`retap`). 사유 기록은 순수한
+        **부수효과**이고 예약/이벤트 흐름은 옛 동작과 같다(`tests/test_limit_engine.py`가
+        파리티 고정). ⚠️ 볼린저 규칙 3 기각(deviation)은 여기서 남기지 않는다 — 채택
+        경로(`intrabar_live`)는 밴드가 봉 안에서 움직여 예약 시점에 규칙 3을 판정하지 않고,
+        주문이 걸린 뒤 밴드가 한 번도 유리하지 않은 채 만료되는 형태(`first_rested_ms
+        IS NULL`)로 나타난다(`SeriesFillStats.unfilled_no_band`가 실측)."""
         if not state.refreshed or state.forming_bar is None:
             return []
-        if self.book.pending(symbol, timeframe) is not None:
-            return []
-        if self._has_position(symbol, timeframe):
-            return []  # 단일 포지션 규칙: 슬롯이 차 있으면 새 주문을 걸지 않는다.
         low = state.forming_low
         high = state.forming_high
         if low is None or high is None:
             return []
+
+        # 슬롯이 차 있으면(오픈 포지션 또는 대기 주문) 새 주문을 걸 수 없다 — 옛 동작은
+        # 여기서 즉시 반환이었다. 이제는 이 봉에 새로 탭한 존을 `cell_busy`로 남기되
+        # armed는 설정하지 않아, 같은 봉 뒤에 슬롯이 비면 예약이 살아난다(파리티 보존).
+        slot_busy = self.book.pending(symbol, timeframe) is not None or self._has_position(
+            symbol, timeframe
+        )
 
         params = self._params
         for watch in state.zones.values():
@@ -432,12 +453,26 @@ class ZoneLimitLiveEngine:
             is_inside = low <= ob.top and high >= ob.bottom
             if not is_inside:
                 continue
-            watch.armed_forming_bar = state.forming_bar
-
+            # 이 봉에서 이 존으로 새 탭 전이가 확인됐다.
             tap_index = len(ob.tapped_times)
+
+            if slot_busy:
+                # armed를 설정하지 않는다 — 슬롯이 비면 이 봉 안에서 재시도할 수 있어야 한다.
+                self._record_skip(
+                    state, watch, symbol, timeframe, ob, tap_index, time_ms, SKIP_REASON_CELL_BUSY
+                )
+                continue
+
+            watch.armed_forming_bar = state.forming_bar
             if params.retap_mode == "once" and tap_index > 0:
+                self._record_skip(
+                    state, watch, symbol, timeframe, ob, tap_index, time_ms, SKIP_REASON_RETAP
+                )
                 continue
             if not params.zone_width_filter_passes(ob, state.last_closed_atr):
+                self._record_skip(
+                    state, watch, symbol, timeframe, ob, tap_index, time_ms, SKIP_REASON_ZONE_WIDTH
+                )
                 continue  # WAN-159: 넓은 존은 주문을 걸지 않는다(판정 불가도 기각).
 
             order = self._build_order(state, symbol, timeframe, ob, tap_index, time_ms)
@@ -462,6 +497,40 @@ class ZoneLimitLiveEngine:
                 )
             ]
         return []
+
+    def _record_skip(
+        self,
+        state: _SeriesState,
+        watch: _ZoneWatch,
+        symbol: str,
+        timeframe: str,
+        ob: OrderBlock,
+        tap_index: int,
+        time_ms: int,
+        reason: str,
+    ) -> None:
+        """윗단계에서 걸러진 셋업을 미진입 사유로 장부에 남긴다(WAN-217, 부수효과).
+
+        봉당 존 하나에 한 번만 남긴다 — `_maybe_arm`이 매 서브스텝 재평가하므로 그대로
+        두면 같은 사유가 봉 길이만큼 중복 적재된다. `armed`와 별도 표식을 쓰는 이유는
+        `cell_busy`가 armed를 설정하면 안 되기 때문이다(모듈·`_ZoneWatch` 문단). 첫 사유가
+        남고, 같은 봉에 슬롯이 비어 사유가 바뀌어도 다시 찍지 않는다(측정 이중 계수 방지)."""
+        if self._journal is None or self._session_id is None:
+            return
+        if watch.skip_recorded_forming_bar == state.forming_bar:
+            return
+        watch.skip_recorded_forming_bar = state.forming_bar
+        self._journal.record_skipped(
+            session_id=self._session_id,
+            symbol=symbol,
+            timeframe=timeframe,
+            direction=ob.direction.value,
+            tap_index=tap_index,
+            placed_ms=time_ms,
+            reason=reason,
+            zone_start_time=ob.start_time,
+            zone_confirmed_time=ob.confirmed_time,
+        )
 
     def _build_order(
         self,

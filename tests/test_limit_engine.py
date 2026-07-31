@@ -296,6 +296,51 @@ def test_zone_width_filter_blocks_wide_zone(monkeypatch: pytest.MonkeyPatch) -> 
     assert engine.book.pending(_SYMBOL, _TF) is None
 
 
+def test_zone_width_skip_is_journaled(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """존폭 필터에 걸린 셋업이 `skip_reason='zone_width'` 행으로 남는다(WAN-217).
+
+    옛 동작은 이 셋업을 조용히 버려 "왜 안 들어갔나"를 사후에 셀 수 없었다 — 이 이슈의
+    핵심 새 배선이다. 주문은 여전히 걸리지 않고(이벤트 불변) 사유만 장부에 남는다."""
+    journal = OrderJournal(tmp_path / "j.db")
+    session = journal.start_session(now_ms=0)
+    wide = _zone(top=95.0, bottom=90.0)  # 폭 5 vs ATR≈1 → 기각.
+    engine = _engine(
+        monkeypatch, [wide], params=ConfluenceParams(), journal=journal, session_id=session
+    )
+    events = engine.on_substep(_SYMBOL, _TF, time_ms=_FORMING, low=94.9, high=99.0, close=95.2)
+    assert events == []  # 이벤트 흐름은 옛 동작과 같다(부수효과만 추가).
+    assert engine.book.pending(_SYMBOL, _TF) is None
+
+    s = journal.fill_stats()[0]
+    assert s.skipped_zone_width == 1
+    assert s.placed == 0  # 주문이 걸린 적 없어 체결률 분모 밖.
+    assert s.resolved == 0
+    journal.close()
+
+
+def test_cell_busy_skip_is_journaled_once_per_bar(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """슬롯이 차 있으면(오픈 포지션) 새 탭이 `skip_reason='cell_busy'`로 남되, 같은 봉에서
+    매 서브스텝 재평가돼도 한 번만 찍힌다(WAN-217 · 중복 계수 방지)."""
+    journal = OrderJournal(tmp_path / "j.db")
+    session = journal.start_session(now_ms=0)
+    engine = _engine(
+        monkeypatch,
+        [_zone()],
+        journal=journal,
+        session_id=session,
+        has_position=lambda _s, _t: True,  # 슬롯 참.
+    )
+    engine.on_substep(_SYMBOL, _TF, time_ms=_FORMING, low=94.9, high=99.0, close=95.2)
+    engine.on_substep(_SYMBOL, _TF, time_ms=_FORMING + _M, low=94.8, high=99.0, close=95.1)
+
+    s = journal.fill_stats()[0]
+    assert s.skipped_cell_busy == 1  # 같은 봉 두 서브스텝이 한 행으로.
+    assert engine.book.pending(_SYMBOL, _TF) is None
+    journal.close()
+
+
 def test_fill_carries_zone_width_atr_when_filter_on(monkeypatch: pytest.MonkeyPatch) -> None:
     """필터가 켜져 있으면 체결이 통과한 존폭(÷ATR)을 실어 나른다(WAN-189 알림용).
 
