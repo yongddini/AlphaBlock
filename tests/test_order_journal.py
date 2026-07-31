@@ -8,9 +8,18 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from execution.engine import (
+    REJECT_CODE_CELL_BUSY,
+    REJECT_CODE_NOTIONAL,
+    REJECT_CODE_RISK,
+    REJECT_CODE_SIZING,
+)
 from live.fill_report import render_report
 from live.limit_orders import LimitFill, LimitOrderStatus, PendingLimitOrder
-from live.order_journal import OrderJournal
+from live.order_journal import (
+    SKIP_REASON_CELL_BUSY,
+    OrderJournal,
+)
 from strategy.models import OrderBlockDirection
 from strategy.realtime_rsi import RealtimeRsi
 
@@ -409,6 +418,156 @@ def test_unfilled_no_band_separates_deviation_from_pure_no_fill(tmp_path: Path) 
     assert s.cancelled_expired == 2
     assert s.unfilled_no_band == 1  # 밴드 규칙 3 기각(deviation).
     assert s.no_fill == 1  # 걸렸다 안 닿은 순수 미체결.
+    journal.close()
+
+
+def test_reject_code_shares_vocabulary_with_skip_reasons() -> None:
+    """체결 후 거부 코드(`REJECT_CODE_*`)가 깔때기 상단 스킵 어휘와 같은 라벨을 쓴다(WAN-221).
+
+    엔진(execution)과 장부(live)가 서로를 import하지 않으므로 두 상수가 우연히 어긋날 수
+    있다 — 이 테스트가 `cell_busy` 라벨의 일치를 동작으로 고정한다(funnel이 상단·하단
+    슬롯참을 합산하는 근거)."""
+    assert REJECT_CODE_CELL_BUSY == SKIP_REASON_CELL_BUSY == "cell_busy"
+
+
+def test_entry_reject_code_is_persisted(tmp_path: Path) -> None:
+    """거부 **코드**가 자유 텍스트와 별도 열에 남는다(WAN-221 — funnel이 파싱 없이 집계)."""
+    journal = OrderJournal(tmp_path / "j.db")
+    session = journal.start_session(now_ms=0)
+    row = journal.record_placed(
+        _order(), session_id=session, zone_start_time=0, zone_confirmed_time=1
+    )
+    journal.record_filled(row, _fill())
+    journal.record_entry_result(
+        row, entered=False, reason="사이징 수량 0 — 진입 스킵", reason_code=REJECT_CODE_SIZING
+    )
+    stored = journal._conn.execute(  # noqa: SLF001 — 열이 실제로 찍혔는지 보는 회귀 테스트.
+        "SELECT entry_reject_reason, entry_reject_code FROM live_limit_orders WHERE id = ?", (row,)
+    ).fetchone()
+    assert stored == ("사이징 수량 0 — 진입 스킵", "sizing")
+
+    # 진입 성공이면 코드도 비운다(거부 코드가 성공 행에 남지 않는다).
+    ok = journal.record_placed(
+        _order(), session_id=session, zone_start_time=0, zone_confirmed_time=1
+    )
+    journal.record_filled(ok, _fill())
+    journal.record_entry_result(ok, entered=True)
+    code = journal._conn.execute(  # noqa: SLF001
+        "SELECT entry_reject_code FROM live_limit_orders WHERE id = ?", (ok,)
+    ).fetchone()[0]
+    assert code is None
+    journal.close()
+
+
+def test_funnel_counts_windows_and_buckets_reasons(tmp_path: Path) -> None:
+    """일일 요약의 원자료: 사유마다 자기 시각으로 창에 넣고, 코드로 명목/사이징/슬롯참을
+    가른다(WAN-221). 체결률 = 체결 ÷ (체결 + no_fill)."""
+    journal = OrderJournal(tmp_path / "j.db")
+    session = journal.start_session(now_ms=0)
+
+    def place() -> int:
+        return journal.record_placed(
+            _order(), session_id=session, zone_start_time=0, zone_confirmed_time=1
+        )
+
+    def skip(reason: str, placed_ms: int) -> None:
+        journal.record_skipped(
+            session_id=session,
+            symbol="BTC/USDT:USDT",
+            timeframe="1h",
+            direction=OrderBlockDirection.BULLISH.value,
+            tap_index=0,
+            placed_ms=placed_ms,
+            reason=reason,
+            zone_start_time=0,
+            zone_confirmed_time=1,
+        )
+
+    # -- 창 [1000, 2000) 안 --
+    entered = place()  # 체결 + 진입 성공(체결률 분자).
+    journal.record_filled(entered, _fill_at(1400))
+    journal.record_entry_result(entered, entered=True)
+    for ts, code in (
+        (1500, REJECT_CODE_SIZING),
+        (1600, REJECT_CODE_NOTIONAL),
+        (1700, REJECT_CODE_CELL_BUSY),
+    ):
+        rej = place()  # 체결됐으나 집행 계층이 거부 — 체결로 세되 사유로도 센다.
+        journal.record_filled(rej, _fill_at(ts))
+        journal.record_entry_result(rej, entered=False, reason="거부", reason_code=code)
+    journal.record_cancelled(place(), LimitOrderStatus.CANCELLED_EXPIRED, now_ms=1800)  # no_fill
+    band = journal.record_placed(  # deviation(밴드 규칙 3): first_rested_ms NULL.
+        PendingLimitOrder(
+            symbol="BTC/USDT:USDT",
+            timeframe="1h",
+            direction=OrderBlockDirection.BULLISH,
+            stop_price=90.0,
+            rsi_state=RealtimeRsi(length=3),
+            live_limit=_NeverRestsProvider(),
+            placed_ms=1_000,
+        ),
+        session_id=session,
+        zone_start_time=0,
+        zone_confirmed_time=1,
+    )
+    journal.record_cancelled(band, LimitOrderStatus.CANCELLED_EXPIRED, now_ms=1850)
+    skip("zone_width", 1200)
+    skip("cell_busy", 1250)
+    skip("retap", 1300)
+
+    # -- 창 밖(제외돼야 한다) --
+    late = place()
+    journal.record_filled(late, _fill_at(5000))
+    journal.record_entry_result(late, entered=True)
+    skip("zone_width", 5000)
+    journal.record_cancelled(place(), LimitOrderStatus.CANCELLED_EXPIRED, now_ms=5000)  # no_fill 밖
+
+    f = journal.funnel_counts(start_ms=1000, end_ms=2000)
+    assert f.filled == 4  # 진입 성공 1 + 거부 3(모두 창 안). 창 밖 체결은 제외.
+    assert f.no_fill == 1
+    assert f.deviation == 1
+    assert f.zone_width == 1  # 창 밖 존폭 스킵 제외.
+    assert f.cell_busy == 2  # 상단 스킵 1 + 하단 거부 1.
+    assert f.retap == 1
+    assert f.notional == 1
+    assert f.sizing == 1
+    assert f.other == 0
+    assert f.fill_rate == 4 / 5  # 체결 4 / (체결 4 + no_fill 1).
+    journal.close()
+
+
+def test_funnel_counts_empty_ledger_is_safe(tmp_path: Path) -> None:
+    """빈 장부에서도 깨지지 않고 fill_rate는 None이다(WAN-221 완료 기준)."""
+    journal = OrderJournal(tmp_path / "j.db")
+    journal.start_session(now_ms=0)
+    f = journal.funnel_counts(start_ms=0, end_ms=1_000)
+    assert (f.filled, f.no_fill, f.zone_width, f.cell_busy, f.notional, f.sizing) == (
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+    )
+    assert f.fill_rate is None
+    journal.close()
+
+
+def test_funnel_counts_uncoded_rejection_falls_to_other(tmp_path: Path) -> None:
+    """코드가 없는 거부(리스크 한도·WAN-221 이전 행)는 `other`로 떨어진다."""
+    journal = OrderJournal(tmp_path / "j.db")
+    session = journal.start_session(now_ms=0)
+    row = journal.record_placed(
+        _order(), session_id=session, zone_start_time=0, zone_confirmed_time=1
+    )
+    journal.record_filled(row, _fill_at(1500))
+    journal.record_entry_result(
+        row, entered=False, reason="일일 손실 서킷브레이커", reason_code=REJECT_CODE_RISK
+    )
+    f = journal.funnel_counts(start_ms=1000, end_ms=2000)
+    assert f.filled == 1
+    assert (f.sizing, f.notional, f.cell_busy) == (0, 0, 0)
+    assert f.other == 1
     journal.close()
 
 

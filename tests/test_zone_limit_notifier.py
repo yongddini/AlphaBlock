@@ -17,10 +17,12 @@ from execution.models import Fill, Order, OrderSide, OrderStatus, OrderType, Pos
 from live import message_format, zone_limit_notifier
 from live.executor import TradeReport
 from live.limit_orders import LimitFill
+from live.order_journal import FunnelCounts
 from live.zone_limit_notifier import (
     ZoneLimitNotifier,
     format_daily_summary,
     format_fill_entry,
+    format_filter_skip,
     format_position_exit,
 )
 from strategy.models import OrderBlockDirection, SignalExitReason
@@ -173,6 +175,46 @@ def test_daily_summary_line() -> None:
 
     msg = format_daily_summary(date(2026, 7, 24), placed=40, filled=22, expired=18)
     assert "예약 40 · 체결 22 · 만료 18" in msg
+    # funnel 없이는 체결률·사유 줄이 붙지 않는다(재계산 금지 — 없으면 뺀다).
+    assert "체결률" not in msg
+
+
+def test_daily_summary_appends_fill_rate_and_reasons() -> None:
+    """funnel이 붙으면 체결률과 6개 사유가 **문장형 한 줄씩** 실린다(WAN-221 변경요청)."""
+    from datetime import date
+
+    funnel = FunnelCounts(
+        filled=22, no_fill=18, deviation=3, zone_width=5, cell_busy=2, notional=1, sizing=4
+    )
+    msg = format_daily_summary(date(2026, 7, 24), placed=40, filled=22, expired=21, funnel=funnel)
+    assert "예약 40 · 체결 22 · 만료 21" in msg
+    assert "체결률 55.0% (체결 22 / 미체결 18)" in msg  # 22 / (22+18).
+    assert "미진입 사유*" in msg  # 사유 블록 헤더.
+    # 압축어 대신 사람이 읽는 문장으로 사유마다 한 줄씩.
+    assert "· 지정가에 안 닿아 만료 …… 18" in msg
+    assert "· 존이 너무 넓어 제외 …… 5" in msg
+    assert "· 밴드가 불리해 제외 …… 3" in msg
+    assert "· 같은 종목·주기에 포지션 보유 중 …… 2" in msg
+    assert "· 명목 한도 초과 …… 1" in msg
+    assert "· 손절이 너무 짧아 제외 …… 4" in msg
+
+
+def test_daily_summary_fill_rate_none_when_no_resolved() -> None:
+    """체결·미체결이 모두 0이면 체결률은 '-'로 낸다(빈 장부에서도 안 깨진다, WAN-221)."""
+    from datetime import date
+
+    msg = format_daily_summary(
+        date(2026, 7, 24), placed=0, filled=0, expired=0, funnel=FunnelCounts()
+    )
+    assert "체결률 - (체결 0 / 미체결 0)" in msg
+    # 카운트 0인 사유도 그대로 노출한다(WAN-221 변경요청 — 현재 동작 유지).
+    assert "· 명목 한도 초과 …… 0" in msg
+
+
+def test_filter_skip_message_is_short() -> None:
+    """건별 필터 알림도 요약과 **같은 문구 출처**(`_REASON_PHRASES`)를 쓴다(WAN-221 변경요청)."""
+    msg = format_filter_skip("zone_width", symbol=_SYMBOL, timeframe=_TF, time_ms=14 * _H)
+    assert "필터 미진입" in msg and "존이 너무 넓어 제외" in msg
 
 
 # -- 전송·드라이런·토글 ------------------------------------------------------
@@ -273,6 +315,81 @@ def test_daily_summary_emitted_on_day_rollover() -> None:
     notif.tick(10_000.0, now_ms=day0 + 24 * _H + _H)  # 다음 날.
     assert len(rec.sent) == 1
     assert "예약 2 · 체결 0 · 만료 1" in rec.sent[0]
+
+
+class _FunnelProvider:
+    """창을 기록하고 고정 카운트를 돌려주는 가짜 공급자(WAN-221 일일 요약 배선 테스트용)."""
+
+    def __init__(self, counts: FunnelCounts) -> None:
+        self.counts = counts
+        self.window: tuple[int, int] | None = None
+
+    def __call__(self, start_ms: int, end_ms: int) -> FunnelCounts:
+        self.window = (start_ms, end_ms)
+        return self.counts
+
+
+def test_daily_summary_uses_funnel_provider_on_rollover() -> None:
+    """날짜 경계에서 DB 창 조회로 체결률·사유가 요약에 실린다(재계산 아님, WAN-221)."""
+    rec = _Recorder()
+    prov = _FunnelProvider(FunnelCounts(filled=3, no_fill=1, zone_width=2))
+    notif = ZoneLimitNotifier(_client(rec), funnel_provider=prov)
+    notif.tick(10_000.0, now_ms=0)
+    notif.note_placed()
+    notif.note_expired()
+    notif.tick(10_000.0, now_ms=24 * _H + _H)  # 다음 날.
+    assert len(rec.sent) == 1
+    assert "체결률 75.0% (체결 3 / 미체결 1)" in rec.sent[0]  # 3 / (3+1).
+    assert "· 존이 너무 넓어 제외 …… 2" in rec.sent[0]
+    # 조회 창은 정확히 KST 하루 span이다(서머타임 없음).
+    assert prov.window is not None and prov.window[1] - prov.window[0] == 24 * _H
+
+
+def test_daily_summary_survives_funnel_provider_error() -> None:
+    """장부 조회가 터져도 요약(예약/체결/만료)은 나간다(빈 장부 안전 · WAN-221)."""
+
+    def _boom(start_ms: int, end_ms: int) -> FunnelCounts:
+        raise RuntimeError("장부 조회 실패")
+
+    rec = _Recorder()
+    notif = ZoneLimitNotifier(_client(rec), funnel_provider=_boom)
+    notif.tick(10_000.0, now_ms=0)
+    notif.note_placed()
+    notif.tick(10_000.0, now_ms=24 * _H + _H)
+    assert len(rec.sent) == 1
+    assert "예약 1 · 체결 0 · 만료 0" in rec.sent[0]
+    assert "체결률" not in rec.sent[0]  # 조회 실패면 사유 줄은 뺀다(요약 자체는 보존).
+
+
+def test_no_fill_expiry_never_sends_per_event_even_with_filter_skip_on() -> None:
+    """`no_fill`(안 닿은 만료)은 filter_skip을 켜도 **건별로 안 나간다**(WAN-221 완료 기준).
+
+    만료는 `note_expired`로만 세고 어떤 전송 경로도 타지 않는다 — 러너도 no_fill을
+    `note_filter_skip`에 넘기지 않으므로, 두 계층에서 no_fill 건별 알림이 원천 차단된다."""
+    rec = _Recorder()
+    notif = ZoneLimitNotifier(
+        _client(rec), events=frozenset({"filter_skip"}), now_ms=lambda: 14 * _H
+    )
+    notif.note_expired()
+    notif.note_expired()
+    assert rec.sent == []
+
+
+def test_filter_skip_sends_only_when_opted_in() -> None:
+    """존폭·밴드기각 건별 알림은 `filter_skip` 옵트인일 때만 나간다(기본 꺼짐, WAN-221)."""
+    rec_off = _Recorder()
+    off = ZoneLimitNotifier(_client(rec_off), now_ms=lambda: 14 * _H)  # 기본 이벤트(옵트인 아님).
+    off.note_filter_skip("zone_width", symbol=_SYMBOL, timeframe=_TF, time_ms=14 * _H)
+    assert rec_off.sent == []
+
+    rec_on = _Recorder()
+    on = ZoneLimitNotifier(
+        _client(rec_on),
+        events=frozenset({"filled", "exit", "daily_summary", "filter_skip"}),
+        now_ms=lambda: 14 * _H,
+    )
+    on.note_filter_skip("deviation", symbol=_SYMBOL, timeframe=_TF, time_ms=14 * _H)
+    assert len(rec_on.sent) == 1 and "필터 미진입" in rec_on.sent[0]
 
 
 def test_no_daily_summary_when_no_events() -> None:

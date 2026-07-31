@@ -14,6 +14,10 @@ import pytest
 from config.settings import Settings
 from execution.broker import CcxtLiveBroker, PaperBroker, build_live_broker
 from execution.engine import (
+    REJECT_CODE_CELL_BUSY,
+    REJECT_CODE_NOTIONAL,
+    REJECT_CODE_RISK,
+    REJECT_CODE_SIZING,
     EntryIntent,
     ExecutionEngine,
     build_execution_engine,
@@ -168,6 +172,7 @@ def test_second_entry_same_series_blocked() -> None:
     blocked = engine.on_entry(_long_intent(), now_ms=_DAY0)
     assert not blocked.accepted
     assert "이미 오픈" in blocked.reason
+    assert blocked.reason_code == REJECT_CODE_CELL_BUSY  # WAN-221 집계용 안정 코드.
 
 
 def test_entry_without_stop_skipped() -> None:
@@ -183,6 +188,29 @@ def test_entry_without_stop_skipped() -> None:
     outcome = engine.on_entry(intent, now_ms=_DAY0)
     assert not outcome.accepted
     assert "손절" in outcome.reason
+    assert outcome.reason_code == REJECT_CODE_SIZING  # 손절 없음도 사이징 계열 거부.
+
+
+def test_rejection_reason_codes_cover_sizing_notional_risk() -> None:
+    """집계가 파싱 없이 사유를 세도록 거부마다 안정 코드가 실린다(WAN-221).
+
+    코드가 자유 텍스트와 어긋나지 않는지도 함께 본다 — funnel이 이 코드로 명목/사이징/
+    리스크를 가른다."""
+    # 사이징 수량 0: 손절이 진입가에 붙어(거리 0) 리스크 사이징이 0주를 낸다.
+    zero = _engine().on_entry(_long_intent(price=100.0, stop=100.0), now_ms=_DAY0)
+    assert not zero.accepted and zero.reason_code == REJECT_CODE_SIZING
+
+    # 명목가치 한도: 사이징이 상한을 넘는 수량을 내면 리스크 매니저가 막는다.
+    engine = _engine(risk=RiskParams(max_leverage=1.0), sizing=_sizing(leverage=2.0))
+    assert engine.on_entry(_long_intent(stop=99.0), now_ms=_DAY0).accepted
+    over = engine.on_entry(
+        _long_intent(price=100.0, stop=99.0).model_copy(update={"timeframe": "4h"}),
+        now_ms=_DAY0,
+    )
+    assert not over.accepted and over.reason_code == REJECT_CODE_RISK
+
+    # 북 명목 상한(cap-only) 코드는 상수로 존재한다(북 경로는 test_execution_book이 검증).
+    assert REJECT_CODE_NOTIONAL == "notional"
 
 
 def test_exit_without_position_rejected() -> None:

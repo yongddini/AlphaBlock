@@ -56,7 +56,7 @@ from data.storage import OhlcvStore
 from execution.engine import EntryIntent
 from live.executor import PaperExecutor
 from live.limit_engine import EngineEvent, ZoneLimitLiveEngine
-from live.order_journal import OrderJournal
+from live.order_journal import SKIP_REASON_ZONE_WIDTH, OrderJournal
 from live.paper import PaperPosition
 from live.runtime_state import PendingOrderSnapshot, RuntimeStateStore
 from live.zone_limit_notifier import ZoneLimitNotifier
@@ -223,6 +223,16 @@ class ZoneLimitPaperRunner:
             else:
                 if self._notifier is not None and event.kind == "cancelled_expired":
                     self._notifier.note_expired()  # 만료는 실시간 없음 — 일일 요약에만.
+                    # 밴드가 한 번도 유리하지 않아 주문판에 실린 적 없는 만료 = 볼린저 규칙 3
+                    # 기각(deviation). 옵트인 건별 알림에만 넘긴다(no_fill은 넘기지 않는다 —
+                    # WAN-221: 걸렸다 안 닿은 순수 미체결은 건별로 보내지 않는다).
+                    if event.order.first_rested_ms is None:
+                        self._notifier.note_filter_skip(
+                            "deviation",
+                            symbol=event.symbol,
+                            timeframe=event.timeframe,
+                            time_ms=event.time_ms,
+                        )
                 _logger.info(
                     "지정가 주문 종결: %s %s %s", event.symbol, event.timeframe, event.kind
                 )
@@ -267,7 +277,10 @@ class ZoneLimitPaperRunner:
             )
             if journal_id is not None:
                 self._journal.record_entry_result(
-                    journal_id, entered=report.accepted, reason=report.outcome.reason
+                    journal_id,
+                    entered=report.accepted,
+                    reason=report.outcome.reason,
+                    reason_code=report.outcome.reason_code,
                 )
             disposition_done = True
             # 거부는 WARNING이다 — 체결이 거래가 되지 않은 것이라 조용히 흘리면
@@ -303,8 +316,11 @@ class ZoneLimitPaperRunner:
                         else "진입 처리 중 예외(처분 유실 방지, WAN-207)"
                     )
                 )
+                reason_code = report.outcome.reason_code if report is not None else ""
                 try:
-                    self._journal.record_entry_result(journal_id, entered=entered, reason=reason)
+                    self._journal.record_entry_result(
+                        journal_id, entered=entered, reason=reason, reason_code=reason_code
+                    )
                 except Exception:  # noqa: BLE001 — 폴백 처분마저 실패하면 로그만 남긴다.
                     _logger.exception("처분 기록 폴백 실패: journal_id=%d", journal_id)
 
@@ -433,6 +449,33 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
             _logger.info("이전 세션 대기 주문 %d건 폐기(discarded_restart)", discarded)
         session_id = journal.start_session(now_ms=now)
 
+        series = build_series(settings)
+        # 매매 이벤트 알림(WAN-189, 페이퍼 한정). 텔레그램 미설정이면 build_telegram_client가
+        # None을 주고 알림기는 드라이런(로그만)으로 돈다 — `notifier`의 기존 관행 그대로다.
+        # 엔진보다 **먼저** 만든다 — 엔진의 스킵 훅이 알림기를 참조하기 때문이다(WAN-221).
+        notifier: ZoneLimitNotifier | None = None
+        if settings.paper_trade_notify_enabled:
+            notifier = ZoneLimitNotifier(
+                build_telegram_client(settings),
+                events=frozenset(settings.paper_trade_notify_events),
+                # 일일 요약의 체결률·사유 카운트는 DB 장부 창 조회로 낸다(재계산 아님, WAN-221).
+                funnel_provider=lambda s, e: journal.funnel_counts(start_ms=s, end_ms=e),
+            )
+
+        # 존폭 필터 기각의 건별 알림(옵트인, WAN-221). deviation은 만료 이벤트에서 따로 넘기고,
+        # cell_busy·retap은 no_fill처럼 시끄러워 넘기지 않는다(존폭만 전달).
+        skip_listener: Callable[[str, str, str, int], None] | None = None
+        if notifier is not None:
+
+            def _forward_skip(reason: str, symbol: str, timeframe: str, time_ms: int) -> None:
+                if reason == SKIP_REASON_ZONE_WIDTH:
+                    assert notifier is not None
+                    notifier.note_filter_skip(
+                        reason, symbol=symbol, timeframe=timeframe, time_ms=time_ms
+                    )
+
+            skip_listener = _forward_skip
+
         engine = ZoneLimitLiveEngine(
             params=settings.confluence,
             book=None,
@@ -441,16 +484,8 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
             has_position=lambda s, t: any(
                 p.symbol == s and p.timeframe == t for p in executor.open_positions
             ),
+            skip_listener=skip_listener,
         )
-        series = build_series(settings)
-        # 매매 이벤트 알림(WAN-189, 페이퍼 한정). 텔레그램 미설정이면 build_telegram_client가
-        # None을 주고 알림기는 드라이런(로그만)으로 돈다 — `notifier`의 기존 관행 그대로다.
-        notifier: ZoneLimitNotifier | None = None
-        if settings.paper_trade_notify_enabled:
-            notifier = ZoneLimitNotifier(
-                build_telegram_client(settings),
-                events=frozenset(settings.paper_trade_notify_events),
-            )
         runner = ZoneLimitPaperRunner(
             store=store,
             engine=engine,

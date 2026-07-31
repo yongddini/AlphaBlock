@@ -113,6 +113,7 @@ def _engine(
     session_id: int | None = None,
     has_position: object = None,
     closes: list[float] | None = None,
+    skip_listener: object = None,
 ) -> ZoneLimitLiveEngine:
     _install_stub_detector(monkeypatch, zones)
     engine = ZoneLimitLiveEngine(
@@ -120,6 +121,7 @@ def _engine(
         journal=journal,
         session_id=session_id,
         has_position=has_position,  # type: ignore[arg-type]
+        skip_listener=skip_listener,  # type: ignore[arg-type]
     )
     engine.on_htf_bars(_SYMBOL, _TF, _htf_df(closes=closes))
     return engine
@@ -315,6 +317,32 @@ def test_zone_width_skip_is_journaled(monkeypatch: pytest.MonkeyPatch, tmp_path:
     assert s.skipped_zone_width == 1
     assert s.placed == 0  # 주문이 걸린 적 없어 체결률 분모 밖.
     assert s.resolved == 0
+    journal.close()
+
+
+def test_skip_listener_fires_once_per_bar_without_emitting_events(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """스킵 리스너(옵트인 건별 알림용, WAN-221)는 장부에 사유가 남을 때 함께 불리되,
+    엔진 이벤트 스트림은 그대로 비어 있다(스킵 파리티 보존) · 봉당 1회만."""
+    journal = OrderJournal(tmp_path / "j.db")
+    session = journal.start_session(now_ms=0)
+    seen: list[tuple[str, str, str, int]] = []
+    wide = _zone(top=95.0, bottom=90.0)  # 폭 5 vs ATR≈1 → 존폭 기각.
+    engine = _engine(
+        monkeypatch,
+        [wide],
+        params=ConfluenceParams(),
+        journal=journal,
+        session_id=session,
+        skip_listener=lambda *a: seen.append(a),
+    )
+    e1 = engine.on_substep(_SYMBOL, _TF, time_ms=_FORMING, low=94.9, high=99.0, close=95.2)
+    e2 = engine.on_substep(_SYMBOL, _TF, time_ms=_FORMING + _M, low=94.8, high=99.0, close=95.1)
+    assert e1 == [] and e2 == []  # 이벤트 흐름 불변(스킵은 부수효과만).
+    assert len(seen) == 1  # 같은 봉 두 서브스텝이 한 번만(저널 기록과 같은 dedup).
+    reason, symbol, timeframe, _ = seen[0]
+    assert (reason, symbol, timeframe) == ("zone_width", _SYMBOL, _TF)
     journal.close()
 
 

@@ -169,6 +169,7 @@ class ZoneLimitLiveEngine:
         journal: OrderJournal | None = None,
         session_id: int | None = None,
         has_position: Callable[[str, str], bool] | None = None,
+        skip_listener: Callable[[str, str, str, int], None] | None = None,
     ) -> None:
         _validate_live_params(params)
         self._params = params
@@ -179,6 +180,11 @@ class ZoneLimitLiveEngine:
         self._has_position: Callable[[str, str], bool] = (
             has_position if has_position is not None else (lambda _s, _t: False)
         )
+        #: 미진입 사유 실시간 알림 훅(reason, symbol, timeframe, time_ms) — 옵트인 건별
+        #: 텔레그램용(WAN-221). None이면 부수효과 없음(이벤트 스트림·저널 기록 불변).
+        #: 장부에 사유가 실제로 남을 때만(봉당 1회) 호출돼 텔레그램 카운트와 저널이 어긋나지
+        #: 않는다. ⚠️ 이벤트를 추가로 내지 **않는다** — 스킵의 `events == []` 파리티 보존.
+        self._skip_listener = skip_listener
         self._series: dict[SeriesKey, _SeriesState] = {}
 
     # -- 상위TF 확정봉: 존 대장 갱신 -----------------------------------------
@@ -531,6 +537,9 @@ class ZoneLimitLiveEngine:
             zone_start_time=ob.start_time,
             zone_confirmed_time=ob.confirmed_time,
         )
+        # 저널에 실제로 남은 사유만(봉당 1회) 건별 알림 훅에 넘긴다(WAN-221 옵트인).
+        if self._skip_listener is not None:
+            self._skip_listener(reason, symbol, timeframe, time_ms)
 
     def _build_order(
         self,
