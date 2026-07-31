@@ -42,6 +42,15 @@ from dashboard.charts import (
     filter_zones,
 )
 from dashboard.data_access import list_series, load_ohlcv, series_bounds
+from dashboard.funnel_ledger import (
+    cell_options,
+    fill_rate_by_cell,
+    filter_entries,
+    ledger_frame,
+    reason_distribution,
+    reason_options,
+    to_funnel_counts,
+)
 from dashboard.health import (
     CollectorStatus,
     FundingFreshness,
@@ -66,6 +75,7 @@ from dashboard.trade_table import (
     selected_trade_window,
     style_trade_frame,
 )
+from live.order_journal import LedgerEntry, OrderJournal
 from live.runtime_state import EventRecord
 from paper.performance import build_performance
 from paper.report import (
@@ -1185,6 +1195,111 @@ def _render_paper(settings: Settings) -> None:
     )
 
 
+# --- 진입/미진입 사유 장부 탭 (WAN-219) --------------------------------------
+#
+# WAN-217이 페이퍼 러너의 진입 깔때기(체결/미체결/스킵/거부 사유)를 DB에 적재한다. 이 탭은
+# 그 장부를 **계산 없이 조회**해 체결률·미진입 사유 분포·진입/미진입 목록으로 보여 준다
+# (저장된 거래 탭과 같은 원칙 — 화면에서 재계산 금지). 무거운 부분(DB 조회)은 전체 창을
+# 한 번 캐시하고, 기간·칸·사유 필터는 캐시된 목록을 메모리에서 좁힌다(캐시 히트 즉시).
+
+#: 조회 창 상한 — 실제 사건 시각은 항상 이보다 작다. 창을 [0, 이 값)으로 고정해 캐시 키가
+#: `now`에 흔들리지 않게 하고(캐시 히트 즉시), 기간 필터는 메모리에서 자른다.
+_LEDGER_FAR_FUTURE_MS = 10_000_000_000_000  # ≈ 서기 2286년
+
+_LEDGER_PERIODS: dict[str, int | None] = {
+    "전체": None,
+    "최근 7일": 7 * 86_400_000,
+    "최근 30일": 30 * 86_400_000,
+}
+
+
+@st.cache_data(ttl=_SERIES_TTL_SECONDS, show_spinner=False)
+def _cached_ledger(db_path: str) -> list[LedgerEntry]:
+    """전체 창의 진입 깔때기 행을 한 번 조회해 캐시한다 — **조회일 뿐 재계산이 아니다**.
+
+    기간 필터가 `now`에 따라 창을 좁혀도 캐시 키는 `db_path` 하나라 즉시 히트한다(좁히기는
+    호출부가 메모리에서 한다). 빈 DB·미배포 장부여도 `OrderJournal`이 스키마를 만들어 빈
+    목록을 돌려주므로 화면이 깨지지 않는다.
+    """
+    journal = OrderJournal(db_path)
+    try:
+        return journal.ledger_entries(start_ms=0, end_ms=_LEDGER_FAR_FUTURE_MS)
+    finally:
+        journal.close()
+
+
+def _render_funnel_ledger(settings: Settings) -> None:
+    db_path = settings.db_path
+    st.header("진입/미진입 사유 장부")
+    st.caption(
+        "WAN-217이 적재한 페이퍼 러너의 **진입 깔때기**를 계산 없이 조회합니다 — 걸어놓은 "
+        "지정가 중 몇 %가 실제로 채워졌나(체결률)와 안 들어간 이유의 분포입니다. 시각은 "
+        "한국시간(KST)입니다."
+    )
+
+    entries = _cached_ledger(db_path)
+    if not entries:
+        st.info(
+            "기록된 진입/미진입 사유가 없습니다. 페이퍼 러너(`python -m live.runner`)가 돌면 "
+            "지정가 주문의 진입 깔때기(체결·미체결·스킵·거부)가 여기에 쌓입니다.\n\n"
+            f"조회 대상 DB: `{db_path}`"
+        )
+        return
+
+    period = st.radio("기간", list(_LEDGER_PERIODS), horizontal=True, key="ledger_period")
+    span_ms = _LEDGER_PERIODS[period]
+    if span_ms is None:
+        windowed = entries
+    else:
+        cutoff = int(time.time() * 1000) - span_ms
+        windowed = [e for e in entries if e.event_ms >= cutoff]
+    if not windowed:
+        st.info("이 기간에는 기록이 없습니다.")
+        return
+
+    funnel = to_funnel_counts(windowed)
+    entered = sum(1 for e in windowed if e.entered)
+    cols = st.columns(4)
+    cols[0].metric(
+        "체결률",
+        "—" if funnel.fill_rate is None else f"{funnel.fill_rate * 100:.1f}%",
+        help="체결 ÷ (체결 + 미체결). 스킵·거부는 분모에 넣지 않습니다(주문이 걸린 표본만).",
+    )
+    cols[1].metric("체결", str(funnel.filled))
+    cols[2].metric("미체결(안 닿음)", str(funnel.no_fill))
+    cols[3].metric(
+        "진입",
+        str(entered),
+        help=(
+            "체결이 페이퍼 포지션으로 실제 열린 수 — 체결됐어도 집행 가드가 거부하면 "
+            "진입이 아닙니다(WAN-194)."
+        ),
+    )
+
+    st.subheader("미진입 사유 분포")
+    dist = reason_distribution(windowed)
+    if int(dist["건수"].sum()) == 0:
+        st.caption("이 기간에는 미진입 사유가 없습니다(모두 진입/체결).")
+    else:
+        st.dataframe(dist, use_container_width=True, hide_index=True)
+
+    st.subheader("칸별 체결률")
+    st.dataframe(fill_rate_by_cell(windowed), use_container_width=True, hide_index=True)
+
+    st.subheader("진입 vs 미진입 목록")
+    filter_cols = st.columns(2)
+    with filter_cols[0]:
+        cell = st.selectbox("칸(심볼·TF)", cell_options(windowed), key="ledger_cell")
+    with filter_cols[1]:
+        reason = st.selectbox("사유", reason_options(windowed), key="ledger_reason")
+    listing = filter_entries(windowed, cell=cell, reason=reason)
+    st.caption(
+        "**체결**은 지정가에 닿았는지, **사유**는 그 결과입니다 — 닿았는데 거부(체결·미진입)와 "
+        "안 닿음(미체결)이 한 표에서 갈립니다."
+    )
+    st.dataframe(ledger_frame(listing), use_container_width=True, hide_index=True)
+
+
 def main() -> None:
     st.set_page_config(page_title="AlphaBlock Dashboard", layout="wide")
     st.title("AlphaBlock — 통합 트레이딩 대시보드")
@@ -1206,8 +1321,8 @@ def main() -> None:
         )
     run_every = refresh_seconds if (auto_refresh and refresh_seconds > 0) else None
 
-    analysis_tab, saved_tab, paper_tab, health_tab = st.tabs(
-        ["분석", "저장된 거래", "페이퍼 성과", "운영 상태(Health)"]
+    analysis_tab, saved_tab, paper_tab, ledger_tab, health_tab = st.tabs(
+        ["분석", "저장된 거래", "페이퍼 성과", "진입/미진입 장부", "운영 상태(Health)"]
     )
     with analysis_tab:
         _render_analysis(settings)
@@ -1215,6 +1330,8 @@ def main() -> None:
         _render_saved_trades(settings)
     with paper_tab:
         _render_paper(settings)
+    with ledger_tab:
+        _render_funnel_ledger(settings)
     with health_tab:
         _render_health(settings, run_every=run_every)
 

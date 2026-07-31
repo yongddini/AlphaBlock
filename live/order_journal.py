@@ -80,6 +80,11 @@ from live.limit_orders import LimitFill, LimitOrderStatus, PendingLimitOrder
 __all__ = [
     "ENTRY_STATUS_ENTERED",
     "ENTRY_STATUS_REJECTED",
+    "LEDGER_REASON_DEVIATION",
+    "LEDGER_REASON_ENTERED",
+    "LEDGER_REASON_NO_FILL",
+    "LEDGER_REASON_OTHER",
+    "LEDGER_REASON_UNRECORDED",
     "MARGINAL_FILL_BPS",
     "SKIP_REASON_CELL_BUSY",
     "SKIP_REASON_RETAP",
@@ -87,6 +92,7 @@ __all__ = [
     "STATUS_DISCARDED_RESTART",
     "STATUS_SKIPPED",
     "FunnelCounts",
+    "LedgerEntry",
     "OrderJournal",
     "OrphanFill",
     "SeriesFillStats",
@@ -125,6 +131,21 @@ SKIP_REASON_CELL_BUSY = "cell_busy"
 #: `retap_mode="once"`(옵트인)에서 이미 한 번 진입한 존의 재탭이라 걸렀다. 채택
 #: 기본값(`every_tap`)에서는 발생하지 않는다.
 SKIP_REASON_RETAP = "retap"
+
+#: 진입 깔때기 행 하나의 「결과 사유」 정규 코드(WAN-219 조회 화면). `funnel_counts`와 **같은
+#: 분류 규칙**을 써서, 이 코드로 나열한 목록을 집계하면 `funnel_counts`와 정확히 같은 수가
+#: 나온다(회귀 테스트가 고정). 존폭·슬롯참·재탭·명목·사이징은 `SKIP_REASON_*`·`REJECT_CODE_*`
+#: 문자열을 그대로 재사용하므로(백테스트 북·라이브 스킵과 같은 어휘) 아래는 나머지 코드만 정의한다.
+#: 체결 + 페이퍼 진입 성공.
+LEDGER_REASON_ENTERED = "entered"
+#: 체결됐으나 하류 처분이 안 남음(orphan, WAN-194) — 진입도 거부도 아니라 결과 미상.
+LEDGER_REASON_UNRECORDED = "unrecorded"
+#: 걸렸으나 유효기간 내 지정가에 안 닿아 만료(순수 미체결).
+LEDGER_REASON_NO_FILL = "no_fill"
+#: 걸렸으나 밴드가 한 번도 유리하지 않아 주문판에 실린 적 없이 만료(볼린저 규칙 3 기각).
+LEDGER_REASON_DEVIATION = "deviation"
+#: 그 밖의 체결 후 거부(리스크 한도 등) · 코드 미기록 거부(WAN-221 이전 행).
+LEDGER_REASON_OTHER = "other"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS live_limit_orders (
@@ -286,6 +307,34 @@ class FunnelCounts:
         """
         denom = self.filled + self.no_fill
         return self.filled / denom if denom else None
+
+
+@dataclass(frozen=True)
+class LedgerEntry:
+    """진입 깔때기 행 하나(WAN-219 조회 화면). `funnel_counts`와 같은 모집단·분류다.
+
+    `ledger_entries`가 창 안의 깔때기 행(체결·만료·주문 걸기 전 스킵)을 이 형태로 나열한다 —
+    화면은 이 목록을 라벨로만 바꿔 체결률·사유 분포·진입/미진입 목록을 그린다(재계산 없음).
+    무효화·조건취소·대기·재시작 폐기는 깔때기 밖이라 나열되지 않는다(funnel_counts와 같다).
+    """
+
+    symbol: str
+    timeframe: str
+    direction: str
+    event_ms: int
+    """창 귀속·표시에 쓰는 사건 시각 — 체결=fill_ms · 만료=terminal_ms · 스킵=placed_ms."""
+    filled: bool
+    """지정가가 닿았는가(체결). 체결률 분자에 드는 행이면 True."""
+    reason: str
+    """결과 사유 정규 코드(`LEDGER_REASON_*` · `SKIP_REASON_*` · `REJECT_CODE_*`)."""
+    fill_price: float | None
+    limit_price: float | None
+    penetration_bps: float | None
+
+    @property
+    def entered(self) -> bool:
+        """체결이 페이퍼 포지션으로 실제 열렸는가(진입 성공)."""
+        return self.reason == LEDGER_REASON_ENTERED
 
 
 @dataclass(frozen=True)
@@ -702,3 +751,76 @@ class OrderJournal:
             sizing=rej_sizing,
             other=rej_other,
         )
+
+    def ledger_entries(self, *, start_ms: int, end_ms: int) -> list[LedgerEntry]:
+        """`[start_ms, end_ms)` 창의 진입 깔때기 행을 결과 사유와 함께 시간순 나열한다(WAN-219).
+
+        `funnel_counts`와 **같은 모집단·같은 창 귀속·같은 분류 규칙**을 쓴다 — 체결은 `fill_ms`,
+        만료는 `terminal_ms`, 주문 걸기 전 스킵은 `placed_ms`로 창에 넣고, 그 밖 상태(무효화·조건
+        취소·대기·재시작 폐기)는 깔때기 밖이라 나열하지 않는다. 그래서 이 목록을 집계하면
+        `funnel_counts`와 정확히 같은 수가 나온다(회귀 테스트가 고정). 조회 전용이라 쓰지 않는다.
+        """
+        rows = self._conn.execute(
+            "SELECT symbol, timeframe, direction, status, first_rested_ms, entry_status,"
+            " entry_reject_code, skip_reason, fill_ms, terminal_ms, placed_ms, fill_price,"
+            " last_limit_price, fill_penetration_bps FROM live_limit_orders"
+        ).fetchall()
+
+        def _in_window(ts: int | None) -> bool:
+            return ts is not None and start_ms <= int(ts) < end_ms
+
+        entries: list[LedgerEntry] = []
+        for row in rows:
+            symbol, timeframe, direction = str(row[0]), str(row[1]), str(row[2])
+            status = str(row[3])
+            rested, entry_status, reject_code, skip = row[4], row[5], row[6], row[7]
+            fill_ms, terminal_ms, placed_ms = row[8], row[9], row[10]
+            fill_price, limit_price, penetration = row[11], row[12], row[13]
+
+            if status == LimitOrderStatus.FILLED.value:
+                if not _in_window(fill_ms):
+                    continue
+                event_ms = int(fill_ms)
+                filled = True
+                if entry_status == ENTRY_STATUS_ENTERED:
+                    reason = LEDGER_REASON_ENTERED
+                elif entry_status == ENTRY_STATUS_REJECTED:
+                    reason = (
+                        str(reject_code)
+                        if reject_code
+                        in (REJECT_CODE_CELL_BUSY, REJECT_CODE_NOTIONAL, REJECT_CODE_SIZING)
+                        else LEDGER_REASON_OTHER
+                    )
+                else:
+                    reason = LEDGER_REASON_UNRECORDED
+            elif status == LimitOrderStatus.CANCELLED_EXPIRED.value:
+                if not _in_window(terminal_ms):
+                    continue
+                event_ms = int(terminal_ms)
+                filled = False
+                # 밴드가 한 번도 유리하지 않아 주문판에 실린 적 없는 만료 = deviation(규칙 3).
+                reason = LEDGER_REASON_DEVIATION if rested is None else LEDGER_REASON_NO_FILL
+            elif status == STATUS_SKIPPED:
+                if not _in_window(placed_ms):
+                    continue
+                event_ms = int(placed_ms)
+                filled = False
+                reason = str(skip)
+            else:
+                continue  # 무효화·조건취소·대기·재시작 폐기는 깔때기 밖.
+
+            entries.append(
+                LedgerEntry(
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    direction=direction,
+                    event_ms=event_ms,
+                    filled=filled,
+                    reason=reason,
+                    fill_price=None if fill_price is None else float(fill_price),
+                    limit_price=None if limit_price is None else float(limit_price),
+                    penetration_bps=None if penetration is None else float(penetration),
+                )
+            )
+        entries.sort(key=lambda e: e.event_ms)
+        return entries

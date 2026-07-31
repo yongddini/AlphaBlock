@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from pathlib import Path
 
 from execution.engine import (
@@ -17,7 +18,13 @@ from execution.engine import (
 from live.fill_report import render_report
 from live.limit_orders import LimitFill, LimitOrderStatus, PendingLimitOrder
 from live.order_journal import (
+    LEDGER_REASON_DEVIATION,
+    LEDGER_REASON_ENTERED,
+    LEDGER_REASON_NO_FILL,
+    LEDGER_REASON_UNRECORDED,
     SKIP_REASON_CELL_BUSY,
+    SKIP_REASON_RETAP,
+    SKIP_REASON_ZONE_WIDTH,
     OrderJournal,
 )
 from strategy.models import OrderBlockDirection
@@ -568,6 +575,123 @@ def test_funnel_counts_uncoded_rejection_falls_to_other(tmp_path: Path) -> None:
     assert f.filled == 1
     assert (f.sizing, f.notional, f.cell_busy) == (0, 0, 0)
     assert f.other == 1
+    journal.close()
+
+
+def _band_rejected_order() -> PendingLimitOrder:
+    """밴드가 한 번도 유리하지 않아 first_rested_ms NULL로 만료되는 주문(deviation)."""
+    return PendingLimitOrder(
+        symbol="BTC/USDT:USDT",
+        timeframe="1h",
+        direction=OrderBlockDirection.BULLISH,
+        stop_price=90.0,
+        rsi_state=RealtimeRsi(length=3),
+        live_limit=_NeverRestsProvider(),
+        placed_ms=1_000,
+    )
+
+
+def test_ledger_entries_windows_classifies_and_excludes_non_funnel(tmp_path: Path) -> None:
+    """진입 깔때기 행을 창·사유로 나열하되 깔때기 밖 상태는 뺀다(WAN-219).
+
+    `funnel_counts`와 같은 모집단·창 귀속·분류를 쓴다(집계 일치의 교차검산은 표시 계층
+    테스트가 맡는다). 여기서는 사유 분류·창 자르기·깔때기 밖 제외·정렬을 직접 고정한다.
+    """
+    journal = OrderJournal(tmp_path / "j.db")
+    session = journal.start_session(now_ms=0)
+
+    def place() -> int:
+        return journal.record_placed(
+            _order(), session_id=session, zone_start_time=0, zone_confirmed_time=1
+        )
+
+    def skip(reason: str, placed_ms: int) -> None:
+        journal.record_skipped(
+            session_id=session,
+            symbol="BTC/USDT:USDT",
+            timeframe="1h",
+            direction=OrderBlockDirection.BULLISH.value,
+            tap_index=0,
+            placed_ms=placed_ms,
+            reason=reason,
+            zone_start_time=0,
+            zone_confirmed_time=1,
+        )
+
+    # -- 창 [1000, 2000) 안: 깔때기 행 8개 --
+    entered = place()
+    journal.record_filled(entered, _fill_at(1400))
+    journal.record_entry_result(entered, entered=True)
+    rej = place()
+    journal.record_filled(rej, _fill_at(1500))
+    journal.record_entry_result(rej, entered=False, reason="사이징", reason_code=REJECT_CODE_SIZING)
+    orphan = place()  # 체결만 남고 처분 미기록.
+    journal.record_filled(orphan, _fill_at(1550))
+    journal.record_cancelled(place(), LimitOrderStatus.CANCELLED_EXPIRED, now_ms=1600)  # no_fill
+    band = journal.record_placed(
+        _band_rejected_order(), session_id=session, zone_start_time=0, zone_confirmed_time=1
+    )
+    journal.record_cancelled(band, LimitOrderStatus.CANCELLED_EXPIRED, now_ms=1650)  # deviation
+    skip("zone_width", 1200)
+    skip("cell_busy", 1250)
+    skip("retap", 1300)
+
+    # -- 창 안이지만 깔때기 밖 상태: 나열되지 않아야 한다 --
+    journal.record_cancelled(place(), LimitOrderStatus.CANCELLED_INVALIDATED, now_ms=1700)
+    journal.record_cancelled(place(), LimitOrderStatus.CANCELLED_CONDITION_FAILED, now_ms=1750)
+    place()  # 대기 유지.
+    journal.record_discarded(place(), now_ms=1800)
+
+    # -- 창 밖 체결: 제외 --
+    late = place()
+    journal.record_filled(late, _fill_at(5000))
+    journal.record_entry_result(late, entered=True)
+
+    entries = journal.ledger_entries(start_ms=1000, end_ms=2000)
+
+    # 사건 시각순 정렬.
+    assert [e.event_ms for e in entries] == sorted(e.event_ms for e in entries)
+    # 사유 분류가 funnel_counts와 같은 어휘로 찍힌다.
+    assert Counter(e.reason for e in entries) == Counter(
+        {
+            LEDGER_REASON_ENTERED: 1,
+            REJECT_CODE_SIZING: 1,
+            LEDGER_REASON_UNRECORDED: 1,
+            LEDGER_REASON_NO_FILL: 1,
+            LEDGER_REASON_DEVIATION: 1,
+            SKIP_REASON_ZONE_WIDTH: 1,
+            SKIP_REASON_CELL_BUSY: 1,
+            SKIP_REASON_RETAP: 1,
+        }
+    )
+    # 무효화·조건취소·대기·재시작 폐기는 깔때기 밖이라 없다.
+    assert all(
+        e.reason
+        not in (
+            "cancelled_invalidated",
+            "cancelled_condition_failed",
+            "pending",
+            "discarded_restart",
+        )
+        for e in entries
+    )
+    # 체결 플래그는 지정가가 닿은 3건(진입·거부·미기록)만 True.
+    assert sum(1 for e in entries if e.filled) == 3
+    assert sum(1 for e in entries if e.entered) == 1  # entered 프로퍼티.
+    # 창 밖 체결(5000)은 나열되지 않는다.
+    assert all(e.event_ms < 2000 for e in entries)
+    # 체결 행은 체결가·관통을 싣고, 스킵 행은 안 싣는다.
+    entered_entry = next(e for e in entries if e.entered)
+    assert entered_entry.fill_price == 100.0
+    skip_entry = next(e for e in entries if e.reason == SKIP_REASON_ZONE_WIDTH)
+    assert skip_entry.fill_price is None and skip_entry.penetration_bps is None
+    journal.close()
+
+
+def test_ledger_entries_empty_ledger_is_safe(tmp_path: Path) -> None:
+    """빈 장부에서도 예외 없이 빈 목록을 돌려준다(WAN-219 빈 장부 렌더의 근거)."""
+    journal = OrderJournal(tmp_path / "j.db")
+    assert journal.ledger_entries(start_ms=0, end_ms=10_000) == []
     journal.close()
 
 
