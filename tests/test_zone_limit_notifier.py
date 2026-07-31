@@ -180,7 +180,7 @@ def test_daily_summary_line() -> None:
 
 
 def test_daily_summary_appends_fill_rate_and_reasons() -> None:
-    """funnel이 붙으면 체결률(체결/(체결+no_fill))과 6개 사유 카운트가 한눈에 실린다(WAN-221)."""
+    """funnel이 붙으면 체결률과 6개 사유가 **문장형 한 줄씩** 실린다(WAN-221 변경요청)."""
     from datetime import date
 
     funnel = FunnelCounts(
@@ -189,8 +189,14 @@ def test_daily_summary_appends_fill_rate_and_reasons() -> None:
     msg = format_daily_summary(date(2026, 7, 24), placed=40, filled=22, expired=21, funnel=funnel)
     assert "예약 40 · 체결 22 · 만료 21" in msg
     assert "체결률 55.0% (체결 22 / 미체결 18)" in msg  # 22 / (22+18).
-    assert "no_fill 18" in msg and "존폭 5" in msg and "밴드기각 3" in msg
-    assert "슬롯참 2" in msg and "명목 1" in msg and "사이징 4" in msg
+    assert "미진입 사유*" in msg  # 사유 블록 헤더.
+    # 압축어 대신 사람이 읽는 문장으로 사유마다 한 줄씩.
+    assert "· 지정가에 안 닿아 만료 …… 18" in msg
+    assert "· 존이 너무 넓어 제외 …… 5" in msg
+    assert "· 밴드가 불리해 제외 …… 3" in msg
+    assert "· 같은 종목·주기에 포지션 보유 중 …… 2" in msg
+    assert "· 명목 한도 초과 …… 1" in msg
+    assert "· 손절이 너무 짧아 제외 …… 4" in msg
 
 
 def test_daily_summary_fill_rate_none_when_no_resolved() -> None:
@@ -201,11 +207,14 @@ def test_daily_summary_fill_rate_none_when_no_resolved() -> None:
         date(2026, 7, 24), placed=0, filled=0, expired=0, funnel=FunnelCounts()
     )
     assert "체결률 - (체결 0 / 미체결 0)" in msg
+    # 카운트 0인 사유도 그대로 노출한다(WAN-221 변경요청 — 현재 동작 유지).
+    assert "· 명목 한도 초과 …… 0" in msg
 
 
 def test_filter_skip_message_is_short() -> None:
+    """건별 필터 알림도 요약과 **같은 문구 출처**(`_REASON_PHRASES`)를 쓴다(WAN-221 변경요청)."""
     msg = format_filter_skip("zone_width", symbol=_SYMBOL, timeframe=_TF, time_ms=14 * _H)
-    assert "필터 미진입" in msg and "존폭 필터 기각" in msg
+    assert "필터 미진입" in msg and "존이 너무 넓어 제외" in msg
 
 
 # -- 전송·드라이런·토글 ------------------------------------------------------
@@ -331,7 +340,7 @@ def test_daily_summary_uses_funnel_provider_on_rollover() -> None:
     notif.tick(10_000.0, now_ms=24 * _H + _H)  # 다음 날.
     assert len(rec.sent) == 1
     assert "체결률 75.0% (체결 3 / 미체결 1)" in rec.sent[0]  # 3 / (3+1).
-    assert "존폭 2" in rec.sent[0]
+    assert "· 존이 너무 넓어 제외 …… 2" in rec.sent[0]
     # 조회 창은 정확히 KST 하루 span이다(서머타임 없음).
     assert prov.window is not None and prov.window[1] - prov.window[0] == 24 * _H
 

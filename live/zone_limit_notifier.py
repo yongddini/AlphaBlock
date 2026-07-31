@@ -17,8 +17,9 @@
   / 보유 시간 / 지갑 잔고·오늘 손익.
 * **만료·예약은 실시간으로 안 보낸다**(9종목 × 3TF면 하루 수십 건이라 시끄럽다). 대신
   하루 1회 **일일 요약**(`daily_summary`): `예약 40 · 체결 22 · 만료 18`에 더해
-  **체결률 + 미진입 사유 카운트**(WAN-221)를 얹는다 — `체결률 55.0% (체결 22 / 미체결 18)`
-  · `미진입 · no_fill 18 · 존폭 5 · 밴드기각 3 · 슬롯참 2 · 명목 0 · 사이징 1`. 사유 숫자는
+  **체결률 + 미진입 사유 카운트**(WAN-221)를 얹는다 — `체결률 55.0% (체결 22 / 미체결 18)`에
+  이어 사유마다 **사람이 읽는 문장 한 줄**(WAN-221 변경요청): `· 지정가에 안 닿아 만료 …… 18`,
+  `· 존이 너무 넓어 제외 …… 5` 등. 사유 숫자는
   러너가 넘긴 DB 장부 창 조회(`OrderJournal.funnel_counts`, WAN-217)에서 오며 여기서
   재계산하지 않는다. ⚠️ `no_fill`은 **건별로 보내지 않는다**(체결률 50~80%라 미체결이
   다수 케이스 → 건별이면 알림 피로). 요약에만 실린다.
@@ -187,6 +188,19 @@ def _fmt_rate(value: float | None) -> str:
     return "-" if value is None else f"{value * 100:.1f}%"
 
 
+#: 사유 코드 → 사람이 읽는 문구. 일일 요약과 건별 필터 알림이 **한 출처**를 공유해,
+#: 같은 사유가 두 곳에서 다르게 보이지 않게 한다(WAN-221 변경요청 2026-07-31).
+_REASON_PHRASES: dict[str, str] = {
+    "no_fill": "지정가에 안 닿아 만료",
+    "zone_width": "존이 너무 넓어 제외",
+    "deviation": "밴드가 불리해 제외",
+    "cell_busy": "같은 종목·주기에 포지션 보유 중",
+    "notional": "명목 한도 초과",
+    "sizing": "손절이 너무 짧아 제외",
+    "retap": "이미 진입한 존의 재탭이라 제외",
+}
+
+
 def format_daily_summary(
     day: date,
     *,
@@ -206,30 +220,31 @@ def format_daily_summary(
         lines.append(
             f"체결률 {_fmt_rate(funnel.fill_rate)} (체결 {funnel.filled} / 미체결 {funnel.no_fill})"
         )
-        # 미진입 사유 — 체결률의 분모(no_fill)와 깔때기의 다른 탈락 사유를 한 줄에.
-        reasons = (
-            f"미진입 · no_fill {funnel.no_fill} · 존폭 {funnel.zone_width}"
-            f" · 밴드기각 {funnel.deviation} · 슬롯참 {funnel.cell_busy}"
-            f" · 명목 {funnel.notional} · 사이징 {funnel.sizing}"
-        )
+        # 미진입 사유 — 체결률의 분모(no_fill)와 깔때기의 다른 탈락 사유를, 압축어 대신
+        # 사람이 읽는 문장으로 사유마다 한 줄씩(WAN-221 변경요청 2026-07-31).
+        lines.append("")
+        lines.append("*미진입 사유*")
+        for count, code in (
+            (funnel.no_fill, "no_fill"),
+            (funnel.zone_width, "zone_width"),
+            (funnel.deviation, "deviation"),
+            (funnel.cell_busy, "cell_busy"),
+            (funnel.notional, "notional"),
+            (funnel.sizing, "sizing"),
+        ):
+            # 카운트 0인 사유도 그대로 노출한다(예: `명목 한도 초과 …… 0`).
+            lines.append(f"· {_REASON_PHRASES[code]} …… {count}")
         # 채택 기본값에서 0인 사유(재탭·기타)는 나올 때만 덧붙여 요약을 어지럽히지 않는다.
         if funnel.retap:
-            reasons += f" · 재탭 {funnel.retap}"
+            lines.append(f"· {_REASON_PHRASES['retap']} …… {funnel.retap}")
         if funnel.other:
-            reasons += f" · 기타 {funnel.other}"
-        lines.append(reasons)
+            lines.append(f"· 기타 …… {funnel.other}")
     return "\n".join(lines)
-
-
-_SKIP_WORDS: dict[str, str] = {
-    "zone_width": "존폭 필터 기각",
-    "deviation": "밴드 규칙3 기각",
-}
 
 
 def format_filter_skip(reason: str, *, symbol: str, timeframe: str, time_ms: int) -> str:
     """존폭·밴드기각의 **건별** 알림(옵트인, WAN-221). 초반 필터 검증용이라 짧게 낸다."""
-    word = _SKIP_WORDS.get(reason, f"{reason} 기각")
+    word = _REASON_PHRASES.get(reason, f"{reason} 기각")
     return "\n".join(
         [
             f"🟡 *필터 미진입* · {short_symbol(symbol)} {timeframe} — {word}",
