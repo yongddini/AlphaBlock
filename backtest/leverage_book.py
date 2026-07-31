@@ -65,62 +65,49 @@ import logging
 from bisect import bisect_left
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Literal
-
-from pydantic import BaseModel, ConfigDict, Field
 
 from backtest.models import BacktestConfig, Trade
-from backtest.portfolio import DEFAULT_MAINTENANCE_MARGIN_RATE, LiquidationEvent
+from backtest.portfolio import LiquidationEvent
 from backtest.zone_limit_backtest import _Candidate, _to_trade
 from data.models import FundingRate
-from execution.sizing import PositionSizingParams
+
+# 사이징 회계(배수·상한·cap-only 합성)의 정본은 `execution.leverage`다 — 백테스트 배치와
+# 라이브 집행이 같은 함수를 공유하기 위함이다(WAN-171). 여기서는 하위 호환을 위해
+# 재수출한다(기존 `from backtest.leverage_book import LeverageBookParams …` import·CSV 재현
+# 불변). 배치 전용(`apply_book_leverage`·`run_leverage_book`)만 이 모듈에 남는다.
+from execution.leverage import (
+    LEGACY_BOOK_PARAMS,
+    BookSizing,
+    LeverageBookParams,
+    LeverageMode,
+    resolve_book_sizing,
+    scale_sizing_params,
+    sizing_notional_cap,
+)
 
 logger = logging.getLogger(__name__)
 
 #: 칸 식별자 = (종목, 타임프레임). 사용자 정의의 진입 단위다.
 CellKey = tuple[str, str]
 
-LeverageMode = Literal["combined", "cap_only"]
-"""배수 N을 어디에 싣는가 (WAN-180).
-
-* `combined` — **매 거래 사이징 N배**(리스크 1%→N% · 거래당 천장 N× · 북 상한 N×).
-  WAN-169 사용자 확정 방식이자 기본값.
-* `cap_only` — **북 명목 상한만 N배**. 거래당 리스크·거래당 천장은 1배 그대로다
-  (같은 크기 포지션을 더 많이 동시에 — 밀림을 줄이는 팔, WAN-180 팔 B).
-"""
-
-
-class LeverageBookParams(BaseModel):
-    """레버리지 북 회계 파라미터 (WAN-169).
-
-    이 객체를 만드는 곳에서만 북이 돈다 — 기본 경로는 이 모듈을 모른다(옵트인).
-    """
-
-    model_config = ConfigDict(frozen=True)
-
-    leverage_multiple: float = Field(default=5.0, gt=0)
-    """사이징 배수 N. **매 거래의 크기를 N배**로 키우고(리스크 1% → N%) 북 전체 명목
-    상한도 N배가 된다(모듈 독스트링). 1.0이면 채택 사이징 그대로에 자본 공유만 얹는다.
-
-    ⚠️ **기본값 5.0은 채택 값이다(WAN-213 재-베이스라인, 2026-07-30 사용자 결정 「전부 다」)** —
-    `ConfluenceParams()`가 채택 전략을 내듯 `LeverageBookParams()`가 채택 북을 낸다. WAN-169
-    시절의 중립 기준점(1.0 · combined)은 `LEGACY_BOOK_PARAMS`로 뺐다(비트 동일 검산·회귀
-    테스트가 그 상수를 쓴다). 근거는 WAN-180 실측: cap_only는 배수를 올려도 MDD가 거의 안
-    늘고(6년 2배 18.9% → 5배 19.6%) 5배가 같은 낙폭으로 복리를 가장 많이 받는 지점이다."""
-    leverage_mode: LeverageMode = "cap_only"
-    """배수 N을 싣는 자리(WAN-180). 기본 `"cap_only"`(WAN-213 채택) = 북 명목 상한만 N배로
-    키우고 거래당 크기·천장은 1배로 둔다(팔 B — 거래당 리스크를 1배로 묶어 낙폭이 배수를
-    안 따라간다). `"combined"`는 WAN-169 방식으로 매 거래를 N배 한다(리스크 1%→N%)."""
-    maintenance_margin_rate: float = Field(default=DEFAULT_MAINTENANCE_MARGIN_RATE, ge=0, lt=1)
-    """최악 가정 청산 검사에 쓰는 유지증거금률(명목 대비, WAN-103 결정 4 재사용)."""
-
-
-#: WAN-169 중립 기준점(배수 1.0 · combined) — 「채택 사이징 그대로에 자본 공유만 얹은」 북.
-#: 이 값에서 칸 하나짜리 북은 채택 단일 포지션 시퀀서와 **비트 단위로 같은 거래**를 낸다
-#: (`tests/test_leverage_book.py`가 고정). WAN-213이 클래스 기본값을 채택 북(cap_only 5배)으로
-#: 옮긴 뒤, 그 중립 항등을 검정하는 코드는 이 상수를 명시적으로 써야 한다(WAN-159의
-#: `LEGACY_MAX_ZONE_WIDTH_ATR`와 같은 「기본값 이동 + 명시 핀」 패턴).
-LEGACY_BOOK_PARAMS = LeverageBookParams(leverage_multiple=1.0, leverage_mode="combined")
+# 하위 호환 재수출을 명시(정적 분석이 「미사용 import」로 오해하지 않게).
+__all__ = [
+    "LEGACY_BOOK_PARAMS",
+    "BookCell",
+    "BookOutcome",
+    "BookSizing",
+    "BookStats",
+    "CellKey",
+    "LeverageBookParams",
+    "LeverageMode",
+    "PlacedSetup",
+    "SkippedSetup",
+    "apply_book_leverage",
+    "resolve_book_sizing",
+    "run_leverage_book",
+    "scale_sizing_params",
+    "sizing_notional_cap",
+]
 
 
 @dataclass(frozen=True)
@@ -229,33 +216,6 @@ class BookOutcome:
     effective_config: BacktestConfig
 
 
-def scale_sizing_params(
-    sizing: PositionSizingParams, multiple: float, *, mode: LeverageMode = "combined"
-) -> PositionSizingParams:
-    """사이징 파라미터에 배수 N을 싣는다.
-
-    `"combined"`(기본 = WAN-169) — 「매 거래 크기 N배」: `risk_pct` 모드는
-    `risk_per_trade`, `fixed_notional` 모드는 `notional_fraction`이 거래 크기를 정하므로
-    둘 다 N배 하고, 거래·북 공용 명목 천장(`leverage`)도 N배 한다. 상한만 키우고 크기를
-    안 키우면 그것이 WAN-169 당시 폐기된 cap-only 모델이다 — 세 필드를 한 곳에서 함께
-    키워 그 어긋남을 막는다.
-
-    `"cap_only"`(WAN-180 팔 B, 옵트인) — 그 폐기됐던 모델을 **명시적 축으로** 되살린 것:
-    `leverage`(북 상한)만 N배 하고 거래 크기 노브 둘은 손대지 않는다. ⚠️ 이 결과의
-    `leverage`는 북 상한 용도다 — 거래당 천장까지 함께 커지면 안 되므로,
-    `run_leverage_book`이 거래당 사이징에는 **원본(1배) 설정**을 쓴다.
-    """
-    if mode == "cap_only":
-        return sizing.model_copy(update={"leverage": sizing.leverage * multiple})
-    return sizing.model_copy(
-        update={
-            "risk_per_trade": sizing.risk_per_trade * multiple,
-            "notional_fraction": sizing.notional_fraction * multiple,
-            "leverage": sizing.leverage * multiple,
-        }
-    )
-
-
 def apply_book_leverage(cfg: BacktestConfig, book: LeverageBookParams) -> BacktestConfig:
     """`leverage_multiple`을 사이징에 실은 북 실행용 설정을 낸다.
 
@@ -300,19 +260,14 @@ def _validate_cells(cells: Sequence[BookCell]) -> None:
 
 
 def _notional_cap(cfg: BacktestConfig, equity: float) -> float:
-    """이 자본에서 허용되는 열린 명목 합의 상한.
+    """이 자본에서 허용되는 열린 명목 합의 상한 — `sizing_notional_cap`(공용)에 위임.
 
-    `position_size`의 clamp와 같은 식(`equity × leverage`, `max_notional_fraction`과 min)
-    이어야 한다 — 여기서 "여유 있음"이라 판정한 진입을 사이징이 0으로 거부하면 그 스킵이
-    사이징 거부로 잘못 분류된다(`backtest.portfolio._notional_cap`과 같은 계약). 배수는
-    이미 `apply_book_leverage`가 `risk_sizing.leverage`에 실었으므로 여기서 또 곱하지
-    않는다 — 두 곳이 각자 곱하면 상한이 N²배가 된다.
+    배수는 이미 `apply_book_leverage`가 `risk_sizing.leverage`에 실었으므로 여기서 또
+    곱하지 않는다(두 곳이 각자 곱하면 상한이 N²배). 라이브 집행과 같은 상한식을 쓰기
+    위해 `execution.leverage.sizing_notional_cap`을 공유한다(WAN-171).
     """
     assert cfg.risk_sizing is not None  # apply_book_leverage가 보장.
-    cap = equity * cfg.risk_sizing.leverage
-    if cfg.risk_sizing.max_notional_fraction is not None:
-        cap = min(cap, equity * cfg.risk_sizing.max_notional_fraction)
-    return cap
+    return sizing_notional_cap(cfg.risk_sizing, equity)
 
 
 def _unclamped_notional(cand: _Candidate, cfg: BacktestConfig, equity: float) -> float:
@@ -440,25 +395,20 @@ def run_leverage_book(
             stats.skip_records.append(SkippedSetup(cell.key, "cell_busy", cand, cash))
             continue
         open_notional = sum(p.notional for p in open_by_cell.values())
-        book_cap = _notional_cap(eff_cfg, cash)
-        if open_notional >= book_cap:
+        # 사이징 결정(배수·북 상한·cap-only 합성 여유)은 라이브 집행과 **공유하는**
+        # `resolve_book_sizing`이 낸다 — 두 경로가 상한식을 복제하면 갈라진다(WAN-171,
+        # WAN-95/112/123의 조용한 실패 방지). combined는 합성 여유 = 실제 open_notional이라
+        # 기존 CSV와 비트 일치하고, cap-only는 `min(거래당 천장, 북 여유)`를 합성한다.
+        assert cfg.risk_sizing is not None  # apply_book_leverage가 보장.
+        sizing = resolve_book_sizing(
+            cfg.risk_sizing, book, equity=cash, open_notional=open_notional
+        )
+        if sizing.cap_exhausted:
             stats.skipped_notional += 1
             stats.skip_records.append(SkippedSetup(cell.key, "notional", cand, cash))
             continue
-        # 거래당 천장은 `size_cfg`(cap-only면 1배), 북 여유는 `book_cap`(N배) — 둘 중 작은
-        # 쪽이 이 진입의 실제 허용 명목이다. `position_size`는 상한 하나(`size_cfg.leverage`)
-        # 에서 `open_notional`을 뺀 여유만 알므로, cap-only에서는 그 여유가 정확히
-        # `min(거래당 천장, 북 여유)`가 되도록 합성 `open_notional`을 만들어 넘긴다.
-        # combined는 두 설정이 같아 원값을 그대로 넘긴다 — 합성식을 공용하면 `cap−(cap−x)`
-        # 왕복이 부동소수 끝자리를 흔들어 기존 CSV 비트 재현이 깨질 수 있다.
-        if size_cfg is eff_cfg:
-            synthetic_open = open_notional
-        else:
-            per_trade_cap = _notional_cap(size_cfg, cash)
-            allowed = min(per_trade_cap, book_cap - open_notional)
-            synthetic_open = per_trade_cap - allowed
         rates = funding_index[cell.key].window(cand.entry_time, cand.exit_time)
-        trade = _to_trade(cand, cash, size_cfg, rates, synthetic_open)
+        trade = _to_trade(cand, cash, size_cfg, rates, sizing.synthetic_open)
         if trade is None:
             stats.skipped_sizing += 1
             stats.skip_records.append(SkippedSetup(cell.key, "sizing", cand, cash))

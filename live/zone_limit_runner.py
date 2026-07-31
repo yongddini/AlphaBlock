@@ -404,6 +404,7 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
     from common.telegram import build_telegram_client
     from data.funding import FundingRateStore
     from execution.engine import build_execution_engine
+    from execution.leverage import book_per_trade_sizing
     from paper.store import PaperTradeRecorder, PaperTradeStore
 
     store = OhlcvStore(settings.db_path)
@@ -413,11 +414,16 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
     recorder = PaperTradeRecorder(
         paper_store, cost_model=settings.costs, funding_store=funding_store
     )
+    # 레버리지 북(WAN-171 = WAN-45의 2단계): 칸=(종목,TF)마다 1포지션 · 여러 칸 동시 · 한
+    # 지갑(공유 자본) · 배수 N. 기본값 = 채택 북(cap_only 5배, WAN-213). 엔진이 백테스트와
+    # **같은** `resolve_book_sizing`으로 사이징하고, 거래당 리스크 금액(장부)은 북의 거래당
+    # 사이징(cap_only=1배·combined=N배)으로 재야 라벨과 실제가 어긋나지 않는다.
+    book = settings.live_leverage_book
     executor = PaperExecutor(
-        engine=build_execution_engine(settings),
+        engine=build_execution_engine(settings, leverage_book=book),
         store=paper_store,
         recorder=recorder,
-        sizing=settings.risk_sizing,
+        sizing=book_per_trade_sizing(settings.risk_sizing, book),
     )
     try:
         now = int(time.time() * 1000)
@@ -460,10 +466,13 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
         )
         _logger.info(
             "존-지정가 페이퍼 러너 시작(WAN-45): %d 시리즈, 폴링 %ds, 세션 #%d"
+            " · 레버리지 북 %s×%.4g (WAN-171, 공유 자본)"
             " (live_trading=%s — 페이퍼 한정, 체결률 실측이 목적)",
             len(series),
             settings.live_poll_interval_seconds,
             session_id,
+            book.leverage_mode,
+            book.leverage_multiple,
             settings.live_trading,
         )
         runner.run(max_polls=1 if once else None)

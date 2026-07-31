@@ -43,12 +43,13 @@ from pydantic import BaseModel, ConfigDict, Field
 from backtest.models import BacktestConfig, Trade
 from data.models import FundingRate
 
-logger = logging.getLogger(__name__)
+# 유지증거금률의 정본은 `execution.leverage`다(레버리지 북·라이브 집행이 공유) — 여기서
+# 재정의하면 두 곳이 드리프트하므로 재수출만 한다. 값의 의미(바이낸스 USDT-M 1티어의
+# 보수적 근사)는 그대로이고, 이 엔진의 청산 검사는 **최악 가정**이라 티어 정밀화가 결론을
+# 바꾸지 않는다(§4).
+from execution.leverage import DEFAULT_MAINTENANCE_MARGIN_RATE
 
-#: 바이낸스 USDT-M 무기한 1티어 유지증거금률의 보수적 근사(BTC/ETH는 0.4%, 알트는 더 높다).
-#: 정확한 티어 테이블은 명목 구간별로 달라지지만, 이 엔진의 청산 검사는 **최악 가정**이라
-#: 티어를 정밀화해도 결론이 바뀌지 않는다(§4 참고) — 그래서 상수 하나로 둔다.
-DEFAULT_MAINTENANCE_MARGIN_RATE = 0.005
+logger = logging.getLogger(__name__)
 
 
 class PortfolioParams(BaseModel):

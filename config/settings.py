@@ -13,6 +13,7 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from common.costs import CostModel
+from execution.leverage import LeverageBookParams
 from execution.risk import RiskParams
 from execution.sizing import PositionSizingParams
 from strategy.models import ConfluenceParams
@@ -242,6 +243,17 @@ class Settings(BaseSettings):
     # 예: ALPHABLOCK_RISK_SIZING__RISK_PER_TRADE=0.02
     risk_sizing_enabled: bool = Field(default=True)
     risk_sizing: PositionSizingParams = Field(default_factory=PositionSizingParams)
+
+    # 실시간 페이퍼 러너의 레버리지 북(WAN-171 = WAN-45의 2단계). 칸=(종목,TF)마다
+    # 1포지션 · 여러 칸 동시 · 한 지갑(공유 자본) · 배수 N. 기본값 = 채택 북(cap_only 5배,
+    # WAN-213 재-베이스라인). 러너가 이 설정을 백테스트와 **같은** `resolve_book_sizing`으로
+    # 집행에 배선한다(로직 이중화 금지). 개별 필드는 ALPHABLOCK_LIVE_LEVERAGE_BOOK__<필드명>로
+    # 덮어쓴다 — 예: WAN-45 단일 포지션 회귀는 ALPHABLOCK_LIVE_LEVERAGE_BOOK__LEVERAGE_MULTIPLE=1
+    # + ALPHABLOCK_LIVE_LEVERAGE_BOOK__LEVERAGE_MODE=combined(= LEGACY_BOOK_PARAMS).
+    # ⚠️ 페이퍼 한정 검증이다 — 배수를 올려도 실주문은 안 나가고(ALPHABLOCK_LIVE_TRADING=false
+    # 불변) 「엣지 없음」도 불변이다. 레버리지는 위험의 모양만 바꾼다(WAN-90/169 · "5배가
+    # 안전"으로 읽지 말 것).
+    live_leverage_book: LeverageBookParams = Field(default_factory=LeverageBookParams)
 
     # 실행 리스크 한도(WAN-9). 사이징(WAN-26)과 별개로 신규 진입을 차단하는 상한:
     # 최대 명목/레버리지, 동시 포지션 수, 일일 손실 서킷브레이커.
