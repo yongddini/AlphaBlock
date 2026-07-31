@@ -67,6 +67,11 @@ from pathlib import Path
 
 from data.integrity import OrphanFill
 from data.sqlite_util import configure_connection
+from execution.engine import (
+    REJECT_CODE_CELL_BUSY,
+    REJECT_CODE_NOTIONAL,
+    REJECT_CODE_SIZING,
+)
 from live.limit_orders import LimitFill, LimitOrderStatus, PendingLimitOrder
 
 #: 처분 미기록 체결의 행 모양은 `data.integrity`가 소유한다(레이어 규칙: `data`는 `live`를
@@ -81,6 +86,7 @@ __all__ = [
     "SKIP_REASON_ZONE_WIDTH",
     "STATUS_DISCARDED_RESTART",
     "STATUS_SKIPPED",
+    "FunnelCounts",
     "OrderJournal",
     "OrphanFill",
     "SeriesFillStats",
@@ -144,6 +150,7 @@ CREATE TABLE IF NOT EXISTS live_limit_orders (
     wait_ms              INTEGER,
     entry_status         TEXT,
     entry_reject_reason  TEXT,
+    entry_reject_code    TEXT,
     skip_reason          TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_live_limit_orders_series
@@ -241,6 +248,47 @@ class SeriesFillStats:
 
 
 @dataclass(frozen=True)
+class FunnelCounts:
+    """한 시간 창(예: KST 하루)의 진입 깔때기 사유 카운트 — 전 시리즈 합산(WAN-221).
+
+    일일 텔레그램 요약이 체결률과 미진입 사유를 **DB 조회로**(재계산 아님) 싣기 위한
+    원자료다. 사유 어휘는 백테스트 레버리지 북·라이브 스킵과 같다(`SKIP_REASON_*` ·
+    `execution.engine.REJECT_CODE_*`) — 두 경로의 깔때기를 나란히 읽기 위해서다.
+    """
+
+    filled: int = 0
+    """창 안에 체결된 지정가 주문 수(체결률 분자). 집행 계층의 하류 처분(진입/거부)과
+    무관하다 — '지정가에 닿았나'를 재는 값이라 거부돼도 체결로 센다(거부는 사유로 별도)."""
+    no_fill: int = 0
+    """걸렸으나 유효기간 내 안 닿아 만료된 수(체결률 분모의 나머지). 밴드 규칙 3 기각은 뺀다."""
+    deviation: int = 0
+    """걸렸으나 밴드가 한 번도 유리하지 않아 끝난 만료(볼린저 규칙 3 기각, `first_rested_ms
+    IS NULL`)."""
+    zone_width: int = 0
+    """존폭 필터에 걸려 주문을 걸지 않은 셋업 수(WAN-159 · 깔때기 상단)."""
+    cell_busy: int = 0
+    """슬롯 점유로 주문을 못 걸었거나(상단) 체결 후 이미 오픈이라 거부된 수(하단) 합산."""
+    retap: int = 0
+    """재탭이라 걸른 셋업 수(옵트인 `retap_mode="once"`에서만 — 채택 기본값은 0)."""
+    notional: int = 0
+    """체결됐으나 북 명목 상한 소진으로 거부된 수(WAN-171/213)."""
+    sizing: int = 0
+    """체결됐으나 사이징 수량 0으로 거부된 수(대부분 손절폭 가드 0.3%, WAN-79)."""
+    other: int = 0
+    """그 밖의 체결 후 거부(리스크 한도 등) · 코드 미기록 거부."""
+
+    @property
+    def fill_rate(self) -> float | None:
+        """체결률 = 체결 ÷ (체결 + no_fill). 결말 표본이 없으면 None(WAN-221 정의).
+
+        `SeriesFillStats.fill_rate`(체결/결말 — 무효화·조건취소 포함)와 분모가 다르다:
+        이 이슈가 폰 요약에 쓰기로 한 정의는 "닿았나 vs 안 닿았나"만 보는 filled/(filled+no_fill)다.
+        """
+        denom = self.filled + self.no_fill
+        return self.filled / denom if denom else None
+
+
+@dataclass(frozen=True)
 class SessionSpan:
     """러너 가동 구간 하나(시작 ~ 마지막 하트비트)."""
 
@@ -274,7 +322,12 @@ class OrderJournal:
         existing = {
             str(row[1]) for row in self._conn.execute("PRAGMA table_info(live_limit_orders)")
         }
-        for column in ("entry_status", "entry_reject_reason", "skip_reason"):
+        for column in (
+            "entry_status",
+            "entry_reject_reason",
+            "entry_reject_code",
+            "skip_reason",
+        ):
             if column not in existing:
                 self._conn.execute(f"ALTER TABLE live_limit_orders ADD COLUMN {column} TEXT")
 
@@ -423,21 +476,28 @@ class OrderJournal:
                 ),
             )
 
-    def record_entry_result(self, journal_id: int, *, entered: bool, reason: str = "") -> None:
+    def record_entry_result(
+        self, journal_id: int, *, entered: bool, reason: str = "", reason_code: str = ""
+    ) -> None:
         """체결의 **하류 처분**을 기록한다 — 포지션이 열렸는지, 거부면 사유(WAN-194).
 
         체결(`record_filled`) 직후에 부른다. 이 호출이 없으면 그 행은 `entry_status
         IS NULL`로 남아 `orphan_fills()`에 잡힌다 — 그게 "체결과 포지션 쓰기 사이에서
         죽었다"의 유일한 신호이므로, **거부일 때도 반드시 기록한다**(조용한 성공/실패
         구분 불가가 이 이슈의 사고 원인이었다).
+
+        `reason`은 사람용 자유 텍스트, `reason_code`(WAN-221 · `REJECT_CODE_*`)는 집계가
+        문자열을 파싱하지 않고 사유를 세도록 싣는 안정 코드다 — 일일 요약의 사유 카운트
+        (`funnel_counts`)가 이 코드로 명목/사이징/슬롯참을 가른다. 진입 성공이면 둘 다 비운다.
         """
         with self._lock, self._conn:
             self._conn.execute(
-                "UPDATE live_limit_orders SET entry_status = ?, entry_reject_reason = ?"
-                " WHERE id = ?",
+                "UPDATE live_limit_orders SET entry_status = ?, entry_reject_reason = ?,"
+                " entry_reject_code = ? WHERE id = ?",
                 (
                     ENTRY_STATUS_ENTERED if entered else ENTRY_STATUS_REJECTED,
                     None if entered else (reason or "사유 미기록"),
+                    None if entered else (reason_code or None),
                     journal_id,
                 ),
             )
@@ -578,3 +638,67 @@ class OrderJournal:
                 )
             )
         return stats
+
+    def funnel_counts(self, *, start_ms: int, end_ms: int) -> FunnelCounts:
+        """`[start_ms, end_ms)` 창의 진입 깔때기 사유를 전 시리즈 합산한다(WAN-221 일일 요약).
+
+        사건마다 창 귀속 시각이 다르다 — 체결은 `fill_ms`, 만료는 `terminal_ms`, 주문 걸기 전
+        스킵은 `placed_ms`(스킵 행은 종결 시각이 없다). 각 행을 자기 시각으로 창에 넣는다.
+        재시작 폐기(`discarded_restart`)·대기 중(`pending`)은 결말이 없어 어디에도 안 든다.
+        """
+        rows = self._conn.execute(
+            "SELECT status, first_rested_ms, entry_status, entry_reject_code, skip_reason,"
+            " fill_ms, terminal_ms, placed_ms FROM live_limit_orders"
+        ).fetchall()
+
+        def _in_window(ts: int | None) -> bool:
+            return ts is not None and start_ms <= int(ts) < end_ms
+
+        filled = no_fill = deviation = 0
+        skip_zone = skip_cell = skip_retap = 0
+        rej_cell = rej_notional = rej_sizing = rej_other = 0
+        for row in rows:
+            status = str(row[0])
+            rested, entry_status, reject_code, skip = row[1], row[2], row[3], row[4]
+            fill_ms, terminal_ms, placed_ms = row[5], row[6], row[7]
+            if status == LimitOrderStatus.FILLED.value:
+                if not _in_window(fill_ms):
+                    continue
+                filled += 1
+                if entry_status == ENTRY_STATUS_REJECTED:
+                    if reject_code == REJECT_CODE_CELL_BUSY:
+                        rej_cell += 1
+                    elif reject_code == REJECT_CODE_NOTIONAL:
+                        rej_notional += 1
+                    elif reject_code == REJECT_CODE_SIZING:
+                        rej_sizing += 1
+                    else:
+                        rej_other += 1  # 리스크 한도·코드 미기록(WAN-221 이전 행) 등.
+            elif status == LimitOrderStatus.CANCELLED_EXPIRED.value:
+                if not _in_window(terminal_ms):
+                    continue
+                # 밴드가 한 번도 유리하지 않아 주문판에 실린 적 없는 만료 = deviation(규칙 3).
+                if rested is None:
+                    deviation += 1
+                else:
+                    no_fill += 1
+            elif status == STATUS_SKIPPED:
+                if not _in_window(placed_ms):
+                    continue
+                if skip == SKIP_REASON_ZONE_WIDTH:
+                    skip_zone += 1
+                elif skip == SKIP_REASON_CELL_BUSY:
+                    skip_cell += 1
+                elif skip == SKIP_REASON_RETAP:
+                    skip_retap += 1
+        return FunnelCounts(
+            filled=filled,
+            no_fill=no_fill,
+            deviation=deviation,
+            zone_width=skip_zone,
+            cell_busy=skip_cell + rej_cell,
+            retap=skip_retap,
+            notional=rej_notional,
+            sizing=rej_sizing,
+            other=rej_other,
+        )

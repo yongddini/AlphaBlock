@@ -16,7 +16,14 @@
 * **청산**(`exit`): 사유(손절/익절) / 진입가→청산가 / 실현 손익 = R 배수 + 금액 + %
   / 보유 시간 / 지갑 잔고·오늘 손익.
 * **만료·예약은 실시간으로 안 보낸다**(9종목 × 3TF면 하루 수십 건이라 시끄럽다). 대신
-  하루 1회 **일일 요약**(`daily_summary`) 한 줄: `예약 40 · 체결 22 · 만료 18`.
+  하루 1회 **일일 요약**(`daily_summary`): `예약 40 · 체결 22 · 만료 18`에 더해
+  **체결률 + 미진입 사유 카운트**(WAN-221)를 얹는다 — `체결률 55.0% (체결 22 / 미체결 18)`
+  · `미진입 · no_fill 18 · 존폭 5 · 밴드기각 3 · 슬롯참 2 · 명목 0 · 사이징 1`. 사유 숫자는
+  러너가 넘긴 DB 장부 창 조회(`OrderJournal.funnel_counts`, WAN-217)에서 오며 여기서
+  재계산하지 않는다. ⚠️ `no_fill`은 **건별로 보내지 않는다**(체결률 50~80%라 미체결이
+  다수 케이스 → 건별이면 알림 피로). 요약에만 실린다.
+* **존폭·밴드기각 건별 알림**(`filter_skip`, WAN-221): 기본 꺼짐 옵트인. no_fill보다 드문
+  필터 거부를 초반 검증용으로 켤 때만 쓴다(`paper_trade_notify_events`에 `filter_skip` 추가).
 
 시각은 전부 KST(WAN-172), 저장·계산은 UTC epoch ms 그대로다. 텔레그램 미설정 시
 드라이런(로그만) — `notifier`의 기존 관행 그대로다. 페이퍼 한정: 실주문·자금 이동은
@@ -28,7 +35,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from common.telegram import TelegramClient
 from common.timefmt import KST
@@ -44,15 +51,24 @@ from live.message_format import (
     fmt_usd,
     short_symbol,
 )
+from live.order_journal import FunnelCounts
 from strategy.models import OrderBlockDirection, SignalExitReason
 
 _logger = logging.getLogger(__name__)
 
 #: 설정으로 켤 수 있는 이벤트 종류. 실시간은 체결·청산만, 만료는 일일 요약에만 실린다.
-VALID_EVENTS = frozenset({"filled", "exit", "daily_summary"})
+#: `filter_skip`(WAN-221)은 존폭·밴드기각의 **건별** 텔레그램이라 기본에서 빠져 있다
+#: (옵트인 — no_fill보다 드문 필터 거부를 초반 검증용으로 켤 때만 쓴다).
+VALID_EVENTS = frozenset({"filled", "exit", "daily_summary", "filter_skip"})
 
 #: 설정 미지정 시 켜는 기본 이벤트(스팸 방지: 실시간은 체결·청산, 만료는 일일 요약).
+#: `filter_skip`은 넣지 않는다 — 필터 거부 건별 알림은 명시적 옵트인이다(WAN-221).
 DEFAULT_EVENTS: tuple[str, ...] = ("filled", "exit", "daily_summary")
+
+#: `no_fill`은 이 값 집합 어디에도 없다 — 지정가에 안 닿은 만료는 **건별 텔레그램으로
+#: 보내지 않는다**(WAN-221 사용자 결정: 체결률 50~80%라 미체결이 다수라서 건별로 쏘면
+#: 알림 피로로 진입·거부 알림이 묻힌다). 요약에만 카운트로 실린다.
+FILTER_SKIP_EVENT = "filter_skip"
 
 _EXIT_WORDS: dict[SignalExitReason, str] = {
     SignalExitReason.TAKE_PROFIT: "익절 청산",
@@ -167,12 +183,57 @@ def format_entry_rejected(fill: LimitFill, *, reason: str) -> str:
     )
 
 
-def format_daily_summary(day: date, *, placed: int, filled: int, expired: int) -> str:
-    """일일 요약 한 줄(만료 포함) — 실시간으로 안 보내는 예약·만료를 여기서 합산해 본다."""
+def _fmt_rate(value: float | None) -> str:
+    return "-" if value is None else f"{value * 100:.1f}%"
+
+
+def format_daily_summary(
+    day: date,
+    *,
+    placed: int,
+    filled: int,
+    expired: int,
+    funnel: FunnelCounts | None = None,
+) -> str:
+    """일일 요약 — 실시간으로 안 보내는 예약·만료에 더해, **체결률 + 미진입 사유 카운트**를
+    한눈에 얹는다(WAN-221). 사유 숫자는 러너가 넘긴 `funnel`(DB 장부 조회 · WAN-217)에서
+    오며 여기서 **재계산하지 않는다**. `funnel`이 없으면 예약/체결/만료 한 줄만 낸다."""
+    lines = [
+        f"📊 *일일 요약* · {day.isoformat()} (KST)",
+        f"예약 {placed} · 체결 {filled} · 만료 {expired}",
+    ]
+    if funnel is not None:
+        lines.append(
+            f"체결률 {_fmt_rate(funnel.fill_rate)} (체결 {funnel.filled} / 미체결 {funnel.no_fill})"
+        )
+        # 미진입 사유 — 체결률의 분모(no_fill)와 깔때기의 다른 탈락 사유를 한 줄에.
+        reasons = (
+            f"미진입 · no_fill {funnel.no_fill} · 존폭 {funnel.zone_width}"
+            f" · 밴드기각 {funnel.deviation} · 슬롯참 {funnel.cell_busy}"
+            f" · 명목 {funnel.notional} · 사이징 {funnel.sizing}"
+        )
+        # 채택 기본값에서 0인 사유(재탭·기타)는 나올 때만 덧붙여 요약을 어지럽히지 않는다.
+        if funnel.retap:
+            reasons += f" · 재탭 {funnel.retap}"
+        if funnel.other:
+            reasons += f" · 기타 {funnel.other}"
+        lines.append(reasons)
+    return "\n".join(lines)
+
+
+_SKIP_WORDS: dict[str, str] = {
+    "zone_width": "존폭 필터 기각",
+    "deviation": "밴드 규칙3 기각",
+}
+
+
+def format_filter_skip(reason: str, *, symbol: str, timeframe: str, time_ms: int) -> str:
+    """존폭·밴드기각의 **건별** 알림(옵트인, WAN-221). 초반 필터 검증용이라 짧게 낸다."""
+    word = _SKIP_WORDS.get(reason, f"{reason} 기각")
     return "\n".join(
         [
-            f"📊 *일일 요약* · {day.isoformat()} (KST)",
-            f"예약 {placed} · 체결 {filled} · 만료 {expired}",
+            f"🟡 *필터 미진입* · {short_symbol(symbol)} {timeframe} — {word}",
+            fmt_time(time_ms),
         ]
     )
 
@@ -198,10 +259,14 @@ class ZoneLimitNotifier:
         telegram: TelegramClient | None,
         *,
         events: frozenset[str] | None = None,
+        funnel_provider: Callable[[int, int], FunnelCounts] | None = None,
         now_ms: Callable[[], int] = lambda: int(time.time() * 1000),
     ) -> None:
         self._telegram = telegram
         self._events = frozenset(events) if events is not None else frozenset(DEFAULT_EVENTS)
+        #: 일일 요약의 체결률·사유 카운트를 내는 창 조회(러너가 `OrderJournal.funnel_counts`로
+        #: 배선, WAN-221). None이면 요약은 예약/체결/만료 한 줄만 낸다(재계산 금지 — 없으면 뺀다).
+        self._funnel_provider = funnel_provider
         self._now_ms = now_ms
         #: 일일 요약 카운터(오늘 KST). tick()이 날짜 경계에서 비운다.
         self._placed = 0
@@ -238,8 +303,21 @@ class ZoneLimitNotifier:
         self._placed += 1
 
     def note_expired(self) -> None:
-        """미체결 만료를 일일 카운터에만 센다(실시간 전송 안 함)."""
+        """미체결 만료를 일일 카운터에만 센다(실시간 전송 안 함).
+
+        ⚠️ `no_fill`(지정가에 안 닿은 만료)은 여기서 **건별 전송하지 않는다**(WAN-221) —
+        만료는 실시간 사건이 아니라 유효기간 만료로만 확정되고, 다수 케이스라 건별로 쏘면
+        시끄럽다. 요약의 체결률 분모로만 실린다."""
         self._expired += 1
+
+    def note_filter_skip(self, reason: str, *, symbol: str, timeframe: str, time_ms: int) -> None:
+        """존폭·밴드기각의 **건별** 알림(옵트인 — `filter_skip` 이벤트가 켜졌을 때만, WAN-221).
+
+        기본값에서는 꺼져 있어(요약 집계만) 아무것도 보내지 않는다. `no_fill`은 이 경로로
+        **절대** 오지 않는다 — 러너가 no_fill을 이 훅에 넘기지 않는다(만료는 `note_expired`)."""
+        if FILTER_SKIP_EVENT not in self._events:
+            return
+        self._send(format_filter_skip(reason, symbol=symbol, timeframe=timeframe, time_ms=time_ms))
 
     def handle_fill(self, fill: LimitFill, report: TradeReport) -> None:
         """체결 → 진입 알림. 진입이 거부되면 **거부 알림**을 보낸다(WAN-194).
@@ -302,9 +380,30 @@ class ZoneLimitNotifier:
             return  # 아무 일도 없던 날은 보내지 않는다(스팸 방지).
         self._send(
             format_daily_summary(
-                day, placed=self._placed, filled=self._filled, expired=self._expired
+                day,
+                placed=self._placed,
+                filled=self._filled,
+                expired=self._expired,
+                funnel=self._day_funnel(day),
             )
         )
+
+    def _day_funnel(self, day: date) -> FunnelCounts | None:
+        """그 KST 하루 `[자정, 다음 자정)`의 깔때기 사유를 DB 장부에서 조회한다(WAN-221).
+
+        KST는 서머타임이 없어 하루가 정확히 24h지만, 경계는 `timedelta`로 잡아 상수(86_400_000)를
+        박지 않는다. 조회 실패는 요약 자체를 막지 않도록 삼키고 None을 준다(예약/체결/만료
+        한 줄은 계속 나간다)."""
+        if self._funnel_provider is None:
+            return None
+        start = datetime(day.year, day.month, day.day, tzinfo=KST)
+        start_ms = int(start.timestamp() * 1000)
+        end_ms = int((start + timedelta(days=1)).timestamp() * 1000)
+        try:
+            return self._funnel_provider(start_ms, end_ms)
+        except Exception:  # noqa: BLE001 — 장부 조회 실패가 일일 요약을 막지 않도록.
+            _logger.exception("일일 요약 깔때기 조회 실패: %s", day.isoformat())
+            return None
 
     def _send(self, message: str) -> bool:
         if self._telegram is None:

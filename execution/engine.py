@@ -40,6 +40,22 @@ _logger = logging.getLogger(__name__)
 #: (symbol, timeframe) 시리즈 키.
 SeriesKey = tuple[str, str]
 
+#: 진입 거부 **사유 코드**(WAN-221). `reason`(자유 텍스트, 사람용·WAN-194)와 별개로,
+#: 집계가 문자열을 파싱하지 않고 사유를 셀 수 있게 안정 코드를 함께 싣는다. 라이브 장부의
+#: `SKIP_REASON_*`(`live.order_journal`)와 같은 어휘를 쓴다 — 깔때기 상단(주문 걸기 전
+#: 스킵)과 하단(체결 후 거부)의 사유를 나란히 읽기 위해서다(테스트가 두 어휘의 일치를 고정).
+REJECT_CODE_CELL_BUSY = "cell_busy"
+#: 사이징이 수량 0을 냈다 — 대부분 손절폭 가드(0.3%, WAN-79)에 손절이 너무 가까운 경우다
+#: (WAN-194가 "대부분은 손절폭 가드"라 한 그 거부). 손절 참조가 자체가 없어 사이징 불가인
+#: 경우도 여기로 묶는다(둘 다 "사이징이 안 됐다").
+REJECT_CODE_SIZING = "sizing"
+#: 북 명목 상한(cap-only 레버리지)이 소진돼 새 명목을 실을 수 없다(WAN-171/213).
+REJECT_CODE_NOTIONAL = "notional"
+#: 리스크 한도 차단(자본 소진·일일 손실 서킷브레이커, WAN-38).
+REJECT_CODE_RISK = "risk"
+#: 브로커가 주문을 체결하지 않았다(페이퍼에서는 사실상 발생하지 않는다).
+REJECT_CODE_UNFILLED = "unfilled"
+
 
 class EntryIntent(BaseModel):
     """전략이 낸 진입 의도. 시그널(WAN-23)에서 실행 레이어로 넘어오는 입력."""
@@ -63,7 +79,10 @@ class ExecutionOutcome(BaseModel):
 
     accepted: bool
     reason: str = ""
-    """거부·스킵 사유. 성공이면 빈 문자열."""
+    """거부·스킵 사유(자유 텍스트, 사람용). 성공이면 빈 문자열."""
+    reason_code: str = ""
+    """거부 사유 **코드**(`REJECT_CODE_*`, WAN-221). 집계가 자유 텍스트를 파싱하지 않고
+    사유를 세도록 안정 코드를 함께 싣는다. 성공이면 빈 문자열."""
     position: Position | None = None
     """진입 성공 시 새로 연(또는 청산된) 포지션."""
     fill: Fill | None = None
@@ -71,8 +90,8 @@ class ExecutionOutcome(BaseModel):
     """청산 시 실현 손익(수수료 반영). 진입이면 None."""
 
     @classmethod
-    def rejected(cls, reason: str) -> ExecutionOutcome:
-        return cls(accepted=False, reason=reason)
+    def rejected(cls, reason: str, code: str = "") -> ExecutionOutcome:
+        return cls(accepted=False, reason=reason, reason_code=code)
 
 
 class ExecutionEngine:
@@ -158,9 +177,13 @@ class ExecutionEngine:
         """진입 의도를 사이징·리스크 검사 후 주문·포지션 오픈으로 처리한다."""
         key = (intent.symbol, intent.timeframe)
         if key in self._book:
-            return ExecutionOutcome.rejected("이미 오픈 포지션이 있어 진입 스킵")
+            return ExecutionOutcome.rejected(
+                "이미 오픈 포지션이 있어 진입 스킵", REJECT_CODE_CELL_BUSY
+            )
         if intent.stop_price is None:
-            return ExecutionOutcome.rejected("손절 참조가가 없어 사이징 불가 — 진입 스킵")
+            return ExecutionOutcome.rejected(
+                "손절 참조가가 없어 사이징 불가 — 진입 스킵", REJECT_CODE_SIZING
+            )
 
         if self._leverage_book is None:
             qty = position_size(
@@ -181,7 +204,9 @@ class ExecutionEngine:
                 open_notional=self.open_notional,
             )
             if book_sizing.cap_exhausted:
-                return ExecutionOutcome.rejected("북 명목 상한 소진 — 진입 스킵")
+                return ExecutionOutcome.rejected(
+                    "북 명목 상한 소진 — 진입 스킵", REJECT_CODE_NOTIONAL
+                )
             qty = position_size(
                 equity=self._equity,
                 entry_price=intent.entry_price,
@@ -190,7 +215,7 @@ class ExecutionEngine:
                 open_notional=book_sizing.synthetic_open,
             )
         if qty <= 0.0:
-            return ExecutionOutcome.rejected("사이징 수량 0 — 진입 스킵")
+            return ExecutionOutcome.rejected("사이징 수량 0 — 진입 스킵", REJECT_CODE_SIZING)
 
         new_notional = intent.entry_price * qty
         if self._leverage_book is None:
@@ -211,7 +236,7 @@ class ExecutionEngine:
             decision = self._book_risk_decision(now_ms)
         if not decision.allowed:
             _logger.info("진입 차단(%s %s): %s", intent.symbol, intent.timeframe, decision.reason)
-            return ExecutionOutcome.rejected(decision.reason)
+            return ExecutionOutcome.rejected(decision.reason, REJECT_CODE_RISK)
 
         order = Order(
             symbol=intent.symbol,
@@ -221,7 +246,7 @@ class ExecutionEngine:
         )
         fill = self._place_with_retry(order, mark_price=intent.entry_price)
         if not fill.is_filled:
-            return ExecutionOutcome.rejected("주문이 체결되지 않음(거부)")
+            return ExecutionOutcome.rejected("주문이 체결되지 않음(거부)", REJECT_CODE_UNFILLED)
         if fill.status is OrderStatus.PARTIALLY_FILLED:
             _logger.warning(
                 "부분체결로 진입(%s %s): 요청 %s, 체결 %s",

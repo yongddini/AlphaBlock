@@ -416,6 +416,130 @@ def test_rejected_entry_is_recorded_not_silent(
     assert reason and "사이징" in reason
 
 
+def test_rejected_entry_stores_reject_code(
+    rig: dict[str, object], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """거부의 **코드**(WAN-221)가 자유 텍스트와 함께 남는다 — 손절폭 가드(0.3%)는 `sizing`.
+
+    일일 요약의 사유 카운트가 이 코드로 명목/사이징/슬롯참을 가른다(자유 텍스트 파싱 금지)."""
+    store: OhlcvStore = rig["store"]  # type: ignore[assignment]
+    runner: ZoneLimitPaperRunner = rig["runner"]  # type: ignore[assignment]
+    journal: OrderJournal = rig["journal"]  # type: ignore[assignment]
+    _install_narrow_zone(monkeypatch)
+
+    store.upsert_candles([_m1(_FORMING + _M, 94.79, 99.0, 94.9)])
+    runner.poll_once()
+
+    code = journal._conn.execute(  # noqa: SLF001 — 코드가 실제로 찍혔는지 보는 회귀 테스트.
+        "SELECT entry_reject_code FROM live_limit_orders WHERE status = 'filled'"
+    ).fetchone()[0]
+    assert code == "sizing"
+
+    # 그 코드로 요약 깔때기가 사이징 거부를 센다(전 구간 창).
+    funnel = journal.funnel_counts(start_ms=0, end_ms=_FORMING + 10 * _M)
+    assert funnel.sizing == 1
+    assert funnel.filled == 1  # 체결 자체는 났다(거부는 하류 처분).
+
+
+def test_expiry_forwards_deviation_not_no_fill_to_filter_skip() -> None:
+    """만료 중 밴드기각(deviation)만 옵트인 건별 알림으로 넘긴다 — no_fill은 안 넘긴다(WAN-221).
+
+    `_handle_events`를 직접 태워 배선을 고정한다: 걸렸다 안 닿은 순수 만료(no_fill,
+    `first_rested_ms` 있음)는 `note_expired`만, 밴드가 한 번도 유리하지 않은 만료
+    (`first_rested_ms is None`)는 거기 더해 `note_filter_skip("deviation")`."""
+    from live.limit_engine import EngineEvent
+    from live.limit_orders import PendingLimitOrder
+    from strategy.realtime_rsi import RealtimeRsi
+
+    class _NeverRests:
+        """봉내 지정가가 한 번도 유리하지 않아 주문판에 실린 적 없는 공급자(deviation 모양)."""
+
+        def commit(self, closed_price: float) -> None: ...
+        def limit_price(self, live_price: float) -> float | None:
+            return None
+
+        def resolve_exits(self, limit_price: float) -> tuple[float, float | None] | None:
+            return None
+
+    def _no_fill_order() -> PendingLimitOrder:
+        # 정적 지정가는 예약 즉시 주문판에 걸린다(first_rested_ms=placed_ms) → 순수 no_fill.
+        return PendingLimitOrder(
+            symbol=_SYMBOL,
+            timeframe=_TF,
+            direction=OrderBlockDirection.BULLISH,
+            limit_price=100.0,
+            stop_price=90.0,
+            rsi_state=RealtimeRsi(length=3),
+            placed_ms=1_000,
+        )
+
+    def _deviation_order() -> PendingLimitOrder:
+        # 봉내 재산정이 계속 기각 → first_rested_ms NULL → 밴드 규칙 3 기각(deviation).
+        return PendingLimitOrder(
+            symbol=_SYMBOL,
+            timeframe=_TF,
+            direction=OrderBlockDirection.BULLISH,
+            live_limit=_NeverRests(),
+            stop_price=90.0,
+            rsi_state=RealtimeRsi(length=3),
+            placed_ms=1_000,
+        )
+
+    expired: list[str] = []
+    skips: list[str] = []
+
+    class _Spy:
+        def note_expired(self) -> None:
+            expired.append("x")
+
+        def note_filter_skip(
+            self, reason: str, *, symbol: str, timeframe: str, time_ms: int
+        ) -> None:
+            skips.append(reason)
+
+    runner: ZoneLimitPaperRunner = _make_runner_with_notifier(_Spy())
+    runner._handle_events(  # noqa: SLF001 — 배선을 동작으로 고정.
+        [
+            EngineEvent("cancelled_expired", _SYMBOL, _TF, 2_000, _no_fill_order()),
+            EngineEvent("cancelled_expired", _SYMBOL, _TF, 2_100, _deviation_order()),
+        ]
+    )
+    assert expired == ["x", "x"]  # 둘 다 만료 카운터엔 잡힌다.
+    assert skips == ["deviation"]  # deviation만 건별로 넘어간다(no_fill은 안 넘어간다).
+
+
+def _make_runner_with_notifier(notifier: object) -> ZoneLimitPaperRunner:
+    """알림기만 바꾼 최소 러너(이벤트 처리 배선 테스트용). 이 테스트는 `_handle_events`만
+    태우므로 폴링 데이터·시리즈는 필요 없다."""
+    import tempfile
+
+    db = Path(tempfile.mkdtemp()) / "ohlcv.db"
+    store = OhlcvStore(db)
+    journal = OrderJournal(db)
+    session = journal.start_session(now_ms=0)
+    settings = Settings(db_path=str(db))
+    paper_store = PaperTradeStore(db)
+    executor = PaperExecutor(
+        engine=build_execution_engine(settings),
+        store=paper_store,
+        recorder=PaperTradeRecorder(paper_store, cost_model=settings.costs, funding_store=None),
+        sizing=settings.risk_sizing,
+    )
+    engine = ZoneLimitLiveEngine(params=settings.confluence, journal=journal, session_id=session)
+    return ZoneLimitPaperRunner(
+        store=store,
+        engine=engine,
+        journal=journal,
+        session_id=session,
+        executor=executor,
+        params=settings.confluence,
+        series=[],
+        lookback_bars=settings.live_signal_lookback_bars,
+        poll_interval_seconds=settings.live_poll_interval_seconds,
+        notifier=notifier,  # type: ignore[arg-type]
+    )
+
+
 def test_accepted_entry_records_entered_disposition(rig: dict[str, object]) -> None:
     """정상 진입도 처분이 남는다 — 안 남기면 성공한 체결이 유실 후보로 잡힌다."""
     store: OhlcvStore = rig["store"]  # type: ignore[assignment]
