@@ -1810,6 +1810,7 @@ uv run python -m backtest.run --tf 15m,1h --positions single,3 --oos      # 단�
 uv run python -m backtest.run --tf 15m,1h --combine-obs true,false --oos  # 존 병합 전후(WAN-149)
 uv run python -m backtest.run --tf 1h --max-zone-width-atr none,1.28 --oos # 존폭 필터 off/on(WAN-159 기본 1.28)
 uv run python -m backtest.run --tf 1h --max-zone-width-atr none,1.28 --tp-r 1.0,1.5,2.0,3.0 --oos  # 문턱×배수(WAN-161)
+uv run python -m backtest.run --tf 1h --limit-valid-bars 6,12,24,48,none --oos-warm  # 지정가 유효기간 스윕(WAN-222)
 uv run python -m backtest.run --symbol BTCUSDT --tf 15m --trades t.csv --equity s.csv  # 거래별(WAN-106)
 uv run python -m backtest.run --symbol BTCUSDT --tf 15m --persist         # DB 적재 → 대시보드 조회(WAN-106)
 ```
@@ -1839,13 +1840,15 @@ uv run python -m backtest.run --symbol BTCUSDT --tf 15m --persist         # DB �
 `single` = per-cell 동시 1포지션 · 숫자 = per-cell 다중 포지션 명목 상한 배수)·**존 병합**
 (`--combine-obs`, WAN-149 — ⚠️ 이것만 **탐지** 파라미터라 값마다 오더블록을 다시 탐지한다)·
 **존폭 필터**(`--max-zone-width-atr`, WAN-159 — 채택 기본값 `1.28`, `none`은 **끄기**이고 인자
-미지정(1.28)과 다르다, 단위는 **ATR 배수**다)·체결 가정·시드이며, `--oos`/`--walkforward`가
+미지정(1.28)과 다르다, 단위는 **ATR 배수**다)·**지정가 유효기간**(`--limit-valid-bars`, WAN-222 —
+채택 기본값 `24`봉, `none`은 **무기한**이고 인자 미지정(24)과 다르다, 단위는 **봉 수**지 시간이
+아니다)·체결 가정·시드이며, `--oos`/`--walkforward`가
 IS/OOS 분할을 기본 제공한다. **정본 리포트의 OOS는 `--oos-warm`**(WAN-166: `oos_warm` 주 수치
 + `oos` 스트레스 병기)이다.
 📌 **포지션 기본값 = 채택 북(WAN-213)** — 인자 없는(또는 좌표만 준) 실행은 **레버리지 북**
 (cap_only 5배 · 칸=(종목,TF) 공유 자본)을 돌아 **구간당 집계 행**을 낸다(`backtest/book_cli.py`).
-⚠️ 전략·비용·거래별 축(`--tp-r`·`--fill`·`--combine-obs`·`--max-zone-width-atr`·`--trades`
-등)을 주면 북이 그 축을 표현하지 못하므로 **per-cell 단일 포지션으로 자동 접힌다** — 그 축
+⚠️ 전략·비용·거래별 축(`--tp-r`·`--fill`·`--combine-obs`·`--max-zone-width-atr`·
+`--limit-valid-bars`·`--trades` 등)을 주면 북이 그 축을 표현하지 못하므로 **per-cell 단일 포지션으로 자동 접힌다** — 그 축
 스윕은 예전 그대로 `RunRow`를 낸다(매번 `--positions single`을 붙일 필요 없다). 명시적
 `--positions book`에 그 축을 함께 주면 **거부**한다(조용히 접지 않는다). per-cell 단일
 포지션이 WAN-95/99 리포트 셀과 1e-9 이내로 일치함은 테스트가 고정한다(`tests/test_harness.py`
