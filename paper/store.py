@@ -171,6 +171,17 @@ ON CONFLICT(symbol, timeframe) DO UPDATE SET
     entry_fee         = excluded.entry_fee
 """
 
+# 일일 손실 서킷브레이커 알림 상태(WAN-38). 발동/해제 텔레그램을 각 1회만 보내려면
+# 마지막으로 알린 (KST일, 발동여부)을 원장 옆에 남겨야 러너 재시작 후에도 중복 스팸이
+# 없다(인메모리 플래그는 재시작 때 사라져 발동 알림이 재전송된다). 단일 행(id=1).
+_CIRCUIT_BREAKER_SCHEMA = """
+CREATE TABLE IF NOT EXISTS circuit_breaker_notice (
+    id       INTEGER PRIMARY KEY CHECK (id = 1),
+    day      TEXT,
+    tripped  INTEGER NOT NULL DEFAULT 0
+)
+"""
+
 
 class OpenPosition(BaseModel):
     """DB에 영속된 열린 페이퍼 포지션 한 건(엔진 복구용, WAN-34).
@@ -403,6 +414,7 @@ class PaperTradeStore:
         configure_connection(self._conn)  # WAL + busy_timeout (WAN-156 §4)
         self._conn.execute(_SCHEMA)
         self._conn.execute(_OPEN_POSITIONS_SCHEMA)
+        self._conn.execute(_CIRCUIT_BREAKER_SCHEMA)
         self._migrate()
         self._conn.commit()
 
@@ -439,6 +451,60 @@ class PaperTradeStore:
         """페이퍼 거래 한 건을 UPSERT한다."""
         with self._lock, self._conn:
             self._conn.execute(_UPSERT, record.as_row())
+
+    # -- 서킷브레이커 지원 (WAN-38) -----------------------------------------
+
+    def realized_pnl_between(self, start_ms: int, end_ms: int) -> float:
+        """`[start_ms, end_ms)`(청산시각 기준)에 청산된 거래의 실현손익 합.
+
+        일일 손실 서킷브레이커가 "오늘(KST) 청산된 거래의 실현손익 합"을 DB에서
+        재계산하는 원천이다(재시작 내구성). `realized_pnl`이 NULL인 옛 %-only 행
+        (WAN-207)은 제외한다 — 금액 미상이라 손익 합에 넣을 수 없다.
+        """
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT COALESCE(SUM(realized_pnl), 0.0) FROM paper_trades "
+                "WHERE exit_time >= ? AND exit_time < ? AND realized_pnl IS NOT NULL",
+                (start_ms, end_ms),
+            )
+            row = cur.fetchone()
+        return float(row[0]) if row is not None else 0.0
+
+    def latest_equity_after(self) -> float | None:
+        """가장 최근(청산시각 최신) 거래의 청산 직후 자본 = 현재 지갑 잔고(WAN-212).
+
+        `equity_after`가 있는 거래 중 청산이 가장 늦은 것을 고른다. 하나도 없으면 None
+        (옛 %-only 행뿐 → 재구성 불가). 서킷브레이커 한도 기준자본 표시에 쓴다.
+        """
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT equity_after FROM paper_trades WHERE equity_after IS NOT NULL "
+                "ORDER BY exit_time DESC LIMIT 1"
+            )
+            row = cur.fetchone()
+        return None if row is None else float(row[0])
+
+    def get_circuit_breaker_notice(self) -> tuple[str | None, bool]:
+        """마지막으로 텔레그램에 알린 서킷브레이커 상태 `(KST일, 발동여부)`.
+
+        기록이 없으면 `(None, False)`. 러너가 발동/해제 알림 중복을 재시작 후에도
+        막는 데 쓴다.
+        """
+        with self._lock:
+            cur = self._conn.execute("SELECT day, tripped FROM circuit_breaker_notice WHERE id = 1")
+            row = cur.fetchone()
+        if row is None:
+            return None, False
+        return (None if row[0] is None else str(row[0])), bool(row[1])
+
+    def set_circuit_breaker_notice(self, day: str, *, tripped: bool) -> None:
+        """서킷브레이커 알림 상태를 `(KST일, 발동여부)`로 기록한다(단일 행 UPSERT)."""
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO circuit_breaker_notice (id, day, tripped) VALUES (1, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET day = excluded.day, tripped = excluded.tripped",
+                (day, 1 if tripped else 0),
+            )
 
     # -- 열린 포지션 (재시작 복구, WAN-34) ----------------------------------
 

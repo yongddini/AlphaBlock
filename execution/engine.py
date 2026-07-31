@@ -31,7 +31,13 @@ from execution.models import (
     side_for_entry,
     side_for_exit,
 )
-from execution.risk import RiskDecision, RiskManager, RiskParams
+from execution.risk import (
+    CircuitBreakerStatus,
+    RealizedPnlSource,
+    RiskDecision,
+    RiskManager,
+    RiskParams,
+)
 from execution.sizing import PositionSizingParams, position_size
 from strategy.models import OrderBlockDirection, SignalExitReason
 
@@ -126,6 +132,18 @@ class ExecutionEngine:
         self._book: dict[SeriesKey, Position] = {}
 
     # -- 상태 조회 ----------------------------------------------------------
+
+    def bind_realized_pnl_source(self, source: RealizedPnlSource | None) -> None:
+        """서킷브레이커를 DB 재계산으로 전환한다(러너 배선, WAN-38).
+
+        엔진 구성 시점엔 저장소가 없으므로, 저장소가 준비된 뒤 호출부(`PaperExecutor`)가
+        `paper_trades` 조회 콜백을 여기서 물린다. `None`이면 인메모리로 되돌린다.
+        """
+        self._risk.bind_realized_pnl_source(source)
+
+    def circuit_breaker_status(self, now_ms: int) -> CircuitBreakerStatus:
+        """현재 자본 기준 서킷브레이커 상태 스냅샷(대시보드·알림, WAN-38)."""
+        return self._risk.status(now_ms, self._equity)
 
     @property
     def equity(self) -> float:

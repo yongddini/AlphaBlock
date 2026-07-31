@@ -41,6 +41,7 @@ from datetime import date, datetime, timedelta
 from common.telegram import TelegramClient
 from common.timefmt import KST
 from execution.models import Position
+from execution.risk import CircuitBreakerStatus
 from live.executor import TradeReport
 from live.limit_orders import LimitFill
 from live.message_format import (
@@ -253,6 +254,29 @@ def format_filter_skip(reason: str, *, symbol: str, timeframe: str, time_ms: int
     )
 
 
+def format_circuit_breaker_tripped(status: CircuitBreakerStatus, *, now_ms: int) -> str:
+    """일일 손실 서킷브레이커 **발동** 알림(WAN-38). 신규 진입 차단을 알린다."""
+    return "\n".join(
+        [
+            "🛑 *일일 손실 서킷브레이커 발동*",
+            f"오늘 손익 {fmt_usd(status.daily_realized_pnl)} · 한도 −{fmt_usd(status.loss_limit)}",
+            "신규 진입을 차단합니다(기존 포지션 청산은 계속).",
+            fmt_time(now_ms),
+        ]
+    )
+
+
+def format_circuit_breaker_cleared(status: CircuitBreakerStatus, *, now_ms: int) -> str:
+    """일일 손실 서킷브레이커 **해제** 알림(WAN-38). KST 일자 전환으로 진입 재개."""
+    return "\n".join(
+        [
+            "🟢 *일일 손실 서킷브레이커 해제*",
+            "새 KST 일자로 한도가 초기화돼 신규 진입을 재개합니다.",
+            fmt_time(now_ms),
+        ]
+    )
+
+
 def _kst_date(now_ms: int) -> date:
     """epoch ms → KST 날짜(일일 경계 판정용)."""
     return datetime.fromtimestamp(now_ms / 1000, tz=KST).date()
@@ -379,6 +403,17 @@ class ZoneLimitNotifier:
                 today_pct=self._today_pct(report.equity),
             )
         )
+
+    def handle_circuit_breaker_tripped(self, status: CircuitBreakerStatus, *, now_ms: int) -> None:
+        """서킷브레이커 발동 알림(WAN-38). 안전 알림이라 이벤트 스위치와 무관하게 보낸다.
+
+        중복(발동 1회) 방지는 러너가 영속 상태로 관리한다 — 여기서는 포맷·전송만 한다.
+        """
+        self._send(format_circuit_breaker_tripped(status, now_ms=now_ms))
+
+    def handle_circuit_breaker_cleared(self, status: CircuitBreakerStatus, *, now_ms: int) -> None:
+        """서킷브레이커 해제 알림(WAN-38). 발동과 대칭으로 이벤트 스위치와 무관하게 보낸다."""
+        self._send(format_circuit_breaker_cleared(status, now_ms=now_ms))
 
     # -- 내부 ---------------------------------------------------------------
 
