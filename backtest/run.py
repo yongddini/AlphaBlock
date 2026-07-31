@@ -118,6 +118,7 @@ from backtest.harness import (
     SEGMENT_OOS_WARM,
     UNSET,
     FillPreset,
+    LimitValidBarsArg,
     RunRow,
     ZoneWidthArg,
     build_config,
@@ -301,6 +302,18 @@ class Grid:
 
     ⚠️ 단위는 **ATR 배수**지 퍼센트가 아니다(권고 문턱 15m 1.24 · 1h 1.32, 채택 `1.28`).
     """
+    limit_valid_bars: tuple[LimitValidBarsArg, ...] = (UNSET,)
+    """지정가 유효기간 축(WAN-222, 상위TF 봉 수). `UNSET` = 채택 기본값(`24`), `None` =
+    무기한(존 무효화까지 대기), 숫자 = 그 봉 수 경과 시 미체결 취소.
+
+    **진짜 축이다**(`max_zone_widths_atr`와 같은 자리, `band_bar` 같은 핀이 아니다) —
+    유효기간별 체결률 교환비를 한 표에 나란히 놓고 보라고 여는 축이다. 기본값 `(UNSET,)`
+    이라 인자를 안 주면 채택 기본값(24)으로 예전과 **비트 단위로 같은 행**이 나온다.
+
+    ⚠️ **무기한이 `None`(= CLI `none`)이고 미지정(`UNSET`)과 다르다**(존폭 필터와 같은 규약,
+    WAN-222) — 안 가르면 「유효기간 24」 실행에 「무기한」 라벨이 붙는 조용한 실패가 된다.
+    단위는 **봉 수**지 시간이 아니다(실제 대기 = 봉 수 × TF 주기: 24봉이 15m=6h · 1h=24h · 4h=나흘).
+    """
     band_bar: BandBar | None = None
     """이격 밴드 표본 **고정**. None이면 채택 기본값(WAN-132: `intrabar_live`).
 
@@ -331,6 +344,7 @@ class Combo:
     portfolio_leverage: float | None
     combine_obs: bool | None
     max_zone_width_atr: ZoneWidthArg
+    limit_valid_bars: LimitValidBarsArg
     fill: FillPreset
     seed: int
 
@@ -367,20 +381,22 @@ def iter_combos(grid: Grid) -> list[Combo]:
                 for leverage in grid.portfolio_leverages:
                     for combine_obs in grid.combine_obs:
                         for zone_width in grid.max_zone_widths_atr:
-                            for fill in grid.fills:
-                                for seed in iter_seeds(fill, grid.seeds):
-                                    combos.append(
-                                        Combo(
-                                            take_profit_r=take_profit_r,
-                                            offset_bps=offset_bps,
-                                            retap_mode=retap_mode,
-                                            portfolio_leverage=leverage,
-                                            combine_obs=combine_obs,
-                                            max_zone_width_atr=zone_width,
-                                            fill=fill,
-                                            seed=seed,
+                            for valid_bars in grid.limit_valid_bars:
+                                for fill in grid.fills:
+                                    for seed in iter_seeds(fill, grid.seeds):
+                                        combos.append(
+                                            Combo(
+                                                take_profit_r=take_profit_r,
+                                                offset_bps=offset_bps,
+                                                retap_mode=retap_mode,
+                                                portfolio_leverage=leverage,
+                                                combine_obs=combine_obs,
+                                                max_zone_width_atr=zone_width,
+                                                limit_valid_bars=valid_bars,
+                                                fill=fill,
+                                                seed=seed,
+                                            )
                                         )
-                                    )
     return combos
 
 
@@ -562,6 +578,7 @@ def _run_cell(task: _CellTask) -> _CellOutcome:
                 retap_mode=combo.retap_mode,
                 short_enabled=grid.short_enabled,
                 max_zone_width_atr=combo.max_zone_width_atr,
+                limit_valid_bars=combo.limit_valid_bars,
                 base=_pinned_base(grid),
             )
             portfolio = combo.portfolio
@@ -810,6 +827,15 @@ def build_parser() -> argparse.ArgumentParser:
             "예: --max-zone-width-atr none,1.28"
         ),
     )
+    strategy.add_argument(
+        "--limit-valid-bars",
+        help=(
+            "지정가 유효기간 축(WAN-222, 상위TF 봉 수). 미체결 지정가가 이 봉 수 경과 시 "
+            "취소된다. 콤마 복수 = 격자이며 none = 무기한(존 무효화까지 대기). 안 주면 채택 "
+            "기본값(24). 단위는 봉 수지 시간이 아니다(24봉 = 15m 6h · 1h 24h · 4h 나흘). "
+            "예: --limit-valid-bars 6,12,24,48,none"
+        ),
+    )
     strategy.add_argument("--fill-dropout-rate", type=float, help="--fill 대신 탈락률을 직접 지정")
     strategy.add_argument("--seeds", help="탈락 추첨 시드(콤마 복수). 기본은 프리셋 시드")
 
@@ -929,6 +955,7 @@ def grid_from_args(args: argparse.Namespace) -> Grid:
         portfolio_leverages=_positions_from_args(args),
         combine_obs=_combine_obs_from_args(args),
         max_zone_widths_atr=_zone_widths_from_args(args),
+        limit_valid_bars=_limit_valid_bars_from_args(args),
         seeds=split_ints(args.seeds, label="--seeds") if args.seeds else None,
         short_enabled=short_enabled,
     )
@@ -1002,6 +1029,7 @@ def _book_rejected_flags(args: argparse.Namespace) -> list[str]:
         (args.fill_dropout_rate is not None, "--fill-dropout-rate"),
         (args.combine_obs, "--combine-obs"),
         (args.max_zone_width_atr, "--max-zone-width-atr"),
+        (args.limit_valid_bars, "--limit-valid-bars"),
         (args.seeds, "--seeds"),
         (args.short_enabled, "--short-enabled"),
         (args.long_only, "--long-only"),
@@ -1133,6 +1161,43 @@ def _zone_widths_from_args(args: argparse.Namespace) -> tuple[ZoneWidthArg, ...]
             values.append(value)
     if not values:
         raise ValueError("--max-zone-width-atr가 비어 있습니다.")
+    return tuple(values)
+
+
+#: `--limit-valid-bars`에서 "무기한 대기"를 가리키는 토큰. 0으로 표현하지 않는 이유는
+#: `--max-zone-width-atr none`과 같다 — 필드가 `ge=1`이라 0은 값으로도 못 쓰고, 무기한은
+#: 봉 수 스케일의 값이 아니라 다른 종류다. ⚠️ `none`(무기한)은 인자 미지정(채택 기본값 24)과
+#: 다르다(WAN-222).
+INDEFINITE_VALID_BARS_TOKEN = "none"
+
+
+def _limit_valid_bars_from_args(args: argparse.Namespace) -> tuple[LimitValidBarsArg, ...]:
+    """`--limit-valid-bars 6,24,none` → `(6, 24, None)`. 안 주면 `(UNSET,)`(채택 기본값 24).
+
+    ⚠️ **`none`은 무기한(`None`)이고, 인자를 안 준 것(`UNSET` = 채택 기본값 24)과 다르다**
+    (WAN-222, 존폭 필터 `none`과 같은 규약) — 안 가르면 「유효기간 24」 실행에 「무기한」
+    라벨이 붙는 조용한 실패가 된다. 단위는 **봉 수**(정수)지 시간이 아니다.
+    """
+    if not args.limit_valid_bars:
+        return (UNSET,)
+    values: list[LimitValidBarsArg] = []
+    for token in split_list(args.limit_valid_bars):
+        if token.lower() == INDEFINITE_VALID_BARS_TOKEN:
+            value: int | None = None
+        else:
+            try:
+                value = int(token)
+            except ValueError as exc:
+                raise ValueError(
+                    f"--limit-valid-bars에 알 수 없는 값이 있습니다: {token!r} "
+                    f"({INDEFINITE_VALID_BARS_TOKEN} 또는 봉 수 정수)"
+                ) from exc
+            if value < 1:
+                raise ValueError(f"--limit-valid-bars의 봉 수는 1 이상이어야 합니다: {token!r}")
+        if value not in values:
+            values.append(value)
+    if not values:
+        raise ValueError("--limit-valid-bars가 비어 있습니다.")
     return tuple(values)
 
 
