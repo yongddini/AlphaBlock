@@ -27,7 +27,9 @@ from backtest.run import main
 from backtest.trade_store import BacktestRunStore
 from tests.test_run_cli import synthetic_loader  # noqa: F401 - pytest 픽스처 재사용
 
-_BASE = ["--symbol", "BTCUSDT", "--tf", "1h", "--quiet", "--format", "csv"]
+# WAN-213: 거래별 상세 출력(--trades/--equity/--persist)은 per-cell 축이라 단일 포지션
+# 경로를 명시한다 — 인자 없는 실행의 기본값(레버리지 북)은 상세 출력을 아직 배선하지 않았다.
+_BASE = ["--symbol", "BTCUSDT", "--tf", "1h", "--positions", "single", "--quiet", "--format", "csv"]
 #: 지정가(B안) 상세-출력 실행. 존폭 필터를 끄면 적격 셋업이 흐르지만(미체결) 채택 필터
 #: 1.28로는 합성 존이 전부 걸러진다 — 배선을 보려면 셋업이 흘러야 한다.
 _DETAIL = [*_BASE, "--max-zone-width-atr", "none"]

@@ -10,12 +10,15 @@ uv run python -m backtest.run --tp-r 1.0,1.5,2.0,3.0
 값에 콤마를 주면 데카르트 곱으로 격자를 돌고 조합별 1행을 낸다. 축은 심볼 · TF ·
 진입 방식 · 익절 R · 지정가 오프셋 · 재탭 정책 · **포지션 정책** · 체결 가정 · 시드다.
 
-## 기본값 = 채택 기본값
+## 기본값 = 채택 기본값(전략) + 채택 북(회계, WAN-213)
 
-인자를 아무것도 주지 않으면 `ConfluenceParams()`(WAN-95/87 채택 기본값: 지정가 진입 +
-실시간 RSI + 롱 온리 + 볼린저 + 고정 1.5R) 그대로 돈다. CLI가 자기만의 기본값을 갖지
-않는 이유는 그것이 조용히 갈라지기 때문이다 — `tests/test_run_cli.py`가 CLI 기본
-파라미터 == WAN-95/96/99 리포트의 기준선 파라미터임을 고정한다.
+전략 축은 `ConfluenceParams()`(WAN-95/87: 지정가 진입 + 실시간 RSI + 롱 온리 + 볼린저 +
+고정 1.5R + 존폭 필터 1.28) 그대로다. **포지션 회계**는 WAN-213부터 **레버리지 북**
+(`LeverageBookParams()` = cap_only 5배 · 칸=(종목,TF)마다 1포지션 · 공유 자본)이 기본값이다
+— 인자 없는 `backtest.run`이 단일 포지션 대신 북을 돈다(`--positions`가 그 분기, `book_cli`
+가 실행). per-cell 단일 포지션은 `--positions single`이다. CLI가 자기만의 기본값을 갖지
+않는 이유는 그것이 조용히 갈라지기 때문이다 — `tests/test_run_cli.py`·`test_book_cli.py`가
+CLI 기본이 채택 전략·채택 북과 같음을 동작으로 고정한다.
 
 ## 사용 예시
 
@@ -63,12 +66,14 @@ python -m backtest.run --symbol BTCUSDT --tf 15m --persist
   버전 + 코드 리비전)이 붙어 섞이지 않고, 같은 지문의 재적재는 기본이 거부다
   (`--persist-replace`가 명시적 덮어쓰기). 상세는 `backtest/trade_store.py`.
 
-## 포지션 정책 (`--positions`, WAN-130)
+## 포지션 정책 (`--positions`, WAN-130/213)
 
-`single`(기본)은 채택 기본값인 **동시 1포지션** 경로 그대로이고, 숫자는 **동시 다중
-포지션**(WAN-103)의 명목 상한 배수다(`열린 명목 합 ≤ 자본 × leverage`). 두 팔은 셋업
-탐색·체결 시뮬레이션이 **완전히 같고** 후보를 배치하는 회계만 다르므로, 한 표의 두 줄이
-같은 풀에서 나온다. 인자를 안 주면 예전과 비트 단위로 같은 행이 나온다.
+인자 없는 실행의 기본값 = **`book`**(채택 레버리지 북, WAN-213 = cap_only 5배 · 칸을
+가로지르는 공유 자본 · 구간당 집계 행 하나). `single`은 **동시 1포지션**(per-cell) 경로,
+숫자는 **동시 다중 포지션**(WAN-103)의 명목 상한 배수다(`열린 명목 합 ≤ 자본 × leverage`).
+`single`/숫자는 per-cell(심볼·TF마다 한 행)이고 두 팔은 셋업 탐색·체결이 **완전히 같아**
+한 표에서 비교된다. `book`은 회계 모양이 달라(칸을 한 지갑으로 접는다) 단독으로만 쓰고,
+채택 기본값만 돈다(전략·비용 축을 주면 거부 — 라벨만 붙는 조용한 무시를 막는다).
 
 ## 병렬 실행 (`--jobs`, WAN-121)
 
@@ -107,6 +112,10 @@ from backtest.harness import (
     FILL_PRESETS,
     FORMATS,
     RETAP_MODES,
+    SEGMENT_FULL,
+    SEGMENT_IS,
+    SEGMENT_OOS,
+    SEGMENT_OOS_WARM,
     UNSET,
     FillPreset,
     RunRow,
@@ -127,6 +136,7 @@ from backtest.harness import (
     slice_market,
     write_output,
 )
+from backtest.leverage_book import LeverageBookParams
 from backtest.models import BacktestConfig, BacktestResult
 from backtest.portfolio import PortfolioParams
 from backtest.report import (
@@ -771,9 +781,10 @@ def build_parser() -> argparse.ArgumentParser:
     strategy.add_argument(
         "--positions",
         help=(
-            "포지션 정책 축(콤마 복수 = 격자). single(기본, 동시 1포지션 = 채택 기본값) "
-            "또는 숫자 = 동시 다중 포지션의 명목 상한 배수(WAN-103). "
-            "예: --positions single,3 → 단일 대 3배 다중을 한 표에서 비교"
+            "포지션 정책. 인자 없는 실행의 기본값 = book(채택 레버리지 북, WAN-213 = "
+            "cap_only 5배 · 칸=(종목,TF)마다 1포지션 · 공유 자본). "
+            "single = 동시 1포지션(per-cell) · 숫자 = 동시 다중 포지션 명목 상한 배수(WAN-103, "
+            "콤마 복수 = 격자). book은 단독으로만. 예: --positions single,3 / --positions book"
         ),
     )
     strategy.add_argument(
@@ -923,10 +934,139 @@ def grid_from_args(args: argparse.Namespace) -> Grid:
     )
 
 
-#: `--positions`에서 "동시 1포지션(채택 기본값)"을 가리키는 토큰. 숫자로 표현하지 않는
-#: 이유는 단일 포지션 경로에 레버리지 축이 없기 때문이다 — `1`을 단일의 뜻으로 쓰면
-#: "다중 1배"와 구분되지 않는데, 그 둘은 실제로 다른 경로다(WAN-108 대조군 설계).
+#: `--positions`에서 "동시 1포지션"(WAN-122까지의 채택 기본값이자 per-cell 단일 경로)을
+#: 가리키는 토큰. 숫자로 표현하지 않는 이유는 단일 포지션 경로에 레버리지 축이 없기
+#: 때문이다 — `1`을 단일의 뜻으로 쓰면 "다중 1배"와 구분되지 않는데, 그 둘은 실제로 다른
+#: 경로다(WAN-108 대조군 설계).
 SINGLE_POSITION_TOKEN = "single"
+
+#: `--positions`에서 **채택 레버리지 북**(WAN-213 = cap_only 5배, 인자 없는 실행의 기본값)을
+#: 가리키는 토큰. 북은 칸을 가로지르는 공유 자본 회계라 per-cell 행이 아니라 구간별 집계
+#: 행을 내므로 완전히 다른 경로(`book_cli`)로 분기한다(아래 `_book_from_args`).
+BOOK_POSITION_TOKEN = "book"
+
+#: 인자 없는 `backtest.run`이 도는 채택 북. `LeverageBookParams()` 기본값이 곧 채택 값이다
+#: (WAN-213 — cap_only 5배). `ConfluenceParams()`가 채택 전략을 내는 것과 대칭.
+ADOPTED_BOOK = LeverageBookParams()
+
+
+def _book_from_args(args: argparse.Namespace) -> LeverageBookParams | None:
+    """`--positions`가 북 모드인지 판정한다(WAN-213).
+
+    * **명시** `--positions book` → 채택 북. `single`/숫자 → `None`(per-cell — `grid_from_args`).
+    * **미지정**:
+      * 채택 좌표만 준 실행(전략·비용·거래별 축 없음) → **채택 북**. 인자 없는 실행과
+        정본 리포트(`--oos-warm`)가 여기 든다.
+      * 전략/비용/거래별 축이 하나라도 있으면 → `None`(per-cell 단일 포지션 기본). 북은 그
+        축들을 표현하지 못하므로(채택 기본값만) `--tp-r`·`--fill` 같은 per-cell 스윕은
+        예전 그대로 돈다 — 사용자가 매번 `--positions single`을 붙이지 않아도 된다.
+
+    북은 단독으로만 쓴다 — per-cell(single/숫자)과 출력 모양이 달라 한 표에 섞을 수 없다.
+    명시적 `--positions book`에 그 축들을 함께 주면 `run_book_main`이 **거부**한다(조용히
+    per-cell로 접지 않는다 — 사용자가 북을 콕 집었으니 어긋남을 알린다, WAN-95 교훈).
+    """
+    if args.positions:
+        tokens = split_list(args.positions)
+        if BOOK_POSITION_TOKEN in tokens:
+            if tokens != (BOOK_POSITION_TOKEN,):
+                raise ValueError(
+                    f"--positions {BOOK_POSITION_TOKEN}는 단독으로만 씁니다 — "
+                    f"{SINGLE_POSITION_TOKEN}/숫자(per-cell)와 출력 모양이 달라 섞을 수 없습니다."
+                )
+            return ADOPTED_BOOK
+        return None
+    # 미지정: 북이 못 표현하는 축(전략·비용·거래별)이 있으면 per-cell 단일 포지션으로 접는다.
+    if _book_rejected_flags(args):
+        return None
+    return ADOPTED_BOOK
+
+
+def _book_segments(*, oos: bool, warm_oos: bool) -> tuple[str, ...]:
+    """북 모드의 구간 목록. `--oos-warm`이 정본(따뜻+차가움 병기, WAN-166)."""
+    if warm_oos:
+        return (SEGMENT_FULL, SEGMENT_IS, SEGMENT_OOS_WARM, SEGMENT_OOS)
+    if oos:
+        return (SEGMENT_FULL, SEGMENT_IS, SEGMENT_OOS)
+    return (SEGMENT_FULL,)
+
+
+#: 북 모드가 거부하는 인자 — 채택 기본값만 돌기 때문(라벨만 붙는 조용한 무시를 막는다,
+#: WAN-95 교훈). (플래그 판정식, 사람이 읽는 이름).
+def _book_rejected_flags(args: argparse.Namespace) -> list[str]:
+    checks: list[tuple[object, str]] = [
+        (args.tp_r, "--tp-r"),
+        (args.offset_bps, "--offset-bps"),
+        (args.retap_mode, "--retap-mode"),
+        (args.fill, "--fill"),
+        (args.fill_penetration_bps is not None, "--fill-penetration-bps"),
+        (args.fill_dropout_rate is not None, "--fill-dropout-rate"),
+        (args.combine_obs, "--combine-obs"),
+        (args.max_zone_width_atr, "--max-zone-width-atr"),
+        (args.seeds, "--seeds"),
+        (args.short_enabled, "--short-enabled"),
+        (args.long_only, "--long-only"),
+        (args.fee is not None, "--fee"),
+        (args.maker_fee is not None, "--maker-fee"),
+        (args.slippage is not None, "--slippage"),
+        (not args.funding, "--no-funding"),
+        (args.years is not None, "--years"),
+        (args.walkforward, "--walkforward"),
+        (args.trades, "--trades"),
+        (args.equity, "--equity"),
+        (args.persist, "--persist"),
+    ]
+    return [name for value, name in checks if value]
+
+
+def run_book_main(args: argparse.Namespace, book: LeverageBookParams) -> int:
+    """채택 레버리지 북 실행 경로 — per-cell 파이프라인 대신 공유 자본 북을 돈다.
+
+    스코프를 좁게 유지한다: 채택 기본값(전략·비용·존폭 필터 1.28·오프셋 2bp 등)만 돌고,
+    전략/비용/거래별-출력 축이 주어지면 **조용히 무시하지 않고 거부한다**(WAN-95 교훈).
+    warm/cold OOS는 배선돼 있으나 `--walkforward`·`--years`(미끄러지는 창)는 아직 아니다.
+    """
+    rejected = _book_rejected_flags(args)
+    if rejected:
+        print(
+            "오류: 북 모드(--positions book · 인자 없는 실행의 기본값)는 채택 기본값만 "
+            f"돕니다 — 다음 인자는 아직 배선되지 않았습니다: {', '.join(rejected)}. "
+            "per-cell 실험은 --positions single 로 여세요.",
+            file=sys.stderr,
+        )
+        return 2
+
+    start = args.start or DEFAULT_START
+    end = args.end or DEFAULT_END
+    symbols = [normalize_symbol(s) for s in split_list(args.symbol)]
+    timeframes = split_list(args.tf)
+    segments = _book_segments(oos=args.oos, warm_oos=args.oos_warm)
+
+    from backtest import book_cli  # 지연 import(사이클 회피 — 모듈 독스트링).
+
+    try:
+        jobs = parse_jobs(args.jobs)
+        rows = book_cli.run_book(
+            symbols,
+            timeframes,
+            start=start,
+            end=end,
+            book=book,
+            segments=segments,
+            jobs=jobs,
+            log=not args.quiet,
+        )
+    except ValueError as exc:
+        print(f"오류: {exc}", file=sys.stderr)
+        return 2
+
+    text = book_cli.render_book(rows, args.format)
+    if args.out:
+        path = write_output(text, args.out)
+        _log(not args.quiet, f"[run] 저장: {path}")
+    else:
+        print(text)
+    return 0
+
 
 #: `--combine-obs`가 받는 토큰 → 불리언.
 _BOOL_TOKENS: dict[str, bool] = {"true": True, "false": False, "on": True, "off": False}
@@ -1079,6 +1219,17 @@ def options_from_args(args: argparse.Namespace) -> RunOptions:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+
+    # 북 모드(인자 없는 실행의 기본값 = 채택 레버리지 북, WAN-213)는 칸을 가로지르는 공유
+    # 자본 회계라 per-cell 격자와 다른 경로다 — grid를 짜기 전에 먼저 분기한다.
+    try:
+        book = _book_from_args(args)
+    except ValueError as exc:
+        print(f"오류: {exc}", file=sys.stderr)
+        return 2
+    if book is not None:
+        return run_book_main(args, book)
+
     try:
         grid = grid_from_args(args)
         options = options_from_args(args)

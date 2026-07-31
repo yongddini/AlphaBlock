@@ -155,12 +155,17 @@ _WAN95_PINNED = {
 
 
 def test_cli_defaults_reproduce_wan95_zone_limit_cell() -> None:
-    """인자 없는 기본 실행(현행 채택 기본값) == 못 박은 창의 WAN-95 기준값.
+    """채택 **단일 포지션** 엔진(per-cell) == 못 박은 창의 WAN-95 기준값.
 
-    이 테스트가 **현행 기본 엔진**을 실데이터로 도는 유일한 축이다 — 아래 WAN-99 테스트는
+    이 테스트가 채택 per-cell 엔진을 실데이터로 도는 유일한 축이다 — 아래 WAN-99 테스트는
     옛 엔진을 핀(오프셋 0 · tap 밴드 · first_tap_free · 병합 존)으로 되돌려 돌기 때문이다.
+
+    ⚠️ **WAN-213부터 인자 없는 `backtest.run`(main)은 레버리지 북을 돈다** — 이 셀의 단일
+    포지션 손익은 이제 `--positions single` 경로다. `_run`이 `run_grid`(per-cell)를 직접
+    부르므로 이 대조는 그 단일 포지션 엔진을 그대로 고정한다(북 기본값 전환에 영향받지 않는다).
+    북이 채택 경로를 실제로 타는지는 `tests/test_book_cli.py`가 동작으로 고정한다.
     """
-    row = _run(["--symbol", "BTCUSDT", "--tf", _TIMEFRAME])
+    row = _run(["--symbol", "BTCUSDT", "--tf", _TIMEFRAME, "--positions", "single"])
     for column, expected in _WAN95_PINNED.items():
         actual = getattr(row, column)
         assert actual == pytest.approx(float(expected), abs=1e-9), (

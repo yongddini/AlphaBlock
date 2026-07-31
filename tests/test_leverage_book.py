@@ -12,6 +12,7 @@ from __future__ import annotations
 import pytest
 
 from backtest.leverage_book import (
+    LEGACY_BOOK_PARAMS,
     BookCell,
     LeverageBookParams,
     apply_book_leverage,
@@ -94,9 +95,7 @@ def test_single_cell_book_matches_adopted_sequencer_bit_for_bit() -> None:
         _cand(3_500, 4_000),
     ]
     adopted = [trade for _, trade in sequence_with_candidates(candidates, cfg)]
-    outcome = run_leverage_book(
-        [_cell("BTC/USDT:USDT", "1h", candidates)], cfg, LeverageBookParams()
-    )
+    outcome = run_leverage_book([_cell("BTC/USDT:USDT", "1h", candidates)], cfg, LEGACY_BOOK_PARAMS)
     assert outcome.trades == adopted
     assert outcome.stats.skipped_cell_busy == 1
     assert outcome.stats.peak_concurrency == 1
@@ -119,7 +118,7 @@ def test_same_cell_overlap_skipped_but_other_cell_enters() -> None:
             _cell("BTC/USDT:USDT", "1h", [b]),
         ],
         cfg,
-        LeverageBookParams(),
+        LEGACY_BOOK_PARAMS,
     )
     assert outcome.stats.placed == 2
     assert outcome.stats.skipped_cell_busy == 1
@@ -132,7 +131,7 @@ def test_cell_frees_at_exit_time_half_open() -> None:
     outcome = run_leverage_book(
         [_cell("BTC/USDT:USDT", "1h", [_cand(1_000, 2_000), _cand(2_000, 3_000)])],
         cfg,
-        LeverageBookParams(),
+        LEGACY_BOOK_PARAMS,
     )
     assert outcome.stats.placed == 2
     assert outcome.stats.skipped_cell_busy == 0
@@ -146,7 +145,7 @@ def test_duplicate_cell_key_rejected() -> None:
         _cell("BTC/USDT:USDT", "1h", [_cand(3_000, 4_000)]),
     ]
     with pytest.raises(ValueError, match="칸이 중복"):
-        run_leverage_book(cells, cfg, LeverageBookParams())
+        run_leverage_book(cells, cfg, LEGACY_BOOK_PARAMS)
 
 
 # --------------------------------------------------------------------------- #
@@ -159,11 +158,11 @@ def test_realized_pnl_flows_into_other_cells_sizing() -> None:
     cfg = _cfg()
     win = _cand(1_000, 2_000)  # +1.5R 익절 → 현금 증가.
     later = _cand(3_000, 4_000)
-    lone = run_leverage_book([_cell("ETH/USDT:USDT", "1h", [later])], cfg, LeverageBookParams())
+    lone = run_leverage_book([_cell("ETH/USDT:USDT", "1h", [later])], cfg, LEGACY_BOOK_PARAMS)
     shared = run_leverage_book(
         [_cell("BTC/USDT:USDT", "1h", [win]), _cell("ETH/USDT:USDT", "1h", [later])],
         cfg,
-        LeverageBookParams(),
+        LEGACY_BOOK_PARAMS,
     )
     qty_alone = lone.trades[0].quantity
     qty_after_win = shared.trades[1].quantity
@@ -190,11 +189,15 @@ def test_notional_cap_shared_across_cells_and_relative_headroom_invariant() -> N
     b = _cand(2_000, 6_000)
     cells = [_cell("BTC/USDT:USDT", "1h", [a]), _cell("ETH/USDT:USDT", "1h", [b])]
 
-    one_x = run_leverage_book(cells, _cfg(), LeverageBookParams(leverage_multiple=1.0))
+    one_x = run_leverage_book(
+        cells, _cfg(), LeverageBookParams(leverage_multiple=1.0, leverage_mode="combined")
+    )
     assert one_x.stats.placed == 1
     assert one_x.stats.skipped_notional == 1
 
-    three_x = run_leverage_book(cells, _cfg(), LeverageBookParams(leverage_multiple=3.0))
+    three_x = run_leverage_book(
+        cells, _cfg(), LeverageBookParams(leverage_multiple=3.0, leverage_mode="combined")
+    )
     assert three_x.stats.placed == 1  # 배치 집합은 그대로 —
     assert three_x.stats.skipped_notional == 1
     # — 크기만 3배다.
@@ -209,7 +212,7 @@ def test_partial_headroom_clamps_entry() -> None:
     outcome = run_leverage_book(
         [_cell("BTC/USDT:USDT", "1h", [a]), _cell("ETH/USDT:USDT", "1h", [b])],
         _cfg(),
-        LeverageBookParams(),
+        LEGACY_BOOK_PARAMS,
     )
     assert outcome.stats.placed == 2
     assert outcome.stats.clamped_entries == 1
@@ -223,8 +226,12 @@ def test_partial_headroom_clamps_entry() -> None:
 def test_multiple_scales_every_trade_size() -> None:
     """배수 N은 상한만 여는 게 아니라 **매 거래의 수량을 N배** 키운다."""
     cells = [_cell("BTC/USDT:USDT", "1h", [_cand(1_000, 2_000)])]
-    base = run_leverage_book(cells, _cfg(), LeverageBookParams(leverage_multiple=1.0))
-    tripled = run_leverage_book(cells, _cfg(), LeverageBookParams(leverage_multiple=3.0))
+    base = run_leverage_book(
+        cells, _cfg(), LeverageBookParams(leverage_multiple=1.0, leverage_mode="combined")
+    )
+    tripled = run_leverage_book(
+        cells, _cfg(), LeverageBookParams(leverage_multiple=3.0, leverage_mode="combined")
+    )
     assert tripled.trades[0].quantity == pytest.approx(base.trades[0].quantity * 3.0)
     # 리스크 비율도 N배로 계측된다(1% → 3%).
     assert tripled.stats.max_concurrent_risk_ratio == pytest.approx(
@@ -246,8 +253,12 @@ def test_fixed_notional_mode_scales_with_multiple() -> None:
     """`fixed_notional`(시드 분할) 모드에서도 배수가 명목을 키운다."""
     cells = [_cell("BTC/USDT:USDT", "1h", [_cand(1_000, 2_000)])]
     cfg = _cfg(sizing_mode="fixed_notional", notional_fraction=0.25, leverage=1.0)
-    base = run_leverage_book(cells, cfg, LeverageBookParams(leverage_multiple=1.0))
-    doubled = run_leverage_book(cells, cfg, LeverageBookParams(leverage_multiple=2.0))
+    base = run_leverage_book(
+        cells, cfg, LeverageBookParams(leverage_multiple=1.0, leverage_mode="combined")
+    )
+    doubled = run_leverage_book(
+        cells, cfg, LeverageBookParams(leverage_multiple=2.0, leverage_mode="combined")
+    )
     assert doubled.trades[0].quantity == pytest.approx(base.trades[0].quantity * 2.0)
 
 
@@ -255,7 +266,9 @@ def test_apply_book_leverage_rejects_missing_risk_sizing() -> None:
     """전액 진입 모드(risk_sizing=None)는 배수를 정의할 수 없어 거부한다."""
     cfg = BacktestConfig(initial_capital=10_000.0, risk_sizing=None)
     with pytest.raises(ValueError, match="리스크 사이징"):
-        apply_book_leverage(cfg, LeverageBookParams(leverage_multiple=2.0))
+        apply_book_leverage(
+            cfg, LeverageBookParams(leverage_multiple=2.0, leverage_mode="combined")
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -267,12 +280,20 @@ def test_liquidation_event_recorded_at_high_multiple() -> None:
     """전 포지션 동시 손절 가정이 유지증거금을 뚫으면 청산 이벤트로 계측된다."""
     cells = [_cell("BTC/USDT:USDT", "1h", [_cand(1_000, 2_000)])]
     calm = run_leverage_book(
-        cells, _cfg(), LeverageBookParams(leverage_multiple=1.0, maintenance_margin_rate=0.25)
+        cells,
+        _cfg(),
+        LeverageBookParams(
+            leverage_multiple=1.0, maintenance_margin_rate=0.25, leverage_mode="combined"
+        ),
     )
     assert calm.stats.liquidations == []
     # 배수 5: 명목 ≈ 자본×5 → 유지증거금 1.25×자본 > 최악 자본(0.95×자본) → 트리거.
     risky = run_leverage_book(
-        cells, _cfg(), LeverageBookParams(leverage_multiple=5.0, maintenance_margin_rate=0.25)
+        cells,
+        _cfg(),
+        LeverageBookParams(
+            leverage_multiple=5.0, maintenance_margin_rate=0.25, leverage_mode="combined"
+        ),
     )
     assert len(risky.stats.liquidations) == 1
     assert risky.stats.liquidated
@@ -293,14 +314,14 @@ def test_straddle_position_does_not_occupy_capital_or_cell() -> None:
     straddle = _cand(1_000, 9_000, trigger_time=1_000)  # 경계(5_000)를 넘어 산다.
     fresh = _cand(6_000, 8_000, trigger_time=6_000)  # 평가 창 셋업 — straddle과 겹친다.
     cells = [_cell("BTC/USDT:USDT", "1h", [straddle, fresh])]
-    outcome = run_leverage_book(cells, _cfg(), LeverageBookParams(), eval_from_ms=boundary)
+    outcome = run_leverage_book(cells, _cfg(), LEGACY_BOOK_PARAMS, eval_from_ms=boundary)
 
     assert outcome.stats.placed == 1  # straddle은 배치조차 되지 않았다.
     assert outcome.stats.skipped_cell_busy == 0  # 칸을 잠그지도 않았다.
     only = outcome.trades[0]
     assert only.entry_time == 6_000
     # 신선한 초기자본 그대로 사이징됐다(워밍업 손익·점유가 스며들지 않았다).
-    lone = run_leverage_book([_cell("BTC/USDT:USDT", "1h", [fresh])], _cfg(), LeverageBookParams())
+    lone = run_leverage_book([_cell("BTC/USDT:USDT", "1h", [fresh])], _cfg(), LEGACY_BOOK_PARAMS)
     assert only.quantity == pytest.approx(lone.trades[0].quantity)
 
 
@@ -312,7 +333,7 @@ def test_eval_filter_uses_trigger_time_not_entry_time() -> None:
     outcome = run_leverage_book(
         [_cell("BTC/USDT:USDT", "1h", [warm_tap])],
         _cfg(),
-        LeverageBookParams(),
+        LEGACY_BOOK_PARAMS,
         eval_from_ms=boundary,
     )
     assert outcome.stats.placed == 0
@@ -364,8 +385,8 @@ def test_book_causality_truncating_future_keeps_past_trades() -> None:
         for cell in full_cells
     ]
     cfg = _cfg(leverage=10.0)
-    full = run_leverage_book(full_cells, cfg, LeverageBookParams())
-    part = run_leverage_book(truncated_cells, cfg, LeverageBookParams())
+    full = run_leverage_book(full_cells, cfg, LEGACY_BOOK_PARAMS)
+    part = run_leverage_book(truncated_cells, cfg, LEGACY_BOOK_PARAMS)
 
     # 절단 시각 자체에 강제 청산된 인공 거래(END_OF_DATA)는 비교 대상이 아니다 —
     # "그 전에 끝난" 거래만 비교한다(엄격 미만).
@@ -392,11 +413,15 @@ def test_cap_only_scales_cap_not_trade_size() -> None:
     b = _cand(2_000, 6_000)
     cells = [_cell("BTC/USDT:USDT", "1h", [a]), _cell("ETH/USDT:USDT", "1h", [b])]
 
-    base = run_leverage_book(cells, _cfg(), LeverageBookParams(leverage_multiple=1.0))
+    base = run_leverage_book(
+        cells, _cfg(), LeverageBookParams(leverage_multiple=1.0, leverage_mode="combined")
+    )
     assert base.stats.placed == 1
     assert base.stats.skipped_notional == 1
 
-    combined = run_leverage_book(cells, _cfg(), LeverageBookParams(leverage_multiple=3.0))
+    combined = run_leverage_book(
+        cells, _cfg(), LeverageBookParams(leverage_multiple=3.0, leverage_mode="combined")
+    )
     assert combined.stats.placed == 1  # 상대 여유 불변 — 겹침 자리가 늘지 않는다.
     assert combined.stats.skipped_notional == 1
 
@@ -419,7 +444,9 @@ def test_cap_only_per_trade_ceiling_stays_base() -> None:
     cap_only = run_leverage_book(
         cells, _cfg(), LeverageBookParams(leverage_multiple=5.0, leverage_mode="cap_only")
     )
-    combined = run_leverage_book(cells, _cfg(), LeverageBookParams(leverage_multiple=5.0))
+    combined = run_leverage_book(
+        cells, _cfg(), LeverageBookParams(leverage_multiple=5.0, leverage_mode="combined")
+    )
 
     cap_qty = cap_only.trades[0].quantity
     # 1배 천장(자본×1 = 10,000 명목) ÷ 진입가 100 = 수량 100 — 북 상한(5배)이 아니다.
@@ -437,7 +464,9 @@ def test_cap_only_multiple_one_equals_combined() -> None:
         _cell("ETH/USDT:USDT", "1h", [_cand(2_000, 6_000)]),
     ]
     cfg = _cfg(leverage=10.0)  # 상한이 판정을 가리지 않게.
-    combined = run_leverage_book(cells, cfg, LeverageBookParams(leverage_multiple=1.0))
+    combined = run_leverage_book(
+        cells, cfg, LeverageBookParams(leverage_multiple=1.0, leverage_mode="combined")
+    )
     cap_only = run_leverage_book(
         cells, cfg, LeverageBookParams(leverage_multiple=1.0, leverage_mode="cap_only")
     )
@@ -468,7 +497,7 @@ def test_skip_and_placed_records_match_counters() -> None:
     outcome = run_leverage_book(
         [_cell("BTC/USDT:USDT", "1h", [a, a_overlap]), _cell("ETH/USDT:USDT", "1h", [b])],
         _cfg(),
-        LeverageBookParams(),
+        LEGACY_BOOK_PARAMS,
     )
     stats = outcome.stats
     reasons = [r.reason for r in stats.skip_records]
@@ -506,7 +535,7 @@ def test_funding_window_slicing_bit_identical_to_full_list() -> None:
     outcome = run_leverage_book(
         [BookCell(symbol="BTC/USDT:USDT", timeframe="1h", candidates=[cand], funding_rates=rates)],
         cfg,
-        LeverageBookParams(),
+        LEGACY_BOOK_PARAMS,
     )
     manual = _to_trade(cand, cfg.initial_capital, cfg, rates, 0.0)
     assert manual is not None

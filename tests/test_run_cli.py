@@ -530,6 +530,10 @@ def test_main_jobs_keeps_stdout_and_stderr_identical(
     db_path, cache_dir = synthetic_db
     argv = [
         *_PARALLEL_ARGV,
+        # WAN-213: 인자 없는 실행의 기본값이 레버리지 북으로 바뀌었다 — 이 대조는 per-cell
+        # 격자(2심볼 × 2익절R)의 병렬 불변을 재는 것이라 단일 포지션 경로를 명시한다.
+        "--positions",
+        "single",
         "--format",
         "csv",
         "--no-funding",
@@ -576,7 +580,9 @@ def test_run_grid_respects_no_funding(synthetic_loader: None) -> None:
 def test_main_prints_table_by_default(
     synthetic_loader: None, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    assert main(["--symbol", "BTCUSDT", "--quiet"]) == 0
+    # WAN-213: per-cell 표(return%/sharpe 열)를 재는 테스트라 단일 포지션 경로를 명시한다
+    # — 인자 없는 실행의 기본값은 이제 레버리지 북(집계 행, 열이 다르다)이다.
+    assert main(["--symbol", "BTCUSDT", "--positions", "single", "--quiet"]) == 0
     out = capsys.readouterr().out
     assert "return%" in out and "sharpe" in out
 
@@ -589,6 +595,8 @@ def test_main_writes_csv_to_out_path(synthetic_loader: None, tmp_path: Path) -> 
         "BTCUSDT",
         "--tf",
         "1h",
+        "--positions",  # WAN-213: --tp-r 격자는 per-cell 축이다(북 모드는 채택 R만).
+        "single",
         "--tp-r",
         "1.5,2.0",
         "--format",
@@ -607,7 +615,20 @@ def test_main_writes_json_to_out_path(synthetic_loader: None, tmp_path: Path) ->
     out = tmp_path / "sweep.json"
     assert (
         main(
-            ["--symbol", "BTCUSDT", "--tf", "1h", "--format", "json", "--out", str(out), "--quiet"]
+            # WAN-213: entry_mode 등 per-cell 열을 검증하므로 단일 포지션 경로를 명시한다.
+            [
+                "--symbol",
+                "BTCUSDT",
+                "--tf",
+                "1h",
+                "--positions",
+                "single",
+                "--format",
+                "json",
+                "--out",
+                str(out),
+                "--quiet",
+            ]
         )
         == 0
     )
@@ -620,7 +641,10 @@ def test_main_keeps_stdout_clean_for_piping(
     synthetic_loader: None, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """진행 로그는 stderr로 — stdout이 오염되면 `--format csv | ...` 파이프가 깨진다."""
-    assert main(["--symbol", "BTCUSDT", "--tf", "1h", "--format", "csv"]) == 0
+    # WAN-213: per-cell 단일 행의 stdout 청결성 — 단일 포지션 경로를 명시한다.
+    assert (
+        main(["--symbol", "BTCUSDT", "--tf", "1h", "--positions", "single", "--format", "csv"]) == 0
+    )
     captured = capsys.readouterr()
     frame = pd.read_csv(pd.io.common.StringIO(captured.out))
     assert len(frame) == 1
@@ -629,12 +653,16 @@ def test_main_keeps_stdout_clean_for_piping(
 
 def test_main_reports_bad_arguments_as_exit_code_2(capsys: pytest.CaptureFixture[str]) -> None:
     """잘못된 조합은 트레이스백이 아니라 사람이 읽을 오류로 끝난다."""
-    assert main(["--offset-bps", "abc"]) == 2
+    # WAN-213: --offset-bps는 per-cell 축이라(북 모드는 채택 오프셋만) 단일 포지션 경로에서
+    # 파싱 오류를 낸다 — 북 모드였다면 "북은 채택 기본값만"이라는 다른 오류로 끝난다.
+    assert main(["--positions", "single", "--offset-bps", "abc"]) == 2
     assert "오류" in capsys.readouterr().err
 
 
 def test_main_rejects_oos_with_walkforward(capsys: pytest.CaptureFixture[str]) -> None:
-    assert main(["--oos", "--walkforward", "3"]) == 2
+    # WAN-213: per-cell 경로의 oos+walkforward 배타 검사를 재므로 단일 포지션을 명시한다
+    # (북 모드는 --walkforward 자체를 아직 배선하지 않아 다른 오류로 끝난다).
+    assert main(["--positions", "single", "--oos", "--walkforward", "3"]) == 2
     assert "함께 쓸 수 없습니다" in capsys.readouterr().err
 
 
@@ -642,7 +670,7 @@ def test_main_rejects_warm_oos_with_walkforward_and_wrong_paths(
     synthetic_loader: None, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """WAN-166: `--oos-warm`의 금지 조합이 트레이스백 없이 종료 코드 2로 끝난다."""
-    assert main(["--oos-warm", "--walkforward", "3"]) == 2
+    assert main(["--positions", "single", "--oos-warm", "--walkforward", "3"]) == 2
     assert "함께 쓸 수 없습니다" in capsys.readouterr().err
     assert main(["--symbol", "BTCUSDT", "--oos-warm", "--positions", "3"]) == 2
     assert "oos-warm" in capsys.readouterr().err
