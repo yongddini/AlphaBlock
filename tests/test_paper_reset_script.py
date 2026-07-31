@@ -66,8 +66,14 @@ def _count(path: Path, table: str) -> int:
 
 
 def _run(db: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    # `--services ""` 로 systemd 단계를 격리한다. 이 테스트가 잠그는 것은 "시세를
+    # 건드리지 않는다"는 DB 계약이지 서비스 오케스트레이션이 아니다 — 그리고 CI 러너에는
+    # systemctl 은 있으나 유닛(alphablock-live 등)이 없어, 서비스 정지 단계가 유닛
+    # 미로드(종료 코드 5)로 스크립트를 삭제 이전에 중단시킨다(로컬 macOS 에는 systemctl
+    # 자체가 없어 그 단계를 건너뛰므로 환경마다 결과가 달라진다). 빈 SERVICES 는
+    # `-n "$SERVICES"` 가드로 서비스 분기를 통째로 건너뛰게 한다.
     return subprocess.run(
-        [str(SCRIPT), "--db", str(db), *args],
+        [str(SCRIPT), "--db", str(db), "--services", "", *args],
         capture_output=True,
         text=True,
         cwd=REPO_ROOT,
