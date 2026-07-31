@@ -367,6 +367,12 @@ UNSET = _Unset.UNSET
 #: 「미지정」을 「끄기」와 갈라 나르려고 쓴다(run.py의 `Grid`/`Combo`).
 ZoneWidthArg = float | None | _Unset
 
+#: 지정가 유효기간 인자의 타입 — 실제 봉 수(`int`)·무기한(`None`)·미지정(`UNSET`)(WAN-222).
+#: 존폭 필터와 **같은 규약**이다: `None`이 "무기한 대기"라는 **유의미한 값**이라
+#: (`offset_bps`처럼) "손대지 않는다"로 못 쓴다 — 그래서 미지정을 센티넬로 따로 나른다.
+#: `is UNSET`이면 `base`의 값을 물려받고(= 채택 기본값 = `24`), 명시적 `None`이면 무기한이다.
+LimitValidBarsArg = int | None | _Unset
+
 
 def build_params(
     *,
@@ -378,6 +384,7 @@ def build_params(
     short_enabled: bool | None = None,
     retap_mode: str | None = None,
     max_zone_width_atr: float | None | _Unset = UNSET,
+    limit_valid_bars: int | None | _Unset = UNSET,
     base: ConfluenceParams | None = None,
 ) -> ConfluenceParams:
     """CLI 인자를 `ConfluenceParams`로 조립한다.
@@ -395,6 +402,11 @@ def build_params(
     `UNSET`으로 표현한다: `UNSET`이면 `base`의 값을 물려받고(= 채택 기본값 = `1.28`),
     명시적 `None`이면 **끈다**(= `1.28`을 덮어써 `None`으로). 이래야 wan155/wan161·CLI의
     `none` 팔이 「필터 끔」 라벨을 단 채 조용히 1.28로 도는 이중 필터를 피한다.
+
+    ⚠️ **`limit_valid_bars`도 같은 규약이다**(WAN-222) — 무기한이 `None`이라 미지정을
+    센티넬 `UNSET`으로 나른다: `UNSET`이면 `base`의 값(= 채택 기본값 = `24`)을 물려받고,
+    명시적 `None`이면 **무기한**(존 무효화까지 대기)이다. 미지정과 무기한을 안 가르면
+    「유효기간 24」 실행에 `--limit-valid-bars none` 라벨이 붙는 조용한 실패가 생긴다.
 
     진입 방식은 지정가(B안) 단독이다(A안은 WAN-208/WAN-215로 제거). 알 수 없는
     `entry_mode`는 `ValueError`로 거부한다.
@@ -416,6 +428,10 @@ def build_params(
         # 명시적 `None`은 **끄기**다(채택 기본값 1.28을 덮어쓴다). `UNSET`이면
         # `base`(= 채택 기본값)의 값을 그대로 물려받는다 — 위 독스트링 규약.
         update["max_zone_width_atr"] = max_zone_width_atr
+    if limit_valid_bars is not UNSET:
+        # 명시적 `None`은 **무기한**이다(채택 기본값 24를 덮어쓴다). `UNSET`이면
+        # `base`(= 채택 기본값 24)의 값을 그대로 물려받는다 — 위 독스트링 규약.
+        update["limit_valid_bars"] = limit_valid_bars
     if take_profit_r is not None:
         update["take_profit_r"] = take_profit_r
     if short_enabled is not None:
@@ -891,6 +907,14 @@ class RunRow(BaseModel):
 
     `portfolio_leverage`와 같은 자리 — "안 씀"과 숫자를 가르려고 0이 아니라 `None`이다.
     **실제로 엔진에 넘어간 `params.max_zone_width_atr`**를 싣는다(요청 라벨이 아니다)."""
+    limit_valid_bars: int | None = 24
+    """지정가 유효기간(WAN-222, 상위TF 봉 수). `24` = 채택 기본값 · `None` = 무기한(존
+    무효화까지 대기).
+
+    기본값이 채택 기본값(`24`)이라 이 축이 생기기 전 행 생성부(옛 픽스처)는 그대로 유효하다
+    — `retap_mode`가 같은 자리에서 쓴 방식이다. **실제로 엔진에 넘어간
+    `params.limit_valid_bars`**를 싣는다(요청 라벨이 아니다). `None`(무기한)은 CSV에서
+    빈 칸이 되고, 되읽을 때 `_empty_leverage_is_none`이 `NaN`을 `None`으로 되돌린다."""
     fill: str
     seed: int
     start_time: int | None
@@ -908,7 +932,7 @@ class RunRow(BaseModel):
     num_filled: int | None
     funding_coverage: float | None
 
-    @field_validator("portfolio_leverage", "max_zone_width_atr", mode="before")
+    @field_validator("portfolio_leverage", "max_zone_width_atr", "limit_valid_bars", mode="before")
     @classmethod
     def _empty_leverage_is_none(cls, value: object) -> object:
         """CSV 왕복에서 빈 칸(→ `NaN`)을 `None`으로 되돌린다.
@@ -917,6 +941,9 @@ class RunRow(BaseModel):
         읽어 오면 pydantic이 `float | None`의 float 가지로 받아 **저장 전 행과 달라진다** —
         요약만 다시 그리는 `--from-csv` 경로가 원본과 어긋나는 그 사고다(리포트 모듈의
         `rows_from_csv`가 회귀 테스트로 왕복 일치를 고정한다).
+
+        `limit_valid_bars`(WAN-222)의 빈 칸은 **무기한(`None`)**을 뜻한다 — 유한한 봉 수는
+        항상 값이 찍히므로 `NaN`은 무기한 팔에서만 나온다.
         """
         if isinstance(value, float) and math.isnan(value):
             return None
@@ -969,6 +996,7 @@ def build_row(
         portfolio_leverage=None if portfolio is None else portfolio.leverage,
         combine_obs=(order_block or OrderBlockParams()).combine_obs,
         max_zone_width_atr=params.max_zone_width_atr,
+        limit_valid_bars=params.limit_valid_bars,
         fill=fill_name,
         seed=params.fill_dropout_seed,
         start_time=start_time,
@@ -1024,6 +1052,7 @@ _AXIS_COLUMNS: tuple[tuple[str, str], ...] = (
     ("lev", "portfolio_leverage"),
     ("merge", "combine_obs"),
     ("zw_atr", "max_zone_width_atr"),
+    ("lvb", "limit_valid_bars"),
     ("fill", "fill"),
     ("seed", "seed"),
 )
@@ -1032,6 +1061,11 @@ _PERCENT_FIELDS = frozenset({"total_return", "win_rate", "max_drawdown", "fill_r
 
 
 def _fmt_cell(field: str, value: object) -> str:
+    if field == "limit_valid_bars":
+        # `None`(무기한)은 「해당 없음(—)」이 아니라 실험의 한 팔이라 이름을 준다(WAN-222).
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            return "none"
+        return str(int(value)) if isinstance(value, (int, float)) else str(value)
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return "—"
     if field in _PERCENT_FIELDS and isinstance(value, float):

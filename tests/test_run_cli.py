@@ -14,7 +14,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from backtest.harness import MarketData, RunRow
+from backtest.harness import UNSET, MarketData, RunRow
 from backtest.portfolio import PortfolioParams
 from backtest.run import (
     JOBS_AUTO,
@@ -158,6 +158,8 @@ def test_cli_defaults_produce_the_adopted_engine() -> None:
     # CLI 기본 실행만 조용히 갈라진다.
     assert grid.retap_modes == (ConfluenceParams().retap_mode,) == ("every_tap",)
     assert grid.short_enabled is None  # 기본값을 덮어쓰지 않는다.
+    # 유효기간 축(WAN-222)도 미지정 = 센티넬(채택 기본값 24 물려받음).
+    assert grid.limit_valid_bars == (UNSET,)
     assert len(iter_combos(grid)) == 1
 
 
@@ -201,6 +203,32 @@ def test_positions_rejects_unknown_and_non_positive_values() -> None:
         _grid_from(["--positions", "multi"])
     with pytest.raises(ValueError, match="0보다 커야"):
         _grid_from(["--positions", "0"])
+
+
+def test_limit_valid_bars_axis_defaults_to_the_adopted_value() -> None:
+    """WAN-222: `--limit-valid-bars`를 안 주면 축이 열리지 않는다(채택 기본값 = 24 물려받음).
+
+    미지정은 센티넬 `UNSET`이지 `24`가 아니다 — 여기에 24를 하드코딩하면 기본값이 바뀔 때
+    CLI 기본 실행만 조용히 옛 값을 물고 돈다(존폭 필터 `UNSET` 규약과 같은 자리)."""
+    grid = _grid_from([])
+    assert grid.limit_valid_bars == (UNSET,)
+    (combo,) = iter_combos(grid)
+    assert combo.limit_valid_bars is UNSET
+
+
+def test_limit_valid_bars_axis_expands_and_maps_none_to_indefinite() -> None:
+    """WAN-222: `--limit-valid-bars 6,24,none`이 세 팔을 낸다 — `none`은 무기한(`None`)."""
+    grid = _grid_from(["--limit-valid-bars", "6,24,none"])
+    assert grid.limit_valid_bars == (6, 24, None)
+    combos = iter_combos(grid)
+    assert [c.limit_valid_bars for c in combos] == [6, 24, None]
+
+
+def test_limit_valid_bars_rejects_unknown_and_non_positive_values() -> None:
+    with pytest.raises(ValueError, match="--limit-valid-bars"):
+        _grid_from(["--limit-valid-bars", "forever"])
+    with pytest.raises(ValueError, match="1 이상"):
+        _grid_from(["--limit-valid-bars", "0"])
 
 
 def test_comma_values_expand_to_cartesian_product() -> None:
@@ -281,6 +309,35 @@ def test_run_grid_zone_limit_reports_a_fill_rate(synthetic_loader: None) -> None
     assert len(rows) == 1
     assert rows[0].entry_mode == "zone_limit"
     assert rows[0].fill_rate is not None
+
+
+def test_limit_valid_bars_unspecified_is_bit_identical_and_the_knob_is_live(
+    synthetic_loader: None,
+) -> None:
+    """WAN-222 완료기준 1·3: 미지정 = 명시적 24와 비트 동일 · `none`은 라벨이 아니라 동작이다.
+
+    존폭 필터를 끈다(합성 존이 1.28×ATR보다 넓어 켜면 셋업이 사라진다 — 이 테스트가 보는
+    것은 유효기간 축의 동작이지 필터가 아니다). 세 가지를 한 번에 못 박는다:
+
+    * **미지정 == 명시적 24** — 행이 전 열 비트 동일. 축이 생겨도 기본 실행이 안 흔들린다.
+    * **`1` != `none`** — 유효기간이 실제로 엔진을 바꾼다(라벨만 붙는 WAN-95/112/123 부류 방지).
+    * **`none`이 무기한** — 유한 유효기간보다 셋업을 더(≥) 살려 둔다(만료는 취소만 하지
+      더하지 않으므로 eligible은 유효기간에 단조 증가한다).
+    """
+    base = ["--symbol", "BTCUSDT", "--tf", "1h", "--max-zone-width-atr", "none"]
+    unspecified = run_grid(_grid_from(base), RunOptions(), log=False)
+    explicit_24 = run_grid(_grid_from([*base, "--limit-valid-bars", "24"]), RunOptions(), log=False)
+    assert unspecified[0].model_dump() == explicit_24[0].model_dump()
+    assert unspecified[0].limit_valid_bars == 24
+
+    short, indefinite = run_grid(
+        _grid_from([*base, "--limit-valid-bars", "1,none"]), RunOptions(), log=False
+    )
+    assert (short.limit_valid_bars, indefinite.limit_valid_bars) == (1, None)
+    # 라벨이 아니라 동작: 두 팔이 실제로 다른 엔진 산출을 낸다.
+    assert short.model_dump() != indefinite.model_dump()
+    # 무기한은 유한 유효기간보다 셋업을 더(≥) 살려 둔다.
+    assert (indefinite.eligible_setups or 0) >= (short.eligible_setups or 0)
 
 
 def test_run_grid_multi_position_arm_routes_to_the_portfolio_engine(
