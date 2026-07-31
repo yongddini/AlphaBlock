@@ -1338,6 +1338,26 @@ WAN-175/176 못 박은 6년 창(2020-09-15~2026-07-22)으로 옮기고, **cap-on
   111/114/124/151/176) 불변**. **기본값·토대 불변**(cap-only는 옵트인 · 기본값 승격은
   재-베이스라인 = 사용자 결정 · 실거래 보류 유지).
 
+📌 **레버리지 북(cap_only 5배)이 채택 기본 회계다(WAN-213 = 사용자 결정 2026-07-30 「전부
+다」 · 프로젝트 최대 규모 재-베이스라인): 포지션 회계가 「동시 1포지션」에서 **북**으로 바뀌었다.**
+[`docs/decisions/wan213.md`](docs/decisions/wan213.md). 파라미터 하나가 아니라 **회계 모델
+자체**가 「칸=(종목,TF)마다 1포지션 · 여러 칸 동시 · 한 지갑 공유 · cap_only 5배」로 바뀐다.
+- 📌 **`LeverageBookParams()` 기본값이 채택 북이다**(cap_only · 배수 5) — `ConfluenceParams()`가
+  채택 전략을 내는 것과 대칭. WAN-169 중립 기준점(배수 1 · combined)은 `LEGACY_BOOK_PARAMS`로
+  뺐고, 옛 결합 리포트(wan169)는 `leverage_mode="combined"` **명시 핀**으로 고정했다.
+- 📌 **인자 없는 `backtest.run`이 북을 돈다** — `--positions`가 분기: 미지정/`book` = 채택 북,
+  `single` = per-cell 동시 1포지션(옛 리포트 대조), 숫자 = per-cell 다중 포지션(WAN-103).
+  북은 칸을 가로지르는 공유 자본이라 per-cell 행이 아니라 **구간당 집계 행**을 낸다(새 모듈
+  `backtest/book_cli.py`가 실행 · wan169/wan180 함수를 그대로 재사용해 wan180 셀과 **구성상
+  비트 일치**). 정본 OOS = `backtest.run --oos-warm`(북 경로에 warm/cold 배선됨, WAN-166 규약).
+- 🚨 **레버리지는 알파가 아니라 위험의 모양만 바꾼다**(WAN-90) — 총수익 %(both full +12.77억%대)는
+  수천 거래 복리 착시라 **실현 수익 아님**. 판단 근거는 **MDD(both 5배 6년 19.55% · oos_warm
+  14.25%)·최대 동시 리스크(6.93%)·청산(0건)**. 6년 MDD ~20%는 천장이 아니라 **바닥선**(창이
+  2020-09 시작이라 2018·2020-03 폭락 미포함). **「엣지 없음」(WAN-84/88/111/114/124/151/201)
+  불변**(다른 질문) · 전부 `baseline` 위 값 · 실거래 보류 유지(`ALPHABLOCK_LIVE_TRADING=false`).
+- 📌 **페이퍼 러너 배선은 별도 이슈(WAN-171)** — 북 모드는 전략·비용 격자·거래별 출력·
+  `--walkforward`·미끄러지는 창을 아직 **거부**한다(채택 기본값만 · 필요해지면 별도 이슈).
+
 - **진입 방식** = **존 근단 지정가 + 오프셋 2bp**(`entry_mode="zone_limit"`,
   `zone_limit_ref="proximal"`, WAN-95 / `zone_limit_offset_bps=2.0`, **WAN-112** — 존 근단보다
   2bp 체결 쉬운 쪽(롱=위)에 건다. 위 📌 오프셋 문단 참고: 데이터가 아니라 사용자 판단이다).
@@ -1386,6 +1406,10 @@ WAN-175/176 못 박은 6년 창(2020-09-15~2026-07-22)으로 옮기고, **cap-on
   익절 판정에서 완전히 빠졌다**(`use_line_take_profit=False`) — 옛 선 도달 익절은
   `take_profit_mode="line"`으로 켤 수 있지만 기본이 아니다.
 - **손절** = 진입 근거 오더블록의 무효화(breaker). 이 규칙은 변경 없음.
+- **포지션 회계** = **레버리지 북(cap_only 5배)**(`LeverageBookParams()` 기본값, **WAN-213**
+  — 위 📌 문단). 칸=(종목,TF)마다 1포지션 · 여러 칸 동시 · 한 지갑 공유. 인자 없는
+  `backtest.run`이 이 북을 돈다(`--positions single`으로 옛 동시 1포지션 per-cell 경로).
+  ⚠️ 옛 「동시 1포지션」은 `--positions single`로 존치 — 옛 리포트 대조용.
 - **존 병합 없음 — 원본 존 단위로 탐지·진입·손절한다**(`combine_obs=False`, **WAN-149**
   사용자 결정 2026-07-21). 겹치는 오더블록을 하나로 접지 않는다. ⚠️ 옛 기본값 `True`는
   옵트인으로 **존치**한다 — 아래 📌 WAN-149 문단.
@@ -1641,6 +1665,12 @@ WAN-99/104는 오프셋을 **축으로 명시**해 돌리므로 무관하다. �
 리포트 헬퍼(`backtest/report.py`)는 파라미터를 못 받으면 진입 방식을 기본값으로
 지어내지 않고 `"unknown"`으로 적는다.
 
+⚠️ **WAN-103/108의 「동시 다중 포지션」과 채택 북(WAN-213)은 다른 것이다** — WAN-103 다중은
+**한 (종목,TF) 안에서** 존을 겹쳐 잡는 것(per-cell)이고, WAN-213 북은 **칸을 가로질러** 한
+지갑을 공유하는 것이다. 아래 「기본값은 여전히 동시 1포지션」은 **WAN-213 전까지의 서술**이다 —
+지금 채택 회계는 레버리지 북이고(위 📌 WAN-213 문단), per-cell 단일/다중은 `--positions
+single`/숫자로 존치한다.
+
 ⚠️ **동시 다중 포지션은 옵션이고 기본값은 여전히 「동시 1포지션」이다(WAN-103 · 재판정
 WAN-108)**: [`docs/decisions/wan103.md`](docs/decisions/wan103.md)(재현: `python -m
 backtest.wan103_portfolio_leverage_report` + `python -m
@@ -1768,10 +1798,13 @@ WAN-194 잔여 §1·§4)**: [`docs/decisions/wan195.md`](docs/decisions/wan195.m
 **"파라미터 바꿔서 다시 돌려보기"에는 새 스크립트를 만들지 않는다.** 범용 CLI가 있다:
 
 ```bash
-uv run python -m backtest.run --tp-r 1.0,1.5,2.0,3.0          # 익절 R 스윕
+uv run python -m backtest.run                                # 인자 없이 = 채택 북(cap_only 5배, WAN-213)
+uv run python -m backtest.run --oos-warm                     # 정본 리포트 = 채택 북 warm/cold(WAN-166/213)
+uv run python -m backtest.run --positions book --tf 15m,1h   # 채택 북을 명시(wan180 both 좌표)
+uv run python -m backtest.run --tp-r 1.0,1.5,2.0,3.0          # 익절 R 스윕(전략 축 → per-cell 단일 자동)
 uv run python -m backtest.run --tf 15m --fill baseline,pen_5bp,pen_5bp_drop_50
 uv run python -m backtest.run --symbol BTCUSDT,ETHUSDT --oos --format csv --out x.csv
-uv run python -m backtest.run --tf 1h --oos-warm                          # 따뜻(주)+차가움(스트레스) 병기(WAN-166 정본)
+uv run python -m backtest.run --positions single --tf 1h --oos-warm       # per-cell 단일 warm/cold(WAN-166)
 uv run python -m backtest.run --symbol BTCUSDT,ETHUSDT,SOLUSDT --jobs 6   # 병렬(WAN-121)
 uv run python -m backtest.run --tf 15m,1h --positions single,3 --oos      # 단일 vs 다중(WAN-130)
 uv run python -m backtest.run --tf 15m,1h --combine-obs true,false --oos  # 존 병합 전후(WAN-149)
@@ -1802,14 +1835,22 @@ uv run python -m backtest.run --symbol BTCUSDT --tf 15m --persist         # DB �
 
 값에 콤마를 주면 데카르트 곱 격자를 돌고 조합별 1행(`total_return`/승률/MDD/거래수/
 체결률/평균 R/Sharpe)을 낸다. 축은 심볼·TF·진입 방식·익절 R·오프셋·재탭 정책·**포지션
-정책**(`--positions`, WAN-130: `single` = 동시 1포지션 기본값 · 숫자 = 다중 포지션 명목
-상한 배수)·**존 병합**(`--combine-obs`, WAN-149 — ⚠️ 이것만 **탐지** 파라미터라 값마다
-오더블록을 다시 탐지한다)·**존폭 필터**(`--max-zone-width-atr`, WAN-159 — 채택 기본값 `1.28`,
-`none`은 **끄기**이고 인자 미지정(1.28)과 다르다, 단위는 **ATR 배수**다)·체결 가정·시드이며,
-`--oos`/`--walkforward`가 IS/OOS 분할을 기본 제공한다. **정본 리포트의 OOS는 `--oos-warm`**
-(WAN-166: `oos_warm` 주 수치 + `oos` 스트레스 병기 — B안 단일 포지션 전용, 위 📌 문단)이다. 인자 없이 돌리면 **채택 기본값**
-(`ConfluenceParams()`) 그대로이고, 그 결과가 WAN-95/99 리포트 셀과 1e-9 이내로 일치함이
-테스트로 고정돼 있다(`tests/test_harness.py` + `tests/test_run_regression_real_data.py`).
+정책**(`--positions`, WAN-130/213: **미지정 = 채택 북**(cap_only 5배) · `book` = 북 명시 ·
+`single` = per-cell 동시 1포지션 · 숫자 = per-cell 다중 포지션 명목 상한 배수)·**존 병합**
+(`--combine-obs`, WAN-149 — ⚠️ 이것만 **탐지** 파라미터라 값마다 오더블록을 다시 탐지한다)·
+**존폭 필터**(`--max-zone-width-atr`, WAN-159 — 채택 기본값 `1.28`, `none`은 **끄기**이고 인자
+미지정(1.28)과 다르다, 단위는 **ATR 배수**다)·체결 가정·시드이며, `--oos`/`--walkforward`가
+IS/OOS 분할을 기본 제공한다. **정본 리포트의 OOS는 `--oos-warm`**(WAN-166: `oos_warm` 주 수치
++ `oos` 스트레스 병기)이다.
+📌 **포지션 기본값 = 채택 북(WAN-213)** — 인자 없는(또는 좌표만 준) 실행은 **레버리지 북**
+(cap_only 5배 · 칸=(종목,TF) 공유 자본)을 돌아 **구간당 집계 행**을 낸다(`backtest/book_cli.py`).
+⚠️ 전략·비용·거래별 축(`--tp-r`·`--fill`·`--combine-obs`·`--max-zone-width-atr`·`--trades`
+등)을 주면 북이 그 축을 표현하지 못하므로 **per-cell 단일 포지션으로 자동 접힌다** — 그 축
+스윕은 예전 그대로 `RunRow`를 낸다(매번 `--positions single`을 붙일 필요 없다). 명시적
+`--positions book`에 그 축을 함께 주면 **거부**한다(조용히 접지 않는다). per-cell 단일
+포지션이 WAN-95/99 리포트 셀과 1e-9 이내로 일치함은 테스트가 고정한다(`tests/test_harness.py`
++ `tests/test_run_regression_real_data.py`, 후자는 `--positions single`). 북이 wan180 채택
+셀과 구성상 비트 일치함은 `tests/test_book_cli.py`가 고정한다.
 🔁 **인자 없는 실행의 데이터 좌표는 WAN-182부터 9종목 × 15m·1h·4h × 못 박은 채택 창
 (2020-09-15~2026-07-22)이다** — `--years N`을 명시한 실행만 옛 미끄러지는 창을 쓴다(위 📌
 WAN-182 문단). 27셀 × 6년이라 인자 없는 실행은 무겁다 — 탐색 중에는 심볼·TF를 좁혀 돌 것.

@@ -459,7 +459,14 @@ def build_book_rows(payloads: Sequence[CellPayload]) -> list[BookRow]:
                     cells = _segment_cells(scoped, segment, exclude)
                     for multiple in MULTIPLES:
                         outcome = run_leverage_book(
-                            cells, cfg, LeverageBookParams(leverage_multiple=multiple)
+                            # WAN-213 명시 핀: 이 리포트는 결합(combined)만 측정했다 —
+                            # 클래스 기본값이 채택 북(cap_only 5배)으로 옮겨간 뒤 CSV가
+                            # 조용히 그 값으로 다시 돌지 않게 combined를 못 박는다.
+                            cells,
+                            cfg,
+                            LeverageBookParams(
+                                leverage_multiple=multiple, leverage_mode="combined"
+                            ),
                         )
                         result = build_result_from_trades(
                             outcome.trades, outcome.effective_config, BOOK_ANNUALIZATION_TF

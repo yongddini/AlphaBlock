@@ -38,8 +38,9 @@ WAN-103 결정 4의 최악 가정 검사(열린 포지션 전부 동시 손절)�
 둔다(= 같은 크기 포지션을 더 많이 동시에). 목적은 밀림(스킵)을 직접 줄이는 것이고, 그
 대가로 최대 동시 리스크가 결합 팔보다 커질 수 있다 — 그 교환이 WAN-180 팔 B의 판정
 대상이다. ⚠️ **거래당 명목 천장도 1배(기본 leverage)로 남는다** — 상한을 키운 만큼
-개별 거래가 커지면 그건 cap-only가 아니라 결합의 반쪽이다. 기본값은 `"combined"`
-(WAN-169 그대로)라 안 켜면 기존 결과가 비트 단위로 재현된다.
+개별 거래가 커지면 그건 cap-only가 아니라 결합의 반쪽이다. **WAN-213부터 `cap_only`가
+클래스 기본값(배수 5)이다** — 채택 북이다. WAN-169 중립 기준점(`combined` · 배수 1)은
+`LEGACY_BOOK_PARAMS`로 명시하며, 그 값에서 기존 결과가 비트 단위로 재현된다.
 
 ## 따뜻한 연속 OOS × straddle 회계 (b) — 배치 안 함 (사용자 결정 2026-07-22)
 
@@ -97,14 +98,29 @@ class LeverageBookParams(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    leverage_multiple: float = Field(default=1.0, gt=0)
+    leverage_multiple: float = Field(default=5.0, gt=0)
     """사이징 배수 N. **매 거래의 크기를 N배**로 키우고(리스크 1% → N%) 북 전체 명목
-    상한도 N배가 된다(모듈 독스트링). 1.0이면 채택 사이징 그대로에 자본 공유만 얹는다."""
-    leverage_mode: LeverageMode = "combined"
-    """배수 N을 싣는 자리(WAN-180). 기본 `"combined"` = WAN-169 그대로(매 거래 N배).
-    `"cap_only"`는 북 명목 상한만 N배로 키우고 거래당 크기·천장은 1배로 둔다(팔 B)."""
+    상한도 N배가 된다(모듈 독스트링). 1.0이면 채택 사이징 그대로에 자본 공유만 얹는다.
+
+    ⚠️ **기본값 5.0은 채택 값이다(WAN-213 재-베이스라인, 2026-07-30 사용자 결정 「전부 다」)** —
+    `ConfluenceParams()`가 채택 전략을 내듯 `LeverageBookParams()`가 채택 북을 낸다. WAN-169
+    시절의 중립 기준점(1.0 · combined)은 `LEGACY_BOOK_PARAMS`로 뺐다(비트 동일 검산·회귀
+    테스트가 그 상수를 쓴다). 근거는 WAN-180 실측: cap_only는 배수를 올려도 MDD가 거의 안
+    늘고(6년 2배 18.9% → 5배 19.6%) 5배가 같은 낙폭으로 복리를 가장 많이 받는 지점이다."""
+    leverage_mode: LeverageMode = "cap_only"
+    """배수 N을 싣는 자리(WAN-180). 기본 `"cap_only"`(WAN-213 채택) = 북 명목 상한만 N배로
+    키우고 거래당 크기·천장은 1배로 둔다(팔 B — 거래당 리스크를 1배로 묶어 낙폭이 배수를
+    안 따라간다). `"combined"`는 WAN-169 방식으로 매 거래를 N배 한다(리스크 1%→N%)."""
     maintenance_margin_rate: float = Field(default=DEFAULT_MAINTENANCE_MARGIN_RATE, ge=0, lt=1)
     """최악 가정 청산 검사에 쓰는 유지증거금률(명목 대비, WAN-103 결정 4 재사용)."""
+
+
+#: WAN-169 중립 기준점(배수 1.0 · combined) — 「채택 사이징 그대로에 자본 공유만 얹은」 북.
+#: 이 값에서 칸 하나짜리 북은 채택 단일 포지션 시퀀서와 **비트 단위로 같은 거래**를 낸다
+#: (`tests/test_leverage_book.py`가 고정). WAN-213이 클래스 기본값을 채택 북(cap_only 5배)으로
+#: 옮긴 뒤, 그 중립 항등을 검정하는 코드는 이 상수를 명시적으로 써야 한다(WAN-159의
+#: `LEGACY_MAX_ZONE_WIDTH_ATR`와 같은 「기본값 이동 + 명시 핀」 패턴).
+LEGACY_BOOK_PARAMS = LeverageBookParams(leverage_multiple=1.0, leverage_mode="combined")
 
 
 @dataclass(frozen=True)

@@ -138,7 +138,7 @@ def test_proxy_reprice_reflects_funding_cost_in_return() -> None:
 
 def test_monthly_rows_compound_by_calendar_month() -> None:
     """월별 수익률 = 월말 자본 ÷ 직전 월말 자본 − 1 (UTC 달력월 · 복리)."""
-    from backtest.leverage_book import BookCell, LeverageBookParams, run_leverage_book
+    from backtest.leverage_book import LEGACY_BOOK_PARAMS, BookCell, run_leverage_book
     from backtest.models import BacktestConfig
     from backtest.wan180_leverage_book_nine import _monthly_rows
     from backtest.zone_limit_backtest import build_result_from_trades
@@ -159,7 +159,9 @@ def test_monthly_rows_compound_by_calendar_month() -> None:
             candidates=[_cand(jan_10, jan_20), _cand(feb_05, feb_10)],
         )
     ]
-    outcome = run_leverage_book(cells, cfg, LeverageBookParams())
+    # WAN-213: 클래스 기본값이 채택 북(cap_only 5배)으로 옮겨간 뒤, 이 월별 복리 검산은
+    # WAN-169 중립 기준점(combined 1배)을 명시적으로 쓴다(라벨 "combined 1.0"과 일치).
+    outcome = run_leverage_book(cells, cfg, LEGACY_BOOK_PARAMS)
     result = build_result_from_trades(outcome.trades, outcome.effective_config, "1h")
     rows = _monthly_rows(result, "both", "combined", 1.0, "full")
 
