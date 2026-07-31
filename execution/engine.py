@@ -21,6 +21,7 @@ from typing import Protocol
 from pydantic import BaseModel, ConfigDict, Field
 
 from execution.broker import Broker, PaperBroker
+from execution.leverage import LeverageBookParams, resolve_book_sizing
 from execution.models import (
     Fill,
     Order,
@@ -30,7 +31,7 @@ from execution.models import (
     side_for_entry,
     side_for_exit,
 )
-from execution.risk import RiskManager, RiskParams
+from execution.risk import RiskDecision, RiskManager, RiskParams
 from execution.sizing import PositionSizingParams, position_size
 from strategy.models import OrderBlockDirection, SignalExitReason
 
@@ -90,6 +91,7 @@ class ExecutionEngine:
         equity: float,
         live_trading: bool = False,
         max_retries: int = 2,
+        leverage_book: LeverageBookParams | None = None,
     ) -> None:
         self._broker = broker
         self._risk = risk_manager
@@ -97,6 +99,11 @@ class ExecutionEngine:
         self._equity = equity
         self._live_trading = live_trading
         self._max_retries = max(0, max_retries)
+        # 레버리지 북(WAN-171). None이면 예전과 비트 단위로 동일한 사이징(open_notional 미전달).
+        # 켜면 칸=(종목,TF)들이 한 지갑(공유 자본)을 나눠 쓰고, 진입마다 백테스트와 **같은**
+        # `resolve_book_sizing`으로 배수·북 상한을 건다. `_sizing`은 원본(1배) 기준이라
+        # resolve가 배수를 싣는다 — 둘을 곱하지 않도록 여기서 스케일하지 않는다.
+        self._leverage_book = leverage_book
         self._book: dict[SeriesKey, Position] = {}
 
     # -- 상태 조회 ----------------------------------------------------------
@@ -133,6 +140,20 @@ class ExecutionEngine:
 
     # -- 진입 ---------------------------------------------------------------
 
+    def _book_risk_decision(self, now_ms: int) -> RiskDecision:
+        """북 모드의 진입 한도 검사 — 자본 유무 + 일일 손실 서킷브레이커만.
+
+        명목·동시 포지션 상한은 북 회계(칸당 1포지션 + `resolve_book_sizing` 명목 clamp)가
+        대체하므로 여기서 다시 걸지 않는다(WAN-171). 서킷브레이커는 `on_exit`의
+        `register_realized_pnl`이 계속 먹여 살린다(WAN-38)."""
+        if self._equity <= 0.0:
+            return RiskDecision.block("자본이 없어 진입 차단")
+        if self._risk.circuit_breaker_tripped(now_ms, self._equity):
+            return RiskDecision.block(
+                f"일일 손실 서킷브레이커 발동(누적 {self._risk.daily_realized_pnl:.2f}) — 진입 차단"
+            )
+        return RiskDecision.allow()
+
     def on_entry(self, intent: EntryIntent, *, now_ms: int) -> ExecutionOutcome:
         """진입 의도를 사이징·리스크 검사 후 주문·포지션 오픈으로 처리한다."""
         key = (intent.symbol, intent.timeframe)
@@ -141,23 +162,53 @@ class ExecutionEngine:
         if intent.stop_price is None:
             return ExecutionOutcome.rejected("손절 참조가가 없어 사이징 불가 — 진입 스킵")
 
-        qty = position_size(
-            equity=self._equity,
-            entry_price=intent.entry_price,
-            stop_price=intent.stop_price,
-            params=self._sizing,
-        )
+        if self._leverage_book is None:
+            qty = position_size(
+                equity=self._equity,
+                entry_price=intent.entry_price,
+                stop_price=intent.stop_price,
+                params=self._sizing,
+            )
+        else:
+            # 레버리지 북(WAN-171): 배수·북 명목 상한·cap-only 합성 여유를 백테스트
+            # (`run_leverage_book`)와 **같은** `resolve_book_sizing`으로 정하고, 공유 지갑의
+            # 열린 명목(`open_notional`)을 넘겨 칸을 가로지르는 명목 상한을 건다. 칸당
+            # 1포지션은 위 `key in self._book` 거부가 이미 강제한다(= 북의 cell_busy).
+            book_sizing = resolve_book_sizing(
+                self._sizing,
+                self._leverage_book,
+                equity=self._equity,
+                open_notional=self.open_notional,
+            )
+            if book_sizing.cap_exhausted:
+                return ExecutionOutcome.rejected("북 명목 상한 소진 — 진입 스킵")
+            qty = position_size(
+                equity=self._equity,
+                entry_price=intent.entry_price,
+                stop_price=intent.stop_price,
+                params=book_sizing.params,
+                open_notional=book_sizing.synthetic_open,
+            )
         if qty <= 0.0:
             return ExecutionOutcome.rejected("사이징 수량 0 — 진입 스킵")
 
         new_notional = intent.entry_price * qty
-        decision = self._risk.can_enter(
-            equity=self._equity,
-            new_notional=new_notional,
-            open_notional=self.open_notional,
-            open_positions=len(self._book),
-            now_ms=now_ms,
-        )
+        if self._leverage_book is None:
+            decision = self._risk.can_enter(
+                equity=self._equity,
+                new_notional=new_notional,
+                open_notional=self.open_notional,
+                open_positions=len(self._book),
+                now_ms=now_ms,
+            )
+        else:
+            # 북 모드(WAN-171): 명목가치·동시 포지션 수 상한은 **북 자체**가 대체한다 —
+            # 칸당 1포지션(위 `key in self._book`)이 동시 포지션을, `resolve_book_sizing`이
+            # 이미 clamp한 공유 명목 상한이 명목을 관장한다(백테스트 `run_leverage_book`도
+            # 이 둘만 건다). `RiskParams` 기본값(동시 1포지션 · 명목 1×)은 칸을 모르는
+            # 러너 전역 상한이라 북을 조용히 1포지션·1배로 되돌린다 — 그래서 북 모드에서는
+            # **일일 손실 서킷브레이커만** 남긴다(WAN-38 — 레버리지를 얹으면 더 필요하다).
+            decision = self._book_risk_decision(now_ms)
         if not decision.allowed:
             _logger.info("진입 차단(%s %s): %s", intent.symbol, intent.timeframe, decision.reason)
             return ExecutionOutcome.rejected(decision.reason)
@@ -285,12 +336,17 @@ def build_execution_engine(
     broker: Broker | None = None,
     equity: float | None = None,
     now_ms: Callable[[], int] | None = None,
+    leverage_book: LeverageBookParams | None = None,
 ) -> ExecutionEngine:
     """설정에서 실행 엔진을 만든다.
 
     안전: `live_trading`이 꺼져 있으면 항상 `PaperBroker`(네트워크 없음)를 쓴다.
     켜져 있는데 브로커를 주지 않으면 자동으로 실거래 브로커를 만들지 않고
     `RuntimeError`를 던진다(실계좌 연결은 WAN-27에서 명시적으로 주입).
+
+    `leverage_book`(WAN-171)을 주면 엔진이 칸=(종목,TF)을 가로지르는 공유 자본 북으로
+    사이징한다(옵트인). None이면 예전과 비트 단위로 같다. 사이징 파라미터는 **원본**을
+    넘긴다 — 배수는 `resolve_book_sizing`이 진입마다 싣는다(이중 스케일 방지).
     """
     del now_ms  # 예약 인자(러너 연결용). 현재는 미사용.
     if broker is None:
@@ -308,4 +364,5 @@ def build_execution_engine(
         sizing_params=settings.risk_sizing,
         equity=resolved_equity,
         live_trading=settings.live_trading,
+        leverage_book=leverage_book,
     )
