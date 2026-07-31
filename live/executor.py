@@ -22,6 +22,7 @@ from pydantic import BaseModel, ConfigDict
 
 from execution.engine import EntryIntent, ExecutionEngine, ExecutionOutcome
 from execution.models import Position
+from execution.risk import CircuitBreakerStatus
 from execution.sizing import PositionSizingParams
 from live.paper import ClosedTrade, PaperPosition
 from paper.store import PaperTradeRecorder, PaperTradeStore, TradeDollars
@@ -91,6 +92,10 @@ class PaperExecutor:
         self._store = store
         self._recorder = recorder
         self._sizing = sizing
+        # 일일 손실 서킷브레이커를 DB(paper_trades) 재계산으로 전환한다(WAN-38). 러너가
+        # 재시작돼도 "오늘(KST) 청산 손익 합"을 원장에서 다시 읽어 차단 상태가 유지된다 —
+        # 인메모리 누적만 쓰면 재시작 시 0으로 리셋돼 브레이크가 풀린다.
+        self._engine.bind_realized_pnl_source(store.realized_pnl_between)
         self._restore()
 
     def _restore(self) -> None:
@@ -99,6 +104,18 @@ class PaperExecutor:
             self._engine.restore_position(open_position.position)
         if restored:
             _logger.info("열린 페이퍼 포지션 %d건 복구", len(restored))
+
+    def circuit_breaker_status(self, now_ms: int) -> CircuitBreakerStatus:
+        """현재 서킷브레이커 상태 스냅샷(러너 알림·대시보드, WAN-38)."""
+        return self._engine.circuit_breaker_status(now_ms)
+
+    def get_circuit_breaker_notice(self) -> tuple[str | None, bool]:
+        """마지막으로 알린 서킷브레이커 상태 `(KST일, 발동여부)`(중복 알림 방지, WAN-38)."""
+        return self._store.get_circuit_breaker_notice()
+
+    def set_circuit_breaker_notice(self, day: str, *, tripped: bool) -> None:
+        """서킷브레이커 알림 상태를 원장에 기록한다(재시작 내구, WAN-38)."""
+        self._store.set_circuit_breaker_notice(day, tripped=tripped)
 
     @property
     def open_positions(self) -> list[Position]:

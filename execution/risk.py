@@ -8,16 +8,30 @@
 * 동시 오픈 포지션 수 상한
 * 일일 손실 서킷브레이커 — 하루 누적 실현 손실이 한도를 넘으면 그날 신규 진입 차단
 
-`RiskManager`는 실현 손익을 등록받아 UTC 일자별 누적 손익을 추적한다. 날짜가
-바뀌면 카운터가 리셋된다. 순수 인메모리 상태이며 실주문·`live_trading`을 직접
+`RiskManager`는 실현 손익을 등록받아 **KST 일자**별 누적 손익을 추적한다(WAN-38 ·
+WAN-172 KST 통일). 날짜가 바뀌면 카운터가 리셋된다. 실주문·`live_trading`을 직접
 건드리지 않는다.
+
+## 재시작 내구성 — DB 재계산 소스(WAN-38)
+
+인메모리 누적(`_daily_realized`)만으로는 러너가 재시작되면 "오늘의 손실"이 0으로
+리셋돼 서킷브레이커가 무력화된다(systemd 자동재시작 환경). 그래서 `realized_pnl_source`
+(= `paper_trades`에서 "오늘(KST) 청산된 거래의 실현손익 합"을 조회하는 콜백)를 주입하면
+서킷브레이커 판정을 **DB에서 재계산**한다 — 프로세스 메모리가 아니라 원장이 진실의
+원천이라 재시작 후에도 차단 상태가 유지된다. 소스를 안 주면(백테스트·단위 테스트) 예전과
+같은 순수 인메모리 동작이다(`execution`은 `paper` 레이어를 모르므로 소스는 호출부가 주입).
 """
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from collections.abc import Callable
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from common.timefmt import kst_day_bounds, kst_day_key
+
+#: `(start_ms, end_ms)`(배타적 상한) 창에서 청산된 거래의 실현손익 합을 돌려주는 조회.
+RealizedPnlSource = Callable[[int, int], float]
 
 
 class RiskParams(BaseModel):
@@ -63,22 +77,43 @@ class RiskDecision(BaseModel):
         return cls(allowed=False, reason=reason)
 
 
-def _utc_day(now_ms: int) -> str:
-    """epoch(ms)를 UTC 일자 문자열(YYYY-MM-DD)로."""
-    return datetime.fromtimestamp(now_ms / 1000, tz=UTC).strftime("%Y-%m-%d")
+class CircuitBreakerStatus(BaseModel):
+    """일일 손실 서킷브레이커의 현재 상태(대시보드·알림 표시용)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    enabled: bool
+    """서킷브레이커가 켜져 있는지(`daily_loss_limit_fraction`이 설정됐는지)."""
+    tripped: bool
+    """오늘(KST) 손실 한도를 이미 초과해 신규 진입이 차단되는지."""
+    daily_realized_pnl: float
+    """오늘(KST) 누적 실현 손익(손실은 음수)."""
+    loss_limit: float
+    """오늘 차단이 걸리는 손실 금액 = `기준자본 × fraction`. 비활성이면 0."""
+    baseline_equity: float
+    """한도 계산의 기준 자본(오늘 시작 시점 추정)."""
 
 
 class RiskManager:
     """진입 한도 검사 + 일일 손실 서킷브레이커.
 
     상태:
-    * `_day`: 현재 추적 중인 UTC 일자.
+    * `_day`: 현재 추적 중인 KST 일자.
     * `_daily_realized`: 그날 누적 실현 손익(견적 통화, 손실은 음수).
     * `_day_baseline_equity`: 그날 서킷브레이커 한도 계산의 기준 자본.
+
+    `realized_pnl_source`를 주면 위 두 값을 매 판정마다 **DB에서 재계산**한다(재시작
+    내구성, 모듈 독스트링 참고). 안 주면 순수 인메모리 누적이다.
     """
 
-    def __init__(self, params: RiskParams | None = None) -> None:
+    def __init__(
+        self,
+        params: RiskParams | None = None,
+        *,
+        realized_pnl_source: RealizedPnlSource | None = None,
+    ) -> None:
         self._params = params if params is not None else RiskParams()
+        self._realized_source = realized_pnl_source
         self._day: str | None = None
         self._daily_realized: float = 0.0
         self._day_baseline_equity: float = 0.0
@@ -87,22 +122,49 @@ class RiskManager:
     def params(self) -> RiskParams:
         return self._params
 
+    def bind_realized_pnl_source(self, source: RealizedPnlSource | None) -> None:
+        """서킷브레이커 판정을 DB 재계산으로 전환한다(러너 배선용, WAN-38).
+
+        엔진이 `RiskManager`를 먼저 만든 뒤(사이징·한도) 저장소가 준비되면 호출부가
+        `paper_trades` 조회 콜백을 여기서 물린다. `None`이면 인메모리로 되돌린다.
+        """
+        self._realized_source = source
+
     @property
     def daily_realized_pnl(self) -> float:
-        """현재 UTC 일자의 누적 실현 손익."""
+        """현재 KST 일자의 누적 실현 손익.
+
+        DB 소스가 물려 있으면 마지막 판정에서 재계산된 값을 돌려준다(판정 훅이
+        `_daily_realized`를 DB 값으로 덮어쓴다). 소스가 없으면 인메모리 누적치.
+        """
         return self._daily_realized
 
     def _roll_day(self, now_ms: int, equity: float) -> None:
-        """UTC 일자가 바뀌었으면 일일 카운터를 리셋한다."""
-        day = _utc_day(now_ms)
+        """KST 일자가 바뀌었으면 일일 카운터를 리셋한다."""
+        day = kst_day_key(now_ms)
         if self._day != day:
             self._day = day
             self._daily_realized = 0.0
             self._day_baseline_equity = max(equity, 0.0)
 
+    def _sync_from_source(self, now_ms: int, equity: float) -> None:
+        """DB 소스가 물려 있으면 오늘(KST) 실현손익·기준자본을 원장에서 재계산한다.
+
+        기준자본은 원장에 따로 없으므로 `현재자본 − 오늘실현손익`으로 복원한다 —
+        현재 자본이 이미 오늘 손익을 반영하고 있으니 그 차가 곧 오늘 시작 자본이다.
+        재시작해도 원장만 있으면 같은 값이 나온다.
+        """
+        if self._realized_source is None:
+            return
+        start_ms, end_ms = kst_day_bounds(now_ms)
+        realized = self._realized_source(start_ms, end_ms)
+        self._daily_realized = realized
+        self._day_baseline_equity = max(equity - realized, 0.0)
+
     def circuit_breaker_tripped(self, now_ms: int, equity: float) -> bool:
         """오늘 일일 손실 한도를 이미 초과했는지."""
         self._roll_day(now_ms, equity)
+        self._sync_from_source(now_ms, equity)
         limit = self._params.daily_loss_limit_fraction
         if limit is None:
             return False
@@ -110,8 +172,29 @@ class RiskManager:
         # 누적 손실(음수)의 크기가 한도 이상이면 발동.
         return -self._daily_realized >= loss_cap
 
+    def status(self, now_ms: int, equity: float) -> CircuitBreakerStatus:
+        """현재 서킷브레이커 상태 스냅샷(대시보드·알림 표시용).
+
+        `circuit_breaker_tripped`과 **같은 경로**로 판정하므로 표시와 실제 차단이
+        어긋나지 않는다.
+        """
+        tripped = self.circuit_breaker_tripped(now_ms, equity)
+        limit = self._params.daily_loss_limit_fraction
+        loss_limit = self._day_baseline_equity * limit if limit is not None else 0.0
+        return CircuitBreakerStatus(
+            enabled=limit is not None,
+            tripped=tripped,
+            daily_realized_pnl=self._daily_realized,
+            loss_limit=loss_limit,
+            baseline_equity=self._day_baseline_equity,
+        )
+
     def register_realized_pnl(self, pnl: float, *, now_ms: int, equity: float) -> None:
-        """청산 실현 손익을 그날 누적치에 반영한다(서킷브레이커용)."""
+        """청산 실현 손익을 그날 누적치에 반영한다(서킷브레이커용).
+
+        DB 소스가 물려 있어도 프로세스 내 즉시 반영을 위해 인메모리 누적을 유지한다 —
+        다음 판정에서 `_sync_from_source`가 DB 값으로 덮어쓰므로 이중 계산은 없다.
+        """
         self._roll_day(now_ms, equity)
         self._daily_realized += pnl
 

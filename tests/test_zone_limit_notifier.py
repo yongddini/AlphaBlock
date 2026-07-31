@@ -14,12 +14,15 @@ import pytest
 from common.telegram import TelegramClient, TelegramResponse
 from execution.engine import ExecutionOutcome
 from execution.models import Fill, Order, OrderSide, OrderStatus, OrderType, Position
+from execution.risk import CircuitBreakerStatus
 from live import message_format, zone_limit_notifier
 from live.executor import TradeReport
 from live.limit_orders import LimitFill
 from live.order_journal import FunnelCounts
 from live.zone_limit_notifier import (
     ZoneLimitNotifier,
+    format_circuit_breaker_cleared,
+    format_circuit_breaker_tripped,
     format_daily_summary,
     format_fill_entry,
     format_filter_skip,
@@ -422,3 +425,39 @@ def test_format_helpers_are_shared_single_source() -> None:
     """
     assert vars(zone_limit_notifier)["fmt_price"] is message_format.fmt_price
     assert vars(zone_limit_notifier)["fmt_time"] is message_format.fmt_time
+
+
+# -- 일일 손실 서킷브레이커 알림 (WAN-38) ------------------------------------
+
+
+def _cb_status(*, tripped: bool) -> CircuitBreakerStatus:
+    return CircuitBreakerStatus(
+        enabled=True,
+        tripped=tripped,
+        daily_realized_pnl=-600.0,
+        loss_limit=500.0,
+        baseline_equity=10_000.0,
+    )
+
+
+def test_circuit_breaker_tripped_message_content() -> None:
+    msg = format_circuit_breaker_tripped(_cb_status(tripped=True), now_ms=14 * _H)
+    assert "서킷브레이커 발동" in msg
+    assert "신규 진입을 차단" in msg
+
+
+def test_circuit_breaker_cleared_message_content() -> None:
+    msg = format_circuit_breaker_cleared(_cb_status(tripped=False), now_ms=14 * _H)
+    assert "서킷브레이커 해제" in msg
+    assert "재개" in msg
+
+
+def test_circuit_breaker_handlers_send_regardless_of_event_toggle() -> None:
+    # 안전 알림이라 이벤트 스위치(여기선 아무것도 안 켬)와 무관하게 나간다.
+    rec = _Recorder()
+    notif = ZoneLimitNotifier(_client(rec), events=frozenset())
+    notif.handle_circuit_breaker_tripped(_cb_status(tripped=True), now_ms=14 * _H)
+    notif.handle_circuit_breaker_cleared(_cb_status(tripped=False), now_ms=15 * _H)
+    assert len(rec.sent) == 2
+    assert "발동" in rec.sent[0]
+    assert "해제" in rec.sent[1]

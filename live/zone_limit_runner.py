@@ -49,7 +49,7 @@ import time
 from collections.abc import Callable
 
 from backtest.sweep import timeframe_to_ms
-from common.timefmt import format_kst_zoned
+from common.timefmt import format_kst_zoned, kst_day_key
 from config.settings import Settings
 from data.freshness import window_gap_summary
 from data.storage import OhlcvStore
@@ -176,6 +176,7 @@ class ZoneLimitPaperRunner:
                 _logger.exception("시리즈 폴링 실패: %s %s", symbol, timeframe)
         now = self._now_ms()
         self._journal.heartbeat(self._session_id, now_ms=now)
+        self._check_circuit_breaker(now)
         if self._notifier is not None:
             # KST 날짜가 바뀌면 전날 예약·체결·만료 일일 요약을 보낸다(만료 실시간 대체).
             self._notifier.tick(self._executor.equity, now_ms=now)
@@ -197,6 +198,32 @@ class ZoneLimitPaperRunner:
             if max_polls is not None and poll >= max_polls:
                 break
             self._sleep(self._poll_interval)
+
+    # -- 서킷브레이커 알림 (WAN-38) ------------------------------------------
+
+    def _check_circuit_breaker(self, now_ms: int) -> None:
+        """일일 손실 서킷브레이커 상태 전환을 감지해 발동/해제 텔레그램을 각 1회 보낸다.
+
+        중복 방지 상태(마지막으로 알린 `(KST일, 발동여부)`)는 `paper_trades` 옆 원장에
+        영속되므로 러너 재시작 후에도 발동 알림이 재전송되지 않는다(WAN-38). 판정 자체는
+        `executor.circuit_breaker_status`가 DB 재계산으로 내므로 표시와 실제 차단이
+        어긋나지 않는다.
+        """
+        status = self._executor.circuit_breaker_status(now_ms)
+        if not status.enabled:
+            return
+        day = kst_day_key(now_ms)
+        notice_day, notice_tripped = self._executor.get_circuit_breaker_notice()
+        if status.tripped:
+            if not (notice_day == day and notice_tripped):
+                if self._notifier is not None:
+                    self._notifier.handle_circuit_breaker_tripped(status, now_ms=now_ms)
+                self._executor.set_circuit_breaker_notice(day, tripped=True)
+        elif notice_tripped:
+            # 발동 중이었다가 풀렸다(대개 KST 일자 전환) — 해제 알림 1회.
+            if self._notifier is not None:
+                self._notifier.handle_circuit_breaker_cleared(status, now_ms=now_ms)
+            self._executor.set_circuit_breaker_notice(day, tripped=False)
 
     # -- 집행·청산 -----------------------------------------------------------
 

@@ -24,16 +24,18 @@ from live import limit_engine
 from live.executor import PaperExecutor
 from live.limit_engine import ZoneLimitLiveEngine
 from live.order_journal import OrderJournal
+from live.paper import ClosedTrade, PaperPosition
 from live.runtime_state import RuntimeStateStore
 from live.zone_limit_notifier import ZoneLimitNotifier
 from live.zone_limit_runner import ZoneLimitPaperRunner
 from paper.performance import build_performance
-from paper.store import PaperTradeRecorder, PaperTradeStore
+from paper.store import PaperTradeRecorder, PaperTradeStore, TradeDollars, build_record
 from strategy.models import (
     ConfluenceParams,
     OrderBlock,
     OrderBlockDirection,
     OrderBlockResult,
+    SignalExitReason,
 )
 
 _H = 3_600_000
@@ -698,3 +700,58 @@ def test_rejected_entry_notifies(rig: dict[str, object], monkeypatch: pytest.Mon
     assert len(sent) == 1
     assert "진입 거부" in sent[0]
     assert "사이징" in sent[0]
+
+
+def _losing_record(exit_time: int) -> object:
+    """오늘 창에 −800 손실을 남기는 청산 기록(WAN-38 서킷브레이커 발동용)."""
+    trade = ClosedTrade(
+        position=PaperPosition(
+            symbol=_SYMBOL,
+            timeframe=_TF,
+            direction=OrderBlockDirection.BULLISH,
+            entry_time=exit_time - 1_000,
+            entry_price=100.0,
+            stop_price=95.0,
+            take_profit_price=110.0,
+        ),
+        exit_time=exit_time,
+        exit_price=60.0,
+        reason=SignalExitReason.STOP_LOSS,
+    )
+    return build_record(
+        trade, fee_rate=0.0, dollars=TradeDollars(realized_pnl=-800.0, equity_after=9_200.0)
+    )
+
+
+def test_circuit_breaker_alerts_once_and_clears_once(rig: dict[str, object]) -> None:
+    """발동 알림 1회 + 해제 알림 1회, 반복 폴링·재시작(원장 상태)에도 중복 없음(WAN-38)."""
+    runner: ZoneLimitPaperRunner = rig["runner"]  # type: ignore[assignment]
+    paper_store: PaperTradeStore = rig["paper_store"]  # type: ignore[assignment]
+
+    events: list[str] = []
+
+    class _Spy:
+        def handle_circuit_breaker_tripped(self, status: object, *, now_ms: int) -> None:
+            events.append("tripped")
+
+        def handle_circuit_breaker_cleared(self, status: object, *, now_ms: int) -> None:
+            events.append("cleared")
+
+    runner._notifier = _Spy()  # type: ignore[assignment]
+
+    day0 = 1_700_000_000_000
+    paper_store.upsert_record(_losing_record(day0))  # type: ignore[arg-type]
+
+    # 발동: 같은 KST일에 여러 번 폴링해도 알림은 1회.
+    runner._check_circuit_breaker(day0)
+    runner._check_circuit_breaker(day0 + 60_000)
+    assert events == ["tripped"]
+
+    # 원장에 발동 상태가 남았다 → 재시작(새 조회)해도 재알림 없음.
+    assert paper_store.get_circuit_breaker_notice()[1] is True
+
+    # 다음 KST일: 오늘 창이 비어 자동 해제, 알림 1회.
+    next_day = day0 + 86_400_000
+    runner._check_circuit_breaker(next_day)
+    runner._check_circuit_breaker(next_day + 60_000)
+    assert events == ["tripped", "cleared"]

@@ -22,7 +22,14 @@ import live.message_format as message_format
 from backtest.report import format_time_kst
 from cli.main import _fmt_time as cli_fmt_time
 from common import timefmt
-from common.timefmt import KST_LABEL, format_kst, format_kst_zoned, format_utc
+from common.timefmt import (
+    KST_LABEL,
+    format_kst,
+    format_kst_zoned,
+    format_utc,
+    kst_day_bounds,
+    kst_day_key,
+)
 from data.freshness import StaleSeries, format_stale
 
 #: UTC 자정 = KST 오전 9시. 변환이 실제로 일어났는지 이 오프셋 하나로 확인한다.
@@ -128,3 +135,23 @@ def test_use_kst_logging_makes_asctime_korean_time() -> None:
 def test_kst_log_format_carries_timezone_label() -> None:
     assert KST_LABEL in timefmt.kst_log_format()
     assert timefmt.kst_log_format("%(message)s") == "%(message)s"
+
+
+# -- KST 일자 경계 (WAN-38 서킷브레이커) --------------------------------------
+
+
+def test_kst_day_key_uses_kst_date() -> None:
+    # UTC 자정(= KST 오전 9시)은 KST로 같은 날짜.
+    assert kst_day_key(_UTC_MIDNIGHT_MS) == "2026-07-22"
+    # KST 자정 1ms 전(= 전날) = 2026-07-21.
+    assert kst_day_key(_UTC_MIDNIGHT_MS - 9 * 3_600_000 - 1) == "2026-07-21"
+
+
+def test_kst_day_bounds_are_kst_midnight_epoch() -> None:
+    start, end = kst_day_bounds(_UTC_MIDNIGHT_MS)
+    assert start <= _UTC_MIDNIGHT_MS < end
+    assert end - start == 86_400_000  # KST는 서머타임이 없어 하루가 정확히 24h.
+    # 경계 1ms 안팎이 이웃 KST일로 갈린다(당일 손실 창의 자다).
+    assert kst_day_key(start) == "2026-07-22"
+    assert kst_day_key(start - 1) == "2026-07-21"
+    assert kst_day_key(end) == "2026-07-23"

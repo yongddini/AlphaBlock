@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 __all__ = [
@@ -38,6 +38,8 @@ __all__ = [
     "format_kst",
     "format_kst_zoned",
     "format_utc",
+    "kst_day_bounds",
+    "kst_day_key",
     "kst_log_format",
     "kst_time_converter",
     "use_kst_logging",
@@ -90,6 +92,27 @@ def format_utc(ms: int | None, *, seconds: bool = False, missing: str = MISSING_
     return datetime.fromtimestamp(ms / 1000, tz=UTC).strftime(
         _FMT_SECONDS if seconds else _FMT_MINUTES
     )
+
+
+def kst_day_bounds(ms: int) -> tuple[int, int]:
+    """epoch ms가 속한 **KST 하루**의 `[자정, 다음 자정)` 경계를 epoch ms로 돌려준다.
+
+    반환값은 여전히 **UTC epoch(ms)** 이다 — 시간대 변환이 아니라 "이 순간이 어느 KST
+    날짜에 속하는가"의 경계를 잡는 계산이다(저장·비교는 UTC epoch 불변, 위 독스트링).
+    일일 손실 서킷브레이커(WAN-38)·일일 요약(WAN-221)처럼 사람이 체감하는 "당일" 경계가
+    KST일 때 쓴다. KST는 서머타임이 없어 하루가 정확히 24h지만, 경계는 `timedelta`로 잡아
+    상수(86_400_000)를 박지 않는다.
+    """
+    local = datetime.fromtimestamp(ms / 1000, tz=KST)
+    start = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    start_ms = int(start.timestamp() * 1000)
+    end_ms = int((start + timedelta(days=1)).timestamp() * 1000)
+    return start_ms, end_ms
+
+
+def kst_day_key(ms: int) -> str:
+    """epoch ms → KST 날짜 키 `YYYY-MM-DD`(일일 카운터 롤오버 판정용, WAN-38)."""
+    return datetime.fromtimestamp(ms / 1000, tz=KST).strftime("%Y-%m-%d")
 
 
 def kst_time_converter(secs: float | None) -> time.struct_time:

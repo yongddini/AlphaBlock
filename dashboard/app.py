@@ -1022,6 +1022,37 @@ def _render_repair(view: HealthView) -> None:
         )
 
 
+def _render_circuit_breaker(settings: Settings) -> None:
+    """일일 손실 서킷브레이커 상태(WAN-38): 정상/발동 · 당일 손익 · 한도.
+
+    러너의 진입 게이트와 **같은 판정**(`RiskManager.status`, DB 재계산)을 써서 화면과
+    실제 차단이 어긋나지 않게 한다. 시각·경계는 KST(WAN-172).
+    """
+    from execution.risk import RiskManager
+
+    st.subheader("일일 손실 서킷브레이커")
+    now_ms = int(time.time() * 1000)
+    with PaperTradeStore(settings.db_path) as store:
+        equity = store.latest_equity_after()
+        base_equity = equity if equity is not None else settings.paper_equity
+        rm = RiskManager(settings.risk_limits, realized_pnl_source=store.realized_pnl_between)
+        status = rm.status(now_ms, base_equity)
+
+    if not status.enabled:
+        st.caption("서킷브레이커가 비활성입니다(`daily_loss_limit_fraction` 미설정).")
+        return
+
+    frac = settings.risk_limits.daily_loss_limit_fraction or 0.0
+    state = "🔴 발동 — 신규 진입 차단" if status.tripped else "🟢 정상"
+    rows = [
+        {"항목": "상태", "값": state},
+        {"항목": "당일 손익(KST)", "값": f"{status.daily_realized_pnl:,.2f} USDT"},
+        {"항목": f"손실 한도(자본 {frac:.1%})", "값": f"−{status.loss_limit:,.2f} USDT"},
+        {"항목": "기준 자본", "값": f"{status.baseline_equity:,.2f} USDT"},
+    ]
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+
 def _render_health_body(settings: Settings) -> None:
     # 마지막 갱신 시각(KST, WAN-172). 자동 새로고침이 켜져 있으면 fragment가 주기적으로
     # 재실행되며 이 값이 갱신돼, 화면이 실제로 최신인지 한눈에 확인할 수 있다.
@@ -1066,6 +1097,7 @@ def _render_health_body(settings: Settings) -> None:
     _render_collector(view.collector)
     _render_runner(view.runner)
     _render_repair(view)
+    _render_circuit_breaker(settings)
 
     st.subheader("현재 페이퍼 포지션")
     if view.positions:

@@ -19,12 +19,13 @@ from execution.models import (
     side_for_entry,
     side_for_exit,
 )
-from execution.risk import RiskDecision, RiskManager, RiskParams
+from execution.risk import CircuitBreakerStatus, RiskDecision, RiskManager, RiskParams
 from execution.sizing import PositionSizingParams, position_size
 
 __all__ = [
     "Broker",
     "CcxtLiveBroker",
+    "CircuitBreakerStatus",
     "EntryIntent",
     "ExecutionEngine",
     "ExecutionOutcome",
