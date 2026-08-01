@@ -1,17 +1,27 @@
 """통합 트레이딩 웹 대시보드 (WAN-15 · WAN-30).
 
-**분석 탭**: 캔들+오더블록 차트 위에, 적재된 **채택 엔진(B안 존-지정가)** 실행의 거래
-마커·성과를 **조회로** 얹는다(WAN-199). 화면에서 B안 백테스트(1분봉 substep, 단일 조합
-~7분)를 다시 돌리지 않는다 — 손익·거래는 `backtest.run --persist`가 넣어 둔 결과를
-저장된 거래 탭과 **같은 인프라**(`BacktestRunStore`)로 읽는다. 차트의 존은 컨플루언스
-파라미터와 무관한 오더블록 탐지(상위TF에서 수 초)로 그리고, 기간 슬라이더는 그 **차트
-뷰**만 좁힌다(성과 지표는 적재된 전체 실행 기준). 적재본이 없으면 재계산 대신 넣는
-방법을 안내한다.
-**저장된 거래 탭(WAN-106)**: `backtest.run --persist`가 적재해 둔 **채택 엔진(B안
-지정가)** 거래를 계산 없이 조회한다(손절/익절 필터 · 미체결 셋업 · 차트 점프). 분석 탭과
-같은 조회 인프라를 쓰되 존을 그리지 않는다(거래 감사 전용).
+**라이브-우선 배치(WAN-220, 사용자 결정 2026-07-31)**: 실거래/실전 페이퍼를 매일
+들여다보는 화면이라 **라이브·운영 탭이 앞**에 온다 — 페이퍼 성과 → 진입/미진입 장부
+(체결률, WAN-217/219) → 운영 상태(Health). **백테스트 탭(분석·저장된 거래)은 뒤로
+강등**되고 **지연 로딩**된다(cold start에서 자동 로드하지 않아 첫 화면이 빠르다 —
+분석 탭 cold load ~10초를 앞단에서 없앤다, WAN-202). 지우지 않은 이유는 백테스트가
+라이브 실측과 대조하는 **잣대**이기 때문이다(약속·기대수익이 아니라 대조용).
+
+**페이퍼 성과 탭**: 페이퍼 러너가 적재한 거래·잔고·성과를 조회한다.
+**진입/미진입 장부 탭(WAN-217/219)**: 페이퍼 러너의 진입 깔때기(체결/미체결/스킵/거부
+사유)를 계산 없이 조회 — 체결률·미진입 사유 분포·칸별 필터.
 **운영 상태(Health) 탭**: 데이터 신선도·펀딩·러너 생존·페이퍼 포지션·최근 신호를
 한눈에 보여, 수집이 멈췄는지/러너가 살아있는지 즉시 식별한다.
+**분석 탭(참고·대조, 지연 로딩)**: 캔들+오더블록 차트 위에, 적재된 **채택 엔진(B안
+존-지정가)** 실행의 거래 마커·성과를 **조회로** 얹는다(WAN-199). 화면에서 B안 백테스트
+(1분봉 substep, 단일 조합 ~7분)를 다시 돌리지 않는다 — 손익·거래는 `backtest.run
+--persist`가 넣어 둔 결과를 저장된 거래 탭과 **같은 인프라**(`BacktestRunStore`)로 읽는다.
+차트의 존은 컨플루언스 파라미터와 무관한 오더블록 탐지(상위TF에서 수 초)로 그리고,
+기간 슬라이더는 그 **차트 뷰**만 좁힌다(성과 지표는 적재된 전체 실행 기준). 적재본이
+없으면 재계산 대신 넣는 방법을 안내한다.
+**저장된 거래 탭(WAN-106, 참고·대조, 지연 로딩)**: `backtest.run --persist`가 적재해 둔
+**채택 엔진(B안 지정가)** 거래를 계산 없이 조회한다(손절/익절 필터 · 미체결 셋업 ·
+차트 점프). 분석 탭과 같은 조회 인프라를 쓰되 존을 그리지 않는다(거래 감사 전용).
 
 로컬 실행형이며 외부 노출/인증은 범위 밖이다.
 
@@ -23,7 +33,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -1332,6 +1342,43 @@ def _render_funnel_ledger(settings: Settings) -> None:
     st.dataframe(ledger_frame(listing), use_container_width=True, hide_index=True)
 
 
+#: 백테스트(참고·대조) 탭의 "참고·대조" 성격을 화면이 드러내는 한 줄(WAN-220). 강등의
+#: 핵심 이유 — 이 숫자는 라이브 실측과 대조하는 **잣대**이지 약속·기대수익이 아니다.
+_BACKTEST_REFERENCE_NOTE = (
+    "📊 **참고·대조** — 채택 엔진 백테스트 리플레이입니다. 라이브 페이퍼 실측과 "
+    '대조하는 잣대이지 기대수익이 아닙니다("닿으면 체결" 가정 위, 엣지 미확인).'
+)
+
+
+def _render_backtest_tab_lazy(
+    *,
+    state_key: str,
+    button_key: str,
+    load_label: str,
+    render: Callable[[], None],
+) -> None:
+    """백테스트 탭을 **지연 로딩**한다(WAN-220 · WAN-202).
+
+    Streamlit `st.tabs`는 활성 탭과 무관하게 매 실행마다 모든 탭 본문을 렌더하므로,
+    탭 순서만 바꿔서는 cold start에서 무거운 분석 탭(cold load ~10초)이 여전히 돈다.
+    사용자가 "불러오기"를 누른 뒤에만 무거운 조회를 실행하고, 한 번 열면 세션 동안
+    유지한다 — 첫 화면에서는 버튼과 안내만 그린다(빠른 cold start).
+    """
+    st.caption(_BACKTEST_REFERENCE_NOTE)
+    if st.session_state.get(state_key) or st.button(
+        load_label,
+        key=button_key,
+        help="cold start를 빠르게 유지하려고 이 대조용 탭은 열 때만 로드합니다(WAN-220).",
+    ):
+        st.session_state[state_key] = True
+        render()
+    else:
+        st.info(
+            "참고·대조용 백테스트 탭입니다. 위 **불러오기** 버튼을 눌러야 로드됩니다 — "
+            "첫 화면(라이브·운영)을 빠르게 유지하기 위한 지연 로딩입니다(WAN-220)."
+        )
+
+
 def main() -> None:
     st.set_page_config(page_title="AlphaBlock Dashboard", layout="wide")
     st.title("AlphaBlock — 통합 트레이딩 대시보드")
@@ -1353,19 +1400,38 @@ def main() -> None:
         )
     run_every = refresh_seconds if (auto_refresh and refresh_seconds > 0) else None
 
-    analysis_tab, saved_tab, paper_tab, ledger_tab, health_tab = st.tabs(
-        ["분석", "저장된 거래", "페이퍼 성과", "진입/미진입 장부", "운영 상태(Health)"]
+    # 라이브-우선 배치(WAN-220): 라이브·운영 탭이 앞, 백테스트(참고·대조)는 뒤로 강등.
+    paper_tab, ledger_tab, health_tab, analysis_tab, saved_tab = st.tabs(
+        [
+            "페이퍼 성과",
+            "진입/미진입 장부",
+            "운영 상태(Health)",
+            "분석 (참고·대조)",
+            "저장된 거래 (참고·대조)",
+        ]
     )
-    with analysis_tab:
-        _render_analysis(settings)
-    with saved_tab:
-        _render_saved_trades(settings)
     with paper_tab:
         _render_paper(settings)
     with ledger_tab:
         _render_funnel_ledger(settings)
     with health_tab:
         _render_health(settings, run_every=run_every)
+    # 백테스트 탭은 지연 로딩한다 — cold start에서 무거운 분석 탭(~10초)을 자동 로드하지
+    # 않아 첫 화면(라이브·운영)이 빠르다(WAN-220 · WAN-202).
+    with analysis_tab:
+        _render_backtest_tab_lazy(
+            state_key="_backtest_analysis_loaded",
+            button_key="load_analysis_tab",
+            load_label="분석 탭 불러오기",
+            render=lambda: _render_analysis(settings),
+        )
+    with saved_tab:
+        _render_backtest_tab_lazy(
+            state_key="_backtest_saved_loaded",
+            button_key="load_saved_tab",
+            load_label="저장된 거래 탭 불러오기",
+            render=lambda: _render_saved_trades(settings),
+        )
 
 
 main()

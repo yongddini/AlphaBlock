@@ -24,6 +24,15 @@ from strategy.models import ConfluenceParams, OrderBlockParams
 _STEP = 3_600_000
 
 
+def _open_backtest_tab(at: AppTest, button_key: str, *, timeout: int = 60) -> None:
+    """WAN-220: 백테스트(분석·저장된 거래) 탭은 지연 로딩된다 — cold start에서는
+    "불러오기" 버튼만 보이므로, 내용을 단언하기 전에 그 버튼을 눌러 로드한다.
+    """
+    button = next(b for b in at.button if b.key == button_key)
+    button.click()
+    at.run(timeout=timeout)
+
+
 @pytest.fixture
 def seeded_db_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
     db_path = str(tmp_path / "ohlcv.db")
@@ -97,6 +106,8 @@ def test_analysis_defaults_to_recent_window_not_the_whole_history(long_span_db_p
     _seed_backtest_run(long_span_db_path, timeframe="1d")
     at = AppTest.from_file("dashboard/app.py")
     at.run(timeout=60)
+    assert not at.exception
+    _open_backtest_tab(at, "load_analysis_tab")
 
     assert not at.exception
     period = next(s for s in at.slider if s.label == "기간")
@@ -123,6 +134,8 @@ def test_full_range_checkbox_really_widens_the_window(long_span_db_path: str) ->
     at = AppTest.from_file("dashboard/app.py")
     at.run(timeout=60)
     assert not at.exception
+    _open_backtest_tab(at, "load_analysis_tab")
+    assert not at.exception
     narrow_start, _ = next(s for s in at.slider if s.label == "기간").value
 
     next(c for c in at.checkbox if c.label == "전 구간 보기(느림)").set_value(True)
@@ -141,6 +154,8 @@ def test_analysis_display_lines_are_off_by_default(seeded_db_path: str) -> None:
     _seed_backtest_run(seeded_db_path)
     at = AppTest.from_file("dashboard/app.py")
     at.run(timeout=30)
+    assert not at.exception
+    _open_backtest_tab(at, "load_analysis_tab")
 
     assert not at.exception
     line_toggles = [c for c in at.checkbox if c.label.startswith(("EMA ", "VWMA "))]
@@ -207,9 +222,11 @@ def test_app_renders_price_chart_and_metrics_when_data_available(seeded_db_path:
     _seed_backtest_run(seeded_db_path)
     at = AppTest.from_file("dashboard/app.py")
     at.run(timeout=30)
-
     assert not at.exception
     assert at.title[0].value == "AlphaBlock — 통합 트레이딩 대시보드"
+    _open_backtest_tab(at, "load_analysis_tab", timeout=30)
+
+    assert not at.exception
     # 분석 탭의 백테스트 성과 지표 6종이 실제로 그려졌는지 라벨로 확인한다.
     # 개수(len)로 단언하지 않는다: streamlit 1.59+는 모든 탭을 한 번에 렌더하므로
     # Health/페이퍼 탭의 지표(러너 상태 등)까지 at.metric 에 섞여 개수가 환경에 따라 달라진다.
@@ -237,6 +254,8 @@ def test_app_trade_table_is_korean_time_and_keeps_engine_labels(seeded_db_path: 
     _seed_backtest_run(seeded_db_path)
     at = AppTest.from_file("dashboard/app.py")
     at.run(timeout=30)
+    assert not at.exception
+    _open_backtest_tab(at, "load_analysis_tab", timeout=30)
 
     assert not at.exception
     assert "거래 목록" in [s.value for s in at.subheader]
@@ -307,6 +326,8 @@ def test_analysis_tab_hints_to_persist_when_no_zone_limit_run(seeded_db_path: st
     화면에서 A안으로 재계산하지 않고 넣는 방법을 안내한다(조용한 7분 대기 금지)."""
     at = AppTest.from_file("dashboard/app.py")
     at.run(timeout=30)
+    assert not at.exception
+    _open_backtest_tab(at, "load_analysis_tab", timeout=30)
 
     assert not at.exception
     infos = [i.value for i in at.info]
@@ -320,6 +341,8 @@ def test_saved_trades_tab_hints_how_to_persist_when_empty(seeded_db_path: str) -
     """적재된 게 없으면 "빈 화면"이 아니라 **넣는 방법**을 보여준다 (WAN-106)."""
     at = AppTest.from_file("dashboard/app.py")
     at.run(timeout=30)
+    assert not at.exception
+    _open_backtest_tab(at, "load_saved_tab", timeout=30)
 
     assert not at.exception
     assert any("--persist" in i.value for i in at.info)
@@ -331,6 +354,8 @@ def test_saved_trades_tab_renders_stored_trades_with_fingerprint(seeded_db_path:
 
     at = AppTest.from_file("dashboard/app.py")
     at.run(timeout=30)
+    assert not at.exception
+    _open_backtest_tab(at, "load_saved_tab", timeout=30)
 
     assert not at.exception
     captions = [c.value for c in at.caption]
@@ -341,6 +366,49 @@ def test_saved_trades_tab_renders_stored_trades_with_fingerprint(seeded_db_path:
     # 사용자의 원 요청("어디서 손절났는지")이 선택지로 실제로 있다.
     reason_radio = next(r for r in at.radio if r.label == "청산사유")
     assert "손절" in list(reason_radio.options)
+
+
+def test_backtest_tabs_are_lazy_and_demoted_reference(seeded_db_path: str) -> None:
+    """WAN-220: cold start는 백테스트 탭을 자동 로드하지 않는다.
+
+    "라벨은 바뀌었는데 동작은 그대로"(WAN-91/95/112/123) 부류를 동작으로 막는다 —
+    로드 전에는 "불러오기" 버튼과 "참고·대조" 안내만 보이고 무거운 성과 지표는 없으며,
+    버튼을 눌러야 비로소 조회가 실행된다.
+    """
+    _seed_backtest_run(seeded_db_path)
+    at = AppTest.from_file("dashboard/app.py")
+    at.run(timeout=30)
+    assert not at.exception
+
+    # 두 백테스트 탭의 지연 로딩 버튼이 존재한다(분석·저장된 거래).
+    button_keys = {b.key for b in at.button}
+    assert {"load_analysis_tab", "load_saved_tab"} <= button_keys
+
+    # 강등된 탭의 "참고·대조" 성격이 화면에 드러난다(약속·기대수익 아님).
+    from dashboard.app import _BACKTEST_REFERENCE_NOTE
+
+    assert _BACKTEST_REFERENCE_NOTE in [c.value for c in at.caption]
+    assert "참고" in _BACKTEST_REFERENCE_NOTE and "대조" in _BACKTEST_REFERENCE_NOTE
+
+    # 로드 전에는 분석 탭의 백테스트 지표("Total Return")가 그려지지 않는다 → cold start 빠름.
+    # (페이퍼 탭은 "총수익률(지갑)" 한글 라벨이라 겹치지 않는다.)
+    assert "Total Return" not in {m.label for m in at.metric}
+
+    # 버튼을 누르면 비로소 조회가 실행돼 지표가 뜬다.
+    _open_backtest_tab(at, "load_analysis_tab", timeout=30)
+    assert not at.exception
+    assert "Total Return" in {m.label for m in at.metric}
+
+
+def test_live_tabs_render_on_cold_start_without_loading_backtest(seeded_db_path: str) -> None:
+    """WAN-220 라이브-우선: 라이브·운영 탭(Health)은 cold start에서 즉시 그려진다 —
+    백테스트 탭을 열지 않아도 첫 화면에 운영 정보가 있어야 한다."""
+    at = AppTest.from_file("dashboard/app.py")
+    at.run(timeout=30)
+    assert not at.exception
+    subheaders = [s.value for s in at.subheader]
+    assert "데이터 신선도" in subheaders
+    assert "실시간 러너" in subheaders
 
 
 def _paper_record(*, exit_time: int, equity_after: float | None) -> PaperTradeRecord:
