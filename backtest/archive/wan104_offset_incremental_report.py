@@ -63,7 +63,7 @@
 ## 재현
 
 ```
-python -m backtest.wan104_offset_incremental_report
+python -m backtest.archive.wan104_offset_incremental_report
 ```
 """
 
@@ -729,7 +729,7 @@ def build_markdown(
     lines = [
         "# WAN-104: 오프셋 증분 거래 분해",
         "",
-        "**재현**: `python -m backtest.wan104_offset_incremental_report`",
+        "**재현**: `python -m backtest.archive.wan104_offset_incremental_report`",
         "",
         "## 무엇을 묻는가",
         "",

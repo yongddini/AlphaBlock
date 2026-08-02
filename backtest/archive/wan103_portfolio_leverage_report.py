@@ -23,7 +23,7 @@ CLI로는 답이 안 나오는 것을 묻기 때문이다: 동시 겹침(peak co
 ## 재현
 
 ```
-uv run python -m backtest.wan103_portfolio_leverage_report
+uv run python -m backtest.archive.wan103_portfolio_leverage_report
 ```
 """
 
@@ -646,7 +646,7 @@ def write_summary(
     lines = [
         "# WAN-103: 동시 다중 포지션 + 포트폴리오 레버리지 — 레버리지 스윕·단일 포지션 대조",
         "",
-        "재현: `uv run python -m backtest.wan103_portfolio_leverage_report`",
+        "재현: `uv run python -m backtest.archive.wan103_portfolio_leverage_report`",
         "",
         "WAN-112 이전 채택 기본값(롱 온리·지정가·`first_tap_free`·고정 1.5R·**오프셋 0bp**) 위에서 "
         "**포지션 제약만** 바꿔 돌린 결과다. 전략 파라미터는 하나도 건드리지 않았다. "

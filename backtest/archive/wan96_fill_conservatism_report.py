@@ -36,7 +36,7 @@ WAN-95 기준선(`baseline` 레벨)이 그대로 재현된다.
 ## 재현
 
 ```
-python -m backtest.wan96_fill_conservatism_report
+python -m backtest.archive.wan96_fill_conservatism_report
 ```
 
 전 심볼×TF×레벨을 다 도는 데 시간이 걸린다. 좁히려면
@@ -593,7 +593,7 @@ def build_markdown(
     lines = [
         "# WAN-96: 체결 가정 보수화 민감도",
         "",
-        "**재현**: `python -m backtest.wan96_fill_conservatism_report`",
+        "**재현**: `python -m backtest.archive.wan96_fill_conservatism_report`",
         "",
         "## 무엇을 묻는가",
         "",

@@ -150,15 +150,24 @@ def test_explicit_zero_offset_matches_wan99_zero_offset_baseline() -> None:
 
     ⚠️ WAN-123/132부터 되돌릴 것이 **셋**이다: 오프셋(0bp) + RSI 게이트(`first_tap_free`)
     + 밴드 표본(`tap`). 옛 셀을 재현하려면 그 리포트가 고정한 엔진을 통째로 요청해야 한다.
-    """
-    from backtest.wan99_zone_limit_offset_report import FILL_ASSUMPTIONS
 
-    assert build_params(
-        offset_bps=0.0,
-        base=pin_band_bar(
-            ConfluenceParams(rsi_gate_mode=LEGACY_RSI_GATE_MODE, max_zone_width_atr=None)
-        ),
-    ) == FILL_ASSUMPTIONS[0].params(offset_bps=0.0, seed=0)
+    WAN-216 이후: wan99는 `backtest/archive/`로 동결됐다. 그 baseline 가정(`offset 0 ·
+    관통 0 · 탈락 0`)을 리터럴로 재현해 자체 완결로 잠근다(아카이브 모듈을 import하면
+    mypy follow-imports가 아카이브를 되살린다).
+    """
+    legacy = pin_band_bar(
+        ConfluenceParams(rsi_gate_mode=LEGACY_RSI_GATE_MODE, max_zone_width_atr=None)
+    )
+    # wan99 `FILL_ASSUMPTIONS[0].params(offset_bps=0.0, seed=0)`의 리터럴 재현.
+    expected = legacy.model_copy(
+        update={
+            "zone_limit_offset_bps": 0.0,
+            "fill_penetration_bps": 0.0,
+            "fill_dropout_rate": 0.0,
+            "fill_dropout_seed": 0,
+        }
+    )
+    assert build_params(offset_bps=0.0, base=legacy) == expected
 
 
 def test_default_gate_is_off_and_legacy_pin_differs() -> None:
@@ -240,26 +249,44 @@ def test_fill_presets_match_wan96_conservatism_levels() -> None:
 
     이름만 같고 값이 다르면 `--fill pen_5bp` 결과를 WAN-96 표의 `pen_5bp` 행과 나란히
     읽을 수 없다 — 이 테스트가 그 조용한 갈라짐을 막는다.
-    """
-    from backtest.wan96_fill_conservatism_report import CONSERVATISM_LEVELS
 
-    for level in CONSERVATISM_LEVELS:
-        preset = fill_preset(level.name)
-        assert preset.penetration_bps == level.penetration_bps
-        assert preset.dropout_rate == level.dropout_rate
-        assert preset.seeds == level.seeds
-        for seed in level.seeds:
+    WAN-216 이후: wan96은 `backtest/archive/`로 동결됐다. `CONSERVATISM_LEVELS`를
+    리터럴로 스냅샷해 자체 완결로 잠근다(아카이브 모듈을 import하면 mypy follow-imports가
+    아카이브를 되살린다). 값이 갈라지면 여기서 여전히 실패한다.
+    """
+    # wan96 `CONSERVATISM_LEVELS`의 리터럴 스냅샷 (name, penetration_bps, dropout_rate, seeds).
+    levels: tuple[tuple[str, float, float, tuple[int, ...]], ...] = (
+        ("baseline", 0.0, 0.0, (0,)),
+        ("pen_1bp", 1.0, 0.0, (0,)),
+        ("pen_5bp", 5.0, 0.0, (0,)),
+        ("drop_25", 0.0, 0.25, (0, 1, 2, 3, 4)),
+        ("drop_50", 0.0, 0.5, (0, 1, 2, 3, 4)),
+        ("pen_5bp_drop_50", 5.0, 0.5, (0, 1, 2, 3, 4)),
+    )
+    legacy = pin_band_bar(
+        ConfluenceParams(rsi_gate_mode=LEGACY_RSI_GATE_MODE, max_zone_width_atr=None)
+    )
+    for name, penetration_bps, dropout_rate, seeds in levels:
+        preset = fill_preset(name)
+        assert preset.penetration_bps == penetration_bps
+        assert preset.dropout_rate == dropout_rate
+        assert preset.seeds == seeds
+        for seed in seeds:
             # WAN-96은 오프셋 0bp + 게이트 `first_tap_free`에 고정돼 있다(당시 엔진 기록).
             # CLI 기본은 이제 2bp · 게이트 없음이므로 나란히 읽으려면 둘 다 그쪽에 맞춰야
             # 한다 — 이 인자들이 "옛 엔진을 요청한다"는 사실을 드러낸다(WAN-112/123).
-            assert build_params(
-                fill=preset,
-                seed=seed,
-                offset_bps=0.0,
-                base=pin_band_bar(
-                    ConfluenceParams(rsi_gate_mode=LEGACY_RSI_GATE_MODE, max_zone_width_atr=None)
-                ),
-            ) == level.params(seed)
+            # wan96 `ConservatismLevel.params(seed)`의 리터럴 재현. wan96 `BASE_PARAMS`는
+            # 오프셋 0bp에 고정돼 있었으므로(위 `build_params(offset_bps=0.0)`과 짝) 여기서도
+            # 오프셋 0bp를 명시한다 — `legacy` 기본 오프셋(2bp)이 새어들지 않게.
+            expected = legacy.model_copy(
+                update={
+                    "zone_limit_offset_bps": 0.0,
+                    "fill_penetration_bps": penetration_bps,
+                    "fill_dropout_rate": dropout_rate,
+                    "fill_dropout_seed": seed,
+                }
+            )
+            assert build_params(fill=preset, seed=seed, offset_bps=0.0, base=legacy) == expected
 
 
 def test_fill_presets_match_wan99_fill_assumptions() -> None:
@@ -267,21 +294,37 @@ def test_fill_presets_match_wan99_fill_assumptions() -> None:
 
     WAN-123 이후 게이트를 그쪽 고정값으로 되돌려야 한다 — 오프셋은 WAN-99가 **축으로
     명시**해 돌리므로 여기서 그대로 주지만, 게이트는 그 리포트가 **핀**으로 잡은 값이다.
-    """
-    from backtest.wan99_zone_limit_offset_report import FILL_ASSUMPTIONS
 
+    WAN-216 이후: wan99는 `backtest/archive/`로 동결됐다. `FILL_ASSUMPTIONS`를 리터럴로
+    스냅샷해 자체 완결로 잠근다. ⚠️ wan99는 오프셋 축(5배)이 곱해져 탈락 시드를 3개로
+    줄였다 — 그래서 프리셋 `seeds`(5개)와 대조하지 않고 **가정의 시드**만 순회한다.
+    """
+    # wan99 `FILL_ASSUMPTIONS`의 리터럴 스냅샷 (name, penetration_bps, dropout_rate, seeds).
+    assumptions: tuple[tuple[str, float, float, tuple[int, ...]], ...] = (
+        ("baseline", 0.0, 0.0, (0,)),
+        ("pen_5bp", 5.0, 0.0, (0,)),
+        ("pen_5bp_drop_50", 5.0, 0.5, (0, 1, 2)),
+    )
     legacy = pin_band_bar(
         ConfluenceParams(rsi_gate_mode=LEGACY_RSI_GATE_MODE, max_zone_width_atr=None)
     )
-    for assumption in FILL_ASSUMPTIONS:
-        preset = fill_preset(assumption.name)
-        assert preset.penetration_bps == assumption.penetration_bps
-        assert preset.dropout_rate == assumption.dropout_rate
+    for name, penetration_bps, dropout_rate, seeds in assumptions:
+        preset = fill_preset(name)
+        assert preset.penetration_bps == penetration_bps
+        assert preset.dropout_rate == dropout_rate
         for offset in (0.0, 5.0, 20.0):
-            for seed in assumption.seeds:
-                assert build_params(
-                    fill=preset, seed=seed, offset_bps=offset, base=legacy
-                ) == assumption.params(offset, seed)
+            for seed in seeds:
+                # wan99 `FillAssumption.params(offset, seed)`의 리터럴 재현.
+                expected = legacy.model_copy(
+                    update={
+                        "zone_limit_offset_bps": offset,
+                        "fill_penetration_bps": penetration_bps,
+                        "fill_dropout_rate": dropout_rate,
+                        "fill_dropout_seed": seed,
+                    }
+                )
+                got = build_params(fill=preset, seed=seed, offset_bps=offset, base=legacy)
+                assert got == expected
 
 
 def test_build_params_pairs_rsi_mode_with_entry_mode() -> None:
@@ -774,11 +817,10 @@ def test_mean_r_scores_by_exit_reason_and_skips_unresolved() -> None:
     assert mean_r(_result([]), 1.5) is None
 
 
-def test_mean_r_matches_wan99_definition() -> None:
-    """WAN-99가 쓰던 정의와 동일하다(그 리포트가 이 구현으로 위임됐다)."""
-    from backtest.wan99_zone_limit_offset_report import mean_r as wan99_mean_r
-
-    assert wan99_mean_r is mean_r
+# WAN-216: `test_mean_r_matches_wan99_definition`(= wan99가 `harness.mean_r`를 재구현하지
+# 않고 위임했다는 항등 검사)은 wan99가 `backtest/archive/`로 동결되면서 무의미해져 제거했다.
+# `harness.mean_r` 자체의 동작은 `test_run_regression_real_data.py`가 실데이터로 `mean_r`
+# 열까지 비트 대조해 계속 지킨다.
 
 
 # ---------------------------------------------------- 렌더

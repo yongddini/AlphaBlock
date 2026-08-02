@@ -13,7 +13,7 @@ import pytest
 from backtest.models import BacktestConfig, ExitReason, PositionSide
 from backtest.portfolio import PortfolioParams, sequence_portfolio
 from backtest.sweep import default_backtest_config
-from backtest.wan108_multi_position_reappraisal import (
+from backtest.archive.wan108_multi_position_reappraisal import (
     ALL_TIMEFRAMES,
     SCENARIO_PEAK,
     SERIES_TIMEFRAMES,

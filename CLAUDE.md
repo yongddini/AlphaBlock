@@ -1546,7 +1546,7 @@ WAN-97이 IS/OOS 축까지 포함해 재판정했고([`docs/decisions/wan97.md`]
 1셀만 교정 엔진으로 갱신돼 **엔진이 섞여 있으니 셀 간 비교 금지**.
 
 ⚠️ **체결 가정 보수화 결과 — 15m 제외 권고(WAN-96, 🔁 폐기됨)**: `backtest/reports/
-wan96_fill_conservatism_summary.md`(재현: `python -m backtest.wan96_fill_conservatism_report`).
+wan96_fill_conservatism_summary.md`(재현: `python -m backtest.archive.wan96_fill_conservatism_report`).
 **아래 수치는 전부 WAN-100 교정 전 엔진 기준이고, 그 권고(15m 제외)는 이제 결론까지
 번복됐다** — 근거는 WAN-100 교정에서 소멸했고(아래), 결론은 WAN-107이 뒤집었다(위 📌 TF
 문단이 정본). **이 문단은 당시 기록이며 인용 대상이 아니다.**
@@ -1673,8 +1673,8 @@ single`/숫자로 존치한다.
 
 ⚠️ **동시 다중 포지션은 옵션이고 기본값은 여전히 「동시 1포지션」이다(WAN-103 · 재판정
 WAN-108)**: [`docs/decisions/wan103.md`](docs/decisions/wan103.md)(재현: `python -m
-backtest.wan103_portfolio_leverage_report` + `python -m
-backtest.wan108_multi_position_reappraisal`). 여러 존에 동시 진입하는 포트폴리오 회계
+backtest.archive.wan103_portfolio_leverage_report` + `python -m
+backtest.archive.wan108_multi_position_reappraisal`). 여러 존에 동시 진입하는 포트폴리오 회계
 (`backtest/portfolio.py`)와 포트폴리오 레버리지(= **열린 명목 합** ≤ 자본 × leverage)를
 만들었지만, **`ConfluenceParams()`도 `risk_sizing`(사이징 모드·레버리지)도 바꾸지 않았다** —
 `PortfolioParams`를 명시적으로 넘기는 새 진입점(`run_zone_limit_portfolio_backtest`)에서만
