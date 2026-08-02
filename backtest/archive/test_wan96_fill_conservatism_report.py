@@ -1,8 +1,8 @@
-"""backtest.wan96_fill_conservatism_report 단위 테스트 (WAN-96).
+"""backtest.archive.wan96_fill_conservatism_report 단위 테스트 (WAN-96).
 
 3심볼×2TF×3년 실데이터 민감도 산출은 `backtest/reports/wan96_fill_conservatism*.csv`·
 `wan96_fill_bias.csv`·`wan96_fill_conservatism_summary.md`(재현:
-`python -m backtest.wan96_fill_conservatism_report`)로 별도 확인한다. 여기서는 결정적
+`python -m backtest.archive.wan96_fill_conservatism_report`)로 별도 확인한다. 여기서는 결정적
 합성 데이터로 보수화 레벨 배선·편향 진단 산식·리포트 렌더만 검증한다.
 """
 
@@ -16,7 +16,7 @@ from backtest.models import PositionSide
 from backtest.substep import SubStep, ZoneLimitStatus
 from backtest.sweep import timeframe_to_ms
 from backtest.synthetic import make_synthetic_ohlcv
-from backtest.wan96_fill_conservatism_report import (
+from backtest.archive.wan96_fill_conservatism_report import (
     BASE_PARAMS,
     CONSERVATISM_LEVELS,
     ConservatismLevel,
@@ -330,7 +330,7 @@ def test_markdown_renders_verdict_and_limits() -> None:
 
     md = build_markdown(frame, sensitivity, spread, bias_frame)
     assert "WAN-96" in md
-    assert "python -m backtest.wan96_fill_conservatism_report" in md
+    assert "python -m backtest.archive.wan96_fill_conservatism_report" in md
     assert "체결 편향 진단" in md
     assert "15m 채택/제외 최종 권고" in md
     assert "한계" in md

@@ -1,8 +1,8 @@
-"""backtest.wan104_offset_incremental_report 단위 테스트 (WAN-104).
+"""backtest.archive.wan104_offset_incremental_report 단위 테스트 (WAN-104).
 
 3심볼×3년 실데이터 분해는 `backtest/reports/wan104_offset_incremental.csv`·
 `wan104_offset_gap_distribution.csv`(재현: `python -m
-backtest.wan104_offset_incremental_report`)로 별도 확인한다. 여기서는 결정적 입력으로
+backtest.archive.wan104_offset_incremental_report`)로 별도 확인한다. 여기서는 결정적 입력으로
 **분류 규칙·품질 산식·집계 가중·갭 밴드 배정**만 검증한다 — 이 리포트의 결론이 걸린 곳이
 엔진이 아니라 그 네 가지이기 때문이다.
 """
@@ -13,7 +13,7 @@ import pytest
 
 from backtest.models import ExitReason, PositionSide, Trade, TradeFill
 from backtest.substep import ZoneLimitStatus
-from backtest.wan104_offset_incremental_report import (
+from backtest.archive.wan104_offset_incremental_report import (
     CLASS_BASE,
     CLASS_INCREMENTAL,
     CLASS_LOST,

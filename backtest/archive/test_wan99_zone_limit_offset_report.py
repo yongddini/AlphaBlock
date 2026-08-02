@@ -1,8 +1,8 @@
-"""backtest.wan99_zone_limit_offset_report 단위 테스트 (WAN-99).
+"""backtest.archive.wan99_zone_limit_offset_report 단위 테스트 (WAN-99).
 
 3심볼×2TF×3년 실데이터 스윕은 `backtest/reports/wan99_zone_limit_offset*.csv`·
 `wan99_offset_plateau.csv`·`wan99_offset_oos.csv`·`wan99_zone_limit_offset_summary.md`
-(재현: `python -m backtest.wan99_zone_limit_offset_report`)로 별도 확인한다. 여기서는
+(재현: `python -m backtest.archive.wan99_zone_limit_offset_report`)로 별도 확인한다. 여기서는
 결정적 합성 데이터로 격자 배선·구간 분할·고원/OOS 판정 산식·리포트 렌더만 검증한다.
 """
 
@@ -23,7 +23,7 @@ from backtest.models import (
 )
 from backtest.sweep import timeframe_to_ms
 from backtest.synthetic import make_synthetic_ohlcv
-from backtest.wan99_zone_limit_offset_report import (
+from backtest.archive.wan99_zone_limit_offset_report import (
     DECISION_ASSUMPTION,
     DEFAULT_OFFSETS_BPS,
     FILL_ASSUMPTIONS,
@@ -381,7 +381,7 @@ def test_report_frames_and_markdown_render() -> None:
 
     assert not frame.empty and not sensitivity.empty
     assert "# WAN-99" in markdown
-    assert "python -m backtest.wan99_zone_limit_offset_report" in markdown
+    assert "python -m backtest.archive.wan99_zone_limit_offset_report" in markdown
     assert "보수 가정에서 살아남는 오프셋이 있는가" in markdown
     assert "오프셋 채택/미채택 권고" in markdown
 

@@ -36,7 +36,7 @@
 ## 재현
 
 ```
-python -m backtest.wan99_zone_limit_offset_report
+python -m backtest.archive.wan99_zone_limit_offset_report
 ```
 
 전 심볼×TF×오프셋×가정을 다 도는 데 시간이 걸린다(15m 한 셀이 수십 분). 기본은 셀 단위
@@ -757,7 +757,7 @@ def build_markdown(sensitivity: pd.DataFrame, plateau: pd.DataFrame, oos: pd.Dat
     lines = [
         "# WAN-99: 지정가 오프셋 민감도",
         "",
-        "**재현**: `python -m backtest.wan99_zone_limit_offset_report`",
+        "**재현**: `python -m backtest.archive.wan99_zone_limit_offset_report`",
         "",
         "## 무엇을 묻는가",
         "",

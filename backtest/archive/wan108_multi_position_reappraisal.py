@@ -31,13 +31,13 @@
 WAN-103과 같은 이유다: 동시 겹침(peak concurrency)은 격자 한 셀의 성과 지표가 아니라
 **실행 도중의 상태**이고, "IS에서 잰 N을 OOS에 적용"은 셀 사이에 의존이 있는 2단계
 절차다. 여기에 사이징 축의 청산 계측이 더해진다. 골격(데이터 로딩·구간 분할)과 포트폴리오
-경로는 `backtest.harness`·`backtest.wan103_portfolio_leverage_report`에서 **그대로 가져다
+경로는 `backtest.harness`·`backtest.archive.wan103_portfolio_leverage_report`에서 **그대로 가져다
 쓴다** — 새로 짜는 건 사이징 축과 그 축이 요구하는 열뿐이다.
 
 ## 재현
 
 ```
-uv run python -m backtest.wan108_multi_position_reappraisal
+uv run python -m backtest.archive.wan108_multi_position_reappraisal
 ```
 """
 
@@ -55,7 +55,7 @@ from backtest.harness import LEGACY_YEARS, mean_r, segments_for
 from backtest.harness import load_market_data as _load_market_data
 from backtest.models import BacktestConfig, Trade
 from backtest.portfolio import C, PortfolioParams, PortfolioStats, ToTrade, sequence_portfolio
-from backtest.wan103_portfolio_leverage_report import (
+from backtest.archive.wan103_portfolio_leverage_report import (
     PARAMS,
     _Cell,
     _pool,
@@ -596,7 +596,7 @@ def write_summary(rows: Sequence[ReappraisalRow], path: Path) -> None:
     lines = [
         "# WAN-108: 다중 포지션 재판정 (15m 축) + 사이징 1안/2안 대조",
         "",
-        "재현: `uv run python -m backtest.wan108_multi_position_reappraisal`",
+        "재현: `uv run python -m backtest.archive.wan108_multi_position_reappraisal`",
         "",
         "WAN-112 이전 채택 기본값(롱 온리·지정가·`first_tap_free`·고정 1.5R·**오프셋 0bp**) 위에서 "
         "**포지션 제약과 사이징만** 바꿔 돌린 결과다. 전략 파라미터는 하나도 건드리지 않았다. "

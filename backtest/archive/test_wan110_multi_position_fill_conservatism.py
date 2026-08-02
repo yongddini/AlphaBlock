@@ -19,7 +19,7 @@ import pytest
 from backtest.harness import FILL_PRESETS_BY_NAME, build_params, fill_preset, pin_band_bar
 from backtest.models import ExitReason, PositionSide
 from backtest.sweep import default_backtest_config
-from backtest.wan103_portfolio_leverage_report import PARAMS, _Cell, build_cell
+from backtest.archive.wan103_portfolio_leverage_report import PARAMS, _Cell, build_cell
 from backtest.archive.wan110_multi_position_fill_conservatism import (
     HEADLINE_SCENARIO,
     LENS_NAMES,

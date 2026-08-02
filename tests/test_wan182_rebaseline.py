@@ -4,7 +4,8 @@
 
 - 새 기본값이 실제로 9종목 × 15m·1h·4h × 못 박은 채택 창을 돈다(CLI 파서 → 격자·옵션).
 - `--years`를 명시하면 옛 미끄러지는 창이 그대로 나온다(채택 창이 덮지 않는다).
-- harness 기본값을 직접 읽던 옛 리포트(wan104/wan108)는 `LEGACY_*` 좌표로 핀됐다.
+- 옛 좌표 상수(`LEGACY_*`)가 값째 안정하다(wan104/wan108은 WAN-216이 `backtest/archive/`로
+  동결 — 그 핀은 아카이브 모듈 안에 보존, 여기선 좌표 상수 자체만 지킨다).
 - 채택 성과 리포트(wan95)는 새 좌표를 **따라간다**(핀 반대 방향 — "지금 채택된 것"을
   재는 리포트는 고정하지 않는다).
 - 신규 3종목 펀딩 대리(WAN-180 규칙)는 **데이터가 없을 때만** 얹힌다 — 자기 데이터가
@@ -109,20 +110,22 @@ def test_legacy_coordinates_pin_the_old_defaults() -> None:
     assert harness.LEGACY_YEARS == 3.0
 
 
-def test_wan104_and_wan108_are_pinned_to_legacy_coordinates() -> None:
-    """harness 기본값을 직접 읽던 두 모듈은 옛 좌표로 핀됐다(WAN-182 파급).
+def test_legacy_coordinates_are_stable() -> None:
+    """옛 좌표 상수(`LEGACY_SYMBOLS`/`LEGACY_YEARS`)가 값째 안정하다 — 재현의 근거.
 
-    핀이 없으면 이 모듈들은 다음 실행에서 조용히 9종목/6년으로 돌아 본문(3심볼/3년
-    수치가 결론에 박혀 있다)과 어긋난다.
+    ⚠️ WAN-216 이후: wan104/wan108은 `backtest/archive/`로 옮겨져 **동결**됐다(품질검사
+    제외). 옛 규약에서는 이 둘이 harness 기본값을 직접 읽어 "다음 실행에서 조용히 9종목/
+    6년으로 드리프트"할 위험이 있었고 그것을 이 테스트가 막았는데, 아카이브로 동결된
+    지금은 드리프트 자체가 불가능하다(모듈 안의 `DEFAULT_SYMBOLS`/`DEFAULT_YEARS` 핀은
+    `backtest/archive/wan104_offset_incremental_report.py` 등에 그대로 보존).
+
+    남은 live 가드는 **좌표 상수 자체의 안정성**이다 — `LEGACY_YEARS`를 실수로 바꾸면
+    옛 리포트(wan70/88/104/108 등)가 결론에 박아 둔 3심볼·3년 수치의 재현이 통째로
+    깨진다. 아카이브 모듈을 import하지 않고(그러면 mypy follow-imports가 아카이브를
+    되살린다) 상수를 리터럴 스냅샷으로 고정해 그 위험을 계속 막는다.
     """
-    from backtest import wan104_offset_incremental_report as wan104
-    from backtest import wan108_multi_position_reappraisal as wan108
-
-    assert wan104.DEFAULT_SYMBOLS == harness.LEGACY_SYMBOLS
-    assert wan104.DEFAULT_YEARS == harness.LEGACY_YEARS
-    assert wan108.DEFAULT_YEARS == harness.LEGACY_YEARS
-    # 다른 옛 리포트(wan70/88 등)는 좌표를 자기 모듈 상수로 들고 있어 이 전환의 영향을
-    # 받지 않는다. 옛 A안 대조 리포트(wan81/84 등)는 WAN-198이 파일째 삭제했다.
+    assert harness.LEGACY_SYMBOLS == ("BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT")
+    assert harness.LEGACY_YEARS == 3.0
 
 
 def test_wan95_tracks_the_adopted_coordinates() -> None:

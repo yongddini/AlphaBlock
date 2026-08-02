@@ -10,7 +10,7 @@ from __future__ import annotations
 from backtest.models import ExitReason, PositionSide
 from backtest.portfolio import PortfolioParams, sequence_portfolio
 from backtest.sweep import default_backtest_config
-from backtest.wan103_portfolio_leverage_report import (
+from backtest.archive.wan103_portfolio_leverage_report import (
     FIXED_LEVERAGES,
     SCENARIO_PEAK,
     _scenarios,
