@@ -1179,21 +1179,6 @@ def _render_paper(settings: Settings) -> None:
         return "N/A" if value is None else f"{value:+,.2f}"
 
     st.subheader("전체 성과")
-    cols = st.columns(6)
-    cols[0].metric("총수익률(지갑)", f"{overall.total_return_pct:+.2f}%")
-    cols[1].metric("총 손익($)", _usd(overall.total_realized_pnl))
-    cols[2].metric("승률", f"{overall.win_rate * 100:.1f}%")
-    payoff = overall.payoff_ratio
-    cols[3].metric("손익비", f"{payoff:.2f}" if payoff is not None else "N/A")
-    cols[4].metric("MDD", f"{overall.max_drawdown_pct:.2f}%")
-    cols[5].metric("거래 수", str(overall.num_trades))
-
-    invested = overall.total_notional
-    risk_total = overall.total_risk_amount
-    cols2 = st.columns(6)
-    cols2[0].metric("총 투입($)", "N/A" if invested is None else f"{invested:,.2f}")
-    cols2[1].metric("총 리스크($)", "N/A" if risk_total is None else f"{risk_total:,.2f}")
-    cols2[2].metric("총 R", f"{overall.total_r:+.2f}")
 
     # 현재 잔고($) — 정본은 마지막(청산시각 최신) 거래의 청산 직후 자본(`equity_after`).
     # 옛 %-only 행은 NULL이라, 폴백 %로 역산하면 실제 잔고와 어긋난다(WAN-207 사례:
@@ -1201,8 +1186,12 @@ def _render_paper(settings: Settings) -> None:
     # (WAN-95 교훈). NULL이면 러너 재배포(WAN-185) 전까지 재구성 불가로 명시한다(WAN-212).
     balance = _latest_equity_after(records)
     initial_cap = settings.paper_equity
+
+    # 1줄 (결과): 현재 잔고를 맨 앞으로 빼 "지금 얼마다"가 먼저 보이게 하고,
+    # 흩어졌던 수익 지표(수익률·손익·R)를 한 줄에 모은다(WAN-214).
+    cols = st.columns(5)
     if balance is None:
-        cols2[3].metric(
+        cols[0].metric(
             "현재 잔고($)",
             "재구성 불가",
             help=(
@@ -1213,7 +1202,22 @@ def _render_paper(settings: Settings) -> None:
         )
     else:
         delta = None if initial_cap is None else f"{balance - initial_cap:+,.2f}"
-        cols2[3].metric("현재 잔고($)", f"{balance:,.2f}", delta=delta)
+        cols[0].metric("현재 잔고($)", f"{balance:,.2f}", delta=delta)
+    cols[1].metric("총수익률(지갑)", f"{overall.total_return_pct:+.2f}%")
+    cols[2].metric("총 손익($)", _usd(overall.total_realized_pnl))
+    cols[3].metric("총 R", f"{overall.total_r:+.2f}")
+    cols[4].metric("거래 수", str(overall.num_trades))
+
+    # 2줄 (품질·위험): 승률 · 손익비 · MDD · 총 투입 · 총 리스크(WAN-214)
+    invested = overall.total_notional
+    risk_total = overall.total_risk_amount
+    payoff = overall.payoff_ratio
+    cols2 = st.columns(5)
+    cols2[0].metric("승률", f"{overall.win_rate * 100:.1f}%")
+    cols2[1].metric("손익비", f"{payoff:.2f}" if payoff is not None else "N/A")
+    cols2[2].metric("MDD", f"{overall.max_drawdown_pct:.2f}%")
+    cols2[3].metric("총 투입($)", "N/A" if invested is None else f"{invested:,.2f}")
+    cols2[4].metric("총 리스크($)", "N/A" if risk_total is None else f"{risk_total:,.2f}")
 
     st.subheader("시리즈별 성과")
     # 화면은 한글 컬럼, CSV 내보내기는 데이터 축이라 영문·UTC 그대로(WAN-190/172).
