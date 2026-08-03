@@ -1140,17 +1140,26 @@ def _render_health(settings: Settings, *, run_every: int | None) -> None:
 # --- 페이퍼 성과 탭 (WAN-33) -------------------------------------------------
 
 
-def _latest_equity_after(records: Sequence[PaperTradeRecord]) -> float | None:
-    """가장 최근(청산시각 최신) 거래의 청산 직후 자본 = 현재 지갑 잔고(WAN-212).
+def _wallet_balance(
+    records: Sequence[PaperTradeRecord], *, initial_equity: float | None
+) -> float | None:
+    """공유 지갑 잔고 = 초기 자본 + 모든 거래의 실현손익 합(WAN-237).
 
-    옛 %-only 행은 `equity_after`가 None이라 건너뛰고, 값이 있는 거래 중 청산이 가장
-    늦은 것을 고른다. 하나도 없으면 None(재구성 불가)을 반환한다 — 폴백 역산은 실제와
-    어긋나므로 하지 않는다(WAN-207/95 교훈).
+    러너는 칸=(종목,TF)이 **한 지갑을 공유**하는 레버리지 북이다(WAN-213). 따라서 "현재
+    잔고"는 마지막 청산 1건의 스냅샷(`equity_after`)이 아니라 **모든 칸의 실현손익 합**이다 —
+    여러 칸이 동시에 청산되면 그 스냅샷은 마지막 칸만 반영해 지갑을 합산하지 못한다(WAN-237
+    실측: 손절 2건인데 잔고는 한 건만 빠졌다). `초기 자본 + Σrealized_pnl`로 재구성하면
+    "현재 잔고 − 초기 자본 == 총 손익"이 부동소수 오차 내에서 항상 성립한다.
+
+    옛 %-only 행(WAN-207 이전)은 달러 실현손익이 없어, 하나라도 섞이면 None(재구성 불가)을
+    반환한다 — 억지 %-역산은 실제 잔고와 어긋나므로 하지 않는다(WAN-207/95 교훈).
     """
-    dated = [r for r in records if r.equity_after is not None]
-    if not dated:
+    if not records or initial_equity is None:
         return None
-    return max(dated, key=lambda r: r.exit_time).equity_after
+    pnls = [r.realized_pnl for r in records]
+    if any(pnl is None for pnl in pnls):
+        return None
+    return initial_equity + sum(pnl for pnl in pnls if pnl is not None)
 
 
 def _render_paper(settings: Settings) -> None:
@@ -1180,12 +1189,12 @@ def _render_paper(settings: Settings) -> None:
 
     st.subheader("전체 성과")
 
-    # 현재 잔고($) — 정본은 마지막(청산시각 최신) 거래의 청산 직후 자본(`equity_after`).
-    # 옛 %-only 행은 NULL이라, 폴백 %로 역산하면 실제 잔고와 어긋난다(WAN-207 사례:
-    # -2.73%로 역산하면 ~$9,727인데 실제 +$10,179) — 잘못된 잔고를 찍느니 안 찍는다
-    # (WAN-95 교훈). NULL이면 러너 재배포(WAN-185) 전까지 재구성 불가로 명시한다(WAN-212).
-    balance = _latest_equity_after(records)
+    # 현재 잔고($) — 공유 지갑(WAN-213)이므로 초기 자본 + 모든 칸의 실현손익 합이다(WAN-237).
+    # 마지막 거래의 청산 직후 자본(`equity_after`) 스냅샷을 쓰면 여러 칸 동시거래에서 마지막
+    # 칸만 반영돼 지갑을 합산하지 못한다(WAN-237 실측). 옛 %-only 행이 섞이면 달러 손익이 없어
+    # 재구성 불가(None)로 두고 억지 역산은 하지 않는다(WAN-207/95 교훈).
     initial_cap = settings.paper_equity
+    balance = _wallet_balance(records, initial_equity=initial_cap)
 
     # 1줄 (결과): 현재 잔고를 맨 앞으로 빼 "지금 얼마다"가 먼저 보이게 하고,
     # 흩어졌던 수익 지표(수익률·손익·R)를 한 줄에 모은다(WAN-214).
@@ -1195,9 +1204,9 @@ def _render_paper(settings: Settings) -> None:
             "현재 잔고($)",
             "재구성 불가",
             help=(
-                "청산 직후 자본(equity_after)이 기록되지 않았습니다(WAN-207 이전 서버 코드). "
-                "억지 %-역산은 실제 잔고와 어긋나므로 표시하지 않습니다 — 러너 재배포(WAN-185) "
-                "후 새 거래부터 채워집니다."
+                "달러 실현손익이 없는 옛 %-only 거래가 섞여 있어 지갑 잔고를 재구성할 수 "
+                "없습니다(WAN-207 이전 서버 코드). 억지 %-역산은 실제 잔고와 어긋나므로 "
+                "표시하지 않습니다 — 러너 재배포(WAN-185) 후 새 거래부터 채워집니다."
             ),
         )
     else:

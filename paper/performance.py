@@ -103,21 +103,34 @@ def _equity_curve(
     wallet_basis: bool,
     initial_equity: float | None,
 ) -> list[float]:
-    """전액배팅이 아닌 자본곡선(WAN-207).
+    """전액배팅이 아닌 자본곡선(WAN-207/237).
 
-    * **지갑 기준**(`wallet_basis` + 모든 거래에 `equity_after` 존재): 청산 직후 실제 자본을
-      그대로 이어 붙인다 — 러너의 실제 equity 경로와 **정확히 일치**한다(레버리지 clamp·
-      수수료까지 반영된 값). 시작점은 주어진 초기 자본, 없으면 첫 거래 직전 자본으로 근사.
+    * **지갑 기준**(`wallet_basis` + 모든 거래에 달러 실현손익 존재): 초기 자본에서 매 거래
+      `realized_pnl`을 **누적 합산**해 지갑 잔고 경로를 재구성한다. 여러 칸(종목·TF)이 **한
+      지갑을 공유**하므로(WAN-213) 곡선은 마지막 거래의 스냅샷(`equity_after`)이 아니라 모든
+      칸의 실현손익 합이어야 한다 — 옛 구현은 행마다 적힌 `equity_after`를 그대로 이어 붙여,
+      각 칸이 독립 자본으로 기록된 장부(WAN-171 배선 전 서버)에서는 마지막 칸만 반영되고
+      지갑을 합산하지 못했다(WAN-237 실측: 손절 2건인데 잔고는 한 건만 빠졌다). 공유 엔진이
+      순차로 기록한 정상 장부에서는 `equity_after` 체인과 **비트 단위로 동일**하다(엔진 달러
+      자본은 브로커 수수료 0으로 흐르므로 `초기 + Σrealized_pnl == equity_after`). 시작점은
+      주어진 초기 자본, 없으면 첫 거래 직전 자본으로 근사한다.
     * **리스크-사이징 정규화**(그 외): 초기 1.0에서 매 거래 `r_multiple × risk_per_trade`만큼
       복리한다 — 전액배팅(`net_pct` 복리)이 아니라 백테스트와 같은 사이징 자다. 시리즈별
       곡선은 지갑이 공유돼 격리되지 않으므로 이 정규화 곡선을 쓴다.
     """
-    if wallet_basis and all(s.equity_after is not None for s in ordered):
-        first = ordered[0]
+    if wallet_basis and all(s.realized_pnl is not None for s in ordered):
         base = initial_equity
         if base is None:
-            base = float(first.equity_after) - (first.realized_pnl or 0.0)  # type: ignore[arg-type]
-        return [base] + [float(s.equity_after) for s in ordered]  # type: ignore[arg-type]
+            first = ordered[0]
+            # 초기 자본 미지정: 첫 거래 직전 자본으로 근사(청산 직후 자본 − 그 거래 실현손익).
+            after = first.equity_after
+            base = (0.0 if after is None else float(after)) - (first.realized_pnl or 0.0)
+        curve = [base]
+        running = base
+        for s in ordered:
+            running += s.realized_pnl or 0.0
+            curve.append(running)
+        return curve
 
     equity = 1.0
     curve = [equity]
