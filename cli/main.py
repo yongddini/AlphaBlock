@@ -373,6 +373,40 @@ def cmd_fills(args: argparse.Namespace, settings: Settings) -> int:
     return 0
 
 
+def cmd_compare(args: argparse.Namespace, settings: Settings) -> int:
+    """`alphablock compare [--day YYYY-MM-DD]` — 당일 라이브 vs 백테스트 대조(WAN-233).
+
+    같은 KST 하루의 진입 깔때기(탭→예약→체결→진입)를 라이브 장부와 백테스트 채택 엔진으로
+    나란히 낸다. 어느 단계에서 갈리는지가 "진입이 너무 안 됨"의 진단이다. 순수 조회라 종료
+    코드는 항상 0이다. `python -m live.live_vs_backtest`와 같은 산출물.
+    """
+    from live.live_vs_backtest import (
+        DEFAULT_WARMUP_DAYS,
+        compare_day,
+        render_comparison,
+        resolve_day_window,
+    )
+    from live.order_journal import OrderJournal
+
+    db_path = args.db if args.db is not None else settings.db_path
+    warmup_days = args.warmup_days if args.warmup_days is not None else DEFAULT_WARMUP_DAYS
+    start_ms, end_ms, day_key = resolve_day_window(args.day)
+    journal = OrderJournal(db_path)
+    try:
+        comp = compare_day(
+            journal,
+            day_start_ms=start_ms,
+            day_end_ms=end_ms,
+            day_key=day_key,
+            warmup_days=warmup_days,
+            jobs=args.jobs,
+        )
+    finally:
+        journal.close()
+    print(render_comparison(comp, by_cell=args.by_cell))
+    return 0
+
+
 def cmd_doctor(args: argparse.Namespace, settings: Settings) -> int:
     """`alphablock doctor` — DB 무결성·위생 점검(WAN-194 §2·§4·§5).
 
@@ -601,6 +635,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="조회할 KST 날짜(기본: 오늘). 예: 2026-08-02",
     )
     p_fills.set_defaults(func=cmd_fills)
+
+    p_compare = sub.add_parser(
+        "compare",
+        help="당일(KST) 라이브 vs 백테스트 대조 — 탭→예약→체결→진입 funnel(WAN-233)",
+    )
+    p_compare.add_argument("--db", default=None, help="장부 DB 경로(기본: 설정의 db_path)")
+    p_compare.add_argument(
+        "--day",
+        default="today",
+        metavar="YYYY-MM-DD",
+        help="대조할 KST 날짜(기본: 오늘). 예: 2026-08-02",
+    )
+    p_compare.add_argument(
+        "--warmup-days",
+        type=int,
+        default=None,
+        help="백테스트 워밍업 길이(일). 라이브 전-이력 존 재고 근사 노브 — 길수록 느리다",
+    )
+    p_compare.add_argument("--by-cell", action="store_true", help="심볼×TF별 대조 표도 출력")
+    p_compare.add_argument(
+        "--jobs", type=int, default=1, help="백테스트 (심볼, TF) 병렬 워커 수(기본 1)"
+    )
+    p_compare.set_defaults(func=cmd_compare)
 
     p_doctor = sub.add_parser(
         "doctor",

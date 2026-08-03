@@ -62,6 +62,7 @@ from __future__ import annotations
 import sqlite3
 import statistics
 import threading
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -408,6 +409,66 @@ class DaySummary:
         """
         decided = self.entered + self.entry_rejected
         return self.entered / decided if decided else None
+
+    @property
+    def taps(self) -> int:
+        """탭 = 예약(주문 걸림) + 필터제외(주문 걸기 전 걸러짐). 진입 깔때기의 최상단.
+
+        오늘 감지된 존 탭 전이 총수 — `record_placed`로 주문이 걸린 것(`reserved`)과
+        `record_skipped`로 주문 걸기 전 걸러진 것(`skipped`)의 합이다. 백테스트 대조에서
+        「탭/셋업 감지」 단계의 라이브 값이다(WAN-233)."""
+        return self.reserved + self.skipped
+
+    @classmethod
+    def from_orders(cls, orders: Sequence[PlacedOrder]) -> DaySummary:
+        """주문 목록(한 창의 코호트)을 `funnel_counts`와 같은 분류 규칙으로 센다(WAN-232).
+
+        `OrderJournal.day_summary`(전 시리즈)와 대조 도구의 심볼×TF별 집계(WAN-233)가 같은
+        분류를 공유하도록 분류 로직을 여기 한곳에 둔다 — 두 벌로 갈라지면 같은 코호트가 두
+        곳에서 다른 수로 보인다. 만료는 `first_rested_ms`로 순수 미체결(no_fill)과 밴드 규칙 3
+        기각(deviation)을 가르고, 체결의 하류 처분(진입/거부/미기록)은 `entry_status`로 가른다.
+        """
+        filled = no_fill = deviation = invalidated = condition_failed = 0
+        pending = discarded = skipped = 0
+        entered = rejected = unrecorded = 0
+        for order in orders:
+            if order.status == LimitOrderStatus.FILLED.value:
+                filled += 1
+                if order.entry_status == ENTRY_STATUS_ENTERED:
+                    entered += 1
+                elif order.entry_status == ENTRY_STATUS_REJECTED:
+                    rejected += 1
+                else:
+                    unrecorded += 1
+            elif order.status == LimitOrderStatus.CANCELLED_EXPIRED.value:
+                if order.first_rested_ms is None:
+                    deviation += 1
+                else:
+                    no_fill += 1
+            elif order.status == LimitOrderStatus.CANCELLED_INVALIDATED.value:
+                invalidated += 1
+            elif order.status == LimitOrderStatus.CANCELLED_CONDITION_FAILED.value:
+                condition_failed += 1
+            elif order.status == LimitOrderStatus.PENDING.value:
+                pending += 1
+            elif order.status == STATUS_DISCARDED_RESTART:
+                discarded += 1
+            elif order.status == STATUS_SKIPPED:
+                skipped += 1
+        return cls(
+            reserved=len(orders) - skipped,
+            filled=filled,
+            no_fill=no_fill,
+            deviation=deviation,
+            invalidated=invalidated,
+            condition_failed=condition_failed,
+            pending=pending,
+            discarded_restart=discarded,
+            skipped=skipped,
+            entered=entered,
+            entry_rejected=rejected,
+            entry_unrecorded=unrecorded,
+        )
 
 
 @dataclass(frozen=True)
@@ -938,46 +999,8 @@ class OrderJournal:
         만료는 `first_rested_ms`로 순수 미체결(no_fill)과 밴드 규칙 3 기각(deviation)을 가르고,
         체결의 하류 처분(진입/거부/미기록)은 `entry_status`로 가른다. 그래서 모든 사건이 같은
         KST 하루에 나면 체결률 분자·분모가 `funnel_counts`와 정확히 일치한다(CTA #3).
+
+        분류 로직은 `DaySummary.from_orders`가 소유한다 — 대조 도구(WAN-233)의 심볼×TF별
+        집계가 같은 규칙을 재사용해 두 곳에서 같은 코호트가 다른 수로 보이지 않게 한다.
         """
-        filled = no_fill = deviation = invalidated = condition_failed = 0
-        pending = discarded = skipped = 0
-        entered = rejected = unrecorded = 0
-        orders = self.orders_placed_between(start_ms=start_ms, end_ms=end_ms)
-        for order in orders:
-            if order.status == LimitOrderStatus.FILLED.value:
-                filled += 1
-                if order.entry_status == ENTRY_STATUS_ENTERED:
-                    entered += 1
-                elif order.entry_status == ENTRY_STATUS_REJECTED:
-                    rejected += 1
-                else:
-                    unrecorded += 1
-            elif order.status == LimitOrderStatus.CANCELLED_EXPIRED.value:
-                if order.first_rested_ms is None:
-                    deviation += 1
-                else:
-                    no_fill += 1
-            elif order.status == LimitOrderStatus.CANCELLED_INVALIDATED.value:
-                invalidated += 1
-            elif order.status == LimitOrderStatus.CANCELLED_CONDITION_FAILED.value:
-                condition_failed += 1
-            elif order.status == LimitOrderStatus.PENDING.value:
-                pending += 1
-            elif order.status == STATUS_DISCARDED_RESTART:
-                discarded += 1
-            elif order.status == STATUS_SKIPPED:
-                skipped += 1
-        return DaySummary(
-            reserved=len(orders) - skipped,
-            filled=filled,
-            no_fill=no_fill,
-            deviation=deviation,
-            invalidated=invalidated,
-            condition_failed=condition_failed,
-            pending=pending,
-            discarded_restart=discarded,
-            skipped=skipped,
-            entered=entered,
-            entry_rejected=rejected,
-            entry_unrecorded=unrecorded,
-        )
+        return DaySummary.from_orders(self.orders_placed_between(start_ms=start_ms, end_ms=end_ms))
