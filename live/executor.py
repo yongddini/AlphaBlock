@@ -99,11 +99,49 @@ class PaperExecutor:
         self._restore()
 
     def _restore(self) -> None:
+        # 누적 자본을 먼저 복원한다 — 오픈 포지션 복구는 자본을 건드리지 않으므로 순서는
+        # 무관하지만, 자본이 시드된 뒤에 열린 포지션이 얹히는 편이 읽기 쉽다(WAN-238).
+        self._restore_equity()
+        self._restore_positions()
+
+    def _restore_positions(self) -> None:
         restored = self._store.load_open_positions()
         for open_position in restored:
             self._engine.restore_position(open_position.position)
         if restored:
             _logger.info("열린 페이퍼 포지션 %d건 복구", len(restored))
+
+    def _restore_equity(self) -> None:
+        """재시작 시 누적 북 자본을 원장에서 복원한다(WAN-238, `restore_position`과 대칭).
+
+        엔진은 기본이 초기 자본(`settings.paper_equity`)으로 시드되는데, 그러면 재시작
+        후 사이징(`risk_amount = equity × risk_per_trade`)이 **손실을 모르는 초기 자본**
+        기준이 된다(손실이 나도 다음 베팅이 안 줄고, 이익이 나도 안 는다). 북(WAN-213)은
+        공유 지갑이므로 복원 단위는 칸별이 아니라 **전 칸 실현손익 합**이다:
+        `초기자본 + Σrealized_pnl`(= WAN-237 표시 잔고와 같은 공식).
+
+        복원 불가(옛 %-only 장부, `realized_pnl` NULL)면 초기 자본을 그대로 둔다(안전 폴백).
+        """
+        # 아직 시드 직후라 엔진 자본 = settings.paper_equity(초기 자본).
+        initial = self._engine.equity
+        total = self._store.total_realized_pnl()
+        if total is None:
+            _logger.warning(
+                "옛 %%-only 장부(realized_pnl NULL) 감지 — 누적 자본 복원 불가, "
+                "초기 자본(%.2f)으로 시드",
+                initial,
+            )
+            return
+        if total == 0.0:
+            return  # 거래 없음(또는 정확히 상쇄) — 초기 자본 그대로.
+        restored = initial + total
+        self._engine.restore_equity(restored)
+        _logger.info(
+            "누적 북 자본 복원(WAN-238): 초기 %.2f + 실현손익 Σ%.2f = %.2f",
+            initial,
+            total,
+            restored,
+        )
 
     def circuit_breaker_status(self, now_ms: int) -> CircuitBreakerStatus:
         """현재 서킷브레이커 상태 스냅샷(러너 알림·대시보드, WAN-38)."""

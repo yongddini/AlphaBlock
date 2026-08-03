@@ -175,6 +175,20 @@ class ExecutionEngine:
         """
         self._book[(position.symbol, position.timeframe)] = position
 
+    def restore_equity(self, equity: float) -> None:
+        """영속 장부에서 복원한 누적 자본을 시드한다(재시작 안전, WAN-238).
+
+        `restore_position`과 대칭이다. 엔진은 기본이 초기 자본으로 시드되는데, 그
+        상태로 재시작하면 사이징(`risk_amount = equity × risk_per_trade`)이 손실·이익을
+        모르는 초기 자본 기준으로 계산돼 리스크 관리가 설계와 어긋난다. 호출부
+        (`PaperExecutor`)가 원장에서 계산한 누적 자본을 여기로 실어 이어지게 한다.
+
+        미실현 손익 이중계산 없음 — 복원되는 오픈 포지션(`restore_position`)의 손익은
+        엔진 자본에 아직 반영돼 있지 않고 청산 시(`on_exit`) 비로소 더해지므로, 청산된
+        거래만 더해 만든 누적 자본과 겹치지 않는다.
+        """
+        self._equity = equity
+
     # -- 진입 ---------------------------------------------------------------
 
     def _book_risk_decision(self, now_ms: int) -> RiskDecision:
