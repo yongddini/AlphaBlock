@@ -373,6 +373,20 @@ class PlacedOrder:
     entry_status: str | None
     entry_reject_reason: str | None
     skip_reason: str | None
+    # -- 아래 다섯은 `live_limit_orders`에 이미 있으나 WAN-232 표는 안 실었다(WAN-234).
+    #    거래별 타임라인은 「얼마에 체결했나·손절/익절 목표는·어느 존이었나」까지 봐야 해서
+    #    싣는다. 옛 행·아직 안 채워진 값은 `None`이라 렌더러가 `—`로 읽는다.
+    fill_price: float | None = None
+    """실제 체결가(`fill_price`). 미체결이면 `None`."""
+    stop_price: float | None = None
+    """진입 근거 오더블록 무효화 경계 = 손절 목표가. 옛 행은 `None`."""
+    take_profit_price: float | None = None
+    """고정 1.5R 익절 목표가. 옛 행은 `None`."""
+    zone_start_time: int | None = None
+    """이 셋업이 속한 오더블록 존의 형성 봉 시각(상위TF `open_time`). 백테스트 셋업과
+    같은 축이라 라이브↔백테스트 존 대조·차트 점프의 조인 키다(WAN-234)."""
+    zone_confirmed_time: int | None = None
+    """존 확정 봉 시각(상위TF `open_time`). `zone_start_time`과 한 쌍의 조인 키."""
 
 
 @dataclass(frozen=True)
@@ -987,7 +1001,8 @@ class OrderJournal:
         rows = self._conn.execute(
             "SELECT symbol, timeframe, direction, placed_ms, status, last_limit_price,"
             " fill_ms, fill_penetration_bps, first_rested_ms, entry_status,"
-            " entry_reject_reason, skip_reason FROM live_limit_orders"
+            " entry_reject_reason, skip_reason, fill_price, stop_price, take_profit_price,"
+            " zone_start_time, zone_confirmed_time FROM live_limit_orders"
             " WHERE placed_ms >= ? AND placed_ms < ? ORDER BY placed_ms, id",
             (start_ms, end_ms),
         ).fetchall()
@@ -1005,6 +1020,11 @@ class OrderJournal:
                 entry_status=None if r[9] is None else str(r[9]),
                 entry_reject_reason=None if r[10] is None else str(r[10]),
                 skip_reason=None if r[11] is None else str(r[11]),
+                fill_price=None if r[12] is None else float(r[12]),
+                stop_price=None if r[13] is None else float(r[13]),
+                take_profit_price=None if r[14] is None else float(r[14]),
+                zone_start_time=None if r[15] is None else int(r[15]),
+                zone_confirmed_time=None if r[16] is None else int(r[16]),
             )
             for r in rows
         ]

@@ -85,8 +85,21 @@ from dashboard.trade_table import (
     selected_trade_window,
     style_trade_frame,
 )
+from dashboard.trade_timeline_view import (
+    backtest_only_note,
+    chart_window,
+    selected_row,
+    timeline_frame,
+)
 from live.order_journal import LedgerEntry, OrderJournal
 from live.runtime_state import EventRecord
+from live.trade_timeline import (
+    DayTimeline,
+    TimelineRow,
+    backtest_timeline_rows,
+    live_timeline_rows,
+    resolve_day_window,
+)
 from paper.performance import build_performance
 from paper.report import (
     performance_to_dataframe,
@@ -890,6 +903,123 @@ def _render_saved_chart(
         )
 
 
+# --- 거래 타임라인 탭 (WAN-234) ---------------------------------------------
+
+_TIMELINE_TABLE_KEY = "trade_timeline_selection"
+_TIMELINE_CHART_HEIGHT = 520
+#: 선택한 거래 구간의 좌우로 이만큼 더 캔들을 실어 문맥을 준다(차트 여백).
+_TIMELINE_CHART_PAD_MS = 12 * 3_600_000
+
+
+def _render_trade_timeline(settings: Settings) -> None:
+    """당일(KST) 거래별 타임라인 — 예약→체결가→청산가→손익, 라이브|백테스트(WAN-234).
+
+    라이브(주문 장부 + 페이퍼 라운드트립)를 주인공으로 그리고, 백테스트 대조는 무거우니
+    (셀마다 워밍업 연속) **옵트인**이다 — 켜면 그날 라이브가 있었던 (심볼, TF) 셀만 재산출해
+    부담을 줄인다. 행을 누르면 그 거래 지점으로 차트가 이동한다(저장된 거래 탭 패턴).
+    """
+    db_path = settings.db_path
+    st.subheader("당일 거래별 타임라인")
+    st.caption(
+        "들어간 셋업이 **언제 예약 → 얼마에 체결 → 어디서 청산 → 손익 얼마**였는지 거래 한 "
+        "줄로 봅니다. 라이브가 주인공, 백테스트는 대조입니다. 시각은 **한국시간(KST)** 입니다."
+    )
+
+    default_day = datetime.now(tz=KST).date()
+    col_day, col_bt = st.columns([2, 3])
+    day = col_day.date_input("날짜(KST)", value=default_day, key="timeline_day")
+    include_bt = col_bt.checkbox(
+        "백테스트 대조 병기 (그날 라이브 셀만 · 워밍업 연속 — 무겁습니다)",
+        value=False,
+        key="timeline_include_bt",
+    )
+
+    start_ms, end_ms, day_key = resolve_day_window(day.isoformat())
+    journal = OrderJournal(db_path)
+    store = PaperTradeStore(db_path)
+    try:
+        live_rows = live_timeline_rows(journal, store, start_ms=start_ms, end_ms=end_ms)
+    finally:
+        store.close()
+        journal.close()
+
+    backtest_rows: list[TimelineRow] = []
+    if include_bt:
+        symbols = sorted({r.symbol for r in live_rows})
+        timeframes = sorted({r.timeframe for r in live_rows})
+        if symbols and timeframes:
+            with st.spinner("백테스트 대조 재산출 중… (그날 라이브 셀만)"):
+                backtest_rows = backtest_timeline_rows(
+                    day_start_ms=start_ms,
+                    day_end_ms=end_ms,
+                    symbols=symbols,
+                    timeframes=timeframes,
+                )
+        else:
+            st.info("이 날 라이브 예약이 없어 백테스트 대조 대상 셀이 없습니다.")
+
+    timeline = DayTimeline(day_key=day_key, live=tuple(live_rows), backtest=tuple(backtest_rows))
+    note = backtest_only_note(timeline)
+    if note is not None:
+        st.warning(note)
+
+    frame = timeline_frame(timeline)
+    if frame.empty:
+        st.info(f"{day_key}: 라이브 예약·백테스트 진입이 모두 없습니다.")
+        return
+
+    row = selected_row(timeline, parse_selected_rows(st.session_state.get(_TIMELINE_TABLE_KEY)))
+    if row is not None:
+        _render_timeline_chart(db_path, row)
+
+    st.caption(
+        "라이브 칸이 비고 **백테스트 줄만 있는 행**이 핵심 신호입니다 — 백테는 진입했는데 "
+        "라이브가 어느 단계에서 끊겼는지(상태 열)로 원인을 가릅니다. 행을 누르면 위 차트가 그 "
+        "거래 지점으로 이동합니다."
+    )
+    st.dataframe(
+        frame,
+        use_container_width=True,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        key=_TIMELINE_TABLE_KEY,
+    )
+
+
+def _render_timeline_chart(db_path: str, row: TimelineRow) -> None:
+    """선택한 타임라인 행의 (심볼, TF) 캔들 위에 그 거래 구간을 비춘다(존은 안 그린다)."""
+    window = chart_window(row)
+    if window is None:
+        st.caption("이 행은 기준 시각이 없어 차트를 띄울 수 없습니다(예약·체결 시각 미상).")
+        return
+    focus_start, focus_end = window
+    candles = _cached_ohlcv(
+        db_path,
+        row.symbol,
+        row.timeframe,
+        focus_start - _TIMELINE_CHART_PAD_MS,
+        focus_end + _TIMELINE_CHART_PAD_MS,
+    )
+    if candles.empty:
+        st.warning(
+            "이 구간의 캔들이 DB에 없어 차트를 그릴 수 없습니다(거래 표는 그대로 조회됩니다)."
+        )
+        return
+    st.iframe(
+        build_chart_html(
+            candles,
+            [],
+            None,
+            theme=_current_chart_theme(),
+            height=_TIMELINE_CHART_HEIGHT,
+            focus=window,
+        ),
+        height=_TIMELINE_CHART_HEIGHT,
+    )
+    st.caption(f"🔎 {row.source} · {row.symbol} · {row.timeframe} — 선택한 거래 구간")
+
+
 # --- 운영 상태(Health) 탭 ---------------------------------------------------
 
 
@@ -1414,10 +1544,11 @@ def main() -> None:
     run_every = refresh_seconds if (auto_refresh and refresh_seconds > 0) else None
 
     # 라이브-우선 배치(WAN-220): 라이브·운영 탭이 앞, 백테스트(참고·대조)는 뒤로 강등.
-    paper_tab, ledger_tab, health_tab, analysis_tab, saved_tab = st.tabs(
+    paper_tab, ledger_tab, timeline_tab, health_tab, analysis_tab, saved_tab = st.tabs(
         [
             "페이퍼 성과",
             "진입/미진입 장부",
+            "거래 타임라인",
             "운영 상태(Health)",
             "분석 (참고·대조)",
             "저장된 거래 (참고·대조)",
@@ -1427,6 +1558,8 @@ def main() -> None:
         _render_paper(settings)
     with ledger_tab:
         _render_funnel_ledger(settings)
+    with timeline_tab:
+        _render_trade_timeline(settings)
     with health_tab:
         _render_health(settings, run_every=run_every)
     # 백테스트 탭은 지연 로딩한다 — cold start에서 무거운 분석 탭(~10초)을 자동 로드하지
