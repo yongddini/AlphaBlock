@@ -411,11 +411,18 @@ def test_live_tabs_render_on_cold_start_without_loading_backtest(seeded_db_path:
     assert "실시간 러너" in subheaders
 
 
-def _paper_record(*, exit_time: int, equity_after: float | None) -> PaperTradeRecord:
+def _paper_record(
+    *,
+    exit_time: int,
+    equity_after: float | None,
+    realized_pnl: float | None = None,
+    symbol: str = "BTC/USDT:USDT",
+    net_pct: float = 1.0,
+) -> PaperTradeRecord:
     from strategy.models import OrderBlockDirection, SignalExitReason
 
     return PaperTradeRecord(
-        symbol="BTC/USDT:USDT",
+        symbol=symbol,
         timeframe="1h",
         direction=OrderBlockDirection.BULLISH,
         entry_time=exit_time - _STEP,
@@ -423,29 +430,62 @@ def _paper_record(*, exit_time: int, equity_after: float | None) -> PaperTradeRe
         exit_time=exit_time,
         exit_price=101.0,
         reason=SignalExitReason.TAKE_PROFIT,
-        gross_pct=1.0,
+        gross_pct=net_pct,
         fee_pct=0.0,
         funding_pct=0.0,
-        net_pct=1.0,
+        net_pct=net_pct,
+        realized_pnl=realized_pnl,
         equity_after=equity_after,
     )
 
 
-def test_latest_equity_after_picks_most_recent_dated_trade() -> None:
-    """WAN-212: 현재 잔고는 청산시각이 가장 늦은, equity_after가 있는 거래에서 온다."""
-    from dashboard.app import _latest_equity_after
+def test_wallet_balance_sums_all_cells_not_last_snapshot() -> None:
+    """WAN-237: 여러 칸 동시거래에서 현재 잔고는 지갑 합계다(마지막 스냅샷 아님).
+
+    실측 재현 — 손절 2건(BNB·DOGE)이 각자 초기자본 10,000에서 자기 손실만 뺀 채로
+    기록된 장부(칸별 독립 자본)에서, 현재 잔고는 초기자본 + 두 손실의 합이어야 하고
+    (현재 잔고 − 초기자본) == 총 손익이 성립한다.
+    """
+    from dashboard.app import _wallet_balance
 
     records = [
-        _paper_record(exit_time=3 * _STEP, equity_after=None),  # 최신이지만 값 없음(옛 행)
-        _paper_record(exit_time=1 * _STEP, equity_after=10_000.0),
-        _paper_record(exit_time=2 * _STEP, equity_after=10_180.0),
+        _paper_record(
+            exit_time=1 * _STEP,
+            symbol="BNB/USDT:USDT",
+            realized_pnl=-37.881,
+            equity_after=9_962.119,
+        ),
+        _paper_record(
+            exit_time=2 * _STEP,
+            symbol="DOGE/USDT:USDT",
+            realized_pnl=-34.8033,
+            equity_after=9_965.1967,
+        ),
     ]
-    assert _latest_equity_after(records) == 10_180.0
+    initial = 10_000.0
+    balance = _wallet_balance(records, initial_equity=initial)
+    total_pnl = -37.881 + -34.8033
+    assert balance is not None
+    # 마지막 거래 스냅샷(9,965.20)이 아니라 지갑 합계여야 한다.
+    assert balance == pytest.approx(initial + total_pnl)
+    assert balance == pytest.approx(9_927.3157)
+    # 완료 기준 1: 현재 잔고 − 초기자본 == 총 손익.
+    assert balance - initial == pytest.approx(total_pnl)
 
 
-def test_latest_equity_after_none_when_all_missing() -> None:
-    """WAN-212: equity_after가 하나도 없으면 None(재구성 불가) — 억지 역산 금지."""
-    from dashboard.app import _latest_equity_after
+def test_wallet_balance_none_when_any_row_lacks_dollar_pnl() -> None:
+    """WAN-237/207: 달러 손익이 없는 옛 행이 섞이면 None(재구성 불가) — 억지 역산 금지."""
+    from dashboard.app import _wallet_balance
 
-    records = [_paper_record(exit_time=_STEP, equity_after=None)]
-    assert _latest_equity_after(records) is None
+    records = [
+        _paper_record(exit_time=1 * _STEP, realized_pnl=-40.0, equity_after=9_960.0),
+        _paper_record(exit_time=2 * _STEP, realized_pnl=None, equity_after=None),  # 옛 %-only 행
+    ]
+    assert _wallet_balance(records, initial_equity=10_000.0) is None
+
+
+def test_wallet_balance_none_when_empty() -> None:
+    """거래가 없으면 잔고 재구성 불가(None)."""
+    from dashboard.app import _wallet_balance
+
+    assert _wallet_balance([], initial_equity=10_000.0) is None

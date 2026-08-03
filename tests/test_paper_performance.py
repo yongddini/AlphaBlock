@@ -88,6 +88,58 @@ def test_wallet_basis_uses_actual_equity_curve() -> None:
     assert m.total_realized_pnl == 20.0
 
 
+def test_wallet_basis_sums_across_cells_when_equity_after_not_chained() -> None:
+    """WAN-237: 여러 칸이 독립 자본으로 기록돼 `equity_after`가 체이닝되지 않아도, 지갑
+    곡선은 실현손익을 누적 합산해 지갑을 합산한다(마지막 스냅샷만 반영하지 않는다).
+
+    실측 재현 — 손절 2건(BNB·DOGE)이 각자 초기자본 10,000에서 자기 손실만 뺀 채 기록됐다.
+    옛 구현(원 `equity_after` 체인)은 마지막 거래(9,965.20)만 반영해 총수익률이 -0.35%로
+    부풀려졌다. 누적 합산은 두 손실을 모두 반영한다.
+    """
+    stats = [
+        TradeStat(
+            net_pct=-1.47,
+            r_multiple=-1.4743,
+            exit_time=1,
+            realized_pnl=-37.881,
+            equity_after=9_962.119,
+        ),
+        TradeStat(
+            net_pct=-1.52,
+            r_multiple=-1.5163,
+            exit_time=2,
+            realized_pnl=-34.8033,
+            equity_after=9_965.1967,
+        ),
+    ]
+    m = compute_metrics(stats, wallet_basis=True, initial_equity=10_000.0)
+    total_pnl = -37.881 + -34.8033
+    # 곡선 [10000, 9962.119, 9927.3157] → 지갑 합계 반영(마지막 스냅샷 9965.20 아님).
+    assert math.isclose(m.total_return_pct, total_pnl / 10_000.0 * 100.0, rel_tol=1e-9)
+    assert m.total_realized_pnl == total_pnl
+    # MDD: 초기 10000 고점에서 9927.3157까지 단조 하락.
+    assert math.isclose(m.max_drawdown_pct, -total_pnl / 10_000.0 * 100.0, rel_tol=1e-9)
+
+
+def test_wallet_basis_equals_equity_after_chain_when_shared_engine() -> None:
+    """공유 엔진이 순차로 기록한 정상 장부에서는 누적 합산 = `equity_after` 체인(회귀 보존).
+
+    엔진 달러 자본은 브로커 수수료 0으로 흘러 `초기 + Σrealized_pnl == equity_after`가
+    성립하므로, 재구성이 WAN-207 곡선과 비트 단위로 같다.
+    """
+    stats = [
+        TradeStat(
+            net_pct=1.0, r_multiple=1.5, exit_time=1, realized_pnl=60.0, equity_after=10_060.0
+        ),
+        TradeStat(
+            net_pct=-0.5, r_multiple=-1.0, exit_time=2, realized_pnl=-40.0, equity_after=10_020.0
+        ),
+    ]
+    m = compute_metrics(stats, wallet_basis=True, initial_equity=10_000.0)
+    assert math.isclose(m.total_return_pct, 0.20, rel_tol=1e-9)
+    assert math.isclose(m.max_drawdown_pct, (10_060.0 - 10_020.0) / 10_060.0 * 100.0, rel_tol=1e-9)
+
+
 def test_dollar_aggregates_none_when_absent() -> None:
     """달러 데이터가 없는 옛 행만 있으면 달러 집계는 None이다(값 없음과 0 구분)."""
     m = compute_metrics([_stat(1.0, 1.0, 1), _stat(-0.5, -0.5, 2)])
