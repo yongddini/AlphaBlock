@@ -58,6 +58,7 @@ __all__ = [
     "SOURCE_LIVE",
     "DayTimeline",
     "TimelineRow",
+    "backtest_timeline_by_cell",
     "backtest_timeline_rows",
     "display_columns",
     "live_timeline_rows",
@@ -293,7 +294,7 @@ def _backtest_cell_trades(task: _BacktestCellTask) -> list[TimelineRow]:
     return cell_timeline_trades(market, ob_result, day_start_ms=task.day_start_ms)
 
 
-def backtest_timeline_rows(
+def backtest_timeline_by_cell(
     *,
     day_start_ms: int,
     day_end_ms: int,
@@ -301,12 +302,14 @@ def backtest_timeline_rows(
     timeframes: Sequence[str] | None = None,
     warmup_days: int | None = None,
     jobs: int = 1,
-) -> list[TimelineRow]:
-    """백테스트 거래별 타임라인(그 KST 하루, 워밍업 연속·per-cell 단일·미래 봉 없음).
+) -> dict[tuple[str, str], list[TimelineRow]]:
+    """백테스트 거래별 타임라인을 **(심볼, TF) 셀 단위로** 낸다(하루 캐시 적재용, WAN-239).
 
-    `live.live_vs_backtest`와 같은 워밍업·평가 규약을 유지해 라이브 셋업과 1:1로 맞춘다
-    (완료 기준 4). `jobs>1`이면 (심볼, TF) 단위로 병렬. 심볼·TF를 안 주면 채택 좌표
-    (9종목 × 15m·1h·4h)를 돈다 — 무거우니 탐색 중에는 좁혀 부른다.
+    `backtest_timeline_rows`와 **같은 계산**이되 셀 경계를 유지한다 — 야간 크론이 셀마다
+    지문을 붙여 캐시에 담으려면 어느 행이 어느 셀에서 나왔는지 알아야 한다(WAN-239 §1).
+    거래가 0건인 셀도 **빈 리스트로 키가 남는다**(= "그 셀은 계산했고 거래가 없었다" — 캐시
+    미스와 구분하는 신호). 워밍업·평가·per-cell 단일 규약은 `backtest_timeline_rows`와
+    비트 동일하다(회귀 테스트가 고정).
     """
     from backtest.harness import DEFAULT_SYMBOLS, DEFAULT_TIMEFRAMES
     from live.live_vs_backtest import DEFAULT_WARMUP_DAYS
@@ -320,7 +323,6 @@ def backtest_timeline_rows(
         for symbol in syms
         for tf in tfs
     ]
-    rows: list[TimelineRow] = []
     if jobs > 1:
         from concurrent.futures import ProcessPoolExecutor
 
@@ -328,7 +330,38 @@ def backtest_timeline_rows(
             per_cell = list(pool.map(_backtest_cell_trades, tasks))
     else:
         per_cell = [_backtest_cell_trades(task) for task in tasks]
-    for cell_rows in per_cell:
+    return {
+        (task.symbol, task.timeframe): cell_rows
+        for task, cell_rows in zip(tasks, per_cell, strict=True)
+    }
+
+
+def backtest_timeline_rows(
+    *,
+    day_start_ms: int,
+    day_end_ms: int,
+    symbols: Sequence[str] | None = None,
+    timeframes: Sequence[str] | None = None,
+    warmup_days: int | None = None,
+    jobs: int = 1,
+) -> list[TimelineRow]:
+    """백테스트 거래별 타임라인(그 KST 하루, 워밍업 연속·per-cell 단일·미래 봉 없음).
+
+    `live.live_vs_backtest`와 같은 워밍업·평가 규약을 유지해 라이브 셋업과 1:1로 맞춘다
+    (완료 기준 4). `jobs>1`이면 (심볼, TF) 단위로 병렬. 심볼·TF를 안 주면 채택 좌표
+    (9종목 × 15m·1h·4h)를 돈다 — 무거우니 탐색 중에는 좁혀 부른다. 셀 경계를 유지한
+    `backtest_timeline_by_cell`을 평탄화한 것이라 두 함수가 같은 계산을 공유한다.
+    """
+    by_cell = backtest_timeline_by_cell(
+        day_start_ms=day_start_ms,
+        day_end_ms=day_end_ms,
+        symbols=symbols,
+        timeframes=timeframes,
+        warmup_days=warmup_days,
+        jobs=jobs,
+    )
+    rows: list[TimelineRow] = []
+    for cell_rows in by_cell.values():
         rows.extend(cell_rows)
     return rows
 
@@ -493,15 +526,30 @@ def _fmt_cell(value: object) -> str:
     return "" if value is None else str(value)
 
 
-def render_day_timeline(timeline: DayTimeline) -> str:
+def render_day_timeline(
+    timeline: DayTimeline,
+    *,
+    engine_label: str | None = None,
+    status_note: str | None = None,
+) -> str:
     """당일 거래별 타임라인을 마크다운 표로 렌더한다(터미널 `alphablock trades`).
 
     `timeline_to_display_frame`이 낸 **같은 표**를 마크다운으로 옮긴다 — 화면·CSV와 숫자가
     갈라지지 않는다(완료 기준 3). 라이브가 주인공, 백테스트가 대조이고, 라이브 칸이 빈
     「백테만 있는 줄」이 이 도구의 핵심 신호다.
+
+    `engine_label`은 백테 대조가 **어느 엔진으로 계산됐는지**를 밝히는 배지다(WAN-239 완료
+    기준 4-c — (Ⅰ) 설명형 이름 + (Ⅱ) git 해시). `status_note`는 캐시 상태(미스 안내 등)를
+    한 줄로 얹는다.
     """
     rows = timeline.rows
     lines: list[str] = [f"# 당일 거래별 타임라인 · {timeline.day_key} ({KST_LABEL}) — WAN-234", ""]
+    if engine_label is not None:
+        lines.append(f"백테 대조 엔진: **{engine_label}**")
+    if status_note is not None:
+        lines.append(status_note)
+    if engine_label is not None or status_note is not None:
+        lines.append("")
     live_closed = sum(1 for r in timeline.live if r.exit_ms is not None)
     live_entered = sum(1 for r in timeline.live if r.status in ("진입", "청산"))
     lines.append(
