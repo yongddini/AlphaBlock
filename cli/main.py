@@ -408,15 +408,34 @@ def cmd_compare(args: argparse.Namespace, settings: Settings) -> int:
 
 
 def cmd_trades(args: argparse.Namespace, settings: Settings) -> int:
-    """`alphablock trades [--day YYYY-MM-DD]` — 당일(KST) 거래별 타임라인(WAN-234).
+    """`alphablock trades [--day YYYY-MM-DD]` — 당일(KST) 거래별 타임라인(WAN-234/239).
 
     들어간 셋업이 **언제 예약 → 얼마에 체결 → 어디서 청산 → 손익 얼마**였는지 거래 한 줄로
     본다. 라이브(주문 장부 + 페이퍼 라운드트립)가 주인공이고, 백테스트 채택 엔진을 대조로
-    병기한다(`--no-backtest`면 라이브만 빠르게). 라이브 숫자는 `alphablock fills`/`compare`
-    당일 조회와 같은 장부·같은 창이다. 순수 조회라 종료 코드는 항상 0이다.
+    병기한다. 라이브 숫자는 `alphablock fills`/`compare` 당일 조회와 같은 장부·같은 창이다.
+
+    백테 대조는 무거워(27칸 × 워밍업) **미리 계산해 캐시에 담고 조회는 캐시만 읽는다**
+    (WAN-239): 기본 조회는 캐시를 읽고, 미스면 무거운 계산으로 **폴백하지 않고** "아직 계산
+    안 됨"을 명시한다. 야간 크론은 `--persist-cache`로 전일 하루치를 미리 적재한다. 수동
+    재계산은 `--recompute`(캐시 무시), 라이브만은 `--no-backtest`다. 순수 조회라 종료 코드는
+    항상 0이다.
     """
+    from backtest.harness import DEFAULT_SYMBOLS, DEFAULT_TIMEFRAMES
     from live.order_journal import OrderJournal
-    from live.trade_timeline import build_day_timeline, render_day_timeline, resolve_day_window
+    from live.timeline_cache import (
+        TimelineCacheStore,
+        current_engine_label,
+        load_cached_day,
+        persist_day,
+    )
+    from live.trade_timeline import (
+        DayTimeline,
+        TimelineRow,
+        backtest_timeline_rows,
+        live_timeline_rows,
+        render_day_timeline,
+        resolve_day_window,
+    )
     from paper.store import PaperTradeStore
 
     db_path = args.db if args.db is not None else settings.db_path
@@ -424,25 +443,86 @@ def cmd_trades(args: argparse.Namespace, settings: Settings) -> int:
     symbols = _split_csv(args.symbol)
     timeframes = _split_csv(args.tf)
 
+    # --- 야간 크론 적재 경로: 계산 후 저장만 하고 표는 렌더하지 않는다(WAN-239 §2). ---
+    if args.persist_cache:
+        cache = TimelineCacheStore(db_path)
+        try:
+            report = persist_day(
+                cache,
+                day_start_ms=start_ms,
+                day_end_ms=end_ms,
+                day_key=day_key,
+                symbols=symbols,
+                timeframes=timeframes,
+                warmup_days=args.warmup_days,
+                jobs=args.jobs,
+                replace=args.persist_replace,
+            )
+        finally:
+            cache.close()
+        print(f"# 당일 백테 타임라인 캐시 적재 · {day_key} (KST) — WAN-239")
+        print(f"엔진: **{report.label}**")
+        print(
+            f"적재 {len(report.persisted)}셀(거래 {report.total_rows}건) · "
+            f"건너뜀(지문 동일) {len(report.skipped)}셀"
+        )
+        if report.skipped and not args.persist_replace:
+            print("이미 같은 지문으로 적재돼 있습니다 — 다시 적재하려면 `--persist-replace`.")
+        return 0
+
+    # --- 라이브 부분은 언제나 즉시 조회(가볍다). ---
     journal = OrderJournal(db_path)
     store = PaperTradeStore(db_path)
     try:
-        timeline = build_day_timeline(
-            journal,
-            store,
+        live = live_timeline_rows(journal, store, start_ms=start_ms, end_ms=end_ms)
+    finally:
+        store.close()
+        journal.close()
+
+    backtest_rows: list[TimelineRow] = []
+    engine_label: str | None = None
+    status_note: str | None = None
+
+    if args.no_backtest:
+        status_note = "백테 대조 생략(`--no-backtest`) — 라이브만 봅니다."
+    elif args.recompute:
+        # 명시적 온디맨드 재계산(캐시 무시, 무겁다) — 사용자가 골랐을 때만.
+        engine_label = current_engine_label()
+        backtest_rows = backtest_timeline_rows(
             day_start_ms=start_ms,
             day_end_ms=end_ms,
-            day_key=day_key,
-            include_backtest=not args.no_backtest,
             symbols=symbols,
             timeframes=timeframes,
             warmup_days=args.warmup_days,
             jobs=args.jobs,
         )
-    finally:
-        store.close()
-        journal.close()
-    print(render_day_timeline(timeline))
+        status_note = "백테 대조 즉시 재계산(`--recompute`) — 캐시를 읽지 않았습니다."
+    else:
+        # 기본 조회: 캐시만 읽는다. 미스는 폴백하지 않고 명시한다(WAN-239 §3).
+        syms = symbols if symbols is not None else list(DEFAULT_SYMBOLS)
+        tfs = timeframes if timeframes is not None else list(DEFAULT_TIMEFRAMES)
+        cache = TimelineCacheStore(db_path)
+        try:
+            result = load_cached_day(
+                cache,
+                day_key=day_key,
+                symbols=syms,
+                timeframes=tfs,
+                warmup_days=args.warmup_days,
+            )
+        finally:
+            cache.close()
+        backtest_rows = list(result.rows)
+        engine_label = result.label
+        if result.misses:
+            status_note = (
+                f"🚨 백테 대조 **아직 계산 안 됨** — {len(result.misses)}/{len(syms) * len(tfs)}칸 "
+                "캐시 미스(야간 크론 대기 또는 `--persist-cache`로 적재, 즉시 보려면 "
+                "`--recompute`). 조회 시 무거운 재계산은 하지 않습니다."
+            )
+
+    timeline = DayTimeline(day_key=day_key, live=tuple(live), backtest=tuple(backtest_rows))
+    print(render_day_timeline(timeline, engine_label=engine_label, status_note=status_note))
     return 0
 
 
@@ -721,6 +801,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-backtest",
         action="store_true",
         help="백테스트 대조를 생략하고 라이브만 빠르게(27셀 × 워밍업이 무겁다)",
+    )
+    p_trades.add_argument(
+        "--persist-cache",
+        action="store_true",
+        help="백테 대조를 미리 계산해 캐시에 적재만 하고 종료(야간 크론, WAN-239 §2)",
+    )
+    p_trades.add_argument(
+        "--persist-replace",
+        action="store_true",
+        help="적재 시 같은 지문의 셀이 있어도 덮어쓴다(`--persist-cache`와 함께)",
+    )
+    p_trades.add_argument(
+        "--recompute",
+        action="store_true",
+        help="캐시를 무시하고 백테 대조를 즉시 재계산(무겁다 — 수동 확인용, WAN-239)",
     )
     p_trades.add_argument(
         "--symbol",

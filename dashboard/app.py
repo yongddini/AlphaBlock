@@ -93,6 +93,7 @@ from dashboard.trade_timeline_view import (
 )
 from live.order_journal import LedgerEntry, OrderJournal
 from live.runtime_state import EventRecord
+from live.timeline_cache import TimelineCacheStore, current_engine_label, load_cached_day
 from live.trade_timeline import (
     DayTimeline,
     TimelineRow,
@@ -929,9 +930,14 @@ def _render_trade_timeline(settings: Settings) -> None:
     col_day, col_bt = st.columns([2, 3])
     day = col_day.date_input("날짜(KST)", value=default_day, key="timeline_day")
     include_bt = col_bt.checkbox(
-        "백테스트 대조 병기 (그날 라이브 셀만 · 워밍업 연속 — 무겁습니다)",
+        "백테스트 대조 병기 (야간 크론이 미리 계산한 캐시를 읽습니다 — WAN-239)",
         value=False,
         key="timeline_include_bt",
+    )
+    recompute = col_bt.checkbox(
+        "캐시 무시하고 즉시 재계산 (그날 라이브 셀만 · 워밍업 연속 — 무겁습니다)",
+        value=False,
+        key="timeline_recompute",
     )
 
     start_ms, end_ms, day_key = resolve_day_window(day.isoformat())
@@ -947,7 +953,11 @@ def _render_trade_timeline(settings: Settings) -> None:
     if include_bt:
         symbols = sorted({r.symbol for r in live_rows})
         timeframes = sorted({r.timeframe for r in live_rows})
-        if symbols and timeframes:
+        if not symbols or not timeframes:
+            st.info("이 날 라이브 예약이 없어 백테스트 대조 대상 셀이 없습니다.")
+        elif recompute:
+            # 명시적 온디맨드 재계산(캐시 무시, 무겁다) — 사용자가 골랐을 때만(WAN-239).
+            st.caption(f"백테 대조 엔진: **{current_engine_label()}** · 즉시 재계산(캐시 무시)")
             with st.spinner("백테스트 대조 재산출 중… (그날 라이브 셀만)"):
                 backtest_rows = backtest_timeline_rows(
                     day_start_ms=start_ms,
@@ -956,7 +966,24 @@ def _render_trade_timeline(settings: Settings) -> None:
                     timeframes=timeframes,
                 )
         else:
-            st.info("이 날 라이브 예약이 없어 백테스트 대조 대상 셀이 없습니다.")
+            # 기본: 캐시만 읽는다. 미스는 폴백하지 않고 명시한다(WAN-239 §3).
+            cache = TimelineCacheStore(db_path)
+            try:
+                cached = load_cached_day(
+                    cache, day_key=day_key, symbols=symbols, timeframes=timeframes
+                )
+            finally:
+                cache.close()
+            backtest_rows = list(cached.rows)
+            st.caption(f"백테 대조 엔진: **{cached.label}**")
+            if cached.misses:
+                st.warning(
+                    f"🚨 백테 대조 **아직 계산 안 됨** — {len(cached.misses)}/"
+                    f"{len(symbols) * len(timeframes)}칸 캐시 미스입니다. 야간 크론이 적재하거나 "
+                    "`alphablock trades --day … --persist-cache`로 미리 계산하세요. 위 "
+                    "체크박스로 즉시 재계산할 수 있습니다(무겁습니다). 조회 시 자동 재계산은 "
+                    "하지 않습니다."
+                )
 
     timeline = DayTimeline(day_key=day_key, live=tuple(live_rows), backtest=tuple(backtest_rows))
     note = backtest_only_note(timeline)
