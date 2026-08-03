@@ -353,6 +353,26 @@ def cmd_watch(args: argparse.Namespace, settings: Settings) -> int:
     return 0
 
 
+def cmd_fills(args: argparse.Namespace, settings: Settings) -> int:
+    """`alphablock fills [--day YYYY-MM-DD]` — 당일(KST) 주문별 체결 여부 조회(WAN-232).
+
+    `진입이 너무 안 됨`을 숫자로 가르는 첫 단계 — 그날 예약한 지정가가 하나씩 어떻게 됐는지
+    (체결/미체결/거부)와 예약→체결·체결→진입 전환율을 낸다. 기본은 오늘, `--day`로 과거 지정.
+    순수 조회라 종료 코드는 항상 0이다. `python -m live.fill_report --day`와 같은 산출물.
+    """
+    from live.fill_report import render_day_report, resolve_day_window
+    from live.order_journal import OrderJournal
+
+    db_path = args.db if args.db is not None else settings.db_path
+    start_ms, end_ms, day_key = resolve_day_window(args.day)
+    journal = OrderJournal(db_path)
+    try:
+        print(render_day_report(journal, start_ms=start_ms, end_ms=end_ms, day_key=day_key))
+    finally:
+        journal.close()
+    return 0
+
+
 def cmd_doctor(args: argparse.Namespace, settings: Settings) -> int:
     """`alphablock doctor` — DB 무결성·위생 점검(WAN-194 §2·§4·§5).
 
@@ -568,6 +588,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="테스트 메시지를 한 번 보내고 종료(텔레그램 연결 확인)",
     )
     p_watch.set_defaults(func=cmd_watch)
+
+    p_fills = sub.add_parser(
+        "fills",
+        help="당일(KST) 주문별 체결 여부 조회 — 오늘 예약한 지정가가 체결됐나(WAN-232)",
+    )
+    p_fills.add_argument("--db", default=None, help="장부 DB 경로(기본: 설정의 db_path)")
+    p_fills.add_argument(
+        "--day",
+        default="today",
+        metavar="YYYY-MM-DD",
+        help="조회할 KST 날짜(기본: 오늘). 예: 2026-08-02",
+    )
+    p_fills.set_defaults(func=cmd_fills)
 
     p_doctor = sub.add_parser(
         "doctor",

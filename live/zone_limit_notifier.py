@@ -36,10 +36,10 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 
 from common.telegram import TelegramClient
-from common.timefmt import KST
+from common.timefmt import KST, kst_day_bounds_for_date
 from execution.models import Position
 from execution.risk import CircuitBreakerStatus
 from live.executor import TradeReport
@@ -441,14 +441,13 @@ class ZoneLimitNotifier:
     def _day_funnel(self, day: date) -> FunnelCounts | None:
         """그 KST 하루 `[자정, 다음 자정)`의 깔때기 사유를 DB 장부에서 조회한다(WAN-221).
 
-        KST는 서머타임이 없어 하루가 정확히 24h지만, 경계는 `timedelta`로 잡아 상수(86_400_000)를
-        박지 않는다. 조회 실패는 요약 자체를 막지 않도록 삼키고 None을 준다(예약/체결/만료
-        한 줄은 계속 나간다)."""
+        창 경계는 `common.timefmt.kst_day_bounds_for_date`가 잡는다 — 당일 주문별 조회
+        (WAN-232 `live.fill_report --day`)와 **같은 산식**을 공유해 두 도구가 같은 날에
+        비트 단위로 같은 창을 본다(회계 정의 충돌 방지). 조회 실패는 요약 자체를 막지 않도록
+        삼키고 None을 준다(예약/체결/만료 한 줄은 계속 나간다)."""
         if self._funnel_provider is None:
             return None
-        start = datetime(day.year, day.month, day.day, tzinfo=KST)
-        start_ms = int(start.timestamp() * 1000)
-        end_ms = int((start + timedelta(days=1)).timestamp() * 1000)
+        start_ms, end_ms = kst_day_bounds_for_date(day)
         try:
             return self._funnel_provider(start_ms, end_ms)
         except Exception:  # noqa: BLE001 — 장부 조회 실패가 일일 요약을 막지 않도록.

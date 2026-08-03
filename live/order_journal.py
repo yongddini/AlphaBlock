@@ -91,10 +91,12 @@ __all__ = [
     "SKIP_REASON_ZONE_WIDTH",
     "STATUS_DISCARDED_RESTART",
     "STATUS_SKIPPED",
+    "DaySummary",
     "FunnelCounts",
     "LedgerEntry",
     "OrderJournal",
     "OrphanFill",
+    "PlacedOrder",
     "SeriesFillStats",
     "SessionSpan",
 ]
@@ -335,6 +337,77 @@ class LedgerEntry:
     def entered(self) -> bool:
         """체결이 페이퍼 포지션으로 실제 열렸는가(진입 성공)."""
         return self.reason == LEDGER_REASON_ENTERED
+
+
+@dataclass(frozen=True)
+class PlacedOrder:
+    """당일 조회의 주문 한 건(WAN-232 `live.fill_report --day`).
+
+    창 귀속이 `placed_ms`(예약 시각)인 것이 `LedgerEntry`(사건 시각 귀속)와 다르다 —
+    이 화면의 질문은 "**오늘 예약한** 지정가가 어떻게 됐나"라 코호트를 예약 시각으로 잡는다.
+    `status`·`entry_status`·`skip_reason`은 장부 원값 그대로 싣고(가공은 렌더러가 라벨로만),
+    무효화·조건취소·대기·재시작 폐기도 숨기지 않고 전부 나열한다(그날 예약한 주문이면 다 보인다).
+    """
+
+    symbol: str
+    timeframe: str
+    direction: str
+    placed_ms: int
+    status: str
+    """`live_limit_orders.status` 원값(FILLED/CANCELLED_*/PENDING/skipped/discarded_restart)."""
+    limit_price: float | None
+    """마지막 지정가(`last_limit_price`) — 체결가가 아니라 걸었던 가격."""
+    fill_ms: int | None
+    fill_penetration_bps: float | None
+    first_rested_ms: int | None
+    """주문판에 처음 걸린 시각. 만료인데 이게 `None`이면 밴드가 한 번도 유리하지 않은
+    볼린저 규칙 3 기각(deviation)이라 순수 미체결(no_fill)과 구분한다."""
+    entry_status: str | None
+    entry_reject_reason: str | None
+    skip_reason: str | None
+
+
+@dataclass(frozen=True)
+class DaySummary:
+    """당일(placed_ms 창) 주문 코호트의 한 줄 요약(WAN-232).
+
+    창 귀속이 `placed_ms`인 것 말고는 회계 정의가 `FunnelCounts`/`SeriesFillStats`와 같다:
+    체결률 = 체결 / (체결 + 미체결) · 진입률 = 진입 / (진입 + 거부)이고, `discarded_restart`·
+    `skipped`는 체결률 분모 밖이다(주문이 결말을 못 냈거나 아예 걸린 적 없다). 모든 사건이 같은
+    KST 하루 안에 나면 이 카운트는 `funnel_counts`와 정확히 같다(회귀 테스트가 고정 — CTA #3).
+    """
+
+    reserved: int
+    """예약 = 주문이 실제로 걸린 수(비-`skipped`). 필터제외는 걸린 적이 없어 여기서 뺀다."""
+    filled: int
+    no_fill: int
+    """걸렸으나 유효기간 내 안 닿아 만료(순수 미체결)."""
+    deviation: int
+    """걸렸으나 밴드가 한 번도 유리하지 않아 끝난 만료(볼린저 규칙 3 기각)."""
+    invalidated: int
+    condition_failed: int
+    pending: int
+    """아직 결말이 나지 않은 대기 주문 — 체결률 분모 밖."""
+    discarded_restart: int
+    skipped: int
+    entered: int
+    entry_rejected: int
+    entry_unrecorded: int
+
+    @property
+    def fill_rate(self) -> float | None:
+        """예약→체결(닿음) 전환율 = 체결 / (체결 + 미체결). `FunnelCounts.fill_rate`와 같은 정의."""
+        denom = self.filled + self.no_fill
+        return self.filled / denom if denom else None
+
+    @property
+    def entry_rate(self) -> float | None:
+        """체결→진입 전환율 = 진입 / (진입 + 거부). `SeriesFillStats.entry_rate`(WAN-194)와 같다.
+
+        처분 미기록(`entry_unrecorded`)은 결과를 모르므로 분모에서 뺀다.
+        """
+        decided = self.entered + self.entry_rejected
+        return self.entered / decided if decided else None
 
 
 @dataclass(frozen=True)
@@ -824,3 +897,87 @@ class OrderJournal:
             )
         entries.sort(key=lambda e: e.event_ms)
         return entries
+
+    def orders_placed_between(self, *, start_ms: int, end_ms: int) -> list[PlacedOrder]:
+        """`placed_ms ∈ [start_ms, end_ms)`인 주문을 예약 시각순으로 나열한다(WAN-232 당일 조회).
+
+        `funnel_counts`/`ledger_entries`가 사건 시각(체결·만료·스킵)으로 창을 나누는 것과 달리,
+        이 조회는 **예약 시각(`placed_ms`)** 하나로 코호트를 잡는다 — "오늘 예약한 지정가가
+        어떻게 됐나"가 질문이라 예약된 그 주문을 결말과 무관하게 전부 본다(대기·무효화·재시작
+        폐기도 숨기지 않는다). 창 경계는 호출부가 `common.timefmt.kst_day_bounds_for_date`로
+        잡아 일일 요약 funnel과 같은 자정 경계를 공유한다(CTA #2)."""
+        rows = self._conn.execute(
+            "SELECT symbol, timeframe, direction, placed_ms, status, last_limit_price,"
+            " fill_ms, fill_penetration_bps, first_rested_ms, entry_status,"
+            " entry_reject_reason, skip_reason FROM live_limit_orders"
+            " WHERE placed_ms >= ? AND placed_ms < ? ORDER BY placed_ms, id",
+            (start_ms, end_ms),
+        ).fetchall()
+        return [
+            PlacedOrder(
+                symbol=str(r[0]),
+                timeframe=str(r[1]),
+                direction=str(r[2]),
+                placed_ms=int(r[3]),
+                status=str(r[4]),
+                limit_price=None if r[5] is None else float(r[5]),
+                fill_ms=None if r[6] is None else int(r[6]),
+                fill_penetration_bps=None if r[7] is None else float(r[7]),
+                first_rested_ms=None if r[8] is None else int(r[8]),
+                entry_status=None if r[9] is None else str(r[9]),
+                entry_reject_reason=None if r[10] is None else str(r[10]),
+                skip_reason=None if r[11] is None else str(r[11]),
+            )
+            for r in rows
+        ]
+
+    def day_summary(self, *, start_ms: int, end_ms: int) -> DaySummary:
+        """당일 코호트(`placed_ms` 창)의 한 줄 요약을 낸다(WAN-232).
+
+        `orders_placed_between`이 준 주문을 `funnel_counts`와 **같은 분류 규칙**으로 센다 —
+        만료는 `first_rested_ms`로 순수 미체결(no_fill)과 밴드 규칙 3 기각(deviation)을 가르고,
+        체결의 하류 처분(진입/거부/미기록)은 `entry_status`로 가른다. 그래서 모든 사건이 같은
+        KST 하루에 나면 체결률 분자·분모가 `funnel_counts`와 정확히 일치한다(CTA #3).
+        """
+        filled = no_fill = deviation = invalidated = condition_failed = 0
+        pending = discarded = skipped = 0
+        entered = rejected = unrecorded = 0
+        orders = self.orders_placed_between(start_ms=start_ms, end_ms=end_ms)
+        for order in orders:
+            if order.status == LimitOrderStatus.FILLED.value:
+                filled += 1
+                if order.entry_status == ENTRY_STATUS_ENTERED:
+                    entered += 1
+                elif order.entry_status == ENTRY_STATUS_REJECTED:
+                    rejected += 1
+                else:
+                    unrecorded += 1
+            elif order.status == LimitOrderStatus.CANCELLED_EXPIRED.value:
+                if order.first_rested_ms is None:
+                    deviation += 1
+                else:
+                    no_fill += 1
+            elif order.status == LimitOrderStatus.CANCELLED_INVALIDATED.value:
+                invalidated += 1
+            elif order.status == LimitOrderStatus.CANCELLED_CONDITION_FAILED.value:
+                condition_failed += 1
+            elif order.status == LimitOrderStatus.PENDING.value:
+                pending += 1
+            elif order.status == STATUS_DISCARDED_RESTART:
+                discarded += 1
+            elif order.status == STATUS_SKIPPED:
+                skipped += 1
+        return DaySummary(
+            reserved=len(orders) - skipped,
+            filled=filled,
+            no_fill=no_fill,
+            deviation=deviation,
+            invalidated=invalidated,
+            condition_failed=condition_failed,
+            pending=pending,
+            discarded_restart=discarded,
+            skipped=skipped,
+            entered=entered,
+            entry_rejected=rejected,
+            entry_unrecorded=unrecorded,
+        )
