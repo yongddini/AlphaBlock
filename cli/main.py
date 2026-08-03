@@ -407,6 +407,53 @@ def cmd_compare(args: argparse.Namespace, settings: Settings) -> int:
     return 0
 
 
+def cmd_trades(args: argparse.Namespace, settings: Settings) -> int:
+    """`alphablock trades [--day YYYY-MM-DD]` — 당일(KST) 거래별 타임라인(WAN-234).
+
+    들어간 셋업이 **언제 예약 → 얼마에 체결 → 어디서 청산 → 손익 얼마**였는지 거래 한 줄로
+    본다. 라이브(주문 장부 + 페이퍼 라운드트립)가 주인공이고, 백테스트 채택 엔진을 대조로
+    병기한다(`--no-backtest`면 라이브만 빠르게). 라이브 숫자는 `alphablock fills`/`compare`
+    당일 조회와 같은 장부·같은 창이다. 순수 조회라 종료 코드는 항상 0이다.
+    """
+    from live.order_journal import OrderJournal
+    from live.trade_timeline import build_day_timeline, render_day_timeline, resolve_day_window
+    from paper.store import PaperTradeStore
+
+    db_path = args.db if args.db is not None else settings.db_path
+    start_ms, end_ms, day_key = resolve_day_window(args.day)
+    symbols = _split_csv(args.symbol)
+    timeframes = _split_csv(args.tf)
+
+    journal = OrderJournal(db_path)
+    store = PaperTradeStore(db_path)
+    try:
+        timeline = build_day_timeline(
+            journal,
+            store,
+            day_start_ms=start_ms,
+            day_end_ms=end_ms,
+            day_key=day_key,
+            include_backtest=not args.no_backtest,
+            symbols=symbols,
+            timeframes=timeframes,
+            warmup_days=args.warmup_days,
+            jobs=args.jobs,
+        )
+    finally:
+        store.close()
+        journal.close()
+    print(render_day_timeline(timeline))
+    return 0
+
+
+def _split_csv(value: str | None) -> list[str] | None:
+    """`--symbol BTCUSDT,ETHUSDT` 같은 콤마 목록을 리스트로. 없으면 None(= 기본 좌표)."""
+    if value is None:
+        return None
+    items = [part.strip() for part in value.split(",") if part.strip()]
+    return items or None
+
+
 def cmd_doctor(args: argparse.Namespace, settings: Settings) -> int:
     """`alphablock doctor` — DB 무결성·위생 점검(WAN-194 §2·§4·§5).
 
@@ -658,6 +705,45 @@ def build_parser() -> argparse.ArgumentParser:
         "--jobs", type=int, default=1, help="백테스트 (심볼, TF) 병렬 워커 수(기본 1)"
     )
     p_compare.set_defaults(func=cmd_compare)
+
+    p_trades = sub.add_parser(
+        "trades",
+        help="당일(KST) 거래별 타임라인 — 예약→체결가→청산가→손익, 라이브|백테스트(WAN-234)",
+    )
+    p_trades.add_argument("--db", default=None, help="장부 DB 경로(기본: 설정의 db_path)")
+    p_trades.add_argument(
+        "--day",
+        default="today",
+        metavar="YYYY-MM-DD",
+        help="조회할 KST 날짜(기본: 오늘). 예: 2026-08-02",
+    )
+    p_trades.add_argument(
+        "--no-backtest",
+        action="store_true",
+        help="백테스트 대조를 생략하고 라이브만 빠르게(27셀 × 워밍업이 무겁다)",
+    )
+    p_trades.add_argument(
+        "--symbol",
+        default=None,
+        metavar="SYM[,SYM...]",
+        help="백테스트 대조 심볼(콤마 목록). 생략 시 채택 좌표 9종목",
+    )
+    p_trades.add_argument(
+        "--tf",
+        default=None,
+        metavar="TF[,TF...]",
+        help="백테스트 대조 TF(콤마 목록). 생략 시 15m,1h,4h",
+    )
+    p_trades.add_argument(
+        "--warmup-days",
+        type=int,
+        default=None,
+        help="백테스트 워밍업 길이(일). 라이브 전-이력 존 재고 근사 노브 — 길수록 느리다",
+    )
+    p_trades.add_argument(
+        "--jobs", type=int, default=1, help="백테스트 (심볼, TF) 병렬 워커 수(기본 1)"
+    )
+    p_trades.set_defaults(func=cmd_trades)
 
     p_doctor = sub.add_parser(
         "doctor",
