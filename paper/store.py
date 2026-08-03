@@ -484,6 +484,33 @@ class PaperTradeStore:
             row = cur.fetchone()
         return None if row is None else float(row[0])
 
+    def total_realized_pnl(self) -> float | None:
+        """모든 청산 거래의 실현손익 합 — 재시작 시 북 전체 자본 복원용(WAN-238).
+
+        레버리지 북(WAN-213)은 칸=(종목,TF)들이 **한 지갑을 공유**하므로, 재시작 자본은
+        칸별 마지막 거래가 아니라 **전 칸의 실현손익 합**이다. `초기자본 + 이 합`이 곧
+        WAN-237 표시 잔고(`equity_after` 체인, 엔진 브로커 수수료 0으로 흐르므로 정합)와
+        같은 공식이라 표시와 사이징 기준이 한 값으로 묶인다.
+
+        옛 %-only 장부(WAN-207 이전, `realized_pnl` NULL)가 **하나라도** 섞이면 그 행의
+        금액을 알 수 없어 합이 부정확해진다 — 이 경우 `None`을 돌려 호출부가 초기 자본으로
+        안전 폴백하게 한다(부분 복원으로 잘못된 자본을 시드하지 않는다). 거래가 없으면 0.0.
+        """
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT COUNT(*), COUNT(realized_pnl), COALESCE(SUM(realized_pnl), 0.0) "
+                "FROM paper_trades"
+            )
+            row = cur.fetchone()
+        if row is None:
+            return 0.0
+        total_rows, non_null_rows, pnl_sum = int(row[0]), int(row[1]), float(row[2])
+        if total_rows == 0:
+            return 0.0
+        if non_null_rows != total_rows:
+            return None  # 옛 %-only 행이 섞임 → 금액 미상 → 복원 불가.
+        return pnl_sum
+
     def get_circuit_breaker_notice(self) -> tuple[str | None, bool]:
         """마지막으로 텔레그램에 알린 서킷브레이커 상태 `(KST일, 발동여부)`.
 
