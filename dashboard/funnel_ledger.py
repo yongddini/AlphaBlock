@@ -78,7 +78,9 @@ def to_funnel_counts(entries: Iterable[LedgerEntry]) -> FunnelCounts:
     """목록을 `funnel_counts`와 같은 카운트로 되접는다(조회 = 재계산 아님의 다리).
 
     화면의 「전체」 지표가 이 값을 쓰고, 회귀 테스트가 이것이 `OrderJournal.funnel_counts`와
-    **정확히 일치**함을 고정한다 — 목록과 요약이 두 벌로 갈라지지 않는다는 증거다.
+    (`placed`를 뺀) 모든 필드에서 **정확히 일치**함을 고정한다 — 목록과 요약이 두 벌로
+    갈라지지 않는다는 증거다. ⚠️ `placed`(헤드라인 「예약 N」, WAN-230)는 깔때기 행이 아니라
+    `placed_ms` 창 귀속의 헤드라인 카운트라 목록으로 되접히지 않는다(기본값 0으로 둔다).
     """
     counts: dict[str, int] = {}
     filled = 0

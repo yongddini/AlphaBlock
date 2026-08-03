@@ -280,6 +280,13 @@ class FunnelCounts:
     `execution.engine.REJECT_CODE_*`) — 두 경로의 깔때기를 나란히 읽기 위해서다.
     """
 
+    placed: int = 0
+    """창 안에 **주문이 걸린**(record_placed → PENDING) 수 = 예약. 창 귀속은 `placed_ms`다
+    (사건 시각인 체결·만료와 달리 예약 시각으로 센다 — 러너의 메모리 `note_placed`와 같은
+    축). 주문 걸기 전 걸러진 스킵(`STATUS_SKIPPED`)은 걸린 적이 없어 뺀다. 재시작 폐기
+    (`discarded_restart`)는 **포함한다** — 사용자가 실제로 주문을 걸었기 때문이다(WAN-230).
+    ⚠️ 체결률 분모(filled+no_fill)와는 다른 값이다 — 예약은 폰 요약의 헤드라인 「예약 N」이고,
+    재시작에 견디도록 메모리가 아니라 이 DB 카운트에서 낸다(WAN-230)."""
     filled: int = 0
     """창 안에 체결된 지정가 주문 수(체결률 분자). 집행 계층의 하류 처분(진입/거부)과
     무관하다 — '지정가에 닿았나'를 재는 값이라 거부돼도 체결로 센다(거부는 사유로 별도)."""
@@ -827,7 +834,10 @@ class OrderJournal:
 
         사건마다 창 귀속 시각이 다르다 — 체결은 `fill_ms`, 만료는 `terminal_ms`, 주문 걸기 전
         스킵은 `placed_ms`(스킵 행은 종결 시각이 없다). 각 행을 자기 시각으로 창에 넣는다.
-        재시작 폐기(`discarded_restart`)·대기 중(`pending`)은 결말이 없어 어디에도 안 든다.
+        재시작 폐기(`discarded_restart`)·대기 중(`pending`)은 **결말이 없어** 사유 카운트
+        어디에도 안 들지만, 헤드라인 `placed`(예약)에는 `placed_ms`로 든다 — 예약은 사건이
+        아니라 「주문을 걸었다」는 사실이라 결말과 무관하다(WAN-230). 그래서 이 한 번의 조회가
+        일일 요약의 헤드라인(예약·체결·만료)과 미진입 사유를 **한 창·한 출처**로 낸다.
         """
         rows = self._conn.execute(
             "SELECT status, first_rested_ms, entry_status, entry_reject_code, skip_reason,"
@@ -837,6 +847,7 @@ class OrderJournal:
         def _in_window(ts: int | None) -> bool:
             return ts is not None and start_ms <= int(ts) < end_ms
 
+        placed = 0
         filled = no_fill = deviation = 0
         skip_zone = skip_cell = skip_retap = 0
         rej_cell = rej_notional = rej_sizing = rej_other = 0
@@ -844,6 +855,11 @@ class OrderJournal:
             status = str(row[0])
             rested, entry_status, reject_code, skip = row[1], row[2], row[3], row[4]
             fill_ms, terminal_ms, placed_ms = row[5], row[6], row[7]
+            # 예약(헤드라인 「예약 N」, WAN-230): 주문이 실제로 걸린 행(비-skipped) 중
+            # placed_ms가 창 안. 재시작 폐기도 예약이었으니 포함하고, 스킵만 뺀다. 사건
+            # 시각(fill/terminal)과 독립이라 아래 상태별 `continue`에 걸리지 않게 먼저 센다.
+            if status != STATUS_SKIPPED and _in_window(placed_ms):
+                placed += 1
             if status == LimitOrderStatus.FILLED.value:
                 if not _in_window(fill_ms):
                     continue
@@ -875,6 +891,7 @@ class OrderJournal:
                 elif skip == SKIP_REASON_RETAP:
                     skip_retap += 1
         return FunnelCounts(
+            placed=placed,
             filled=filled,
             no_fill=no_fill,
             deviation=deviation,
