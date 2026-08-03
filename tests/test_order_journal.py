@@ -530,6 +530,10 @@ def test_funnel_counts_windows_and_buckets_reasons(tmp_path: Path) -> None:
     journal.record_cancelled(place(), LimitOrderStatus.CANCELLED_EXPIRED, now_ms=5000)  # no_fill 밖
 
     f = journal.funnel_counts(start_ms=1000, end_ms=2000)
+    # 예약(헤드라인, WAN-230) = placed_ms가 창 안인 비-skipped 행. 모든 place()는 placed_ms
+    # 1000이라 「창 밖」 항목도 사건 시각만 밖일 뿐 예약 시각은 안이다: 체결 1 + 거부 3 +
+    # no_fill 1 + deviation 1 + late 1 + 창밖-cancel 1 = 8(스킵 4는 제외).
+    assert f.placed == 8
     assert f.filled == 4  # 진입 성공 1 + 거부 3(모두 창 안). 창 밖 체결은 제외.
     assert f.no_fill == 1
     assert f.deviation == 1
@@ -540,6 +544,57 @@ def test_funnel_counts_windows_and_buckets_reasons(tmp_path: Path) -> None:
     assert f.sizing == 1
     assert f.other == 0
     assert f.fill_rate == 4 / 5  # 체결 4 / (체결 4 + no_fill 1).
+    journal.close()
+
+
+def test_funnel_counts_placed_headline_survives_restart(tmp_path: Path) -> None:
+    """헤드라인 「예약 N」(WAN-230) = `placed_ms`가 창 안인 비-skipped 행. 재시작 폐기도
+    포함(사용자가 실제로 걸었다)하고, 스킵과 창 밖 예약은 뺀다 — 일일 요약이 재시작에
+    견디게 하는 DB 카운트다(메모리 카운터는 재시작에 0으로 초기화됐다)."""
+    journal = OrderJournal(tmp_path / "j.db")
+    session = journal.start_session(now_ms=0)
+
+    def place_at(placed_ms: int) -> int:
+        order = PendingLimitOrder(
+            symbol="BTC/USDT:USDT",
+            timeframe="1h",
+            direction=OrderBlockDirection.BULLISH,
+            limit_price=100.0,
+            stop_price=90.0,
+            rsi_state=RealtimeRsi(length=3),
+            placed_ms=placed_ms,
+        )
+        return journal.record_placed(
+            order, session_id=session, zone_start_time=0, zone_confirmed_time=1
+        )
+
+    # 창 [1000, 2000) 안: 예약 3건(체결 1 · 대기 1 · 재시작 폐기 1).
+    entered = place_at(1100)
+    journal.record_filled(entered, _fill_at(1400))
+    journal.record_entry_result(entered, entered=True)
+    place_at(1500)  # 대기 중 — 결말은 없지만 예약은 됐다.
+    stale = place_at(1200)
+    journal.record_discarded(stale, now_ms=1700)  # 재시작 폐기 — 예약엔 든다.
+
+    # 스킵(주문 걸기 전 걸러짐)은 예약이 아니다.
+    journal.record_skipped(
+        session_id=session,
+        symbol="BTC/USDT:USDT",
+        timeframe="1h",
+        direction=OrderBlockDirection.BULLISH.value,
+        tap_index=0,
+        placed_ms=1300,
+        reason=SKIP_REASON_ZONE_WIDTH,
+        zone_start_time=0,
+        zone_confirmed_time=1,
+    )
+    # 창 밖 예약(placed_ms 밖)은 안 든다.
+    place_at(500)
+
+    f = journal.funnel_counts(start_ms=1000, end_ms=2000)
+    assert f.placed == 3  # 체결 1 + 대기 1 + 재시작 폐기 1(스킵·창 밖 제외).
+    assert f.filled == 1  # 재시작 폐기·대기는 체결이 아니다.
+    assert f.zone_width == 1  # 스킵은 예약이 아니라 사유로 센다.
     journal.close()
 
 

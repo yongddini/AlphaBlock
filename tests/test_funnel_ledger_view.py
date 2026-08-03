@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 from dashboard.funnel_ledger import (
@@ -292,5 +293,8 @@ def test_ledger_entries_fold_back_to_funnel_counts(tmp_path: Path) -> None:
 
     window = {"start_ms": 1000, "end_ms": 2000}
     folded = to_funnel_counts(journal.ledger_entries(**window))
-    assert folded == journal.funnel_counts(**window)
+    # `placed`(헤드라인 「예약 N」, WAN-230)는 깔때기 행이 아니라 `placed_ms` 창 귀속의 헤드라인
+    # 카운트라 목록에는 없다 — 되접기 교차검산은 사유·체결 필드에 대한 것이고, 그 한 필드만
+    # 카빙한다(나머지는 여전히 필드별로 정확히 일치).
+    assert replace(journal.funnel_counts(**window), placed=0) == folded
     journal.close()

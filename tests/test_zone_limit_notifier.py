@@ -364,6 +364,58 @@ def test_daily_summary_survives_funnel_provider_error() -> None:
     assert "체결률" not in rec.sent[0]  # 조회 실패면 사유 줄은 뺀다(요약 자체는 보존).
 
 
+def test_daily_summary_headline_survives_restart_via_db(caplog: pytest.LogCaptureFixture) -> None:
+    """재시작으로 메모리 카운터가 0이어도, DB에 예약/체결이 있으면 요약이 나간다(WAN-230 CTA #1).
+
+    2026-08-02 사고 재현: 예약 2건이 재시작 전에 걸렸다 → 메모리 카운터는 0으로 초기화됐지만
+    장부에는 남아 있다. 헤드라인을 DB(funnel)에서 내므로 자정 요약이 정상 발송되고 숫자가
+    장부와 일치한다.
+    """
+    rec = _Recorder()
+    # 예약 2(재시작 전 걸림) · 체결 0 · 만료 0 — 08-02 실측 모양(discarded_restart 2건).
+    prov = _FunnelProvider(FunnelCounts(placed=2, zone_width=21))
+    notif = ZoneLimitNotifier(_client(rec), funnel_provider=prov)
+    notif.tick(10_000.0, now_ms=0)
+    # note_placed를 부르지 않는다 — 재시작으로 메모리 카운터가 0인 상황.
+    notif.tick(10_000.0, now_ms=24 * _H + _H)  # 다음 날.
+    assert len(rec.sent) == 1
+    assert "예약 2 · 체결 0 · 만료 0" in rec.sent[0]  # 메모리(0)가 아니라 DB(2)에서.
+
+
+def test_daily_summary_headline_and_reasons_share_one_source() -> None:
+    """헤드라인(예약·체결·만료)과 미진입 사유가 같은 창·같은 출처(funnel)임을 고정(WAN-230 CTA #3).
+
+    메모리 카운터를 일부러 funnel과 다른 값으로 채워도 헤드라인은 funnel을 따른다 —
+    두 출처 혼재(옛 버그)가 재발하지 않음을 동작으로 막는다.
+    """
+    rec = _Recorder()
+    # funnel: 예약 40 · 체결 22 · 만료 = no_fill 18 + deviation 3 = 21.
+    prov = _FunnelProvider(
+        FunnelCounts(placed=40, filled=22, no_fill=18, deviation=3, zone_width=5)
+    )
+    notif = ZoneLimitNotifier(_client(rec), funnel_provider=prov)
+    notif.tick(10_000.0, now_ms=0)
+    # 메모리 카운터를 funnel과 어긋나게 채운다(무시돼야 한다).
+    notif.note_placed()
+    notif.handle_fill(_fill(), _entry_report())  # 메모리 filled += 1.
+    notif.tick(10_000.0, now_ms=24 * _H + _H)
+    summary = next(s for s in rec.sent if "일일 요약" in s)
+    assert "예약 40 · 체결 22 · 만료 21" in summary  # DB 값(메모리 1/1이 아니라).
+    # 헤드라인 체결과 체결률 줄의 체결이 같은 수(같은 출처)다.
+    assert "체결률 55.0% (체결 22 / 미체결 18)" in summary
+
+
+def test_quiet_day_skipped_by_db_even_if_memory_nonzero() -> None:
+    """진짜 조용한 날(DB 기준 0)은 건너뛴다 — 메모리가 오염돼도 DB가 판정한다(WAN-230 CTA #2)."""
+    rec = _Recorder()
+    prov = _FunnelProvider(FunnelCounts())  # DB: 예약·체결·만료 전부 0.
+    notif = ZoneLimitNotifier(_client(rec), funnel_provider=prov)
+    notif.tick(10_000.0, now_ms=0)
+    notif.note_placed()  # 메모리는 1이지만 DB가 0이라 스킵돼야 한다.
+    notif.tick(10_000.0, now_ms=24 * _H + _H)
+    assert rec.sent == []
+
+
 def test_no_fill_expiry_never_sends_per_event_even_with_filter_skip_on() -> None:
     """`no_fill`(안 닿은 만료)은 filter_skip을 켜도 **건별로 안 나간다**(WAN-221 완료 기준).
 

@@ -307,7 +307,10 @@ class ZoneLimitNotifier:
         #: 배선, WAN-221). None이면 요약은 예약/체결/만료 한 줄만 낸다(재계산 금지 — 없으면 뺀다).
         self._funnel_provider = funnel_provider
         self._now_ms = now_ms
-        #: 일일 요약 카운터(오늘 KST). tick()이 날짜 경계에서 비운다.
+        #: 일일 요약 헤드라인의 **폴백** 카운터(오늘 KST). tick()이 날짜 경계에서 비운다.
+        #: 채택 경로(러너)는 `funnel_provider`(DB 장부)를 배선하므로 헤드라인은 DB에서 나오고
+        #: 이 카운터는 쓰이지 않는다 — 재시작에 취약한 메모리 카운터가 요약을 유실시킨 것이
+        #: WAN-230의 사고였다. funnel_provider가 없는 드라이런/테스트에서만 폴백으로 쓴다.
         self._placed = 0
         self._filled = 0
         self._expired = 0
@@ -424,18 +427,32 @@ class ZoneLimitNotifier:
         return (equity - base) / base * 100.0
 
     def _flush_daily_summary(self, day: date) -> None:
+        """전날 일일 요약을 보낸다 — 헤드라인·스팸 가드를 **DB 장부**에서 낸다(WAN-230).
+
+        헤드라인(예약·체결·만료)과 미진입 사유를 **한 창·한 출처**(`funnel`)로 낸다: 옛
+        코드는 헤드라인만 메모리 카운터로 냈는데, 그 카운터는 러너가 도는 동안만 쌓여
+        **재시작하면 그날 누적이 0으로 초기화**됐다(2026-08-02 실측 유실). 그래서 예약·체결이
+        실재해도 자정 경계에서 「없던 날」로 보여 요약이 통째로 빠졌다. DB 장부는 재시작에
+        견디므로 여기서 진실의 원천으로 쓴다 — 만료 = no_fill + deviation(모든 만료),
+        예약은 `placed_ms` 창 귀속이라 재시작 전 예약도 남는다.
+
+        `funnel`(DB 조회)이 없는 경로(드라이런·funnel_provider 미배선·조회 실패)에서만
+        메모리 카운터로 degrade한다 — 그 경우엔 애초에 미진입 사유 줄도 못 내므로 두 출처
+        혼재가 생기지 않는다.
+        """
         if "daily_summary" not in self._events:
             return
-        if self._placed == 0 and self._filled == 0 and self._expired == 0:
-            return  # 아무 일도 없던 날은 보내지 않는다(스팸 방지).
+        funnel = self._day_funnel(day)
+        if funnel is not None:
+            placed = funnel.placed
+            filled = funnel.filled
+            expired = funnel.no_fill + funnel.deviation  # 모든 만료(순수 미체결 + 밴드 규칙 3).
+        else:
+            placed, filled, expired = self._placed, self._filled, self._expired
+        if placed == 0 and filled == 0 and expired == 0:
+            return  # 아무 일도 없던 날은 보내지 않는다(스팸 방지 — DB 기준으로 판정).
         self._send(
-            format_daily_summary(
-                day,
-                placed=self._placed,
-                filled=self._filled,
-                expired=self._expired,
-                funnel=self._day_funnel(day),
-            )
+            format_daily_summary(day, placed=placed, filled=filled, expired=expired, funnel=funnel)
         )
 
     def _day_funnel(self, day: date) -> FunnelCounts | None:
