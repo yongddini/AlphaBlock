@@ -29,10 +29,33 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime
 
-from common.timefmt import KST_LABEL, format_kst
+from common.timefmt import KST, KST_LABEL, format_kst, kst_day_bounds_for_date
 from config.settings import get_settings
-from live.order_journal import MARGINAL_FILL_BPS, OrderJournal, SeriesFillStats
+from live.limit_orders import LimitOrderStatus
+from live.order_journal import (
+    ENTRY_STATUS_ENTERED,
+    ENTRY_STATUS_REJECTED,
+    MARGINAL_FILL_BPS,
+    STATUS_DISCARDED_RESTART,
+    STATUS_SKIPPED,
+    OrderJournal,
+    PlacedOrder,
+    SeriesFillStats,
+)
+
+#: 당일 조회의 상태 열 라벨 — 장부 원 상태값을 사람이 읽는 한 낱말로 옮긴다(WAN-232).
+#: 만료(`CANCELLED_EXPIRED`)만은 `first_rested_ms` 유무로 미체결/밴드기각이 갈려 아래
+#: 매핑에 넣지 않고 `_status_label`이 따로 판정한다.
+_STATUS_LABELS = {
+    LimitOrderStatus.FILLED.value: "체결",
+    LimitOrderStatus.CANCELLED_INVALIDATED.value: "무효화",
+    LimitOrderStatus.CANCELLED_CONDITION_FAILED.value: "조건취소",
+    LimitOrderStatus.PENDING.value: "대기",
+    STATUS_DISCARDED_RESTART: "재시작폐기",
+    STATUS_SKIPPED: "필터제외",
+}
 
 
 def _fmt_ms(ms: int) -> str:
@@ -170,15 +193,128 @@ def render_report(journal: OrderJournal) -> str:
     return "\n".join(lines)
 
 
+def _status_label(order: PlacedOrder) -> str:
+    """당일 표의 상태 열 라벨(WAN-232). 만료는 밴드기각(deviation)과 순수 미체결을 가른다."""
+    if order.status == LimitOrderStatus.CANCELLED_EXPIRED.value:
+        return "미체결" if order.first_rested_ms is not None else "밴드기각"
+    return _STATUS_LABELS.get(order.status, order.status)
+
+
+def _entry_cell(order: PlacedOrder) -> str:
+    """진입결과 열(WAN-194): 진입/거부(사유)/미기록 — 체결이 아니면 빈칸."""
+    if order.entry_status == ENTRY_STATUS_ENTERED:
+        return "진입"
+    if order.entry_status == ENTRY_STATUS_REJECTED:
+        return f"거부({order.entry_reject_reason or '사유 미기록'})"
+    if order.status == LimitOrderStatus.FILLED.value:
+        return "미기록"  # 체결인데 처분이 안 남음(orphan 후보, WAN-194).
+    return "-"
+
+
+def resolve_day_window(day_arg: str) -> tuple[int, int, str]:
+    """`--day` 인자를 `[start_ms, end_ms)` KST 하루 창 + 날짜 키로 푼다(WAN-232).
+
+    `"today"`(인자 없이 `--day`)는 지금(KST)이 속한 날, 그 밖은 `YYYY-MM-DD`로 해석한다.
+    창 경계는 `common.timefmt.kst_day_bounds_for_date`가 잡아 일일 요약 funnel과 같은 자정
+    경계를 공유한다(CTA #2). 잘못된 날짜 문자열은 `ValueError`로 그대로 올린다.
+    """
+    if day_arg == "today":
+        day = datetime.now(tz=KST).date()
+    else:
+        day = datetime.strptime(day_arg, "%Y-%m-%d").date()
+    start_ms, end_ms = kst_day_bounds_for_date(day)
+    return start_ms, end_ms, day.isoformat()
+
+
+def render_day_report(journal: OrderJournal, *, start_ms: int, end_ms: int, day_key: str) -> str:
+    """당일(KST) 주문별 「예약 → 체결/미체결」 표 + 한 줄 요약을 렌더한다(WAN-232).
+
+    `진입이 너무 안 됨`을 숫자로 가르는 첫 단계 — 코호트는 그날 **예약된**(`placed_ms`)
+    주문이고, 표 아래 두 줄이 (1) 예약이 체결로 가는가 (2) 체결이 진입으로 가는가를 읽는다.
+    """
+    lines: list[str] = [f"# 당일 주문별 체결 조회 · {day_key} (KST) — WAN-232", ""]
+
+    summary = journal.day_summary(start_ms=start_ms, end_ms=end_ms)
+    orders = journal.orders_placed_between(start_ms=start_ms, end_ms=end_ms)
+
+    lines.append(
+        f"**예약 {summary.reserved} · 체결 {summary.filled} ·"
+        f" 미체결(no_fill) {summary.no_fill} · 재시작폐기 {summary.discarded_restart} ·"
+        f" 필터제외 {summary.skipped}**"
+    )
+    extra: list[str] = []
+    if summary.deviation:
+        extra.append(f"밴드기각 {summary.deviation}")
+    if summary.pending:
+        extra.append(f"대기 {summary.pending}")
+    if summary.invalidated:
+        extra.append(f"무효화 {summary.invalidated}")
+    if summary.condition_failed:
+        extra.append(f"조건취소 {summary.condition_failed}")
+    if extra:
+        lines.append(f"(그 밖 — {' · '.join(extra)})")
+    lines.append(
+        f"예약→체결(닿음) {_fmt_rate(summary.fill_rate)} ·"
+        f" 체결→진입 {_fmt_rate(summary.entry_rate)}"
+        f" (진입 {summary.entered} · 거부 {summary.entry_rejected}"
+        f" · 미기록 {summary.entry_unrecorded})"
+    )
+    lines.append("")
+
+    if not orders:
+        lines.append("이 날 예약된 주문이 없습니다.")
+        return "\n".join(lines)
+
+    lines.append(
+        f"| 심볼 | TF | 방향 | 예약({KST_LABEL}) | 지정가 | 상태 | 진입결과 | 필터사유 |"
+        f" 체결({KST_LABEL}) |"
+    )
+    lines.append("| -- | -- | -- | -- | --: | -- | -- | -- | -- |")
+    for order in orders:
+        limit = "-" if order.limit_price is None else f"{order.limit_price:.8g}"
+        fill = "-" if order.fill_ms is None else format_kst(order.fill_ms)
+        skip = order.skip_reason or "-"
+        lines.append(
+            f"| {order.symbol} | {order.timeframe} | {order.direction} |"
+            f" {format_kst(order.placed_ms)} | {limit} | {_status_label(order)} |"
+            f" {_entry_cell(order)} | {skip} | {fill} |"
+        )
+    lines.append("")
+    lines.append(
+        "1. **예약이 체결로 가는가** — 미체결(no_fill)이 대부분이면 지정가에 가격이 안 와"
+        " 만료된 것(시장·필터 탓, 정상 방향). 예약 대비 체결이 정상인데도 적으면 그냥 드문 시기다."
+    )
+    lines.append(
+        "2. **체결이 진입으로 가는가** — 체결인데 진입결과가 거부(대부분 손절폭 가드 0.3%,"
+        " WAN-79)가 많으면 진입 손실의 원천은 시장이 아니라 집행 가드다."
+    )
+    return "\n".join(lines)
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="WAN-45 지정가 체결률 실측 요약")
+    parser = argparse.ArgumentParser(description="WAN-45/232 지정가 체결률·당일 조회")
     parser.add_argument("--db", default=None, help="장부 DB 경로(기본: 설정의 db_path)")
+    parser.add_argument(
+        "--day",
+        nargs="?",
+        const="today",
+        default=None,
+        metavar="YYYY-MM-DD",
+        help=(
+            "당일(KST) 주문별 「예약→체결」 표 + 한 줄 요약(WAN-232). 인자 없이 `--day`면"
+            " 오늘, 날짜를 주면 그 날. 생략하면 예전처럼 누적 체결률 표(WAN-45)를 낸다."
+        ),
+    )
     args = parser.parse_args()
 
     db_path = args.db if args.db is not None else get_settings().db_path
     journal = OrderJournal(db_path)
     try:
-        print(render_report(journal))
+        if args.day is not None:
+            start_ms, end_ms, day_key = resolve_day_window(args.day)
+            print(render_day_report(journal, start_ms=start_ms, end_ms=end_ms, day_key=day_key))
+        else:
+            print(render_report(journal))
     finally:
         journal.close()
 

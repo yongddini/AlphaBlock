@@ -15,7 +15,7 @@ from execution.engine import (
     REJECT_CODE_RISK,
     REJECT_CODE_SIZING,
 )
-from live.fill_report import render_report
+from live.fill_report import render_day_report, render_report, resolve_day_window
 from live.limit_orders import LimitFill, LimitOrderStatus, PendingLimitOrder
 from live.order_journal import (
     LEDGER_REASON_DEVIATION,
@@ -714,3 +714,179 @@ def test_render_report_shows_skip_funnel(tmp_path: Path) -> None:
     assert "주문 걸기 전 미진입 사유" in text
     assert "존폭기각" in text
     journal.close()
+
+
+# -- 당일(KST) 주문별 조회 (WAN-232) --------------------------------------------
+
+
+def _place_at(journal: OrderJournal, session: int, placed_ms: int) -> int:
+    order = PendingLimitOrder(
+        symbol="BTC/USDT:USDT",
+        timeframe="1h",
+        direction=OrderBlockDirection.BULLISH,
+        limit_price=100.0,
+        stop_price=90.0,
+        rsi_state=RealtimeRsi(length=3),
+        placed_ms=placed_ms,
+    )
+    return journal.record_placed(
+        order, session_id=session, zone_start_time=0, zone_confirmed_time=1
+    )
+
+
+def test_orders_placed_between_lists_cohort_by_placed_ms(tmp_path: Path) -> None:
+    """당일 조회 코호트는 **예약 시각**(`placed_ms`)으로 잡고 예약 순으로 나열한다(WAN-232).
+
+    체결·만료 시각이 아니라 예약 시각으로 창을 나누는 것이 funnel/ledger와 다른 점이다 —
+    질문이 "오늘 예약한 주문이 어떻게 됐나"라, 창 밖에 예약된 주문은 그날 것이 아니다.
+    """
+    journal = OrderJournal(tmp_path / "j.db")
+    session = journal.start_session(now_ms=0)
+
+    # 예약 시각을 일부러 뒤섞어 넣어 정렬을 확인한다(1700 → 1200 순서).
+    late = _place_at(journal, session, 1700)
+    journal.record_filled(late, _fill_at(5000))  # 체결은 창 밖이어도 코호트엔 든다(예약이 창 안).
+    early = _place_at(journal, session, 1200)
+    journal.record_cancelled(early, LimitOrderStatus.CANCELLED_EXPIRED, now_ms=1600)
+
+    # 창 밖 예약(제외돼야 한다).
+    _place_at(journal, session, 500)
+    _place_at(journal, session, 2000)  # 상한은 배타적.
+
+    orders = journal.orders_placed_between(start_ms=1000, end_ms=2000)
+    assert [o.placed_ms for o in orders] == [1200, 1700]  # 예약 순 정렬 · 창 밖 제외.
+    assert orders[0].status == LimitOrderStatus.CANCELLED_EXPIRED.value
+    assert orders[1].status == LimitOrderStatus.FILLED.value
+    assert orders[1].fill_ms == 5000 and orders[1].limit_price == 100.0
+    journal.close()
+
+
+def test_day_summary_counts_and_conversion_rates(tmp_path: Path) -> None:
+    """한 줄 요약: 예약·체결·미체결·재시작폐기·필터제외 + 예약→체결·체결→진입 전환율(WAN-232)."""
+    journal = OrderJournal(tmp_path / "j.db")
+    session = journal.start_session(now_ms=0)
+
+    entered = _place_at(journal, session, 1100)
+    journal.record_filled(entered, _fill_at(1400))
+    journal.record_entry_result(entered, entered=True)
+    rejected = _place_at(journal, session, 1150)
+    journal.record_filled(rejected, _fill_at(1450))
+    journal.record_entry_result(rejected, entered=False, reason="손절 너무 짧음")
+    journal.record_cancelled(
+        _place_at(journal, session, 1200), LimitOrderStatus.CANCELLED_EXPIRED, now_ms=1600
+    )  # no_fill
+    band = journal.record_placed(
+        _band_rejected_order(), session_id=session, zone_start_time=0, zone_confirmed_time=1
+    )
+    journal.record_cancelled(band, LimitOrderStatus.CANCELLED_EXPIRED, now_ms=1650)  # deviation
+    journal.record_discarded(_place_at(journal, session, 1300), now_ms=1700)
+    _place_at(journal, session, 1350)  # 대기 유지.
+    journal.record_skipped(
+        session_id=session,
+        symbol="BTC/USDT:USDT",
+        timeframe="1h",
+        direction=OrderBlockDirection.BULLISH.value,
+        tap_index=0,
+        placed_ms=1250,
+        reason=SKIP_REASON_ZONE_WIDTH,
+        zone_start_time=0,
+        zone_confirmed_time=1,
+    )
+    journal.record_skipped(
+        session_id=session,
+        symbol="BTC/USDT:USDT",
+        timeframe="1h",
+        direction=OrderBlockDirection.BULLISH.value,
+        tap_index=0,
+        placed_ms=1260,
+        reason=SKIP_REASON_CELL_BUSY,
+        zone_start_time=0,
+        zone_confirmed_time=1,
+    )
+
+    s = journal.day_summary(start_ms=1000, end_ms=2000)
+    # 예약 = 걸린 주문(비-skip) = 체결2 + no_fill1 + deviation1 + 폐기1 + 대기1 = 6.
+    assert s.reserved == 6
+    assert (s.filled, s.no_fill, s.deviation) == (2, 1, 1)
+    assert (s.discarded_restart, s.skipped, s.pending) == (1, 2, 1)
+    assert (s.entered, s.entry_rejected, s.entry_unrecorded) == (1, 1, 0)
+    assert s.fill_rate == 2 / 3  # 체결 2 / (체결 2 + no_fill 1) — 폐기·스킵·대기·deviation 제외.
+    assert s.entry_rate == 0.5  # 진입 1 / (진입 1 + 거부 1).
+    journal.close()
+
+
+def test_day_summary_matches_funnel_when_events_share_window(tmp_path: Path) -> None:
+    """CTA #3: 모든 사건이 같은 KST 하루에 나면 체결률 분자·분모가 `funnel_counts`와 일치한다.
+
+    당일 조회는 예약 시각으로, funnel은 사건 시각으로 창을 나누므로 예약·체결·만료가 모두
+    같은 창 안에 있을 때 두 회계가 같아야 한다(discarded_restart·skipped 분모 제외 규칙 포함).
+    """
+    journal = OrderJournal(tmp_path / "j.db")
+    session = journal.start_session(now_ms=0)
+
+    entered = _place_at(journal, session, 1100)
+    journal.record_filled(entered, _fill_at(1400))
+    journal.record_entry_result(entered, entered=True)
+    rej = _place_at(journal, session, 1150)
+    journal.record_filled(rej, _fill_at(1450))
+    journal.record_entry_result(rej, entered=False, reason="사이징", reason_code="sizing")
+    journal.record_cancelled(
+        _place_at(journal, session, 1200), LimitOrderStatus.CANCELLED_EXPIRED, now_ms=1600
+    )
+    band = journal.record_placed(
+        _band_rejected_order(), session_id=session, zone_start_time=0, zone_confirmed_time=1
+    )
+    journal.record_cancelled(band, LimitOrderStatus.CANCELLED_EXPIRED, now_ms=1650)
+    journal.record_discarded(_place_at(journal, session, 1300), now_ms=1700)  # 분모 밖.
+
+    day = journal.day_summary(start_ms=1000, end_ms=2000)
+    funnel = journal.funnel_counts(start_ms=1000, end_ms=2000)
+    assert (day.filled, day.no_fill, day.deviation) == (
+        funnel.filled,
+        funnel.no_fill,
+        funnel.deviation,
+    )
+    assert day.fill_rate == funnel.fill_rate
+    journal.close()
+
+
+def test_render_day_report_has_summary_table_and_questions(tmp_path: Path) -> None:
+    """당일 렌더가 한 줄 요약 · 주문별 표 · 두 진단 질문을 담는다(WAN-232 완료 기준 1)."""
+    journal = OrderJournal(tmp_path / "j.db")
+    session = journal.start_session(now_ms=0)
+    entered = _place_at(journal, session, 1100)
+    journal.record_filled(entered, _fill_at(1400))
+    journal.record_entry_result(entered, entered=True)
+    rejected = _place_at(journal, session, 1150)
+    journal.record_filled(rejected, _fill_at(1450))
+    journal.record_entry_result(rejected, entered=False, reason="손절 너무 짧음")
+
+    out = render_day_report(journal, start_ms=1000, end_ms=2000, day_key="2026-08-02")
+    assert "2026-08-02" in out
+    assert "예약 2 · 체결 2" in out
+    assert "예약→체결(닿음) 100.0%" in out and "체결→진입 50.0%" in out
+    assert "| 심볼 | TF |" in out  # 주문별 표 헤더.
+    assert "진입" in out and "거부(손절 너무 짧음)" in out
+    assert "예약이 체결로 가는가" in out and "체결이 진입으로 가는가" in out
+    journal.close()
+
+
+def test_render_day_report_empty_window(tmp_path: Path) -> None:
+    """예약이 없는 날은 요약 0 + '예약된 주문이 없습니다'만 낸다(빈 창 안전)."""
+    journal = OrderJournal(tmp_path / "j.db")
+    out = render_day_report(journal, start_ms=1000, end_ms=2000, day_key="2026-08-02")
+    assert "예약 0 · 체결 0" in out
+    assert "이 날 예약된 주문이 없습니다." in out
+    journal.close()
+
+
+def test_resolve_day_window_matches_shared_kst_helper() -> None:
+    """CTA #2: `--day` 창이 일일 요약 funnel과 같은 자정 경계(kst_day_bounds_for_date)를 쓴다."""
+    from datetime import date
+
+    from common.timefmt import kst_day_bounds_for_date
+
+    start_ms, end_ms, key = resolve_day_window("2026-08-02")
+    assert (start_ms, end_ms) == kst_day_bounds_for_date(date(2026, 8, 2))
+    assert key == "2026-08-02"
+    assert end_ms - start_ms == 24 * 3_600_000  # KST는 서머타임 없어 정확히 24h.

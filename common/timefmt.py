@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 __all__ = [
@@ -39,6 +39,7 @@ __all__ = [
     "format_kst_zoned",
     "format_utc",
     "kst_day_bounds",
+    "kst_day_bounds_for_date",
     "kst_day_key",
     "kst_log_format",
     "kst_time_converter",
@@ -94,20 +95,40 @@ def format_utc(ms: int | None, *, seconds: bool = False, missing: str = MISSING_
     )
 
 
+def _kst_day_bounds_from_midnight(start: datetime) -> tuple[int, int]:
+    """KST 자정 datetime → `[자정, 다음 자정)` epoch ms 경계.
+
+    `kst_day_bounds`(ms 기준)와 `kst_day_bounds_for_date`(달력 날짜 기준)가 **같은 식**을
+    공유하도록 하나로 뺐다 — 두 진입점이 다른 산식을 쓰면 "당일" 창이 갈라진다(WAN-232가
+    조회 창을 일일 요약 funnel과 비트 단위로 맞춰야 하는 이유). KST는 서머타임이 없어 하루가
+    정확히 24h지만, 경계는 `timedelta`로 잡아 상수(86_400_000)를 박지 않는다.
+    """
+    start_ms = int(start.timestamp() * 1000)
+    end_ms = int((start + timedelta(days=1)).timestamp() * 1000)
+    return start_ms, end_ms
+
+
 def kst_day_bounds(ms: int) -> tuple[int, int]:
     """epoch ms가 속한 **KST 하루**의 `[자정, 다음 자정)` 경계를 epoch ms로 돌려준다.
 
     반환값은 여전히 **UTC epoch(ms)** 이다 — 시간대 변환이 아니라 "이 순간이 어느 KST
     날짜에 속하는가"의 경계를 잡는 계산이다(저장·비교는 UTC epoch 불변, 위 독스트링).
     일일 손실 서킷브레이커(WAN-38)·일일 요약(WAN-221)처럼 사람이 체감하는 "당일" 경계가
-    KST일 때 쓴다. KST는 서머타임이 없어 하루가 정확히 24h지만, 경계는 `timedelta`로 잡아
-    상수(86_400_000)를 박지 않는다.
+    KST일 때 쓴다.
     """
     local = datetime.fromtimestamp(ms / 1000, tz=KST)
-    start = local.replace(hour=0, minute=0, second=0, microsecond=0)
-    start_ms = int(start.timestamp() * 1000)
-    end_ms = int((start + timedelta(days=1)).timestamp() * 1000)
-    return start_ms, end_ms
+    return _kst_day_bounds_from_midnight(local.replace(hour=0, minute=0, second=0, microsecond=0))
+
+
+def kst_day_bounds_for_date(day: date) -> tuple[int, int]:
+    """KST **달력 날짜**의 `[자정, 다음 자정)` 경계를 epoch ms로 돌려준다.
+
+    `kst_day_bounds(ms)`와 **같은 산식**(`_kst_day_bounds_from_midnight` 공유)을 쓰되,
+    입력이 epoch ms가 아니라 달력 날짜다 — 일일 요약(WAN-221)·당일 주문별 조회(WAN-232)처럼
+    "이 날짜의 하루"를 창으로 잡을 때 쓴다. 그래서 두 도구가 같은 날에 대해 **비트 단위로
+    같은 창**을 본다(회귀 테스트가 고정).
+    """
+    return _kst_day_bounds_from_midnight(datetime(day.year, day.month, day.day, tzinfo=KST))
 
 
 def kst_day_key(ms: int) -> str:
