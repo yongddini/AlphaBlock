@@ -521,12 +521,19 @@ def synthetic_db(tmp_path_factory: pytest.TempPathFactory) -> tuple[str, str]:
 _PARALLEL_ARGV: tuple[str, ...] = (
     "--symbol",
     "BTCUSDT,ETHUSDT",
+    "--tf",
+    "1h",
     "--max-zone-width-atr",
     "none",
     "--tp-r",
     "1.5,2.0",
 )
-"""대조 격자: 2심볼 × 2익절R = 4행, fan-out 단위((심볼,TF))는 2개.
+"""대조 격자: 2심볼 × 1TF × 2익절R = 4행, fan-out 단위((심볼,TF))는 2개.
+
+`--tf 1h`를 **명시**하는 이유: 합성 DB는 1h·1m만 저장하는데 채택 기본 TF에 2h가 있고
+(WAN-252) **2h는 저장된 1h에서 파생**되므로(온더플라이 리샘플), TF를 안 주면 1h+2h가
+모두 행을 내 fan-out 수가 기본 TF 집합에 따라 흔들린다. 이 테스트는 기본 TF 수가 아니라
+병렬=직렬 동일성을 재므로 축을 못 박는다.
 
 존폭 필터를 끄는(`--max-zone-width-atr none`) 이유는 지정가(B안) 팔이 이 합성
 데이터에서 **실제 거래를 내게** 하기 위해서다 — 채택 기본값 1.28을 두면 합성 존이

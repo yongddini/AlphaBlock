@@ -277,7 +277,7 @@ def collect_rows(
     return rows, proxy_note
 
 
-_TF_ORDER = {"15m": 0, "1h": 1, "4h": 2, "1d": 3}
+_TF_ORDER = {"15m": 0, "1h": 1, "2h": 2, "4h": 3, "1d": 4}
 
 
 def rows_to_frame(rows: list[ZoneLimitRow]) -> pd.DataFrame:
@@ -412,6 +412,14 @@ def build_markdown(frame: pd.DataFrame, proxy_note: str = "") -> str:
         "평균 최고(= 롱에게 가장 비싼) 종목의 시계열로 **대리 계산**한다(WAN-180과 같은 "
         "규칙, 아래 각주). 근거·파급은 "
         "[`docs/decisions/wan182.md`](../../docs/decisions/wan182.md).",
+        "",
+        "> 🔁 **WAN-252(2h 작업 TF 승격)로 이 표에 2h 행이 더해졌다 — 좌표 재-베이스라인**"
+        "(사용자 결정 2026-08-05, WAN-182의 4h 승격과 같은 패턴). 작업 TF가 15m·1h·4h → "
+        "**15m·1h·2h·4h**가 됐다(2h는 저장된 1h에서 무손실 리샘플로 파생, WAN-24 — 사전 적재 "
+        "불필요). 15m/1h/4h 행은 좌표가 같아 **비트 단위로 그대로**이고 2h 9행만 새로 얹혔다. "
+        "근거는 WAN-236(2h 성능)·WAN-243(2h 재진입 널)이 이미 낸 표이며 `ConfluenceParams()`는 "
+        "그대로다. 근거·파급은 "
+        "[`docs/decisions/wan252.md`](../../docs/decisions/wan252.md).",
         "",
         "> ⚠️ **이 표는 WAN-100(첫 탭 면제 배선)으로 전면 재산출됐다.** 최초 WAN-95 산출 "
         "당시 지정가(B안) 경로는 `tap_index`를 읽지 않아 「첫 탭은 RSI 무관 무조건 진입」"
