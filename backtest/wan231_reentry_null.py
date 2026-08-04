@@ -650,6 +650,18 @@ def cells_from_csv(path: Path) -> list[NullRow]:
     return [NullRow.model_validate(rec) for rec in records]
 
 
+def merge_rows(existing: Sequence[NullRow], new: Sequence[NullRow]) -> list[NullRow]:
+    """기존 CSV 행에 새로 돌린 행을 병합한다 — `--append` 지원(WAN-242 15m 축 추가).
+
+    같은 `(심볼, TF)`가 겹치면 **새 행이 이긴다**(그 셀만 갱신). 새 TF(예: 15m)는 그대로
+    덧붙는다. 기존 행 순서는 그대로 두고 새 행을 뒤에 붙여 diff를 최소화한다 — 요약 표는
+    렌더 시 TF·심볼로 다시 정렬하므로(`_cell_table`) CSV 물리 순서와 무관하다.
+    """
+    new_keys = {(r.symbol, r.timeframe) for r in new}
+    kept = [r for r in existing if (r.symbol, r.timeframe) not in new_keys]
+    return [*kept, *new]
+
+
 # --------------------------------------------------------------------------- #
 # 렌더
 # --------------------------------------------------------------------------- #
@@ -733,7 +745,9 @@ def build_summary_markdown(rows: Sequence[NullRow], *, cells_csv: Path) -> str:
         "실제 > 널 평균(WAN-84 게이트 + WAN-88 방향).",
         "",
         f"재현: `uv run python -m backtest.wan231_reentry_null --tf "
-        f"{','.join(DEFAULT_TIMEFRAMES)} --jobs 6` (요약만: `--from-csv`). 원자료: `{cells_csv}`. "
+        f"{','.join(DEFAULT_TIMEFRAMES)} --jobs 6` · 15m은 "
+        "`--tf 15m --append --jobs 9`(WAN-242 · 셀당 ~37분, WAN-203 선례) "
+        f"(요약만: `--from-csv`). 원자료: `{cells_csv}`. "
         f"창=[{window[0]}, {window[1]}).",
         "",
         "## 칸별 매칭 널 (실제 vs 무작위 · p값)",
@@ -785,6 +799,12 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="백테스트를 다시 돌리지 않고 저장된 CSV에서 요약만 재생성한다.",
     )
+    parser.add_argument(
+        "--append",
+        action="store_true",
+        help="새로 돌린 행을 기존 --out-cells CSV에 병합한다(같은 (심볼,TF)는 갱신). "
+        "WAN-242 15m 축을 4h·1h 표에 덧붙일 때 쓴다.",
+    )
     args = parser.parse_args(argv)
 
     out_cells = Path(args.out_cells)
@@ -794,7 +814,7 @@ def main(argv: list[str] | None = None) -> int:
         rows = cells_from_csv(out_cells)
         print(f"[wan231] CSV에서 {len(rows)}행 로드 — 백테스트 재실행 없음")
     else:
-        rows = run_report(
+        new_rows = run_report(
             tuple(s.strip() for s in str(args.symbols).split(",") if s.strip()),
             timeframes=tuple(t.strip() for t in str(args.tf).split(",") if t.strip()),
             start=args.start,
@@ -802,7 +822,26 @@ def main(argv: list[str] | None = None) -> int:
             jobs=args.jobs,
         )
         out_cells.parent.mkdir(parents=True, exist_ok=True)
-        cells_to_frame(rows).to_csv(out_cells, index=False)
+        if args.append and out_cells.exists():
+            existing = cells_from_csv(out_cells)
+            new_keys = {(r.symbol, r.timeframe) for r in new_rows}
+            overlaps = any((r.symbol, r.timeframe) in new_keys for r in existing)
+            rows = merge_rows(existing, new_rows)
+            if overlaps:
+                # 같은 (심볼,TF)를 다시 돌렸다 → 갱신이 필요하니 전체 재작성.
+                cells_to_frame(rows).to_csv(out_cells, index=False)
+            else:
+                # 순수 추가(새 TF) → 기존 행은 바이트 그대로 두고 새 행만 덧붙인다
+                # (부동소수 재직렬화 churn 없이 diff가 신규 행만 나오게).
+                cells_to_frame(new_rows).to_csv(out_cells, index=False, mode="a", header=False)
+            print(
+                f"[wan231] --append: 기존 유지 {len(rows) - len(new_rows)}행 + "
+                f"신규 {len(new_rows)}행 = {len(rows)}행"
+                + ("(겹침 → 전체 재작성)" if overlaps else "(순수 추가 → 기존 바이트 보존)")
+            )
+        else:
+            rows = new_rows
+            cells_to_frame(rows).to_csv(out_cells, index=False)
         print(f"[wan231] 매칭 널 {len(rows)}행 → {out_cells}")
 
     if not rows:
