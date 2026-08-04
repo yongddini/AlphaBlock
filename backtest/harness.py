@@ -87,9 +87,13 @@ DEFAULT_SYMBOLS: tuple[str, ...] = (
     "LTC/USDT:USDT",
 )
 
-#: 작업 TF = 15m·1h·4h (WAN-182 — WAN-107의 15m·1h에 WAN-179가 4h를 승격).
+#: 작업 TF = 15m·1h·2h·4h (WAN-252 — WAN-182의 15m·1h·4h에 2h를 승격, 사용자 결정
+#: 2026-08-05). WAN-182가 4h를 승격한 것과 **같은 패턴의 좌표 재-베이스라인**이다 —
+#: 엔진(`ConfluenceParams()`)이 아니라 좌표만 바뀐다. 근거는 WAN-236(2h 성능)·WAN-243
+#: (2h 재진입 널)이 이미 낸 표이고 새 격자는 없다. 2h는 저장된 1h에서 무손실 리샘플로
+#: 파생된다(`OhlcvStore.load`의 `_DERIVED_TIMEFRAMES`, WAN-24 — 사전 적재 불필요).
 #: 1d는 표본 미달(OOS 심볼당 ~10거래 < WAN-84 유효 기준 20건)로 제외 유지.
-DEFAULT_TIMEFRAMES: tuple[str, ...] = ("15m", "1h", "4h")
+DEFAULT_TIMEFRAMES: tuple[str, ...] = ("15m", "1h", "2h", "4h")
 
 #: 채택 창 = 못 박은 6년 (WAN-182, 실효 5.85년). 시작점은 SOL 상장(2020-09-14) 하한 —
 #: 9종목이 **같은 창**을 보게 하는 균일 창 원칙(WAN-175/176). 끝은 마지막 미완 하루를

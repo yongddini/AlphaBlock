@@ -39,9 +39,13 @@ _NINE = (
 
 
 def test_adopted_coordinates_are_nine_symbols_three_tfs_pinned_window() -> None:
-    """채택 좌표(WAN-179 결정): 9종목 · 15m/1h/4h · 2020-09-15~2026-07-22."""
+    """채택 좌표(WAN-179 결정): 9종목 · 작업 TF · 2020-09-15~2026-07-22.
+
+    ⚠️ 작업 TF는 WAN-252(2026-08-05)가 2h를 승격해 15m·1h·**2h**·4h 네 축이 됐다 —
+    WAN-182 시점의 3축(15m·1h·4h)이 아니다(상세 회귀는 `test_wan252_rebaseline.py`).
+    """
     assert harness.DEFAULT_SYMBOLS == _NINE
-    assert harness.DEFAULT_TIMEFRAMES == ("15m", "1h", "4h")
+    assert harness.DEFAULT_TIMEFRAMES == ("15m", "1h", "2h", "4h")  # WAN-252: +2h
     assert harness.DEFAULT_START == "2020-09-15"
     assert harness.DEFAULT_END == "2026-07-22"
 
@@ -56,7 +60,7 @@ def test_bare_cli_actually_runs_adopted_coordinates() -> None:
     grid = grid_from_args(args)
     assert len(grid.symbols) == 9
     assert set(grid.symbols) == set(_NINE)
-    assert grid.timeframes == ("15m", "1h", "4h")
+    assert grid.timeframes == ("15m", "1h", "2h", "4h")  # WAN-252: +2h
 
     options = options_from_args(args)
     assert options.start_ms == parse_date_ms("2020-09-15")
