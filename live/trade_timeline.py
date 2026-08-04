@@ -44,6 +44,11 @@ from live.limit_orders import LimitOrderStatus
 from live.order_journal import (
     ENTRY_STATUS_ENTERED,
     ENTRY_STATUS_REJECTED,
+    SKIP_REASON_CELL_BUSY,
+    SKIP_REASON_RETAP,
+    SKIP_REASON_ZONE_WIDTH,
+    STATUS_DISCARDED_RESTART,
+    STATUS_SKIPPED,
     OrderJournal,
     PlacedOrder,
 )
@@ -121,22 +126,52 @@ class TimelineRow:
         return self.fill_ms or self.reserve_ms or self.zone_confirmed_time
 
 
+#: 라이브 주문 상태 원값(`live_limit_orders.status`) → 한글 라벨(WAN-240). `.get(..., 원본)`
+#: 폴백이 영어를 흘리던 자리를 없앤다 — 모든 `LimitOrderStatus` 값 + 장부 원값(`skipped`·
+#: `discarded_restart`)을 여기서 덮는다. `cancelled_expired`(미체결/밴드기각)·`filled`(진입/
+#: 청산/거부/미기록)·`skipped`(사유 병기)는 하류 정보로 갈리므로 `_live_status`가 따로 처리하고
+#: 이 표에 없다. 미매핑이면 `_live_status`가 `?{status}`로 눈에 띄게 찍는다(조용한 누출 금지).
+_LIVE_STATUS_LABELS = {
+    LimitOrderStatus.CANCELLED_INVALIDATED.value: "무효화",
+    LimitOrderStatus.CANCELLED_CONDITION_FAILED.value: "조건취소",
+    LimitOrderStatus.PENDING.value: "대기",
+    STATUS_DISCARDED_RESTART: "재시작폐기",
+}
+
+#: `skipped` 행의 세부 사유(`skip_reason`, WAN-217) → 한글. `fill_report`의 존폭기각/슬롯참/
+#: 재탭 어휘와 같은 낱말을 써 두 화면이 갈라지지 않게 한다(완료 기준 3). `거부(사유)`처럼
+#: `건너뜀(사유)`로 병기해 "왜 걸렀나"를 한눈에 읽힌다.
+_SKIP_REASON_LABELS = {
+    SKIP_REASON_ZONE_WIDTH: "존폭",
+    SKIP_REASON_CELL_BUSY: "슬롯참",
+    SKIP_REASON_RETAP: "재탭",
+}
+
+
+def _skip_status(skip_reason: str | None) -> str:
+    """`skipped` 주문의 라벨 — 사유를 한글로 병기(미매핑 사유는 `?코드`로 눈에 띄게)."""
+    if skip_reason is None:
+        return "건너뜀"
+    detail = _SKIP_REASON_LABELS.get(skip_reason)
+    return f"건너뜀({detail})" if detail is not None else f"건너뜀(?{skip_reason})"
+
+
 def _live_status(order: PlacedOrder, *, closed: bool) -> str:
-    """라이브 주문의 생애 단계를 한 낱말로(WAN-234). WAN-232 라벨 규약을 따른다."""
+    """라이브 주문의 생애 단계를 한 낱말로(WAN-234). 항상 한글 라벨을 낸다(WAN-240)."""
     if order.status == LimitOrderStatus.CANCELLED_EXPIRED.value:
         return "미체결" if order.first_rested_ms is not None else "밴드기각"
-    if order.status != LimitOrderStatus.FILLED.value:
-        return {
-            LimitOrderStatus.CANCELLED_INVALIDATED.value: "무효화",
-            LimitOrderStatus.CANCELLED_CONDITION_FAILED.value: "조건취소",
-            LimitOrderStatus.PENDING.value: "대기",
-        }.get(order.status, order.status)
-    # 여기부터는 체결(FILLED) — 하류 처분으로 가른다.
-    if order.entry_status == ENTRY_STATUS_REJECTED:
-        return f"거부({order.entry_reject_reason or '사유 미기록'})"
-    if order.entry_status != ENTRY_STATUS_ENTERED:
-        return "미기록"  # 체결인데 처분이 안 남음(orphan 후보, WAN-194).
-    return "청산" if closed else "진입"
+    if order.status == LimitOrderStatus.FILLED.value:
+        # 체결(FILLED) — 하류 처분으로 가른다.
+        if order.entry_status == ENTRY_STATUS_REJECTED:
+            return f"거부({order.entry_reject_reason or '사유 미기록'})"
+        if order.entry_status != ENTRY_STATUS_ENTERED:
+            return "미기록"  # 체결인데 처분이 안 남음(orphan 후보, WAN-194).
+        return "청산" if closed else "진입"
+    if order.status == STATUS_SKIPPED:
+        return _skip_status(order.skip_reason)
+    label = _LIVE_STATUS_LABELS.get(order.status)
+    # 폴백은 영어를 흘리지 않고 눈에 띄게 찍는다 — 미매핑 상태가 새로 생기면 바로 보인다.
+    return label if label is not None else f"?{order.status}"
 
 
 def live_timeline_rows(
@@ -376,20 +411,23 @@ class DayTimeline:
 
     @property
     def rows(self) -> tuple[TimelineRow, ...]:
-        """표시 순서: 심볼 → TF → 예약/체결 시각 → 라이브 먼저(주인공), 백테 뒤(대조).
+        """표시 순서: 예약/체결 시각 1차 → 심볼 → TF → 라이브 먼저(주인공), 백테 뒤(대조).
 
-        같은 (심볼, TF)에서 라이브 행 바로 아래 백테 행이 오도록 정렬해, 라이브 칸이 빈
-        「백테만 있는 줄」이 눈에 띄게 한다(WAN-234 핵심 신호).
+        사용자가 "시간대로 보여줬으면"이라 한 요청대로 **시각을 1차 정렬 키**로 올린다
+        (WAN-240 — 옛 WAN-234의 심볼·TF 1차 묶음을 뒤집는다). 「백테만 있는 줄(라이브가 못
+        잡은 거래)」 신호는 인접이 아니라 **`출처` 열**(라이브/백테스트)로 읽는다 — 시각순에서
+        라이브·백테 짝이 흩어져도 백테 행은 `출처=백테스트`로 그대로 드러난다. 같은 시각의
+        타이(같은 셋업의 라이브·백테)는 심볼·TF·출처 순 타이브레이크로 인접을 유지한다.
         """
         merged = list(self.live) + list(self.backtest)
         merged.sort(key=_row_sort_key)
         return tuple(merged)
 
 
-def _row_sort_key(row: TimelineRow) -> tuple[str, str, int, int]:
+def _row_sort_key(row: TimelineRow) -> tuple[int, str, str, int]:
     when = row.reserve_ms if row.reserve_ms is not None else (row.fill_ms or 0)
     source_rank = 0 if row.source == SOURCE_LIVE else 1
-    return (row.symbol, row.timeframe, when, source_rank)
+    return (when, row.symbol, row.timeframe, source_rank)
 
 
 # -- 공용 표시 계층 (화면·터미널·CSV가 같은 거래를 같은 숫자로 — 완료 기준 3) -----------

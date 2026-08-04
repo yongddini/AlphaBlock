@@ -20,12 +20,22 @@ import pytest
 from backtest.report import format_time_kst
 from common.timefmt import kst_day_bounds_for_date
 from live.limit_orders import LimitFill, LimitOrderStatus, PendingLimitOrder
-from live.order_journal import OrderJournal
+from live.order_journal import (
+    ENTRY_STATUS_ENTERED,
+    SKIP_REASON_CELL_BUSY,
+    SKIP_REASON_RETAP,
+    SKIP_REASON_ZONE_WIDTH,
+    STATUS_DISCARDED_RESTART,
+    STATUS_SKIPPED,
+    OrderJournal,
+    PlacedOrder,
+)
 from live.trade_timeline import (
     SOURCE_BACKTEST,
     SOURCE_LIVE,
     DayTimeline,
     TimelineRow,
+    _live_status,
     build_day_timeline,
     display_columns,
     live_timeline_rows,
@@ -152,6 +162,83 @@ def test_live_status_labels_split_by_stage(tmp_path: Path) -> None:
     journal.close()
 
 
+def test_skipped_and_discarded_labels_are_korean(tmp_path: Path) -> None:
+    """`skipped`(사유 병기)·`discarded_restart`가 한글 라벨로 뜬다 — 영어 누출 없음(WAN-240)."""
+    journal = OrderJournal(tmp_path / "j.db")
+    store = PaperTradeStore(tmp_path / "j.db")
+    session = journal.start_session(now_ms=0)
+
+    # 주문 걸기 전 걸러진 셋업(존폭 필터) → 건너뜀(존폭).
+    journal.record_skipped(
+        session_id=session,
+        symbol=_SYMBOL,
+        timeframe=_TF,
+        direction=OrderBlockDirection.BULLISH.value,
+        tap_index=0,
+        placed_ms=1100,
+        reason=SKIP_REASON_ZONE_WIDTH,
+        zone_start_time=50,
+        zone_confirmed_time=60,
+    )
+    # 이전 세션 대기 주문을 재시작 폐기 → 재시작폐기.
+    _place(journal, session, placed_ms=1200)
+    journal.discard_stale_pending(now_ms=1500)
+
+    rows = {r.reserve_ms: r for r in live_timeline_rows(journal, store, start_ms=1000, end_ms=2000)}
+    assert rows[1100].status == "건너뜀(존폭)"
+    assert rows[1200].status == "재시작폐기"
+    # 영어 원본이 화면에 그대로 뜨지 않는다.
+    assert STATUS_SKIPPED not in rows[1100].status
+    assert STATUS_DISCARDED_RESTART not in rows[1200].status
+    store.close()
+    journal.close()
+
+
+def _placed(status: str, **kwargs: object) -> PlacedOrder:
+    base: dict[str, object] = {
+        "symbol": _SYMBOL,
+        "timeframe": _TF,
+        "direction": OrderBlockDirection.BULLISH.value,
+        "placed_ms": 0,
+        "status": status,
+        "limit_price": None,
+        "fill_ms": None,
+        "fill_penetration_bps": None,
+        "first_rested_ms": None,
+        "entry_status": None,
+        "entry_reject_reason": None,
+        "skip_reason": None,
+    }
+    base.update(kwargs)
+    return PlacedOrder(**base)  # type: ignore[arg-type]
+
+
+def test_live_status_never_leaks_raw_english() -> None:
+    """모든 `LimitOrderStatus` 값 + 장부 원값이 한글 라벨을 갖는다(WAN-240 완료 기준 1)."""
+    cases = [
+        _placed(LimitOrderStatus.PENDING.value),
+        _placed(LimitOrderStatus.CANCELLED_INVALIDATED.value),
+        _placed(LimitOrderStatus.CANCELLED_CONDITION_FAILED.value),
+        _placed(LimitOrderStatus.CANCELLED_EXPIRED.value, first_rested_ms=1),  # 미체결
+        _placed(LimitOrderStatus.CANCELLED_EXPIRED.value),  # 밴드기각
+        _placed(LimitOrderStatus.FILLED.value, entry_status=ENTRY_STATUS_ENTERED),  # 진입
+        _placed(STATUS_DISCARDED_RESTART),
+        _placed(STATUS_SKIPPED, skip_reason=SKIP_REASON_ZONE_WIDTH),
+        _placed(STATUS_SKIPPED, skip_reason=SKIP_REASON_CELL_BUSY),
+        _placed(STATUS_SKIPPED, skip_reason=SKIP_REASON_RETAP),
+        _placed(STATUS_SKIPPED),  # 사유 미기록
+    ]
+    for order in cases:
+        label = _live_status(order, closed=False)
+        assert label != order.status, order.status  # 영어 원본 그대로가 아니다.
+        assert not label.isascii(), (order.status, label)  # 한글을 포함한다.
+
+
+def test_live_status_unmapped_falls_back_visibly() -> None:
+    """미매핑 상태가 새로 생기면 조용히 영어로 새지 않고 눈에 띄게 찍는다(WAN-240)."""
+    assert _live_status(_placed("some_new_status"), closed=False) == "?some_new_status"
+
+
 def test_cohort_is_placed_window(tmp_path: Path) -> None:
     """코호트는 예약(`placed_ms`) 창 — 창 밖 주문은 빠진다(WAN-232와 같은 창)."""
     journal = OrderJournal(tmp_path / "j.db")
@@ -228,17 +315,16 @@ def test_render_matches_display_frame() -> None:
         assert str(value) in text
 
 
-def test_rows_sort_live_before_backtest_in_cell() -> None:
-    """같은 (심볼, TF)에서 라이브가 먼저(주인공), 백테가 뒤(대조)로 정렬된다."""
-    live = TimelineRow(
+def _live_row(*, reserve_ms: int, symbol: str = _SYMBOL, status: str = "진입") -> TimelineRow:
+    return TimelineRow(
         source=SOURCE_LIVE,
-        symbol=_SYMBOL,
+        symbol=symbol,
         timeframe=_TF,
         is_long=True,
-        status="진입",
-        reserve_ms=1000,
+        status=status,
+        reserve_ms=reserve_ms,
         limit_price=100.0,
-        fill_ms=1100,
+        fill_ms=reserve_ms + 50,
         fill_price=100.0,
         stop_price=90.0,
         take_profit_price=110.0,
@@ -248,10 +334,45 @@ def test_rows_sort_live_before_backtest_in_cell() -> None:
         pnl_pct=None,
         pnl_amount=None,
     )
-    bt = _bt_row(fill_ms=1050, exit_ms=1200)
+
+
+def test_rows_sort_by_time_primary_across_cells() -> None:
+    """시각 1차 정렬 — 심볼·출처가 달라도 예약/체결 시각 순으로 늘어선다(WAN-240)."""
+    early_bt = TimelineRow(  # 백테(다른 심볼), 가장 이른 체결 1000.
+        source=SOURCE_BACKTEST,
+        symbol="ETH/USDT:USDT",
+        timeframe=_TF,
+        is_long=True,
+        status="청산",
+        reserve_ms=None,
+        limit_price=None,
+        fill_ms=1000,
+        fill_price=101.0,
+        stop_price=None,
+        take_profit_price=None,
+        exit_ms=1500,
+        exit_price=116.0,
+        exit_reason="take_profit",
+        pnl_pct=15.0,
+        pnl_amount=150.0,
+    )
+    mid_live = _live_row(reserve_ms=1200)
+    late_live = _live_row(reserve_ms=1400)
+    timeline = DayTimeline(day_key="2026-08-02", live=(late_live, mid_live), backtest=(early_bt,))
+    whens = [
+        (r.reserve_ms if r.reserve_ms is not None else (r.fill_ms or 0)) for r in timeline.rows
+    ]
+    assert whens == sorted(whens)  # 전체가 시각순.
+    # 백테가 라이브보다 이른 시각이면 라이브 앞에 온다(옛 심볼·TF 1차 묶음이 뒤집혔다).
+    assert timeline.rows[0].source == SOURCE_BACKTEST
+
+
+def test_rows_same_time_keep_live_before_backtest() -> None:
+    """같은 시각 타이는 라이브(주인공) → 백테(대조) 순으로 인접을 유지한다(WAN-240)."""
+    live = _live_row(reserve_ms=1000)
+    bt = _bt_row(fill_ms=1000, exit_ms=1200)  # 라이브 예약과 같은 시각.
     timeline = DayTimeline(day_key="2026-08-02", live=(live,), backtest=(bt,))
-    ordered = [r.source for r in timeline.rows]
-    assert ordered == [SOURCE_LIVE, SOURCE_BACKTEST]
+    assert [r.source for r in timeline.rows] == [SOURCE_LIVE, SOURCE_BACKTEST]
 
 
 def test_resolve_day_window_parses_and_defaults() -> None:
