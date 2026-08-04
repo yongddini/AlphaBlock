@@ -77,12 +77,18 @@ def test_live_signal_timeframes_unchanged_by_2h_promotion() -> None:
 
 @pytest.mark.skipif(not os.path.exists(_DB), reason="ohlcv.db 없음(합성/CI)")
 def test_2h_resamples_on_the_fly_from_stored_1h() -> None:
-    """2h가 저장 행 없이 1h에서 파생되고 짝수시(UTC)로 정렬된다(사전 적재 불필요)."""
+    """2h가 저장 행 없이 1h에서 파생되고 짝수시(UTC)로 정렬된다(사전 적재 불필요).
+
+    ⚠️ skip 판정은 **파일 존재가 아니라 실제 데이터 유무**로 한다(회귀 테스트 관례,
+    `test_run_regression_real_data.py`). CI는 빈 `data/ohlcv.db`를 만들 수 있어 파일은
+    있지만 1h 봉이 0행이면 2h도 빈 프레임이다 — 그 경우 단언이 아니라 skip이 맞다.
+    """
     from data.storage import OhlcvStore
 
     store = OhlcvStore(_DB)
     df = store.load("BTC/USDT:USDT", "2h")
-    assert not df.empty
+    if df.empty:
+        pytest.skip("BTC 1h 실데이터가 없어 2h 파생을 검증할 수 없습니다(CI 기본).")
     # 2h 봉의 open_time은 전부 UTC 짝수시(00,02,04,…) = 2시간 격자에 정렬.
     two_h_ms = 2 * 60 * 60 * 1000
     assert (df["open_time"] % two_h_ms == 0).all()
