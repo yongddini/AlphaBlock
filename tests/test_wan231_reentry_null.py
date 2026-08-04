@@ -320,6 +320,62 @@ def test_thresholds_are_constants() -> None:
     assert 0.0 < ALPHA < 1.0
 
 
+def test_merge_rows_appends_new_tf_and_overrides_same_cell() -> None:
+    """`--append` 병합(WAN-242): 새 TF는 덧붙고, 같은 (심볼,TF)는 새 행이 이긴다."""
+    from backtest.wan231_reentry_null import merge_rows
+
+    existing = [
+        _row(symbol="BTC/USDT:USDT", timeframe="4h", actual_oos=1.0),
+        _row(symbol="BTC/USDT:USDT", timeframe="1h", actual_oos=2.0),
+    ]
+    new = [
+        _row(symbol="BTC/USDT:USDT", timeframe="15m", actual_oos=3.0),  # 새 TF → 덧붙음
+        _row(symbol="BTC/USDT:USDT", timeframe="1h", actual_oos=9.0),  # 겹침 → 갱신
+    ]
+    merged = merge_rows(existing, new)
+    # 4h는 유지, 1h는 새 값, 15m 추가 → 총 3행.
+    assert len(merged) == 3
+    by_tf = {r.timeframe: r for r in merged}
+    assert by_tf["4h"].actual_oos_net_pp == 1.0  # 건드리지 않음
+    assert by_tf["1h"].actual_oos_net_pp == 9.0  # 새 행이 이김
+    assert by_tf["15m"].actual_oos_net_pp == 3.0  # 새 TF 덧붙음
+    # 기존 유지 행이 앞, 새 행이 뒤(diff 최소화 순서).
+    assert merged[0].timeframe == "4h"
+    assert merged[-1].timeframe == "1h"  # new의 마지막
+
+
+def test_15m_actual_arm_matches_wan229_census() -> None:
+    """완료기준 4 — 15m 실제 팔 재진입 수가 WAN-229 census(15m)와 비트 일치.
+
+    널 모듈의 실제 팔은 WAN-228 census의 `reentry_events`를 그대로 재사용하므로 TF와
+    무관하게 census와 같은 재진입을 낸다. 무거운 15m 백테스트를 CI에서 다시 돌리지 않고
+    **커밋된 두 산출물 CSV를 정적으로 대조**해 `reentries_total`·`re_is_n`·`re_oos_n`가 한
+    글자도 다르지 않음을 못 박는다(WAN-229 census(15m) 기준). 15m 행이 아직 없으면 skip.
+    """
+    import pytest
+
+    from backtest.wan229_reentry_census_15m import DEFAULT_CELLS_CSV as census_15m_csv
+    from backtest.wan231_reentry_null import DEFAULT_CELLS_CSV as null_csv
+    from backtest.wan231_reentry_null import cells_from_csv
+
+    if not null_csv.exists() or not census_15m_csv.exists():
+        pytest.skip("wan231/wan229 산출물 CSV가 없어 15m 검산을 건너뜁니다.")
+    null_15m = {r.symbol: r for r in cells_from_csv(null_csv) if r.timeframe == "15m"}
+    if not null_15m:
+        pytest.skip("wan231 CSV에 15m 행이 아직 없습니다(WAN-242 실행 전).")
+
+    import pandas as pd
+
+    census = pd.read_csv(census_15m_csv)
+    assert len(census) > 0
+    for rec in census.to_dict(orient="records"):
+        n = null_15m.get(str(rec["symbol"]))
+        assert n is not None, f"census 15m 심볼 {rec['symbol']}가 널 CSV에 없습니다."
+        assert n.reentries_total == int(rec["reentries_total"])
+        assert n.re_is_n == int(rec["re_is_n"])
+        assert n.re_oos_n == int(rec["re_oos_n"])
+
+
 # --------------------------------------------------------------------------- #
 # 검산(완료기준 4) — 실제 팔 ≡ WAN-228 census (실데이터 있을 때만 · 짧은 창)
 # --------------------------------------------------------------------------- #
