@@ -67,9 +67,14 @@ def test_collection_timeframes_do_not_add_2h() -> None:
     assert "2h" not in _default_timeframes()
 
 
-def test_live_signal_timeframes_unchanged_by_2h_promotion() -> None:
-    """라이브 감시 TF는 WAN-191의 15m·1h·4h 그대로 — 2h 승격은 측정 축만 넓힌다."""
-    assert tuple(_default_live_signal_timeframes()) == ("15m", "1h", "4h")
+def test_live_signal_timeframes_now_include_2h_via_wan246() -> None:
+    """라이브 감시 TF에 2h가 들어갔다 — WAN-252 승격의 라이브 반영을 WAN-246이 흡수했다.
+
+    ⚠️ WAN-252 시점에는 "측정 축만 넓히고 라이브 감시 TF는 15m·1h·4h 그대로"였다(그 이슈는
+    라이브 배선을 범위 밖으로 뒀다). **WAN-246(2026-08-05)이 그 라이브 2h 감시를 흡수**해
+    러너를 틱으로 재배선하며 함께 추가했다 — 이제 기본값은 15m·1h·2h·4h다.
+    """
+    assert tuple(_default_live_signal_timeframes()) == ("15m", "1h", "2h", "4h")
 
 
 # ------------------------------------------------------------- 2h 데이터 파생
