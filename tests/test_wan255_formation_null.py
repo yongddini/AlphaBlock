@@ -18,13 +18,17 @@
 from __future__ import annotations
 
 import math
+import random
+from collections.abc import Sequence
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from backtest import harness
 from backtest.models import ExitReason, PositionSide
 from backtest.synthetic import make_synthetic_ohlcv
+from backtest.wan248_zone_position_null import make_fake_result
 from backtest.wan255_formation_null import (
     ENTRY_A_CLOSE,
     ENTRY_B_OPEN,
@@ -35,6 +39,7 @@ from backtest.wan255_formation_null import (
     _arrays_from_frame,
     _atr_series,
     _formation_trade,
+    _FormationSetup,
     _walk_exit,
     build_formation_setups,
     rows_from_csv,
@@ -43,7 +48,7 @@ from backtest.wan255_formation_null import (
     sequence_formation,
 )
 from common.costs import Liquidity
-from strategy.models import OrderBlockParams, OrderBlockResult
+from strategy.models import OrderBlock, OrderBlockParams, OrderBlockResult
 from strategy.order_blocks import OrderBlockDetector
 
 
@@ -252,7 +257,59 @@ def test_single_position_sequencing_skips_overlap() -> None:
 # --------------------------------------------------------------------------- #
 
 
+def test_atr_degenerate_ob_nondegenerate_synthetic() -> None:
+    """핵심 설계 주장(DB 없이 합성으로 고정): `atr` 손절은 위치 무관이라 실제 셋업 == 가짜
+    셋업(널 퇴화), `ob` 손절은 존 경계라 가짜 위치가 손절가를 바꾼다(널 비퇴화)."""
+    df = make_synthetic_ohlcv(bars=1200, seed=11)
+    ob_params = OrderBlockParams(combine_obs=False)
+    real = OrderBlockDetector(ob_params).run(df)
+    arrays = _arrays_from_frame(df)
+    cfg = harness.build_config("1h")
+    fake = make_fake_result(real, df, ob_params, rng=random.Random(1), pool_k=4)
+    assert fake.order_blocks, "합성 데이터가 가짜 존을 만들지 못했다 — 시나리오 점검."
+
+    def _setups(obs: Sequence[OrderBlock], stop_variant: str) -> list[_FormationSetup]:
+        return build_formation_setups(
+            obs,
+            arrays,
+            entry_point=ENTRY_B_OPEN,
+            stop_variant=stop_variant,
+            direction="both",
+            cfg=cfg,
+        )
+
+    # atr: 같은 진입시각의 실제·가짜 셋업이 손절가·청산까지 동일(위치가 손익에 안 들어감).
+    real_atr = {s.entry_time: s for s in _setups(real.order_blocks, STOP_ATR)}
+    matched = [s for s in _setups(fake.order_blocks, STOP_ATR) if s.entry_time in real_atr]
+    assert matched, "atr 셋업이 confirmed_time을 공유해야 한다."
+    for s in matched:
+        r = real_atr[s.entry_time]
+        assert s.stop_price == r.stop_price
+        assert s.exit_time == r.exit_time
+        assert s.gross_r == r.gross_r
+
+    # ob: 가짜(무작위 위치) 존은 손절가가 실제와 다르다(위치 정보가 1R에 들어감).
+    real_ob: dict[int, list[float]] = {}
+    for s in _setups(real.order_blocks, STOP_OB):
+        real_ob.setdefault(s.entry_time, []).append(s.stop_price)
+    differs = any(
+        s.stop_price not in real_ob.get(s.entry_time, [])
+        for s in _setups(fake.order_blocks, STOP_OB)
+    )
+    assert differs, "ob 손절 가짜 존은 손절가가 실제와 달라야 한다(널 비퇴화 근거)."
+
+
 def test_integration_null_degeneracy_and_roundtrip(tmp_path: Path) -> None:
+    probe = harness.load_market_data(
+        harness.normalize_symbol("BTCUSDT"),
+        "1h",
+        start_ms=0,
+        end_ms=None,
+        need_1m=False,
+        funding=False,
+    )
+    if probe.empty:
+        pytest.skip("실데이터(data/ohlcv.db) 없음 — 통합 실행은 로컬에서만(CI 빈 DB).")
     rows = run_null(
         symbols=["BTCUSDT"],
         timeframes=["1h"],
