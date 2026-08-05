@@ -62,6 +62,7 @@ class _RawOrderBlock:
     swept: bool = False
     swept_time: int | None = None
     tapped_times: list[int] = field(default_factory=list)
+    displacement_atr: float | None = None
     _inside: bool = False
 
     def to_model(self, *, combined: bool = False) -> OrderBlock:
@@ -79,6 +80,7 @@ class _RawOrderBlock:
             swept_time=self.swept_time,
             tapped_times=tuple(self.tapped_times),
             combined=combined,
+            displacement_atr=self.displacement_atr,
         )
 
 
@@ -674,6 +676,9 @@ class OrderBlockDetector:
 
         atr_t = atr[t]
         if atr_t is not None and abs(box_top - box_bottom) <= atr_t * params.max_atr_mult:
+            # WAN-254(측정 전용): 확정 시점 변위 강도 = 종가가 돌파한 스윙고를 넘은 폭 ÷ ATR.
+            # `closes[t] > top.price`가 이미 성립하고 봉 t가 종가로 닫힌 뒤라 룩어헤드 없음.
+            displacement_atr = (closes[t] - top.price) / atr_t if atr_t > 0 else None
             new_ob = _RawOrderBlock(
                 top=box_top,
                 bottom=box_bottom,
@@ -683,6 +688,7 @@ class OrderBlockDetector:
                 confirmed_time=times[t],
                 ob_low_volume=ob_low_volume,
                 ob_high_volume=ob_high_volume,
+                displacement_atr=displacement_atr,
             )
             # WAN-47: 아카이브는 개수 캡으로 오래된 존을 버리지 않는다(전체 생애 보존).
             # 표시 개수 제한은 렌더링 뷰(`select_active`)에서만 적용한다.
@@ -719,6 +725,9 @@ class OrderBlockDetector:
 
         atr_t = atr[t]
         if atr_t is not None and abs(box_top - box_bottom) <= atr_t * params.max_atr_mult:
+            # WAN-254(측정 전용): 확정 시점 변위 강도 = 종가가 돌파한 스윙저를 넘은 폭 ÷ ATR.
+            # `closes[t] < bottom.price`가 이미 성립하고 봉 t가 종가로 닫힌 뒤라 룩어헤드 없음.
+            displacement_atr = (bottom.price - closes[t]) / atr_t if atr_t > 0 else None
             new_ob = _RawOrderBlock(
                 top=box_top,
                 bottom=box_bottom,
@@ -728,6 +737,7 @@ class OrderBlockDetector:
                 confirmed_time=times[t],
                 ob_low_volume=ob_low_volume,
                 ob_high_volume=ob_high_volume,
+                displacement_atr=displacement_atr,
             )
             bearish_obs.insert(0, new_ob)
             active_bear.append(new_ob)
