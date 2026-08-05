@@ -331,44 +331,93 @@ class ZoneLimitLiveEngine:
         # 주문이 걸려 있으므로, 전이 서브스텝에서 예약과 체결이 같은 스텝에 일어날 수 있다.
         events.extend(self._maybe_arm(state, symbol, timeframe, time_ms))
 
-        # 3) 대기 주문 체결/취소 판정.
-        order = self.book.pending(symbol, timeframe)
-        if order is not None:
-            fill = self.book.on_price(symbol, timeframe, low, high, close, now_ms=time_ms)
-            if fill is not None:
-                journal_id = state.pending_journal_id
-                if journal_id is not None and self._journal is not None:
-                    self._journal.record_filled(journal_id, fill)
-                state.pending_zone = None
-                state.pending_journal_id = None
-                events.append(
-                    EngineEvent(
-                        kind="filled",
-                        symbol=symbol,
-                        timeframe=timeframe,
-                        time_ms=time_ms,
-                        order=order,
-                        fill=fill,
-                    )
-                )
-            elif order.status.is_terminal:
-                # 체결 없이 종결 = 조건 미충족 취소(옵트인 게이트) 또는 live 밴드의
-                # 청산 규칙 불가(WAN-143 대응 경로).
-                journal_id = self._take_pending_meta(state)
-                if journal_id is not None and self._journal is not None:
-                    self._journal.record_cancelled(journal_id, order.status, now_ms=time_ms)
-                events.append(
-                    EngineEvent(
-                        kind="cancelled_condition_failed",
-                        symbol=symbol,
-                        timeframe=timeframe,
-                        time_ms=time_ms,
-                        order=order,
-                    )
-                )
+        # 3) 대기 주문 체결/취소 판정(틱 경로와 공용 — 로직 이중화 금지).
+        events.extend(
+            self._apply_pending_price(
+                state, symbol, timeframe, low=low, high=high, close=close, time_ms=time_ms
+            )
+        )
 
         state.running_close = close
         state.last_substep_time = time_ms
+        return events
+
+    def on_tick(
+        self, symbol: str, timeframe: str, *, price: float, time_ms: int
+    ) -> list[EngineEvent]:
+        """웹소켓 실시간 체결가 하나를 대기 주문에 반영한다(WAN-246, 체결 감지 전용).
+
+        예약(arming)·상위TF 존 커밋·만료 계수는 하지 **않는다** — 그 셋은 확정 1분봉 경로
+        (`on_substep`/`on_htf_bars`)가 안정적으로 담당하고, 이 훅은 *이미 걸린* 주문의
+        체결을 폴링 간격보다 빨리 잡을 뿐이다. 단일 체결가라 백테스트 서브스텝과 같은
+        `on_price` 계약대로 low=high=close=price로 넣는다. 대기 주문이 없으면 상태를
+        만들지 않고 빈 목록을 반환한다(부수효과 없음).
+
+        ⚠️ 틱 경로는 백테스트(1분봉)보다 미세하다 — `intrabar_live` 밴드가 봉 안에서 표본을
+        현재가로 다시 잡아 체결 순간의 지정가가 1분봉 종가로 잰 값과 갈릴 수 있다
+        (`docs/decisions/wan246.md` §2/§3, 판정 (b): 백테스트는 1분봉 유지 · 라이브 틱은
+        옵트인으로 더 미세함을 명시).
+        """
+        if self.book.pending(symbol, timeframe) is None:
+            return []
+        state = self._state(symbol, timeframe)
+        return self._apply_pending_price(
+            state, symbol, timeframe, low=price, high=price, close=price, time_ms=time_ms
+        )
+
+    def _apply_pending_price(
+        self,
+        state: _SeriesState,
+        symbol: str,
+        timeframe: str,
+        *,
+        low: float,
+        high: float,
+        close: float,
+        time_ms: int,
+    ) -> list[EngineEvent]:
+        """대기 주문에 가격을 반영해 체결/조건취소를 판정한다(서브스텝·틱 공용).
+
+        예약이나 상위TF 커밋은 하지 않는다 — 이미 걸린 주문의 체결 감지만 한다. 체결되면
+        장부에 기록하고 슬롯을 비우며 `filled` 이벤트를, 체결 없이 종결되면(옵트인 게이트
+        미충족 또는 live 밴드 청산 규칙 불가, WAN-143) `cancelled_condition_failed`를 낸다.
+        """
+        order = self.book.pending(symbol, timeframe)
+        if order is None:
+            return []
+        events: list[EngineEvent] = []
+        fill = self.book.on_price(symbol, timeframe, low, high, close, now_ms=time_ms)
+        if fill is not None:
+            journal_id = state.pending_journal_id
+            if journal_id is not None and self._journal is not None:
+                self._journal.record_filled(journal_id, fill)
+            state.pending_zone = None
+            state.pending_journal_id = None
+            events.append(
+                EngineEvent(
+                    kind="filled",
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    time_ms=time_ms,
+                    order=order,
+                    fill=fill,
+                )
+            )
+        elif order.status.is_terminal:
+            # 체결 없이 종결 = 조건 미충족 취소(옵트인 게이트) 또는 live 밴드의
+            # 청산 규칙 불가(WAN-143 대응 경로).
+            journal_id = self._take_pending_meta(state)
+            if journal_id is not None and self._journal is not None:
+                self._journal.record_cancelled(journal_id, order.status, now_ms=time_ms)
+            events.append(
+                EngineEvent(
+                    kind="cancelled_condition_failed",
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    time_ms=time_ms,
+                    order=order,
+                )
+            )
         return events
 
     # -- 내부 ----------------------------------------------------------------

@@ -77,12 +77,19 @@ def _default_live_signal_symbols() -> list[str]:
 
 
 def _default_live_signal_timeframes() -> list[str]:
-    """실시간 페이퍼 러너(WAN-25)가 감시할 기본 타임프레임 = 작업 TF 3개.
+    """실시간 페이퍼 러너(WAN-25)가 감시할 기본 타임프레임 = 작업 TF 4개.
 
-    **WAN-191(사용자 결정 2026-07-25)에서 1h 단독 → 15m·1h·4h로 확대**했다(채택 좌표의
-    작업 TF, WAN-182). 9종목 × 3TF = 27 조합을 감시한다.
+    **WAN-191(사용자 결정 2026-07-25)에서 1h 단독 → 15m·1h·4h로 확대**했고,
+    **WAN-246(WAN-252 흡수, 2026-08-05)에서 2h를 추가**해 15m·1h·2h·4h가 됐다(채택 좌표의
+    작업 TF, WAN-182 4h 승격 + WAN-252 2h 승격). 9종목 × 4TF = 36 조합을 감시한다.
+
+    ⚠️ **2h는 DB에 물리 적재하지 않는다** — `OhlcvStore.load`가 1h 두 봉을 무손실
+    리샘플로 파생하므로(WAN-24, `data.storage._DERIVED_TIMEFRAMES={"2h":"1h"}`) 1h만
+    신선하면 2h는 공짜다. 러너의 상위TF 로딩(`self._store.load(symbol, timeframe)`)이 이
+    파생 경로를 그대로 타고, 봉 마감·만료 계수는 `timeframe_to_ms("2h")`(=7,200,000ms)로
+    2시간 경계를 일반 처리한다(TF 특수 분기 없음).
     """
-    return ["15m", "1h", "4h"]
+    return ["15m", "1h", "2h", "4h"]
 
 
 def _default_paper_trade_notify_events() -> list[str]:
@@ -172,6 +179,16 @@ class Settings(BaseSettings):
     live_signal_timeframes: list[str] = Field(default_factory=_default_live_signal_timeframes)
     # 폴링 간격(초). 새 확정봉이 저장됐는지 이 주기로 확인한다.
     live_poll_interval_seconds: int = Field(default=60, ge=1)
+    # 웹소켓 틱 피드로 대기 지정가 체결을 감지한다(WAN-246, 페이퍼 한정 · 옵트인).
+    # 기본 꺼짐 = 예전과 **비트 단위로 같다**(러너가 틱 소켓을 열지 않고 확정 1분봉만
+    # 소비 → 백테스트 1분봉 서브스텝과 같은 자, 파리티). 켜면 러너가 ccxt.pro
+    # `watch_trades`로 심볼별 실시간 체결가를 받아 대기 주문의 `on_price`를 매 틱 호출해
+    # **체결 감지 지연**(현재 1분봉 확정 + 폴링 간격)을 줄인다. ⚠️ 틱이라고 "닿으면 체결"
+    # 낙관(WAN-96)이 사라지지 않는다 — 큐 우선순위·부분 체결은 호가·체결 데이터(WAN-98,
+    # Canceled) 소관이라 틱 가격만으로는 여전히 상한이다. 아래 `live_tick_feed_exchange`가
+    # ccxt 거래소 id(기본 binanceusdm).
+    live_tick_feed_enabled: bool = Field(default=False)
+    live_tick_feed_exchange: str = Field(default="binanceusdm")
     # 전략 재평가 시 각 시리즈에서 사용할 최근 봉 수(최장 EMA 365봉 워밍업 여유 포함).
     live_signal_lookback_bars: int = Field(default=1500, ge=1)
     # 이미 보낸 신호를 기록해 재시작 시 중복 발송을 막는 상태 파일 경로.

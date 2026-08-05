@@ -58,6 +58,7 @@ from live.executor import PaperExecutor
 from live.limit_engine import EngineEvent, ZoneLimitLiveEngine
 from live.order_journal import SKIP_REASON_ZONE_WIDTH, OrderJournal
 from live.paper import PaperPosition
+from live.price_feed import PriceFeed
 from live.runtime_state import PendingOrderSnapshot, RuntimeStateStore
 from live.zone_limit_notifier import ZoneLimitNotifier
 from strategy.models import ConfluenceParams, OrderBlockDirection, SignalExitReason
@@ -87,6 +88,7 @@ class ZoneLimitPaperRunner:
         poll_interval_seconds: float,
         runtime_state: RuntimeStateStore | None = None,
         notifier: ZoneLimitNotifier | None = None,
+        price_feed: PriceFeed | None = None,
         sleep: Callable[[float], None] = time.sleep,
         now_ms: Callable[[], int] = lambda: int(time.time() * 1000),
     ) -> None:
@@ -101,6 +103,12 @@ class ZoneLimitPaperRunner:
         self._poll_interval = poll_interval_seconds
         self._runtime_state = runtime_state
         self._notifier = notifier
+        #: 옵트인 웹소켓 틱 피드(WAN-246). None이면 확정 1분봉만 소비(예전과 비트 동일).
+        self._price_feed = price_feed
+        #: 심볼 → 그 심볼을 감시하는 (symbol, timeframe) 시리즈들(틱 팬아웃용).
+        self._series_by_symbol: dict[str, list[Series]] = {}
+        for sym, tf in series:
+            self._series_by_symbol.setdefault(sym, []).append((sym, tf))
         self._sleep = sleep
         self._now_ms = now_ms
         #: 시리즈별 마지막으로 반영한 확정 상위TF 봉 시각.
@@ -174,6 +182,9 @@ class ZoneLimitPaperRunner:
                 emitted += self.poll_series(symbol, timeframe)
             except Exception:  # noqa: BLE001 — 한 시리즈 오류가 루프 전체를 멈추지 않도록.
                 _logger.exception("시리즈 폴링 실패: %s %s", symbol, timeframe)
+        # 웹소켓 틱으로 대기 주문 체결을 앞당긴다(WAN-246, 옵트인). 예약은 위 1분봉
+        # 경로가 이미 끝냈으므로, 여기서는 걸려 있는 주문의 체결만 더 촘촘히 잡는다.
+        emitted += self._drain_ticks()
         now = self._now_ms()
         self._journal.heartbeat(self._session_id, now_ms=now)
         self._check_circuit_breaker(now)
@@ -188,6 +199,31 @@ class ZoneLimitPaperRunner:
                 pending_orders=self._pending_snapshots(),
             )
         return emitted
+
+    def _drain_ticks(self) -> list[EngineEvent]:
+        """옵트인 틱 피드에 쌓인 실시간 체결가를 대기 주문에 반영한다(WAN-246).
+
+        심볼 단위 체결가를 그 심볼을 감시하는 각 (symbol, timeframe) 시리즈의 대기 주문에
+        `on_tick`으로 넣는다(단일가라 low=high=close=price). 체결 이벤트는 1분봉 경로와
+        **같은** `_handle_events`로 집행·기록·알림한다. 청산 판정(`_check_exits`)은 1분봉
+        경로에 남긴다 — 진입 체결만 앞당기고 청산 해상도는 백테스트(1분봉)와 맞춘다.
+        """
+        feed = self._price_feed
+        if feed is None:
+            return []
+        ticks = feed.drain()
+        if not ticks:
+            return []
+        events: list[EngineEvent] = []
+        for tick in ticks:
+            for symbol, timeframe in self._series_by_symbol.get(tick.symbol, ()):
+                step = self._engine.on_tick(
+                    symbol, timeframe, price=tick.price, time_ms=tick.time_ms
+                )
+                if step:
+                    self._handle_events(step)
+                    events += step
+        return events
 
     def run(self, *, max_polls: int | None = None) -> None:
         """폴링 루프. `max_polls`가 None이면 무한 반복(테스트에서는 유한 지정)."""
@@ -457,6 +493,8 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
     recorder = PaperTradeRecorder(
         paper_store, cost_model=settings.costs, funding_store=funding_store
     )
+    # try 이전에 정의한다 — try 안에서 예외가 나도 finally의 정리가 미정의를 참조하지 않게.
+    price_feed: PriceFeed | None = None
     # 레버리지 북(WAN-171 = WAN-45의 2단계): 칸=(종목,TF)마다 1포지션 · 여러 칸 동시 · 한
     # 지갑(공유 자본) · 배수 N. 기본값 = 채택 북(cap_only 5배, WAN-213). 엔진이 백테스트와
     # **같은** `resolve_book_sizing`으로 사이징하고, 거래당 리스크 금액(장부)은 북의 거래당
@@ -513,6 +551,22 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
             ),
             skip_listener=skip_listener,
         )
+        # 옵트인 웹소켓 틱 피드(WAN-246, 페이퍼 한정 · 공개 체결 스트림만). 기본 꺼짐이면
+        # None → 러너는 확정 1분봉만 소비(예전과 비트 동일). 켜면 심볼별 실시간 체결가로
+        # 대기 주문 체결을 앞당긴다.
+        if settings.live_tick_feed_enabled:
+            from live.price_feed import CcxtProTickFeed
+
+            symbols = sorted({sym for sym, _ in series})
+            feed = CcxtProTickFeed(symbols, exchange_id=settings.live_tick_feed_exchange)
+            feed.start()
+            price_feed = feed
+            _logger.info(
+                "웹소켓 틱 피드 켜짐(WAN-246): %d 심볼 · %s (페이퍼 한정, 공개 체결 스트림)",
+                len(symbols),
+                settings.live_tick_feed_exchange,
+            )
+
         runner = ZoneLimitPaperRunner(
             store=store,
             engine=engine,
@@ -525,6 +579,7 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
             poll_interval_seconds=settings.live_poll_interval_seconds,
             runtime_state=RuntimeStateStore(settings.live_runtime_state_path),
             notifier=notifier,
+            price_feed=price_feed,
         )
         _logger.info(
             "존-지정가 페이퍼 러너 시작(WAN-45): %d 시리즈, 폴링 %ds, 세션 #%d"
@@ -539,6 +594,8 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
         )
         runner.run(max_polls=1 if once else None)
     finally:
+        if price_feed is not None:
+            price_feed.close()
         store.close()
         journal.close()
         paper_store.close()
