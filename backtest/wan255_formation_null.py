@@ -19,6 +19,11 @@ WAN-254 §1 census가 「형성 진입이 실제로 뭔가를 놓치고 있다�
    * **atr** 진입가 ∓ `STOP_ATR_MULT`·ATR(**팔마다 1R을 존 위치와 무관하게 고정** = 진입
      타이밍만 격리 = 공정 비교의 주, WAN-152 `atr` 장벽 선례).
    익절 = 고정 1.5R. 비용 = **테이커**(진입·청산 둘 다 4bp + 슬리피지 5bp · 설계 함정 4).
+   * **RSI 게이트**(사용자 제안, 옵트인 `--rsi-gate`) — 롱은 진입 직전 봉 RSI<30(과매도), 숏은
+     RSI>70(과매수). ⚠️ WAN-81 재탭 게이트와 같은 정의라 WAN-114/123의 net-마이너스 판정이
+     사전 확률이고, **형성(모멘텀)과 정면 충돌**한다: 불리시 돌파 확정봉은 강한 상승봉이라
+     RSI가 <30일 수 없다 → 게이트를 켜면 표본이 **0에 수렴**한다(판정 불가 = 「형성에 과매도
+     게이트는 정의상 성립 불가」가 곧 결론). 기본값은 항상 게이트 없음.
 3. **무작위 위치 형성 널** — WAN-248 기계(`make_fake_result`)로 방향·존폭·빈도·무효화 규칙을
    매칭하고 **위치만 무작위**인 가짜 존을 만들어 **같은 형성 진입**을 태운다. 부트스트랩은
    실제 형성 거래의 (방향, UTC 4시간 시각대) 구성·개수를 맞춰 가짜 풀에서 재추출한다(WAN-70
@@ -103,6 +108,7 @@ from common.costs import Liquidity
 from data.funding import cumulative_funding_cost
 from data.models import FundingRate
 from execution.sizing import position_size
+from strategy.indicators import rsi
 from strategy.models import (
     OrderBlock,
     OrderBlockDirection,
@@ -128,6 +134,14 @@ STOP_ATR_MULT = 1.5
 
 #: ATR 길이(봉). 존폭 필터(`zone_width_atr_length=14`)와 같은 값이라 자를 통일한다.
 ATR_LENGTH = 14
+
+#: RSI 게이트(사용자 제안, 옵트인) — 롱은 전봉 RSI<30(과매도), 숏은 전봉 RSI>70(과매수).
+#: ⚠️ WAN-81 재탭 게이트와 같은 정의이고, 그 게이트는 WAN-114/123이 net-마이너스로 판정해
+#: 기본값에서 제거했다. 형성(모멘텀)에 얹으면 과매도/과매수 조건이 돌파와 충돌해 표본이 크게
+#: 준다 — 이 축은 그 실측용이다(기본값은 항상 게이트 없음).
+RSI_LENGTH = 14
+RSI_LONG_MAX = 30.0
+RSI_SHORT_MIN = 70.0
 
 #: 판정 게이트 — 심볼당 거래 20건(WAN-84/143/248 유효 기준).
 MIN_TRADES_FOR_VERDICT = 20
@@ -198,6 +212,8 @@ class _Arrays:
     lows: list[float]
     closes: list[float]
     atr: list[float]
+    rsi: list[float]
+    """확정봉 Wilder RSI(`strategy.indicators.rsi`). 워밍업 구간은 NaN(룩어헤드 없음)."""
     pos_by_time: dict[int, int]
 
 
@@ -243,8 +259,10 @@ def _arrays_from_frame(htf_df: pd.DataFrame) -> _Arrays:
     lows = [float(v) for v in frame["low"].astype(float).tolist()]
     closes = [float(v) for v in frame["close"].astype(float).tolist()]
     atr = _atr_series(highs, lows, closes, ATR_LENGTH)
+    rsi_series = rsi(frame, length=RSI_LENGTH)
+    rsi_vals = [float(v) for v in rsi_series.tolist()]
     pos_by_time = {t: i for i, t in enumerate(times)}
-    return _Arrays(times, opens, highs, lows, closes, atr, pos_by_time)
+    return _Arrays(times, opens, highs, lows, closes, atr, rsi_vals, pos_by_time)
 
 
 # --------------------------------------------------------------------------- #
@@ -317,6 +335,16 @@ def _walk_exit(
     return times[n - 1], terminal, ExitReason.END_OF_DATA, gross
 
 
+def _rsi_gate_passes(rsi_vals: Sequence[float], gate_idx: int, is_long: bool) -> bool:
+    """진입 캔들 직전 봉 RSI 게이트: 롱 RSI<30 · 숏 RSI>70. 워밍업 NaN·범위밖은 기각(보수)."""
+    if gate_idx < 0 or gate_idx >= len(rsi_vals):
+        return False
+    value = rsi_vals[gate_idx]
+    if math.isnan(value):
+        return False
+    return value < RSI_LONG_MAX if is_long else value > RSI_SHORT_MIN
+
+
 def build_formation_setups(
     obs: Sequence[OrderBlock],
     arrays: _Arrays,
@@ -326,12 +354,20 @@ def build_formation_setups(
     direction: str,
     cfg: BacktestConfig,
     tp_r: float = TAKE_PROFIT_R,
+    rsi_gate: bool = False,
 ) -> list[_FormationSetup]:
     """확정 OB마다 **전량** 형성 셋업을 만든다(되돌아옴 여부로 안 거른다 · 설계 함정 1).
 
     진입 시점(A 종가/B 다음 시가)·손절(ob 무효화/atr)·고정 1.5R 익절을 확정하고, 손절폭
     가드를 통과한 셋업만 남긴다(자본 무관 필터 — 실제·가짜 개수 정합). 방향 필터(롱/숏/
     롱숏)를 여기서 건다.
+
+    `rsi_gate`(옵트인, 사용자 제안)를 켜면 진입 캔들 **직전 봉**의 RSI로 거른다: 롱은
+    RSI<`RSI_LONG_MAX`(과매도), 숏은 RSI>`RSI_SHORT_MIN`(과매수). ⚠️ WAN-81 재탭 게이트와
+    같은 정의라 WAN-114/123의 net-마이너스 판정이 사전 확률이고, 형성(모멘텀)과 충돌해 표본이
+    크게 준다. RSI가 **실제 가격 계열**이라 실제·가짜 존이 같은 확정시각에서 같은 게이트
+    판정을 받아 매칭 널은 비퇴화를 유지한다(위치 축만 갈린다). 워밍업 NaN은 **보수적으로
+    기각**(과매도/과매수를 확인 못 하면 진입 안 함).
     """
     n = len(arrays.times)
     setups: list[_FormationSetup] = []
@@ -347,9 +383,13 @@ def build_formation_setups(
         if entry_point == ENTRY_A_CLOSE:
             entry_time = arrays.times[confirm_pos]
             entry_price = arrays.closes[confirm_pos]
+            gate_idx = confirm_pos - 1  # 진입 캔들(확정봉) 직전 봉.
         else:  # ENTRY_B_OPEN
             entry_time = arrays.times[confirm_pos + 1]
             entry_price = arrays.opens[confirm_pos + 1]
+            gate_idx = confirm_pos  # 진입 캔들(다음 봉) 직전 봉 = 확정봉.
+        if rsi_gate and not _rsi_gate_passes(arrays.rsi, gate_idx, is_long):
+            continue
         if stop_variant == STOP_OB:
             stop = ob.bottom if is_long else ob.top
         else:  # STOP_ATR
@@ -596,6 +636,9 @@ class FormationRow(BaseModel):
     direction: str
     entry_point: str
     stop_variant: str
+    rsi_gate: bool = False
+    """RSI 게이트(롱<30·숏>70) 적용 여부(사용자 제안 옵트인 축, 기본 False). 옛 CSV(열 없음)는
+    False로 로드된다."""
     real_total_return: float
     real_num_trades: int
     real_mean_net_r: float | None
@@ -645,6 +688,7 @@ class _Task:
     directions: tuple[str, ...]
     entry_points: tuple[str, ...]
     stop_variants: tuple[str, ...]
+    rsi_gates: tuple[bool, ...]
     pool_k: int
     iterations: int
     with_retap: bool
@@ -738,32 +782,35 @@ def run_cell(task: _Task, *, log: bool = True) -> list[FormationRow]:
                 retap = _retap_return(window, direction, eval_from_ms=eval_from)
             for entry_point in task.entry_points:
                 for stop_variant in task.stop_variants:
-                    row = _one_row(
-                        symbol=task.symbol,
-                        timeframe=task.timeframe,
-                        segment=segment,
-                        direction=direction,
-                        entry_point=entry_point,
-                        stop_variant=stop_variant,
-                        arrays=arrays,
-                        real_ob=real_ob,
-                        fake_ob=fake_ob,
-                        cfg=cfg,
-                        funding_rates=window.funding_rates,
-                        eval_from_ms=eval_from,
-                        iterations=task.iterations,
-                        retap=retap,
-                        buy_hold=buy_hold,
-                    )
-                    rows.append(row)
-                    if log:
-                        print(
-                            f"[wan255] {task.symbol} {task.timeframe} {segment} {direction} "
-                            f"{entry_point}/{stop_variant}: real={row.real_total_return:.4f} "
-                            f"n={row.real_num_trades} netR={row.real_mean_net_r} "
-                            f"p={row.random_p_value}",
-                            flush=True,
+                    for rsi_gate in task.rsi_gates:
+                        row = _one_row(
+                            symbol=task.symbol,
+                            timeframe=task.timeframe,
+                            segment=segment,
+                            direction=direction,
+                            entry_point=entry_point,
+                            stop_variant=stop_variant,
+                            rsi_gate=rsi_gate,
+                            arrays=arrays,
+                            real_ob=real_ob,
+                            fake_ob=fake_ob,
+                            cfg=cfg,
+                            funding_rates=window.funding_rates,
+                            eval_from_ms=eval_from,
+                            iterations=task.iterations,
+                            retap=retap,
+                            buy_hold=buy_hold,
                         )
+                        rows.append(row)
+                        if log:
+                            gate = "rsi" if rsi_gate else "nogate"
+                            print(
+                                f"[wan255] {task.symbol} {task.timeframe} {segment} {direction} "
+                                f"{entry_point}/{stop_variant}/{gate}: "
+                                f"real={row.real_total_return:.4f} n={row.real_num_trades} "
+                                f"netR={row.real_mean_net_r} p={row.random_p_value}",
+                                flush=True,
+                            )
     return rows
 
 
@@ -775,6 +822,7 @@ def _one_row(
     direction: str,
     entry_point: str,
     stop_variant: str,
+    rsi_gate: bool,
     arrays: _Arrays,
     real_ob: OrderBlockResult,
     fake_ob: OrderBlockResult,
@@ -793,6 +841,7 @@ def _one_row(
             stop_variant=stop_variant,
             direction=direction,
             cfg=cfg,
+            rsi_gate=rsi_gate,
         ),
         eval_from_ms,
     )
@@ -813,6 +862,7 @@ def _one_row(
                 stop_variant=stop_variant,
                 direction=direction,
                 cfg=cfg,
+                rsi_gate=rsi_gate,
             ),
             eval_from_ms,
         )
@@ -838,6 +888,7 @@ def _one_row(
         direction=direction,
         entry_point=entry_point,
         stop_variant=stop_variant,
+        rsi_gate=rsi_gate,
         real_total_return=real_total,
         real_num_trades=len(real_trades),
         real_mean_net_r=_mean(net_rs),
@@ -871,6 +922,7 @@ def run_null(
     directions: Sequence[str] = DIRECTIONS,
     entry_points: Sequence[str] = ENTRY_POINTS,
     stop_variants: Sequence[str] = STOP_VARIANTS,
+    rsi_gates: Sequence[bool] = (False,),
     start: str = DEFAULT_START,
     end: str = DEFAULT_END,
     pool_k: int = DEFAULT_POOL_K,
@@ -889,6 +941,7 @@ def run_null(
             directions=tuple(directions),
             entry_points=tuple(entry_points),
             stop_variants=tuple(stop_variants),
+            rsi_gates=tuple(rsi_gates),
             pool_k=pool_k,
             iterations=iterations,
             with_retap=with_retap,
@@ -942,9 +995,9 @@ def significance_counts(rows: Sequence[FormationRow]) -> tuple[int, int]:
     return sum(1 for r in eligible if is_significant(r)), len(eligible)
 
 
-def verdict_null(rows: Sequence[FormationRow]) -> str:
+def verdict_null(rows: Sequence[FormationRow], *, rsi_gate: bool = False) -> str:
     """(a) 형성이 무작위 위치를 이기나 — `ob` 손절 널 기준(§docstring)."""
-    ob_rows = [r for r in rows if r.stop_variant == STOP_OB]
+    ob_rows = [r for r in rows if r.stop_variant == STOP_OB and r.rsi_gate == rsi_gate]
     sig, total = significance_counts(ob_rows)
     if total == 0:
         return f"**⚠️ 판정 불가** — 거래 {MIN_TRADES_FOR_VERDICT}건 이상 유효 셀 없음(표본 부족)."
@@ -967,13 +1020,21 @@ def _round(v: float | None, scale: float = 1.0, digits: int = 2) -> object:
     return round(v * scale, digits) if v is not None else "—"
 
 
-def summary_table(rows: Sequence[FormationRow], *, entry_point: str, stop_variant: str) -> str:
-    """(TF × 구간 × 방향) 심볼평균 요약 — 한 진입점·손절변형."""
+def summary_table(
+    rows: Sequence[FormationRow], *, entry_point: str, stop_variant: str, rsi_gate: bool = False
+) -> str:
+    """(TF × 구간 × 방향) 심볼평균 요약 — 한 진입점·손절변형·게이트."""
     header = (
         "| TF | 구간 | 방향 | 실제수익 | +심볼 | n | net R | never net R | 무작위평균 | 유의 |\n"
         "| -- | -- | -- | --: | --: | --: | --: | --: | --: | --: |"
     )
-    scoped = [r for r in rows if r.entry_point == entry_point and r.stop_variant == stop_variant]
+    scoped = [
+        r
+        for r in rows
+        if r.entry_point == entry_point
+        and r.stop_variant == stop_variant
+        and r.rsi_gate == rsi_gate
+    ]
     tf_order = {tf: i for i, tf in enumerate(WORK_TIMEFRAMES)}
     seg_order = {s: i for i, s in enumerate(SEGMENT_LABELS)}
     dir_order = {d: i for i, d in enumerate(DIRECTIONS)}
@@ -1026,10 +1087,10 @@ def retap_compare_table(rows: Sequence[FormationRow]) -> str:
     return header + "\n" + "\n".join(body)
 
 
-def leave_one_out_lines(rows: Sequence[FormationRow]) -> list[str]:
+def leave_one_out_lines(rows: Sequence[FormationRow], *, rsi_gate: bool = False) -> list[str]:
     """완료기준 4 — 심볼 하나 빼면 심볼평균 부호가 유지되는가(`ob` 손절)."""
     lines: list[str] = []
-    scoped = [r for r in rows if r.stop_variant == STOP_OB]
+    scoped = [r for r in rows if r.stop_variant == STOP_OB and r.rsi_gate == rsi_gate]
     for tf in WORK_TIMEFRAMES:
         for seg in DEFAULT_SEGMENTS:
             for entry_point in ENTRY_POINTS:
@@ -1062,6 +1123,37 @@ def leave_one_out_lines(rows: Sequence[FormationRow]) -> list[str]:
                         head = f"- **{label}**: {mean_all * 100:+.2f}% → "
                         lines.append(head + " · ".join(flips))
     return lines or ["- (해당 행 없음)"]
+
+
+def _rsi_gate_section(rows: Sequence[FormationRow]) -> list[str]:
+    """RSI 게이트(롱<30·숏>70) 축이 실행된 경우에만 대비 섹션을 낸다(사용자 제안)."""
+    if not any(r.rsi_gate for r in rows):
+        return []
+    return [
+        "## §5 RSI 게이트 (롱<30·숏>70, 사용자 제안 · 옵트인)",
+        "",
+        "⚠️ WAN-81 재탭 게이트와 같은 정의이고 WAN-114/123이 net-마이너스로 판정해 기본값에서 "
+        "제거했다. 형성(모멘텀)에 얹으면 과매도/과매수가 돌파와 충돌해 표본이 크게 준다 — "
+        "심볼당 20건 미달로 판정 불가 셀이 늘면 그것이 결론(필터가 형성을 못 구한다)이다. "
+        "게이트를 켜도 실제·가짜는 같은 확정시각에서 같은 게이트를 통과하므로 널은 비퇴화다.",
+        "",
+        "### 판정 (a) — 게이트 켜짐 (`ob` 손절)",
+        "",
+        verdict_null(rows, rsi_gate=True),
+        "",
+        "### B_open / ob 손절 · RSI 게이트 켜짐",
+        "",
+        summary_table(rows, entry_point=ENTRY_B_OPEN, stop_variant=STOP_OB, rsi_gate=True),
+        "",
+        "### A_close / ob 손절 · RSI 게이트 켜짐",
+        "",
+        summary_table(rows, entry_point=ENTRY_A_CLOSE, stop_variant=STOP_OB, rsi_gate=True),
+        "",
+        "### 편중 — leave-one-out (게이트 켜짐)",
+        "",
+        *leave_one_out_lines(rows, rsi_gate=True),
+        "",
+    ]
 
 
 def build_summary_markdown(rows: Sequence[FormationRow]) -> str:
@@ -1109,6 +1201,7 @@ def build_summary_markdown(rows: Sequence[FormationRow]) -> str:
         "",
         *leave_one_out_lines(rows),
         "",
+        *_rsi_gate_section(rows),
         "## 결론 · 인용 금지",
         "",
         "- **측정 전용** — 기본값·토대 불변, `short_enabled` 기본값 불변, 실거래 보류 유지.",
@@ -1151,6 +1244,20 @@ def _split(value: str | None, default: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(x.strip() for x in value.split(",") if x.strip())
 
 
+def _parse_rsi_gates(value: str | None) -> tuple[bool, ...]:
+    """`off|on|off,on` → (False,)·(True,)·(False, True). 미지정=off."""
+    if not value:
+        return (False,)
+    out: list[bool] = []
+    for token in value.split(","):
+        token = token.strip().lower()
+        if token in ("off", "false", "0", "nogate"):
+            out.append(False)
+        elif token in ("on", "true", "1", "rsi"):
+            out.append(True)
+    return tuple(out) if out else (False,)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="WAN-255 형성 진입 전략 + 무작위 위치 널")
     parser.add_argument("--part", type=str, default="all", choices=PARTS)
@@ -1164,6 +1271,12 @@ def main(argv: list[str] | None = None) -> int:
         "--entry", type=str, default=None, help="진입점(콤마) 미지정=A_close,B_open"
     )
     parser.add_argument("--stop", type=str, default=None, help="손절(콤마). 미지정=ob,atr")
+    parser.add_argument(
+        "--rsi-gate",
+        type=str,
+        default="off",
+        help="RSI 게이트(롱<30·숏>70) 축: off|on|off,on. 미지정=off(기본=게이트 없음)",
+    )
     parser.add_argument("--start", type=str, default=DEFAULT_START)
     parser.add_argument("--end", type=str, default=DEFAULT_END)
     parser.add_argument("--pool-k", type=int, default=DEFAULT_POOL_K)
@@ -1182,6 +1295,7 @@ def main(argv: list[str] | None = None) -> int:
             directions=_split(args.direction, DIRECTIONS),
             entry_points=_split(args.entry, ENTRY_POINTS),
             stop_variants=_split(args.stop, STOP_VARIANTS),
+            rsi_gates=_parse_rsi_gates(args.rsi_gate),
             start=args.start,
             end=args.end,
             pool_k=int(args.pool_k),

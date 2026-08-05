@@ -166,6 +166,41 @@ def test_full_population_no_lookahead() -> None:
     assert all(s.side is PositionSide.LONG for s in long_setups)
 
 
+def test_rsi_gate_filters_and_is_subset() -> None:
+    """RSI 게이트(롱<30·숏>70)는 무게이트의 부분집합이고, 통과 셋업은 직전 봉 임계값을
+    만족한다(룩어헤드 없음). 형성=모멘텀이라 대개 크게 걸러진다(0에 수렴)."""
+    from backtest.wan255_formation_null import RSI_LONG_MAX
+
+    _df, result, arrays = _detect_obs()
+    cfg = harness.build_config("1h")
+    off = build_formation_setups(
+        result.order_blocks,
+        arrays,
+        entry_point=ENTRY_B_OPEN,
+        stop_variant=STOP_OB,
+        direction="long",
+        cfg=cfg,
+        rsi_gate=False,
+    )
+    on = build_formation_setups(
+        result.order_blocks,
+        arrays,
+        entry_point=ENTRY_B_OPEN,
+        stop_variant=STOP_OB,
+        direction="long",
+        cfg=cfg,
+        rsi_gate=True,
+    )
+    assert off, "게이트 없는 롱 셋업이 있어야 비교가 성립한다."
+    off_times = {s.entry_time for s in off}
+    assert {s.entry_time for s in on} <= off_times  # 부분집합.
+    assert len(on) <= len(off)
+    # 통과한 롱 셋업은 진입 직전 봉(entry_time 위치 −1) RSI<30을 만족한다.
+    for s in on:
+        gate_idx = arrays.pos_by_time[s.entry_time] - 1
+        assert arrays.rsi[gate_idx] < RSI_LONG_MAX
+
+
 def test_entry_point_a_uses_confirm_close_b_uses_next_open() -> None:
     _df, result, arrays = _detect_obs()
     cfg = harness.build_config("1h")
