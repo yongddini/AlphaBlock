@@ -26,7 +26,7 @@ from live.limit_engine import ZoneLimitLiveEngine
 from live.limit_orders import PendingLimitOrder
 from live.order_journal import OrderJournal
 from live.price_feed import CcxtProTickFeed, NullPriceFeed, SymbolTick
-from live.zone_limit_runner import ZoneLimitPaperRunner
+from live.zone_limit_runner import ZoneLimitPaperRunner, run_zone_limit_runner
 from paper.store import PaperTradeRecorder, PaperTradeStore
 from strategy.models import ConfluenceParams, OrderBlockDirection
 from strategy.realtime_rsi import RealtimeRsi
@@ -264,3 +264,62 @@ def test_tick_drives_paper_entry_through_poll_once(tmp_path: Path) -> None:
     finally:
         store.close()
         journal.close()
+
+
+# -- WAN-256: 틱 피드 기본값 승격 (False → True) + 옵트아웃 보존 -------------------
+
+
+def test_wan256_tick_feed_default_is_on(monkeypatch: Any) -> None:
+    """기본값이 켜짐이다(WAN-256 재-베이스라인) — 설정을 잊어도 라이브가 틱으로 돈다.
+
+    `_env_file=None`으로 로컬 `.env`를 무시하고 **코드 기본값**만 본다. 환경변수도 지워
+    이 프로세스의 셸 설정에 좌우되지 않게 한다.
+    """
+    monkeypatch.delenv("ALPHABLOCK_LIVE_TICK_FEED_ENABLED", raising=False)
+    settings = Settings(_env_file=None)
+    assert settings.live_tick_feed_enabled is True
+
+
+def test_wan256_env_false_opts_out(monkeypatch: Any) -> None:
+    """`ALPHABLOCK_LIVE_TICK_FEED_ENABLED=false`로 옛 1분봉 폴링으로 되돌아간다(옵트아웃)."""
+    monkeypatch.setenv("ALPHABLOCK_LIVE_TICK_FEED_ENABLED", "false")
+    settings = Settings(_env_file=None)
+    assert settings.live_tick_feed_enabled is False
+
+
+def test_wan256_runner_gates_tick_feed_on_the_flag(monkeypatch: Any, tmp_path: Path) -> None:
+    """러너 진입점이 `live_tick_feed_enabled` 꺼짐에서 틱 피드를 인스턴스화하지 않는다.
+
+    실제 `run_zone_limit_runner`를 태우되(스텁 없는 진짜 코드 경로), `CcxtProTickFeed`를
+    스파이로 갈아끼워 **소켓이 열리지 않음**을 동작으로 고정한다. 시리즈가 비면(빈 DB) 러너는
+    조기 반환하지만, 틱 분기는 러너 생성 직전에 있어 시리즈 유무와 무관하게 평가된다 —
+    꺼진 설정에서 스파이가 한 번도 생성되지 않아야 한다(기본값 `True`가 CI에서 소켓을 여는지
+    걱정하는 완료 기준 3의 반례 방지).
+    """
+    import live.price_feed as price_feed_module
+
+    constructed: list[object] = []
+
+    class _SpyFeed:  # pragma: no cover - 생성되면 테스트 실패
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            constructed.append(self)
+
+        def start(self) -> None:
+            pass
+
+    monkeypatch.setattr(price_feed_module, "CcxtProTickFeed", _SpyFeed)
+
+    settings = Settings(
+        _env_file=None,
+        db_path=str(tmp_path / "ohlcv.db"),
+        live_tick_feed_enabled=False,
+        # 격리: 한 시리즈만, 상태 파일은 tmp로(러너가 repo의 data/를 건드리지 않게).
+        live_signal_symbols=[_SYMBOL],
+        live_signal_timeframes=["1h"],
+        live_signal_state_path=str(tmp_path / "signals.json"),
+        live_runtime_state_path=str(tmp_path / "runtime.json"),
+        paper_trade_notify_enabled=False,
+    )
+    # 빈 DB라 폴링은 무동작 — 소켓 분기는 플래그가 꺼져 있어 평가만 되고 피드를 안 만든다.
+    run_zone_limit_runner(settings, once=True)
+    assert constructed == []
