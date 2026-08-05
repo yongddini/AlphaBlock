@@ -179,15 +179,18 @@ class Settings(BaseSettings):
     live_signal_timeframes: list[str] = Field(default_factory=_default_live_signal_timeframes)
     # 폴링 간격(초). 새 확정봉이 저장됐는지 이 주기로 확인한다.
     live_poll_interval_seconds: int = Field(default=60, ge=1)
-    # 웹소켓 틱 피드로 대기 지정가 체결을 감지한다(WAN-246, 페이퍼 한정 · 옵트인).
-    # 기본 꺼짐 = 예전과 **비트 단위로 같다**(러너가 틱 소켓을 열지 않고 확정 1분봉만
-    # 소비 → 백테스트 1분봉 서브스텝과 같은 자, 파리티). 켜면 러너가 ccxt.pro
-    # `watch_trades`로 심볼별 실시간 체결가를 받아 대기 주문의 `on_price`를 매 틱 호출해
-    # **체결 감지 지연**(현재 1분봉 확정 + 폴링 간격)을 줄인다. ⚠️ 틱이라고 "닿으면 체결"
-    # 낙관(WAN-96)이 사라지지 않는다 — 큐 우선순위·부분 체결은 호가·체결 데이터(WAN-98,
-    # Canceled) 소관이라 틱 가격만으로는 여전히 상한이다. 아래 `live_tick_feed_exchange`가
-    # ccxt 거래소 id(기본 binanceusdm).
-    live_tick_feed_enabled: bool = Field(default=False)
+    # 웹소켓 틱 피드로 대기 지정가 체결을 감지한다(WAN-246 배선 · WAN-256 기본값 승격).
+    # 기본 **켜짐**(WAN-256, 사용자 재-베이스라인 2026-08-05) — "그게 이 시스템이 돌아야 할
+    # 방식이면 기본값이어야 한다." 러너가 ccxt.pro `watch_trades`로 심볼별 실시간 체결가를
+    # 받아 대기 주문의 `on_price`를 매 틱 호출해 **체결 감지 지연**(1분봉 확정 + 폴링 간격)을
+    # 줄인다. ⚠️ 그 대가로 **아무 설정 없이도 라이브(페이퍼)가 백테스트(1분봉)보다 미세**해진다
+    # (WAN-246 §2/§3 판정 (b) — 알고 받는 차이). 백테스트는 1분봉을 유지한다(백테스트 틱 승격은
+    # 별도 재-베이스라인 + WAN-98 선행). ⚠️ 틱이라고 "닿으면 체결" 낙관(WAN-96)이 사라지지
+    # 않는다 — 큐 우선순위·부분 체결은 호가·체결 데이터(WAN-98, Canceled) 소관이라 틱 가격만으로는
+    # 여전히 상한이다. 틱은 체결을 더 빨리 **감지**할 뿐 더 정확히 **판정**하지 않는다.
+    # 옵트아웃: `ALPHABLOCK_LIVE_TICK_FEED_ENABLED=false`면 옛 1분봉 폴링(비트 동일)으로 되돌아간다.
+    # 아래 `live_tick_feed_exchange`가 ccxt 거래소 id(기본 binanceusdm).
+    live_tick_feed_enabled: bool = Field(default=True)
     live_tick_feed_exchange: str = Field(default="binanceusdm")
     # 전략 재평가 시 각 시리즈에서 사용할 최근 봉 수(최장 EMA 365봉 워밍업 여유 포함).
     live_signal_lookback_bars: int = Field(default=1500, ge=1)
