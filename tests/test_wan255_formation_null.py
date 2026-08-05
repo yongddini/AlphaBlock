@@ -42,6 +42,7 @@ from backtest.wan255_formation_null import (
     _FormationSetup,
     _walk_exit,
     build_formation_setups,
+    retap_compare_table,
     rows_from_csv,
     rows_to_frame,
     run_null,
@@ -440,3 +441,74 @@ def test_row_nan_to_none_roundtrip() -> None:
     restored = FormationRow.model_validate(frame.to_dict(orient="records")[0])
     assert restored.random_p_value is None
     assert restored.retap_total_return is None
+
+
+def _retap_row(
+    *,
+    timeframe: str,
+    entry_point: str = ENTRY_B_OPEN,
+    stop_variant: str = STOP_OB,
+    rsi_gate: bool = False,
+    real_total_return: float,
+    retap_total_return: float | None,
+) -> FormationRow:
+    return FormationRow(
+        symbol="BTC/USDT:USDT",
+        timeframe=timeframe,
+        segment="is",
+        direction="long",
+        entry_point=entry_point,
+        stop_variant=stop_variant,
+        rsi_gate=rsi_gate,
+        real_total_return=real_total_return,
+        real_num_trades=30,
+        real_mean_net_r=0.05,
+        real_max_drawdown=0.1,
+        returned_n=25,
+        returned_mean_net_r=0.04,
+        never_n=5,
+        never_mean_net_r=0.2,
+        pool_size=10,
+        fake_zones=100,
+        random_mean_return=0.0,
+        random_ci_low=-0.1,
+        random_ci_high=0.1,
+        random_p_value=0.5,
+        iterations=200,
+        retap_total_return=retap_total_return,
+        retap_num_trades=None if retap_total_return is None else 40,
+        buy_hold=0.5,
+    )
+
+
+def test_retap_compare_table_aggregates_primary_config_and_excludes_15m() -> None:
+    """(b) 표는 주 설정(B_open/ob/nogate)만·(TF×구간×방향) 집계하고 retap 없는 15m은 뺀다."""
+    rows = [
+        # 주 설정 1h 롱 IS — 형성 < 재탭(형성>재탭 = 0/1)
+        _retap_row(timeframe="1h", real_total_return=0.05, retap_total_return=0.80),
+        # 다른 진입점(A_close)·손절(atr)·게이트(on)는 (b) 표에서 제외돼야 한다
+        _retap_row(
+            timeframe="1h",
+            entry_point=ENTRY_A_CLOSE,
+            real_total_return=0.99,
+            retap_total_return=0.10,
+        ),
+        _retap_row(
+            timeframe="1h", stop_variant=STOP_ATR, real_total_return=0.99, retap_total_return=0.10
+        ),
+        _retap_row(timeframe="1h", rsi_gate=True, real_total_return=0.99, retap_total_return=0.10),
+        # 15m은 retap=None → (b) 표에서 빠진다(널 판정에는 남는다)
+        _retap_row(timeframe="15m", real_total_return=0.99, retap_total_return=None),
+    ]
+    table = retap_compare_table(rows)
+    lines = [ln for ln in table.splitlines() if ln.startswith("| 1h")]
+    # 주 설정 1h 롱 IS 한 행만 남는다(A_close·atr·게이트·15m 전부 제외)
+    assert len(lines) == 1
+    assert "15m" not in table
+    # 형성 5% vs 재탭 80% → 형성>재탭 0/1
+    assert "0/1" in lines[0]
+
+
+def test_retap_compare_table_empty_when_no_retap() -> None:
+    rows = [_retap_row(timeframe="15m", real_total_return=0.05, retap_total_return=None)]
+    assert "재탭 비교 없음" in retap_compare_table(rows)

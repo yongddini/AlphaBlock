@@ -71,14 +71,18 @@ WAN-254 §1 census가 「형성 진입이 실제로 뭔가를 놓치고 있다�
 
 * 진입 사다리 **C**(돌파된 스윙 되테스트 지정가 · `limit_valid_bars` 격자, WAN-222 재사용).
 * **§4 병행 북** — 통과 팔을 레버리지 북(WAN-213)에 얹어 재탭/형성/병행 대조.
-* 전체 9종목 × 4TF × 200반복 격자(비용이 커서 이 PR은 축소 실행 · reproduce 명령은 아래).
+* **15m 재탭(b) 대비** — `run_once`가 15m·6yr에서 셀당 ~37분(WAN-203)이라 6(구간×방향)×
+  9종목이 비현실적이다. 15m은 형성+널(판정 a·c)만 채우고 재탭(b)은 후속으로 뺀다.
 
-## 재현
+## 재현 (이 PR 실측)
 
 ```
-uv run python -m backtest.wan255_formation_null --part null --tf 1h --jobs 6
-uv run python -m backtest.wan255_formation_null --part null --tf 2h,4h --jobs 6 --append
-uv run python -m backtest.wan255_formation_null --part null --tf 15m --jobs 6 --append  # 무거움
+# 1h·2h·4h: 형성+널 + 재탭(D) 대비 병기(--with-retap · 1분봉·무거움)
+uv run python -m backtest.wan255_formation_null --part null --tf 1h,2h,4h \
+    --rsi-gate off,on --with-retap --jobs 6
+# 15m: 형성+널만(재탭 미측정 — 위 §범위 밖). --append로 덧붙인다.
+uv run python -m backtest.wan255_formation_null --part null --tf 15m \
+    --rsi-gate off,on --jobs 6 --append
 uv run python -m backtest.wan255_formation_null --part summary   # CSV에서 요약만
 ```
 """
@@ -1068,21 +1072,54 @@ def summary_table(
 
 
 def retap_compare_table(rows: Sequence[FormationRow]) -> str:
-    """(b) 재탭 대비 — `--with-retap`으로 채운 셀만."""
-    scoped = [r for r in rows if r.retap_total_return is not None]
+    """(b) 재탭(D) 대비 — 심볼평균 (TF × 구간 × 방향).
+
+    형성 = 주 설정 **B_open/ob/nogate**(다음 봉 시가 · OB 무효화 손절 = 실배포 파리티).
+    재탭값은 (심볼,TF,구간,방향)당 상수라 형성 설정과 무관하므로 한 설정에 붙여 비교한다.
+    ⚠️ **15m은 retap 미측정**(`run_once`가 15m·6yr에서 셀당 ~37분, WAN-203 — 6(구간×방향)×
+    9종목이 비현실적) → (b) 15m 비교는 문서화된 후속. 널 판정 (a)·(c)는 15m 포함이다.
+    """
+    scoped = [
+        r
+        for r in rows
+        if r.entry_point == ENTRY_B_OPEN
+        and r.stop_variant == STOP_OB
+        and not r.rsi_gate
+        and r.retap_total_return is not None
+    ]
     if not scoped:
         return "_(재탭 비교 없음 — `--with-retap`으로 채운다.)_"
     header = (
-        "| 심볼 | TF | 구간 | 방향 | 진입/손절 | 형성수익 | 재탭수익 | 형성n | 재탭n |\n"
-        "| -- | -- | -- | -- | -- | --: | --: | --: | --: |"
+        "| TF | 구간 | 방향 | 형성수익(평균) | 재탭수익(평균) | 형성>재탭 | 형성 net R |\n"
+        "| -- | -- | -- | --: | --: | --: | --: |"
     )
-    body: list[str] = []
+    tf_order = {tf: i for i, tf in enumerate(WORK_TIMEFRAMES)}
+    seg_order = {s: i for i, s in enumerate(SEGMENT_LABELS)}
+    dir_order = {d: i for i, d in enumerate(DIRECTIONS)}
+    groups: dict[tuple[str, str, str], list[FormationRow]] = defaultdict(list)
     for r in scoped:
+        groups[(r.timeframe, r.segment, r.direction)].append(r)
+    body: list[str] = []
+    for (tf, seg, direction), cells in sorted(
+        groups.items(),
+        key=lambda kv: (
+            tf_order.get(kv[0][0], 9),
+            seg_order.get(kv[0][1], 9),
+            dir_order.get(kv[0][2], 9),
+        ),
+    ):
+        form_mean = _mean([c.real_total_return for c in cells])
+        retap_vals = [c.retap_total_return for c in cells if c.retap_total_return is not None]
+        retap_mean = _mean(retap_vals)
+        beats = sum(
+            1
+            for c in cells
+            if c.retap_total_return is not None and c.real_total_return > c.retap_total_return
+        )
+        net_r = _mean([c.real_mean_net_r for c in cells if c.real_mean_net_r is not None])
         body.append(
-            f"| {_short(r.symbol)} | {r.timeframe} | {r.segment} | {r.direction} | "
-            f"{r.entry_point}/{r.stop_variant} | {r.real_total_return * 100:+.2f}% | "
-            f"{(r.retap_total_return or 0.0) * 100:+.2f}% | {r.real_num_trades} | "
-            f"{r.retap_num_trades} |"
+            f"| {tf} | {seg} | {direction} | {_round(form_mean, 100)}% | "
+            f"{_round(retap_mean, 100)}% | {beats}/{len(cells)} | {_round(net_r, 1, 3)} |"
         )
     return header + "\n" + "\n".join(body)
 
@@ -1190,6 +1227,13 @@ def build_summary_markdown(rows: Sequence[FormationRow]) -> str:
         "",
         "## §2 판정 (b) — 재탭 대비",
         "",
+        "형성 = 주 설정 **B_open/ob/nogate**(실배포 파리티) · 심볼평균. 재탭값은 (심볼,TF,"
+        "구간,방향)당 상수(형성 설정과 무관)라 이 한 설정에 붙여 비교한다. 재탭(D)은 "
+        "`run_once`가 total_return·거래수만 내므로 net R은 형성 쪽만 병기한다. ⚠️ **15m은 "
+        "retap 미측정** — `run_once`가 15m·6yr에서 셀당 ~37분(WAN-203)이라 6(구간×방향)×"
+        "9종목이 비현실적이다. (b) 15m 비교는 문서화된 후속(범위 밖)이고, 널 판정 (a)·(c)는 "
+        "15m 포함이다.",
+        "",
         retap_compare_table(rows),
         "",
         "## §3 판정 (c) — 안 되돌아온 OB 형성 net R (사후 조건부 · 엣지 아님)",
@@ -1210,7 +1254,8 @@ def build_summary_markdown(rows: Sequence[FormationRow]) -> str:
         "테이커 비용에 있고, `pen_5bp`는 재탭(D)·지정가(C, 후속) 팔 주석 전용.",
         "- ⚠️ **「엣지 없음」(WAN-84/88/111/114/124/151/201/248)의 반박이 아니다** — 저건 "
         "재탭 진입 규칙이 무작위 시각과 구분되나, 이건 형성의 1R 기하 위치 정보를 묻는다.",
-        "- 범위 밖(후속): 진입점 C(지정가 되테스트) · §4 병행 북(WAN-213) · 전체 격자.",
+        "- 범위 밖(후속): 진입점 C(지정가 되테스트) · §4 병행 북(WAN-213) · **15m 재탭(b) "
+        "대비**(run_once 비용) · 200반복 전체 격자.",
         "",
     ]
     return "\n".join(lines) + "\n"
