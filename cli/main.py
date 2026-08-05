@@ -407,6 +407,54 @@ def cmd_compare(args: argparse.Namespace, settings: Settings) -> int:
     return 0
 
 
+def cmd_parity(args: argparse.Namespace, settings: Settings) -> int:
+    """`alphablock parity [--start … --end …]` — 페이퍼↔백테스트 파리티 대조(WAN-247).
+
+    여러 날 창을 묶어 (심볼·TF)별 **체결률·실현 R**을 라이브 장부와 백테스트 채택 엔진으로
+    나란히 낸다. 낙관 측정이 아니라 파리티(배선) 감사다 — 둘 다 `baseline`·1분봉이라 큐
+    우선순위를 모델링하지 않는다. 순수 조회라 종료 코드는 항상 0이다.
+    """
+    from live.live_vs_backtest import DEFAULT_WARMUP_DAYS
+    from live.order_journal import OrderJournal
+    from live.paper_parity import (
+        build_parity_report,
+        render_parity,
+        resolve_cells,
+        resolve_window,
+    )
+    from paper.store import PaperTradeStore
+
+    if (args.start is None) != (args.end is None):
+        print("--start와 --end는 함께 줘야 합니다(하나만 주면 창이 모호합니다).")
+        return 0
+
+    db_path = args.db if args.db is not None else settings.db_path
+    warmup_days = args.warmup_days if args.warmup_days is not None else DEFAULT_WARMUP_DAYS
+    journal = OrderJournal(db_path)
+    store = PaperTradeStore(db_path)
+    try:
+        start_ms, end_ms, start_key, end_key = resolve_window(
+            journal, store, start=args.start, end=args.end
+        )
+        cells = resolve_cells(journal, store, symbols=args.symbols, timeframes=args.tf)
+        report = build_parity_report(
+            journal,
+            store,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            start_key=start_key,
+            end_key=end_key,
+            cells=cells,
+            warmup_days=warmup_days,
+            jobs=args.jobs,
+        )
+    finally:
+        journal.close()
+        store.close()
+    print(render_parity(report, by_cell=args.by_cell))
+    return 0
+
+
 def cmd_trades(args: argparse.Namespace, settings: Settings) -> int:
     """`alphablock trades [--day YYYY-MM-DD]` — 당일(KST) 거래별 타임라인(WAN-234/239).
 
@@ -785,6 +833,31 @@ def build_parser() -> argparse.ArgumentParser:
         "--jobs", type=int, default=1, help="백테스트 (심볼, TF) 병렬 워커 수(기본 1)"
     )
     p_compare.set_defaults(func=cmd_compare)
+
+    p_parity = sub.add_parser(
+        "parity",
+        help="페이퍼↔백테스트 파리티 — 창별 체결률·실현 R 대조(WAN-247)",
+    )
+    p_parity.add_argument("--db", default=None, help="장부 DB 경로(기본: 설정의 db_path)")
+    p_parity.add_argument(
+        "--start", default=None, metavar="YYYY-MM-DD", help="창 시작(KST). --end와 함께"
+    )
+    p_parity.add_argument(
+        "--end", default=None, metavar="YYYY-MM-DD", help="창 끝(KST, 포함). --start와 함께"
+    )
+    p_parity.add_argument(
+        "--warmup-days",
+        type=int,
+        default=None,
+        help="백테스트 워밍업 길이(일). 라이브 전-이력 존 재고 근사 노브 — 길수록 느리다",
+    )
+    p_parity.add_argument("--symbols", default=None, help="대조 심볼(콤마, 기본: 장부에 있는 셀)")
+    p_parity.add_argument("--tf", default=None, help="대조 TF(콤마, 기본: 장부에 있는 셀)")
+    p_parity.add_argument("--by-cell", action="store_true", help="심볼×TF별 대조 표도 출력")
+    p_parity.add_argument(
+        "--jobs", type=int, default=1, help="백테스트 (심볼, TF) 병렬 워커 수(기본 1)"
+    )
+    p_parity.set_defaults(func=cmd_parity)
 
     p_trades = sub.add_parser(
         "trades",
