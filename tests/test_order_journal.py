@@ -945,3 +945,47 @@ def test_resolve_day_window_matches_shared_kst_helper() -> None:
     assert (start_ms, end_ms) == kst_day_bounds_for_date(date(2026, 8, 2))
     assert key == "2026-08-02"
     assert end_ms - start_ms == 24 * 3_600_000  # KST는 서머타임 없어 정확히 24h.
+
+
+def test_reason_phrases_single_source_covers_funnel_codes() -> None:
+    """미진입 사유 문장은 `order_journal.REASON_PHRASES` 한 곳에서만 정의된다(WAN-257).
+
+    일일 요약이 나열하는 코드가 전부 이 맵에 있어야 하고(빠지면 KeyError로 요약이 깨진다),
+    키는 코드 상수(`SKIP_REASON_*`·`REJECT_CODE_*`·`LEDGER_REASON_*`)를 그대로 쓴다 —
+    라벨을 바꿔도 집계·키는 안 건드린다(표시 계층 전용).
+    """
+    from live.order_journal import REASON_PHRASES
+
+    for code in (
+        LEDGER_REASON_NO_FILL,
+        SKIP_REASON_ZONE_WIDTH,
+        LEDGER_REASON_DEVIATION,
+        SKIP_REASON_CELL_BUSY,
+        REJECT_CODE_NOTIONAL,
+        REJECT_CODE_SIZING,
+        SKIP_REASON_RETAP,
+    ):
+        assert code in REASON_PHRASES
+    # 코드 문자열 자체는 불변(집계·DB 키) — 라벨 정정이 키를 건드리지 않았다.
+    assert SKIP_REASON_CELL_BUSY == "cell_busy"
+    assert REJECT_CODE_CELL_BUSY == "cell_busy"
+
+
+def test_cell_busy_phrase_reveals_pending_orders() -> None:
+    """`cell_busy` 문장은 대기 지정가 주문 점유까지 드러낸다(WAN-257).
+
+    슬롯은 오픈 포지션뿐 아니라 아직 체결 안 된 대기 주문으로도 찬다(단일-대기-주문 규칙).
+    문장이 "포지션 보유 중"만 말하면 "진입 0인데 왜 보유 중?" 혼동을 낳는다.
+    """
+    from live.order_journal import REASON_PHRASES
+
+    phrase = REASON_PHRASES[SKIP_REASON_CELL_BUSY]
+    assert "대기" in phrase  # 대기 주문 점유가 드러난다.
+
+
+def test_notifier_reason_phrases_is_the_canonical_source() -> None:
+    """건별 알림·일일 요약(`zone_limit_notifier`)이 자체 사본이 아니라 정본을 쓴다(WAN-257)."""
+    from live import zone_limit_notifier
+    from live.order_journal import REASON_PHRASES
+
+    assert zone_limit_notifier._REASON_PHRASES is REASON_PHRASES
