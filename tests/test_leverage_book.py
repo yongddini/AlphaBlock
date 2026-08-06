@@ -34,6 +34,7 @@ def _cand(
     stop_price: float = 99.0,
     reason: ExitReason = ExitReason.TAKE_PROFIT,
     trigger_time: int | None = None,
+    adv_usd: float | None = None,
 ) -> _Candidate:
     """실제 엔진 자료형(`_Candidate`) 그대로 만든 테스트 후보.
 
@@ -49,6 +50,7 @@ def _cand(
         reason=reason,
         stop_price=stop_price,
         trigger_time=entry_time if trigger_time is None else trigger_time,
+        adv_usd=adv_usd,
     )
 
 
@@ -146,6 +148,69 @@ def test_duplicate_cell_key_rejected() -> None:
     ]
     with pytest.raises(ValueError, match="칸이 중복"):
         run_leverage_book(cells, cfg, LEGACY_BOOK_PARAMS)
+
+
+# --------------------------------------------------------------------------- #
+# WAN-244 — 용량 상한(일거래량 비례 절대 명목 상한)이 북에서 동작으로 존재한다
+# --------------------------------------------------------------------------- #
+
+
+def _adv_cfg(fraction: float | None) -> BacktestConfig:
+    """용량 상한 프랙션만 얹은 채택-형 cfg(cap_only 북과 함께 쓴다)."""
+    cfg = _cfg(leverage=1.0)  # cap_only 북이 상한을 5배로 연다.
+    assert cfg.risk_sizing is not None
+    sizing = cfg.risk_sizing.model_copy(update={"max_notional_adv_fraction": fraction})
+    return cfg.model_copy(update={"risk_sizing": sizing})
+
+
+def test_adv_cap_off_reproduces_book_bit_for_bit() -> None:
+    """상한이 꺼져 있으면(fraction=None) 후보에 `adv_usd`가 실려 있어도 거래가 비트 동일하다.
+
+    `adv_usd`는 순수 메타데이터라 상한이 꺼진 한 사이징에 영향을 주지 않는다 —
+    이것이 「기본 꺼짐 = wan180 채택 셀 비트 재현」의 회계 단위 보증이다.
+    """
+    book = LeverageBookParams(leverage_multiple=5.0, leverage_mode="cap_only")
+    # 같은 후보를 adv_usd 유무만 다르게.
+    plain = [_cand(1_000, 2_000), _cand(3_000, 4_000)]
+    with_adv = [_cand(1_000, 2_000, adv_usd=100.0), _cand(3_000, 4_000, adv_usd=100.0)]
+    out_plain = run_leverage_book([_cell("BTC/USDT:USDT", "1h", plain)], _cfg(leverage=1.0), book)
+    out_adv = run_leverage_book([_cell("BTC/USDT:USDT", "1h", with_adv)], _adv_cfg(None), book)
+    assert out_adv.trades == out_plain.trades
+    assert out_adv.stats.adv_capped_entries == 0
+    assert out_adv.stats.first_adv_cap_equity is None
+
+
+def test_adv_cap_binds_and_is_recorded() -> None:
+    """상한을 켜면 명목이 `k×ADV_usd`로 잘리고 발동이 계측된다.
+
+    ADV=100_000 · k=0.5% → 상한 명목 500. 리스크 사이징 명목(자본 10_000, 손절거리 1 →
+    명목 10_000)이 그보다 크므로 상한이 구속한다 — 명목 500, 수량 5.
+    """
+    book = LeverageBookParams(leverage_multiple=5.0, leverage_mode="cap_only")
+    cand = _cand(1_000, 2_000, adv_usd=100_000.0)
+    off = run_leverage_book([_cell("BTC/USDT:USDT", "1h", [cand])], _adv_cfg(None), book)
+    on = run_leverage_book([_cell("BTC/USDT:USDT", "1h", [cand])], _adv_cfg(0.005), book)
+    # 상한 끔: 리스크 사이징 명목 = 10_000(자본×1% / 손절거리 1 = 100주 × 100).
+    off_notional = off.trades[0].entry_price * off.trades[0].quantity
+    on_notional = on.trades[0].entry_price * on.trades[0].quantity
+    assert off_notional == pytest.approx(10_000.0)
+    assert on_notional == pytest.approx(500.0)  # k×ADV = 0.005 × 100_000.
+    assert on.stats.adv_capped_entries == 1
+    assert on.stats.first_adv_cap_time == on.trades[0].entry_time
+    assert on.stats.first_adv_cap_equity == pytest.approx(10_000.0)
+    # 발동은 clamped_entries의 부분집합이다.
+    assert on.stats.clamped_entries >= on.stats.adv_capped_entries
+
+
+def test_adv_cap_not_counted_when_liquidity_ample() -> None:
+    """ADV가 커서 상한이 리스크 사이징 명목보다 크면 발동으로 세지 않는다(구속 안 함)."""
+    book = LeverageBookParams(leverage_multiple=5.0, leverage_mode="cap_only")
+    # ADV=10^9 · k=0.5% → 상한 5_000_000 ≫ 리스크 명목 10_000. 안 물린다.
+    cand = _cand(1_000, 2_000, adv_usd=1_000_000_000.0)
+    on = run_leverage_book([_cell("BTC/USDT:USDT", "1h", [cand])], _adv_cfg(0.005), book)
+    assert on.stats.adv_capped_entries == 0
+    assert on.stats.first_adv_cap_equity is None
+    assert on.trades[0].entry_price * on.trades[0].quantity == pytest.approx(10_000.0)
 
 
 # --------------------------------------------------------------------------- #

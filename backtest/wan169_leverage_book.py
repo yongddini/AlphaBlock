@@ -199,6 +199,10 @@ class _Task:
     timeframe: str
     start_ms: int
     end_ms: int
+    adv_fraction: float | None = None
+    """WAN-244(옵트인): 설정하면 후보 생성 cfg의 `max_notional_adv_fraction`을 이 값으로 둬
+    각 후보에 룩어헤드-안전 `adv_usd`를 싣는다(용량 상한 측정용). None(기본)이면 예전과
+    비트 단위로 같다 — ADV를 계산조차 하지 않고 후보 집합·격리 성과가 불변이다."""
 
 
 @dataclass(frozen=True)
@@ -246,6 +250,17 @@ def run_cell(task: _Task, *, log: bool = True) -> CellPayload:
         raise ValueError(f"{task.symbol} {task.timeframe}: 데이터가 없습니다(창 확인).")
     params = harness.build_params()  # 인자 없음 = 채택 기본값(옛 핀 물려받기 금지 — 완료기준).
     cfg = harness.build_config(task.timeframe)
+    if task.adv_fraction is not None:
+        # WAN-244: 후보에 룩어헤드-안전 ADV를 싣기 위해 상한 프랙션을 build cfg에 얹는다.
+        # 상한 발동은 큰 자본에서만 일어나므로 후보 집합은 불변이고 adv_usd만 채워진다.
+        assert cfg.risk_sizing is not None
+        cfg = cfg.model_copy(
+            update={
+                "risk_sizing": cfg.risk_sizing.model_copy(
+                    update={"max_notional_adv_fraction": task.adv_fraction}
+                )
+            }
+        )
 
     candidates: dict[str, tuple[_Candidate, ...]] = {}
     funding: dict[str, tuple[FundingRate, ...]] = {}
@@ -344,14 +359,20 @@ def run_cells(
     start: str,
     end: str,
     jobs: int = 1,
+    adv_fraction: float | None = None,
 ) -> list[CellPayload]:
-    """전 칸을 돈다. `jobs`는 성능 노브이지 결과 축이 아니다(WAN-121)."""
+    """전 칸을 돈다. `jobs`는 성능 노브이지 결과 축이 아니다(WAN-121).
+
+    `adv_fraction`(WAN-244, 옵트인)을 주면 후보에 룩어헤드-안전 `adv_usd`를 실어 용량 상한을
+    잴 수 있게 한다 — None(기본)이면 예전과 비트 단위로 같다(book_cli·wan180 무영향).
+    """
     tasks = [
         _Task(
             symbol=harness.normalize_symbol(symbol),
             timeframe=timeframe,
             start_ms=parse_date_ms(start),
             end_ms=parse_date_ms(end),
+            adv_fraction=adv_fraction,
         )
         for symbol in symbols
         for timeframe in timeframes

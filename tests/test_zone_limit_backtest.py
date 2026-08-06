@@ -18,6 +18,7 @@ from backtest.models import BacktestConfig, ExitReason, PositionSide, Trade
 from backtest.sweep import timeframe_to_ms
 from backtest.synthetic import make_synthetic_ohlcv
 from backtest.zone_limit_backtest import (
+    _MS_PER_DAY,
     SetupDiagnostic,
     StopLossContext,
     TakeProfitContext,
@@ -27,6 +28,7 @@ from backtest.zone_limit_backtest import (
     _line_snapshots,
     _sequence_and_cost,
     _to_trade,
+    _trailing_adv_usd_by_pos,
     build_result_from_trades,
     build_zone_limit_candidates,
     run_zone_limit_backtest,
@@ -1334,3 +1336,48 @@ def test_funding_disabled_ignores_rates() -> None:
     )
     assert all(t.funding_cost == 0.0 for t in result.trades)
     assert result.metrics.funding_coverage is None
+
+
+# --------------------------------------------------------------------------- #
+# WAN-244 — 룩어헤드-안전 트레일링 ADV
+# --------------------------------------------------------------------------- #
+
+
+def test_trailing_adv_excludes_current_and_future_days() -> None:
+    """ADV는 탭 봉 **직전까지 완료된** 일자만 평균한다(그 날·미래 제외 = 룩어헤드 금지)."""
+    times = [i * _MS_PER_DAY for i in range(4)]  # 하루 1봉.
+    closes = [100.0] * 4
+    volumes = [10.0, 20.0, 30.0, 40.0]  # 일 달러거래량 = [1000, 2000, 3000, 4000].
+    adv = _trailing_adv_usd_by_pos(times, closes, volumes, window_days=30)
+    # pos0: 직전 완료일 없음 → None. pos1: [1000]. pos2: mean([1000,2000]). pos3: mean(3개).
+    assert adv == [None, 1000.0, 1500.0, 2000.0]
+
+
+def test_trailing_adv_honors_window_length() -> None:
+    times = [i * _MS_PER_DAY for i in range(4)]
+    closes = [100.0] * 4
+    volumes = [10.0, 20.0, 30.0, 40.0]
+    adv = _trailing_adv_usd_by_pos(times, closes, volumes, window_days=2)
+    # pos3: 최근 2 완료일 = [2000, 3000] → 2500(1000은 창 밖).
+    assert adv == [None, 1000.0, 1500.0, 2500.0]
+
+
+def test_trailing_adv_aggregates_multiple_bars_per_day() -> None:
+    """하루에 여러 봉이면 그 날의 달러거래량을 합친다(TF와 무관하게 같은 일 총량)."""
+    half = _MS_PER_DAY // 2
+    times = [0, half, _MS_PER_DAY, _MS_PER_DAY + half]  # 2봉/일 × 2일.
+    closes = [100.0] * 4
+    volumes = [10.0, 10.0, 30.0, 30.0]  # 일0 = 2000, 일1 = 6000.
+    adv = _trailing_adv_usd_by_pos(times, closes, volumes, window_days=30)
+    # 일0의 두 봉: 직전 완료일 없음 → None. 일1의 두 봉: [2000] → 2000.
+    assert adv == [None, None, 2000.0, 2000.0]
+
+
+def test_trailing_adv_uses_usd_not_base_volume() -> None:
+    """USD 환산(volume × close)이 실제로 걸린다 — 가격이 다르면 값이 달라진다."""
+    times = [0, _MS_PER_DAY]
+    volumes = [10.0, 10.0]
+    adv_lo = _trailing_adv_usd_by_pos(times, [50.0, 50.0], volumes, window_days=30)
+    adv_hi = _trailing_adv_usd_by_pos(times, [200.0, 200.0], volumes, window_days=30)
+    assert adv_lo[1] == 500.0  # 10 × 50.
+    assert adv_hi[1] == 2000.0  # 10 × 200.

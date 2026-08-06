@@ -11,7 +11,9 @@
 * 손절 거리 = ``|entry_price − stop_price|`` (오더블록 distal 경계 기준, WAN-23 규칙).
 * 수량 = 리스크 금액 / 손절 거리 → 손절 거리에 **반비례**.
 * 상한: 명목가치(수량 × 진입가)를 레버리지·정책 한도로 clamp. 여러 포지션을 동시에
-  들면 그 한도는 **포트폴리오 전체**의 것이다(`open_notional`, WAN-103).
+  들면 그 한도는 **포트폴리오 전체**의 것이다(`open_notional`, WAN-103). 옵트인으로
+  일거래량(ADV) 비례 **절대** 명목 상한도 얹을 수 있다(`max_notional_adv_fraction`,
+  WAN-244 — 자본에 안 비례해 복리 착시를 깬다).
 * 최소 주문 단위(`qty_step`)로 내림하고, `min_qty` 미만이면 진입하지 않는다(0 반환).
 * 손절 거리가 0에 가깝거나(`min_stop_distance_fraction` 미만) 자본이 없으면 진입
   스킵(0 반환).
@@ -80,6 +82,26 @@ class PositionSizingParams(BaseModel):
     max_notional_fraction: float | None = Field(default=None, gt=0)
     """추가 명목가치 상한 = `자본 × 이 값`. None이면 `leverage`만 상한으로 쓴다.
     설정 시 `leverage`와 함께 더 작은 쪽이 실제 상한이 된다."""
+    max_notional_adv_fraction: float | None = Field(default=None, gt=0)
+    """용량 상한 = `이 값 × ADV_usd`(일거래량 비례 **절대(달러)** 명목 상한, WAN-244, 옵트인).
+
+    ⚠️ **위 두 상한(`leverage`·`max_notional_fraction`)과 성격이 다르다** — 그 둘은 자본에
+    비례해 커지지만 이 항은 **자본과 무관한 절대 달러 상한**이다(`ADV_usd`는 시장 유동성이지
+    내 계좌가 아니다). 그래서 자본이 수백만 배로 커져도 포지션은 시장 용량에 걸려 잘린다 —
+    복리 착시를 깨는 것이 이 항의 유일한 목적이다(WAN-90 「레버리지는 위험의 모양만 바꾼다」).
+
+    `None`(기본)이면 이 상한을 쓰지 않는다 — 그때 `position_size(adv_usd=...)`는 무시되고
+    실행이 예전과 비트 단위로 같다. 설정하면 `position_size`에 넘어온 `adv_usd`가 있을 때만
+    발동한다(`adv_usd`가 `None`이면 = ADV 정보 없음(워밍업 등) → 이 항은 걸지 않는다).
+
+    단위는 **ADV 대비 분수**다(예: `0.005` = 0.5% ADV). 자본 비율이 아니다."""
+    adv_window_days: int = Field(default=30, gt=0)
+    """`max_notional_adv_fraction`이 쓰는 ADV(평균 일 달러거래량)의 트레일링 창(일).
+
+    ADV는 탭 봉 **직전까지 완료된** 일자들에서만 잰다(룩어헤드 금지) — 산출은 후보 생성
+    (`backtest.zone_limit_backtest.build_zone_limit_candidates`) 쪽이 이 값으로 하고, 여기
+    사이징 함수는 이미 산출된 `adv_usd`를 상한으로 곱하기만 한다. `max_notional_adv_fraction`이
+    `None`이면 이 필드는 읽히지 않는다."""
     qty_step: float = Field(default=0.0, ge=0)
     """최소 주문 수량 단위(lot). 0이면 반올림하지 않는다. 산출 수량을 이 배수로 내림."""
     min_qty: float = Field(default=0.0, ge=0)
@@ -100,6 +122,7 @@ def position_size(
     stop_price: float,
     params: PositionSizingParams,
     open_notional: float = 0.0,
+    adv_usd: float | None = None,
 ) -> float:
     """진입 수량을 산출한다 — `params.sizing_mode`에 따라 손절 역산 또는 명목 고정.
 
@@ -115,10 +138,15 @@ def position_size(
             포트폴리오 전체에 걸리므로, 이 값을 뺀 **남은 여유분**만 새 포지션에
             배정한다. 여유가 없으면(상한 소진) 0을 반환해 진입을 스킵한다. 기본
             `0.0`이면 동시 1포지션 시절과 동일한 per-trade clamp가 된다.
+        adv_usd: 이 진입 시점의 평균 일 달러거래량(ADV, USD, WAN-244). 용량 상한
+            (`params.max_notional_adv_fraction`)이 설정됐을 때만 쓰인다 — 이 포지션의
+            명목을 `max_notional_adv_fraction × adv_usd`로 clamp한다(자본과 무관한 **절대**
+            상한이라 복리 착시를 깬다). `None`이면(기본, 또는 ADV 정보 없음) 용량 상한을
+            걸지 않는다 — 그러면 실행이 이 항을 넣기 전과 비트 단위로 같다.
 
     Returns:
         진입 수량. 진입을 스킵해야 하면(손절 거리 과소·자본 없음·명목 상한 소진·
-        최소 수량 미달) 0.0.
+        용량 상한이 명목을 0으로 clamp·최소 수량 미달) 0.0.
 
     Raises:
         ValueError: `entry_price`가 양수가 아니거나 `open_notional`이 음수일 때.
@@ -156,6 +184,15 @@ def position_size(
         return 0.0
     max_qty = remaining / entry_price
     qty = min(qty, max_qty)
+
+    # 용량 상한(WAN-244, 옵트인): 포지션 명목 ≤ `max_notional_adv_fraction × ADV_usd`.
+    # 위 clamp들과 달리 이 상한은 **자본에 비례하지 않는 절대 달러 값**이라(ADV = 시장
+    # 유동성) 자본이 커져도 포지션이 시장 용량에 걸려 잘린다 — 복리 착시를 깨는 항이다.
+    # 포지션당 상한이므로 `open_notional`(포트폴리오 여유)과 무관하게 이 진입 하나에 건다.
+    # `adv_usd`가 없으면(워밍업 등 ADV 정보 부재) 걸지 않는다 — 조용히 0으로 만들지 않는다.
+    if params.max_notional_adv_fraction is not None and adv_usd is not None:
+        adv_notional_cap = params.max_notional_adv_fraction * adv_usd
+        qty = min(qty, adv_notional_cap / entry_price)
 
     # 최소 주문 단위로 내림.
     if params.qty_step > 0:

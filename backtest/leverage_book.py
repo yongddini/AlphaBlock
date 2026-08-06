@@ -178,7 +178,15 @@ class BookStats:
     placed: int = 0
     """실제로 배치된(거래가 된) 후보 수."""
     clamped_entries: int = 0
-    """명목 상한에 걸려 **축소 진입**된 건수."""
+    """명목 상한에 걸려 **축소 진입**된 건수(레버리지·정책·용량 상한 전부 포함)."""
+    adv_capped_entries: int = 0
+    """용량 상한(WAN-244, `max_notional_adv_fraction`)이 **구속 제약**이었던 진입 건수 —
+    희망 명목이 `k×ADV_usd`보다 컸고 최종 명목이 그 상한에 붙은 경우다. 상한이 꺼져 있으면
+    항상 0이라 기본 실행이 비트 재현된다(카운터를 세지 않으므로). `clamped_entries`의 부분집합."""
+    first_adv_cap_time: int | None = None
+    """용량 상한이 **처음** 구속한 진입의 시각(ms). 상한이 한 번도 안 걸렸으면 None."""
+    first_adv_cap_equity: float | None = None
+    """그 첫 구속 순간의 공유 자본(USD) — 「자본 얼마부터 용량 상한이 발동하나」(WAN-244 판정 c)."""
     skipped_cell_busy: int = 0
     """자기 칸에 이미 포지션이 있어 스킵된 건수 — 칸당 1포지션(사용자 정의)의 계측."""
     skipped_notional: int = 0
@@ -418,6 +426,18 @@ def run_leverage_book(
         wanted = _unclamped_notional(cand, size_cfg, cash)
         if wanted > 0.0 and notional < wanted * (1.0 - 1e-9):
             stats.clamped_entries += 1
+        # WAN-244 용량 상한이 **구속 제약**이었는지: 희망 명목이 `k×ADV_usd`를 넘었고
+        # (상한이 실제로 깎았고) 최종 명목이 그 상한에 붙었으면 발동으로 센다. 레버리지
+        # 상한이 더 작아 그쪽이 구속한 경우(명목 < ADV 상한)는 세지 않는다.
+        assert size_cfg.risk_sizing is not None  # apply_book_leverage가 보장.
+        adv_frac = size_cfg.risk_sizing.max_notional_adv_fraction
+        if adv_frac is not None and cand.adv_usd is not None:
+            adv_cap = adv_frac * cand.adv_usd
+            if adv_cap < wanted * (1.0 - 1e-9) and notional <= adv_cap * (1.0 + 1e-9):
+                stats.adv_capped_entries += 1
+                if stats.first_adv_cap_time is None:
+                    stats.first_adv_cap_time = trade.entry_time
+                    stats.first_adv_cap_equity = cash
         risk_amount = abs(trade.entry_price - cand.stop_price) * trade.quantity
         open_by_cell[cell.key] = _OpenBookPosition(
             cell=cell.key,

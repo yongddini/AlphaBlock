@@ -136,6 +136,13 @@ class _Candidate:
     refinement_tf: str | None = None
     """겹침을 찾은 하위TF(WAN-126 캐스케이드가 멈춘 칸). 겹침 미적용(`A`·overlap=None)이면
     None. 바닥 TF별 성과 분해(어느 TF에서 찾은 겹침이 좋은가)를 위한 진단 전용 필드다."""
+    adv_usd: float | None = None
+    """탭 시점의 평균 일 달러거래량(ADV, USD, WAN-244 용량 상한). 탭 봉 **직전까지 완료된**
+    일자들에서만 잰 룩어헤드-안전 값이다. `cfg.risk_sizing.max_notional_adv_fraction`이
+    설정됐을 때만 `build_zone_limit_candidates`가 채우고, 그때 `_to_trade`가 이 값을
+    `position_size(adv_usd=...)`로 넘겨 포지션 명목을 시장 용량에 맞춰 clamp한다. 상한이
+    꺼져 있으면(기본) `None`이라 사이징이 이 값을 무시한다 — 순수 메타데이터라 체결·청산
+    로직에는 쓰이지 않고, 있어도 없어도 거래는 비트 단위로 같다(상한이 꺼진 한)."""
 
 
 @dataclass(frozen=True)
@@ -196,6 +203,48 @@ class SetupDiagnostic:
     zone_key: frozenset[int] | None = None
     """이 셋업이 속한 존의 안정적 식별자(`OrderBlockSignal.zone_key` 그대로, WAN-83).
     진단 전용이며 체결·청산 로직에는 쓰이지 않는다."""
+
+
+_MS_PER_DAY = 86_400_000
+
+
+def _trailing_adv_usd_by_pos(
+    times: Sequence[int],
+    closes: Sequence[float],
+    volumes: Sequence[float],
+    window_days: int,
+) -> list[float | None]:
+    """봉 pos마다 「탭 봉 **직전까지 완료된** 일자들의 평균 일 달러거래량」(WAN-244 용량 상한).
+
+    ⚠️ **룩어헤드 금지가 이 함수의 핵심이다** — 탭 봉이 속한 날(및 그 이후)은 아직
+    완료되지 않았으므로 ADV에서 **통째로 제외**하고, 그 날 **직전**의 최근 `window_days`
+    완료일만 평균한다. 존폭 필터가 ATR을 `pos-1`(직전 확정봉)에서 읽는 것과 같은 규칙을
+    일(day) 해상도로 옮긴 것이다.
+
+    일 달러거래량 = Σ(봉 volume × 봉 close). ⚠️ ccxt `volume`은 **base 자산 수량**이므로
+    `× 가격`으로 USD 환산해야 한다(WAN-112/158 단위 함정). TF와 무관하게 하루의 봉들을
+    합치면 같은 일 달러거래량이 나온다(15m·1h·2h·4h가 같은 상한을 본다).
+
+    완료된 직전 일자가 하나도 없으면(창 초입) `None` — 사이징이 그 진입에 용량 상한을
+    걸지 않는다(워밍업 처리, `position_size(adv_usd=None)`).
+    """
+    # 1) 일별 달러거래량 합. 봉이 시간 오름차순이 아니어도 dict 집계라 안전하다.
+    daily_usd: dict[int, float] = {}
+    for t, close, vol in zip(times, closes, volumes, strict=True):
+        day = int(t) // _MS_PER_DAY
+        daily_usd[day] = daily_usd.get(day, 0.0) + float(vol) * float(close)
+
+    # 2) 각 일자에 대해 「그 날 직전」의 최근 window_days 완료일 평균을 미리 계산.
+    ordered_days = sorted(daily_usd)
+    ordered_vals = [daily_usd[d] for d in ordered_days]
+    adv_for_day: dict[int, float | None] = {}
+    for i, day in enumerate(ordered_days):
+        lo = max(0, i - window_days)
+        prior = ordered_vals[lo:i]  # [lo, i) = day 직전의 완료일들(최대 window_days개).
+        adv_for_day[day] = (sum(prior) / len(prior)) if prior else None
+
+    # 3) 봉 pos → 그 봉이 속한 날의 사전계산 값.
+    return [adv_for_day[int(t) // _MS_PER_DAY] for t in times]
 
 
 def _prepare_htf(df: pd.DataFrame) -> pd.DataFrame:
@@ -734,6 +783,16 @@ def build_zone_limit_candidates(
     closes = [float(v) for v in frame["close"].astype(float).tolist()]
     time_to_pos = {t: i for i, t in enumerate(times)}
 
+    # 용량 상한(WAN-244, 옵트인). 꺼져 있으면(기본) ADV를 아예 계산하지 않으므로 기본
+    # 실행은 예전과 비트 단위로 같다 — 후보의 `adv_usd`가 전부 None이라 사이징이 무시한다.
+    adv_usd_by_pos: list[float | None] | None = None
+    risk_sizing = cfg.risk_sizing
+    if risk_sizing is not None and risk_sizing.max_notional_adv_fraction is not None:
+        volumes = [float(v) for v in frame["volume"].astype(float).tolist()]
+        adv_usd_by_pos = _trailing_adv_usd_by_pos(
+            times, closes, volumes, risk_sizing.adv_window_days
+        )
+
     ob_result = order_block_result or OrderBlockDetector(order_block_params).run(htf_df)
     substeps = build_substeps(df_1m, htf_ms)
     substep_times = [s.time for s in substeps]
@@ -1057,6 +1116,8 @@ def build_zone_limit_candidates(
                 mfe_r=outcome.mfe_r,
                 mae_r=outcome.mae_r,
                 refinement_tf=refinement_tf,
+                # WAN-244: 탭 봉 pos의 룩어헤드-안전 ADV. 상한이 꺼져 있으면 None(무시).
+                adv_usd=adv_usd_by_pos[pos] if adv_usd_by_pos is not None else None,
             )
         )
 
@@ -1184,6 +1245,9 @@ def _to_trade(
             stop_price=cand.stop_price,
             params=cfg.risk_sizing,
             open_notional=open_notional,
+            # WAN-244 용량 상한: 후보가 실은 룩어헤드-안전 ADV를 넘긴다. 상한이 꺼져 있거나
+            # (`max_notional_adv_fraction=None`) ADV가 없으면(`None`) 사이징이 무시한다.
+            adv_usd=cand.adv_usd,
         )
         if qty <= 0.0:
             return None
