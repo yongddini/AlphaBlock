@@ -34,6 +34,7 @@ from backtest.harness import (
     LEGACY_COMBINE_OBS,
     LEGACY_RSI_GATE_MODE,
     RunRow,
+    build_config,
     load_market_data,
 )
 from backtest.models import BacktestConfig
@@ -333,3 +334,40 @@ def test_intrabar_live_seeding_preserves_real_filled_trades(
 
     assert opt_stats == ref_stats
     assert opt_rows == ref_rows
+
+
+def test_adv_cap_metadata_does_not_change_candidate_set() -> None:
+    """WAN-244 완료기준 — 용량 상한을 켜서 `adv_usd`를 계산해 실어도 **후보 집합은 그대로**다.
+
+    상한은 사이징 시점에만 걸리므로(체결·청산 로직 무관), 상한을 켠 cfg로 후보를 지어도
+    `adv_usd`만 채워지고 나머지 필드는 비트 단위로 같아야 한다 — 「기본 꺼짐 = 채택 셀
+    비트 재현」의 후보 생성 단위 보증(실데이터로 실제 체결 후보 위에서 확인).
+    """
+    market = load_market_data(_SYMBOL, _TIMEFRAME, start_ms=_START_MS, end_ms=_END_MS)
+    assert market.df_1m is not None and not market.df_1m.empty
+    params = ConfluenceParams()  # 채택 기본값.
+
+    cfg_off = build_config(_TIMEFRAME)
+    assert cfg_off.risk_sizing is not None
+    cfg_on = cfg_off.model_copy(
+        update={
+            "risk_sizing": cfg_off.risk_sizing.model_copy(
+                update={"max_notional_adv_fraction": 0.005}
+            )
+        }
+    )
+
+    cands_off, stats_off = build_zone_limit_candidates(
+        market.htf_df, market.df_1m, _TIMEFRAME, params=params, cfg=cfg_off
+    )
+    cands_on, stats_on = build_zone_limit_candidates(
+        market.htf_df, market.df_1m, _TIMEFRAME, params=params, cfg=cfg_on
+    )
+    assert stats_off.filled > 0, "실데이터가 체결 후보를 내지 않았다(검증 무의미)"
+    # 상한 끔: adv_usd 전부 None(계산조차 안 함). 상한 켬: 값이 채워진다.
+    assert all(c.adv_usd is None for c in cands_off)
+    assert any(c.adv_usd is not None for c in cands_on)
+    assert all(c.adv_usd is None or c.adv_usd > 0.0 for c in cands_on)
+    # adv_usd만 다르고 나머지 필드는 전부 같다 = 후보 집합 불변.
+    assert (stats_off.eligible, stats_off.filled) == (stats_on.eligible, stats_on.filled)
+    assert [replace(c, adv_usd=None) for c in cands_on] == cands_off

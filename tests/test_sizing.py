@@ -204,3 +204,80 @@ def test_fixed_notional_rejects_bad_fraction() -> None:
         PositionSizingParams(notional_fraction=0.0)
     with pytest.raises(ValueError):
         PositionSizingParams(sizing_mode="nonsense")
+
+
+# --------------------------------------------------------------------------- #
+# WAN-244 — 용량 상한(일거래량 비례 절대 명목 상한)
+# --------------------------------------------------------------------------- #
+
+
+def test_adv_cap_default_off_ignores_adv_usd() -> None:
+    """기본(`max_notional_adv_fraction=None`)이면 `adv_usd`를 넘겨도 결과가 안 변한다 —
+    이 항을 넣기 전과 비트 단위로 같다(기본 실행 재현의 사이징 단위 보장)."""
+    params = PositionSizingParams(risk_per_trade=0.01, leverage=5.0)
+    base = position_size(equity=1_000_000.0, entry_price=100.0, stop_price=90.0, params=params)
+    with_adv = position_size(
+        equity=1_000_000.0, entry_price=100.0, stop_price=90.0, params=params, adv_usd=1.0
+    )
+    assert with_adv == base  # None 상한 → adv_usd 완전 무시.
+
+
+def test_adv_cap_binds_absolute_not_scaled_by_equity() -> None:
+    """용량 상한은 **절대 달러**다 — 자본이 커져도 명목이 `k×ADV_usd`로 고정된다."""
+    params = PositionSizingParams(
+        risk_per_trade=0.01, leverage=5.0, max_notional_adv_fraction=0.005
+    )
+    # ADV = 1_000_000 → 상한 = 0.5% × 1_000_000 = 5_000 명목 → 진입가 100 → 50주.
+    qty = position_size(
+        equity=1_000_000.0,
+        entry_price=100.0,
+        stop_price=90.0,
+        params=params,
+        adv_usd=1_000_000.0,
+    )
+    assert qty == pytest.approx(50.0)
+    assert qty * 100.0 == pytest.approx(5_000.0)  # 명목 = 상한.
+    # 자본을 10배로 키워도 상한이 절대값이라 명목은 그대로 5_000이다(복리 착시 차단).
+    qty_10x = position_size(
+        equity=10_000_000.0,
+        entry_price=100.0,
+        stop_price=90.0,
+        params=params,
+        adv_usd=1_000_000.0,
+    )
+    assert qty_10x * 100.0 == pytest.approx(5_000.0)
+
+
+def test_adv_cap_not_binding_when_liquidity_ample() -> None:
+    """ADV가 충분히 크면 상한이 안 물리고 리스크 사이징 결과 그대로다."""
+    params = PositionSizingParams(
+        risk_per_trade=0.01, leverage=5.0, max_notional_adv_fraction=0.005
+    )
+    # 자본 10_000, 손절거리 10 → 리스크 사이징 수량 10(명목 1_000). 상한 = 0.5%×1e10 = 5e7 ≫ 1_000.
+    qty = position_size(
+        equity=10_000.0,
+        entry_price=100.0,
+        stop_price=90.0,
+        params=params,
+        adv_usd=10_000_000_000.0,
+    )
+    assert qty == pytest.approx(10.0)  # 상한 미발동 = 리스크 사이징 값.
+
+
+def test_adv_cap_none_adv_usd_is_no_cap() -> None:
+    """상한이 켜져 있어도 `adv_usd`가 없으면(워밍업 등) 걸지 않는다 — 조용히 0으로 만들지 않는다."""
+    params = PositionSizingParams(
+        risk_per_trade=0.01, leverage=5.0, max_notional_adv_fraction=0.005
+    )
+    qty = position_size(
+        equity=1_000_000.0, entry_price=100.0, stop_price=90.0, params=params, adv_usd=None
+    )
+    # ADV 정보 없음 → 상한 없음 → 리스크 사이징(명목 100_000 = leverage 5×1M 한참 아래).
+    assert qty == pytest.approx(1_000.0)
+
+
+def test_adv_cap_rejects_non_positive_fraction() -> None:
+    with pytest.raises(ValueError):
+        PositionSizingParams(max_notional_adv_fraction=0.0)
+    with pytest.raises(ValueError):
+        PositionSizingParams(adv_window_days=0)
