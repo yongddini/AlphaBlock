@@ -1935,6 +1935,21 @@ KST인데 경고는 UTC" 같은 어긋남이 다시 생긴다.
 - 로그는 `use_kst_logging()`이 `logging.Formatter.converter`를 갈아끼워 **머신 시간대와
   무관하게** KST로 찍는다(WAN-174 리눅스 서버는 UTC라 노트북과 어긋났다).
 
+## UI/대시보드 이슈 워크플로우 (WAN-259 = 사용자 결정 2026-08-06)
+
+📌 **UI·대시보드 화면 이슈는 맨땅에서 짜지 않는다** — 「① 별도 HTML 디자인 도구로 목업
+생성 → ② 사용자 승인 → ③ 저장소 개발자가 Streamlit(`dashboard/`)에 배선」 순서로 간다
+(사용자가 이 워크플로우를 확정했다). 규칙이 이슈 코멘트 한 곳에만 있으면 다음 UI 이슈에
+자동 적용되지 않으므로(PM 러너는 실행 간 기억이 없고 개발자도 매번 이슈 본문만 본다) 여기
+명문화해 매 실행·개발 시 항상 참조되게 한다.
+
+- **디자인 도구에는 기존 대시보드 파일을 반드시 import해 지금 화면의 시각 문법을 잇는다**
+  (맨땅 디자인 금지) — 특히 `dashboard/lightweight_chart.py` +
+  `dashboard/static/lightweight-charts.standalone.production.js`.
+- ⚠️ **목업은 「시각·인터랙션 명세」이지 드롭인 코드가 아니다** — 지금 대시보드는 Streamlit
+  + Lightweight Charts라 HTML 목업을 그대로 붙일 수 없다. "이렇게 보이고 이렇게 동작한다"의
+  기준으로만 쓰고, 배선은 개발자가 Streamlit 위에서 다시 한다.
+
 ## 기술 스택
 
 Python 3.11+ · uv · ccxt · pandas · asyncio · pydantic-settings
