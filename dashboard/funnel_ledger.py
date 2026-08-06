@@ -41,13 +41,16 @@ ALL = "전체"
 
 #: 결과 사유 코드 → 화면 라벨. 원문 코드(`zone_width`)는 화면에 그대로 나가면 안 되고,
 #: 모르는 코드는 원문을 남긴다(조용히 빈칸으로 만들지 않는다 — 그래야 고칠 수 있다).
+#: ⚠️ 이건 표에 들어가는 **압축 칩** register다 — 문장형 단일 출처는
+#: `order_journal.REASON_PHRASES`. `슬롯참`은 오픈 포지션·대기 주문 점유를 함께 뜻한다
+#: (`cell_busy`, WAN-257) — "보유 중"처럼 좁히지 말 것.
 REASON_LABELS: dict[str, str] = {
     LEDGER_REASON_ENTERED: "진입",
     LEDGER_REASON_UNRECORDED: "체결(처분 미기록)",
     LEDGER_REASON_NO_FILL: "미체결(안 닿음)",
     LEDGER_REASON_DEVIATION: "밴드 기각",
     SKIP_REASON_ZONE_WIDTH: "존폭 기각",
-    SKIP_REASON_CELL_BUSY: "슬롯 참",
+    SKIP_REASON_CELL_BUSY: "슬롯참",
     SKIP_REASON_RETAP: "재탭",
     REJECT_CODE_NOTIONAL: "명목 상한",
     REJECT_CODE_SIZING: "사이징 가드",

@@ -197,7 +197,9 @@ def test_daily_summary_appends_fill_rate_and_reasons() -> None:
     assert "· 지정가에 안 닿아 만료 …… 18" in msg
     assert "· 존이 너무 넓어 제외 …… 5" in msg
     assert "· 밴드가 불리해 제외 …… 3" in msg
-    assert "· 같은 종목·주기에 포지션 보유 중 …… 2" in msg
+    # cell_busy는 오픈 포지션뿐 아니라 대기 지정가 주문 점유도 포함한다(WAN-257) — 문장이
+    # 그 뜻을 드러내야 "진입 0인데 왜 보유 중?" 혼동이 안 난다.
+    assert "· 같은 종목·주기에 포지션 보유 또는 대기 주문 있음 …… 2" in msg
     assert "· 명목 한도 초과 …… 1" in msg
     assert "· 손절이 너무 짧아 제외 …… 4" in msg
 

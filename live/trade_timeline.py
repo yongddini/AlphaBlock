@@ -140,7 +140,9 @@ _LIVE_STATUS_LABELS = {
 
 #: `skipped` 행의 세부 사유(`skip_reason`, WAN-217) → 한글. `fill_report`의 존폭기각/슬롯참/
 #: 재탭 어휘와 같은 낱말을 써 두 화면이 갈라지지 않게 한다(완료 기준 3). `거부(사유)`처럼
-#: `건너뜀(사유)`로 병기해 "왜 걸렀나"를 한눈에 읽힌다.
+#: `건너뜀(사유)`로 병기해 "왜 걸렀나"를 한눈에 읽힌다. ⚠️ 문장형 단일 출처는
+#: `order_journal.REASON_PHRASES`이고 이건 그 압축 register다 — `슬롯참`은 오픈 포지션·대기
+#: 주문 점유를 함께 뜻한다(`cell_busy`, WAN-257).
 _SKIP_REASON_LABELS = {
     SKIP_REASON_ZONE_WIDTH: "존폭",
     SKIP_REASON_CELL_BUSY: "슬롯참",

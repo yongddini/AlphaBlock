@@ -53,7 +53,7 @@ from live.message_format import (
     fmt_usd,
     short_symbol,
 )
-from live.order_journal import FunnelCounts
+from live.order_journal import REASON_PHRASES, FunnelCounts
 from strategy.models import OrderBlockDirection, SignalExitReason
 
 _logger = logging.getLogger(__name__)
@@ -190,16 +190,10 @@ def _fmt_rate(value: float | None) -> str:
 
 
 #: 사유 코드 → 사람이 읽는 문구. 일일 요약과 건별 필터 알림이 **한 출처**를 공유해,
-#: 같은 사유가 두 곳에서 다르게 보이지 않게 한다(WAN-221 변경요청 2026-07-31).
-_REASON_PHRASES: dict[str, str] = {
-    "no_fill": "지정가에 안 닿아 만료",
-    "zone_width": "존이 너무 넓어 제외",
-    "deviation": "밴드가 불리해 제외",
-    "cell_busy": "같은 종목·주기에 포지션 보유 중",
-    "notional": "명목 한도 초과",
-    "sizing": "손절이 너무 짧아 제외",
-    "retap": "이미 진입한 존의 재탭이라 제외",
-}
+#: 같은 사유가 두 곳에서 다르게 보이지 않게 한다(WAN-221 변경요청 2026-07-31). 그 출처는
+#: 이제 `order_journal.REASON_PHRASES`다 — 코드를 소유한 모듈에 두어 대시보드·타임라인·
+#: 리포트와도 어휘가 갈라지지 않게 한다(WAN-257). 여기서 재정의하지 말 것.
+_REASON_PHRASES = REASON_PHRASES
 
 
 def format_daily_summary(

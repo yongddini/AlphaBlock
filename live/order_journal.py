@@ -87,6 +87,7 @@ __all__ = [
     "LEDGER_REASON_OTHER",
     "LEDGER_REASON_UNRECORDED",
     "MARGINAL_FILL_BPS",
+    "REASON_PHRASES",
     "SKIP_REASON_CELL_BUSY",
     "SKIP_REASON_RETAP",
     "SKIP_REASON_ZONE_WIDTH",
@@ -149,6 +150,24 @@ LEDGER_REASON_NO_FILL = "no_fill"
 LEDGER_REASON_DEVIATION = "deviation"
 #: 그 밖의 체결 후 거부(리스크 한도 등) · 코드 미기록 거부(WAN-221 이전 행).
 LEDGER_REASON_OTHER = "other"
+
+#: 미진입 사유 코드 → 사람이 읽는 **문장**(텔레그램 요약·건별 알림·리포트가 공유하는
+#: 단일 출처). 코드 상수를 그대로 키로 써서(백테스트 북·라이브 스킵과 같은 어휘) 라벨과
+#: 집계가 두 벌로 갈라지지 않게 한다 — 대시보드·타임라인의 **압축 칩**(`슬롯참` 등)은 같은
+#: 코드의 짧은 표기라 별도 register지만 뜻은 여기서 온다.
+#: ⚠️ `cell_busy`는 오픈 포지션뿐 아니라 **아직 체결 안 된 대기 지정가 주문**이 슬롯을
+#: 잡고 있어도 발생한다(단일-대기-주문 규칙, `SKIP_REASON_CELL_BUSY` 문단). 그래서 문장이
+#: "포지션 보유 중"만 말하면 "진입한 적 없는데 왜 보유 중?"이라는 혼동을 낳는다(WAN-257) —
+#: 대기 주문 점유를 반드시 함께 드러낸다.
+REASON_PHRASES: dict[str, str] = {
+    LEDGER_REASON_NO_FILL: "지정가에 안 닿아 만료",
+    SKIP_REASON_ZONE_WIDTH: "존이 너무 넓어 제외",
+    LEDGER_REASON_DEVIATION: "밴드가 불리해 제외",
+    SKIP_REASON_CELL_BUSY: "같은 종목·주기에 포지션 보유 또는 대기 주문 있음",
+    REJECT_CODE_NOTIONAL: "명목 한도 초과",
+    REJECT_CODE_SIZING: "손절이 너무 짧아 제외",
+    SKIP_REASON_RETAP: "이미 진입한 존의 재탭이라 제외",
+}
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS live_limit_orders (
