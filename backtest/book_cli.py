@@ -137,11 +137,16 @@ def build_book_rows(
     segments: Sequence[str],
     start_ms: int,
     end_ms: int,
+    include_reentry: bool = False,
 ) -> list[BookRunRow]:
     """이미 만든 칸 후보(payloads)에서 요청 구간별 북 행을 낸다.
 
     후보 생성(무거운 연산)과 배치 회계(가벼운 연산)를 분리한다 — 검산 테스트가 이 함수에
     직접 payloads를 넘겨 실데이터 로딩 없이 배치 회계만 비트 대조할 수 있게 한다.
+
+    `include_reentry`(WAN-261, 옵트인)를 켜면 각 칸의 재진입 후보(payload에 실려 있을 때만)를
+    base 재탭 후보와 합쳐 한 지갑에서 시퀀싱한다. 기본(False)이면 base만 돌아 인자 없는
+    `backtest.run`과 비트 단위로 같다(완료기준 2).
     """
     unknown = [s for s in segments if s not in SUPPORTED_SEGMENTS]
     if unknown:
@@ -153,7 +158,7 @@ def build_book_rows(
     num_symbols = len({p.symbol for p in payloads})
     rows: list[BookRunRow] = []
     for segment in segments:
-        cells = _segment_cells(payloads, segment, "")
+        cells = _segment_cells(payloads, segment, "", include_reentry=include_reentry)
         outcome = run_leverage_book(cells, base_cfg, book)
         result = build_result_from_trades(
             outcome.trades, outcome.effective_config, BOOK_ANNUALIZATION_TF
@@ -175,16 +180,21 @@ def run_book(
     funding_proxy: bool = True,
     jobs: int = 1,
     log: bool = True,
+    reentry: bool = False,
 ) -> list[BookRunRow]:
     """채택 북을 실데이터에서 돌려 구간별 집계 행을 낸다.
 
     `wan169.run_cells`(칸별 후보·따뜻한 경계) → `apply_funding_proxy`(신규 종목 BTC 대리) →
     `_segment_cells`(구간별 칸) → `run_leverage_book`(공유 자본 배치). 전부 측정 리포트가
     쓰는 함수 그대로라 wan180 셀과 구성상 비트 일치한다.
+
+    `reentry`(WAN-261, 옵트인)를 켜면 「익절 후 존 내 재진입」 후보를 만들어(`run_cells`) base
+    재탭 후보와 함께 북에 넣는다(`build_book_rows(include_reentry=True)`). 끄면(기본) 인자 없는
+    `backtest.run`과 비트 단위로 같다.
     """
     from backtest.run import parse_date_ms  # 지연 import(사이클 회피)
 
-    payloads = run_cells(symbols, timeframes, start=start, end=end, jobs=jobs)
+    payloads = run_cells(symbols, timeframes, start=start, end=end, jobs=jobs, reentry=reentry)
     if funding_proxy:
         payloads, note = apply_funding_proxy(payloads)
         if note and log:
@@ -195,6 +205,7 @@ def run_book(
         segments=segments,
         start_ms=parse_date_ms(start),
         end_ms=parse_date_ms(end),
+        include_reentry=reentry,
     )
 
 
