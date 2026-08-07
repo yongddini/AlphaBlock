@@ -66,7 +66,7 @@ from __future__ import annotations
 
 import argparse
 import bisect
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -155,7 +155,7 @@ def _direction(side: PositionSide) -> OrderBlockDirection:
     return OrderBlockDirection.BULLISH if side is PositionSide.LONG else OrderBlockDirection.BEARISH
 
 
-def reentry_events(
+def _iter_reentries(
     cand: _Candidate,
     *,
     parent_exit_time: int,
@@ -166,22 +166,25 @@ def reentry_events(
     params: ConfluenceParams,
     cfg: BacktestConfig,
     funding_rates: Sequence[FundingRate] | None,
-) -> list[_Reentry]:
-    """익절로 닫힌 한 존을 익절 직후부터 무효화까지 지정가 재무장해 재진입을 센다.
+) -> Iterator[tuple[_Candidate, _Reentry]]:
+    """익절로 닫힌 한 존의 재무장 루프 코어 — `(_Candidate, _Reentry)`를 하나씩 낸다.
 
-    체결·손절·익절·무효화 판정은 `simulate_zone_limit_trade`(엔진과 동일)를 그대로 쓴다.
-    지정가는 원래 체결가(`cand.entry_price`)로 **고정**하고(이슈 §1 정의), 익절 목표는
-    고정 1.5R(진입가→무효화 경계)이다. 익절로 닫히면 다시 무장(가격이 또 되돌아올 수
-    있다), 손절·미체결·데이터끝이면 그 존은 끝난다.
+    `reentry_events`(격리 손익 measurement)와 `reentry_candidates`(북 시퀀서 주입, WAN-261)가
+    **같은 이 루프**를 공유한다 — 두 곳이 재무장 로직을 복제하면 갈라진다(WAN-95 교훈). 낸
+    `_Candidate`는 익절·손절·데이터끝 청산이 확정된 값이라 북이 재시뮬 없이 `_to_trade`로
+    배치할 수 있고, `_Reentry`는 census/널의 격리 손익 자다. 체결·손절·익절·무효화 판정은
+    `simulate_zone_limit_trade`(엔진과 동일)를 그대로 쓴다. 지정가는 원래 체결가
+    (`cand.entry_price`)로 **고정**하고(이슈 §1 정의), 익절 목표는 고정 1.5R이다. 익절로
+    닫히면 다시 무장, 손절·미체결·데이터끝이면 그 존은 끝난다.
     """
     ob = cand.order_block
     if ob is None:
-        return []
+        return
     limit_price = cand.entry_price
     stop_price = cand.stop_price
     risk = abs(limit_price - stop_price)
     if risk <= 0.0:
-        return []  # 1R을 못 재는 존은 재진입 손익도 못 낸다.
+        return  # 1R을 못 재는 존은 재진입 손익도 못 낸다.
     is_long = cand.side is PositionSide.LONG
     take_profit_price = (
         limit_price + params.take_profit_r * risk
@@ -191,7 +194,6 @@ def reentry_events(
     invalidation_time = ob.break_time if params.use_order_block_stop else None
     direction = _direction(cand.side)
 
-    events: list[_Reentry] = []
     cursor = parent_exit_time  # 익절 시각. 재무장은 그 **직후** 서브스텝부터.
     for _ in range(_MAX_REARM_PER_ZONE):
         start = bisect.bisect_right(substep_times, cursor)
@@ -243,23 +245,92 @@ def reentry_events(
             exit_price=exit_price,
             reason=reason,
             stop_price=stop_price,
+            # 아래 둘은 진단·북 배선 전용이라 `_to_trade`가 무시한다(격리 손익 불변) —
+            # `order_block`은 재진입도 같은 존을 근거로 삼음을 남기고, `trigger_time`은
+            # 탭이 없는 재진입을 북의 구간 버킷(`trigger_time >= 경계`)에 올바로 넣는 키다.
+            order_block=ob,
+            trigger_time=outcome.entry_time,
         )
         # 격리 순손익: 기준자본에서 독립 체결(동시 1포지션·자본 경합 미반영 = 상한).
         trade = _to_trade(re_cand, cfg.initial_capital, cfg, funding_rates)
         net_return_pp = (trade.return_pct * 100.0) if trade is not None else 0.0
-        events.append(
+        yield (
+            re_cand,
             _Reentry(
                 entry_time=outcome.entry_time,
                 is_win=is_win,
                 is_stop=is_stop,
                 gross_r=gross_r,
                 net_return_pp=net_return_pp,
-            )
+            ),
         )
         if not is_win:
             break  # 손절(존 무효화)·데이터끝이면 이 존은 끝. 익절이라야 또 무장한다.
         cursor = exit_time
-    return events
+
+
+def reentry_events(
+    cand: _Candidate,
+    *,
+    parent_exit_time: int,
+    substeps: Sequence[SubStep],
+    substep_times: Sequence[int],
+    htf_times: Sequence[int],
+    htf_closes: Sequence[float],
+    params: ConfluenceParams,
+    cfg: BacktestConfig,
+    funding_rates: Sequence[FundingRate] | None,
+) -> list[_Reentry]:
+    """익절로 닫힌 한 존을 익절 직후부터 무효화까지 지정가 재무장해 재진입 손익을 센다."""
+    return [
+        event
+        for _cand, event in _iter_reentries(
+            cand,
+            parent_exit_time=parent_exit_time,
+            substeps=substeps,
+            substep_times=substep_times,
+            htf_times=htf_times,
+            htf_closes=htf_closes,
+            params=params,
+            cfg=cfg,
+            funding_rates=funding_rates,
+        )
+    ]
+
+
+def reentry_candidates(
+    cand: _Candidate,
+    *,
+    parent_exit_time: int,
+    substeps: Sequence[SubStep],
+    substep_times: Sequence[int],
+    htf_times: Sequence[int],
+    htf_closes: Sequence[float],
+    params: ConfluenceParams,
+    cfg: BacktestConfig,
+    funding_rates: Sequence[FundingRate] | None,
+) -> list[_Candidate]:
+    """익절 후 재무장 재진입을 **북 시퀀서에 주입할 `_Candidate`로** 낸다(WAN-261).
+
+    `reentry_events`와 같은 재무장 루프(`_iter_reentries`)를 쓰되 손익 요약이 아니라 청산이
+    확정된 후보를 돌려준다 — 북(`run_leverage_book`)이 채택 지정가(재탭) 후보와 함께 한
+    지갑에서 시퀀싱하면 칸당 1포지션·공유 자본·명목 상한 제약이 자연히 적용된다. 청산이
+    미리 정해져 있어 북은 재시뮬 없이 `_to_trade`로 배치한다(base 후보와 같은 규약).
+    """
+    return [
+        re_cand
+        for re_cand, _event in _iter_reentries(
+            cand,
+            parent_exit_time=parent_exit_time,
+            substeps=substeps,
+            substep_times=substep_times,
+            htf_times=htf_times,
+            htf_closes=htf_closes,
+            params=params,
+            cfg=cfg,
+            funding_rates=funding_rates,
+        )
+    ]
 
 
 # --------------------------------------------------------------------------- #

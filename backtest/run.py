@@ -879,6 +879,17 @@ def build_parser() -> argparse.ArgumentParser:
             "결과는 --jobs 값과 무관하게 동일하다"
         ),
     )
+    execution.add_argument(
+        "--reentry",
+        choices=["on", "off"],
+        default="off",
+        help=(
+            "「익절 후 존 내 재진입」을 채택 북에 켠다(WAN-261, 북 모드 전용, 기본 off). on이면 "
+            "익절 후 재무장(WAN-228)이 낸 재진입 후보를 채택 재탭 후보와 함께 한 지갑에서 "
+            "시퀀싱한다. off면 인자 없는 실행과 비트 단위로 같다. per-cell(--positions single/"
+            "숫자)과는 함께 못 쓴다."
+        ),
+    )
 
     output = parser.add_argument_group("출력")
     output.add_argument("--format", default="table", choices=list(FORMATS))
@@ -1082,6 +1093,7 @@ def run_book_main(args: argparse.Namespace, book: LeverageBookParams) -> int:
             segments=segments,
             jobs=jobs,
             log=not args.quiet,
+            reentry=args.reentry == "on",
         )
     except ValueError as exc:
         print(f"오류: {exc}", file=sys.stderr)
@@ -1291,6 +1303,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         book = _book_from_args(args)
     except ValueError as exc:
         print(f"오류: {exc}", file=sys.stderr)
+        return 2
+    if args.reentry == "on" and book is None:
+        # 재진입은 북 회계 전용이다 — per-cell 경로엔 공유 자본이 없어 「재진입 켰다」는
+        # 라벨을 단 채 조용히 무시된다(WAN-95 교훈). 조용히 접지 않고 거부한다.
+        print(
+            "오류: --reentry on은 북 모드 전용입니다(WAN-261) — per-cell 축(--positions "
+            "single/숫자·전략·비용·거래별)과 함께 쓸 수 없습니다.",
+            file=sys.stderr,
+        )
         return 2
     if book is not None:
         return run_book_main(args, book)

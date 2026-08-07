@@ -38,7 +38,7 @@ import argparse
 import math
 from collections.abc import Sequence
 from concurrent.futures import ProcessPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pandas as pd
@@ -55,16 +55,21 @@ from backtest.harness import (
     Segment,
 )
 from backtest.leverage_book import BookCell, LeverageBookParams, run_leverage_book
-from backtest.models import BacktestConfig
+from backtest.models import BacktestConfig, ExitReason
 from backtest.run import parse_date_ms
+from backtest.substep import build_substeps
+from backtest.sweep import timeframe_to_ms
 from backtest.wan167_position_census import ALL_SYMBOLS, MAIN_TIMEFRAMES
+from backtest.wan228_reentry_census import reentry_candidates as _reentry_candidates_for_cand
 from backtest.zone_limit_backtest import (
     _Candidate,
+    _prepare_htf,
     build_result_from_trades,
     build_zone_limit_candidates,
     sequence_with_candidates,
 )
 from data.models import FundingRate
+from strategy.models import ConfluenceParams
 
 REPORTS_DIR = Path("backtest/reports")
 DEFAULT_CELLS_CSV = REPORTS_DIR / "wan169_leverage_book_cells.csv"
@@ -203,6 +208,11 @@ class _Task:
     """WAN-244(옵트인): 설정하면 후보 생성 cfg의 `max_notional_adv_fraction`을 이 값으로 둬
     각 후보에 룩어헤드-안전 `adv_usd`를 싣는다(용량 상한 측정용). None(기본)이면 예전과
     비트 단위로 같다 — ADV를 계산조차 하지 않고 후보 집합·격리 성과가 불변이다."""
+    reentry: bool = False
+    """WAN-261(옵트인): 켜면 각 구간의 base 후보에서 「익절 후 존 내 재진입」 후보
+    (WAN-228 재무장 로직)를 추가로 만들어 `CellPayload.reentry_candidates`에 싣는다. base
+    후보·격리 성과 행은 **불변**이라(재진입은 별도 dict에 담긴다) 끄면 예전과 비트 단위로
+    같다 — 재진입은 `_segment_cells(include_reentry=True)`에서만 북에 들어간다."""
 
 
 @dataclass(frozen=True)
@@ -221,6 +231,10 @@ class CellPayload:
     """구간(`full`/`is`/`oos`) → 후보. `oos_warm`은 `full`을 경계로 걸러 만든다."""
     funding: dict[str, tuple[FundingRate, ...]]
     rows: tuple[CellRow, ...]
+    reentry_candidates: dict[str, tuple[_Candidate, ...]] = field(default_factory=dict)
+    """구간 → 「익절 후 존 내 재진입」 후보(WAN-261, 옵트인). 빈 dict(기본)이면 예전과
+    비트 단위로 같다 — `_segment_cells(include_reentry=True)`에서만 base 후보와 합쳐 북에
+    들어간다. `oos_warm`은 base와 같은 규약으로 `full`을 칸별 경계로 걸러 만든다."""
 
 
 def _isolated_metrics(
@@ -234,6 +248,51 @@ def _isolated_metrics(
     result = build_result_from_trades(trades, cfg, timeframe)
     m = result.metrics
     return m.num_trades, m.win_rate, m.total_return, m.max_drawdown
+
+
+def reentry_candidates_for_window(
+    window: harness.MarketData,
+    candidates: Sequence[_Candidate],
+    *,
+    params: ConfluenceParams,
+    cfg: BacktestConfig,
+    timeframe: str,
+) -> list[_Candidate]:
+    """이 창의 base 후보에서 「익절 후 존 내 재진입」 후보를 만든다(WAN-261, 옵트인).
+
+    재진입은 채택 엔진이 하지 않는 동작이라 base 후보로는 표현되지 않는다 — 그래서
+    base를 **단일 포지션으로 시퀀싱**해 실제 익절 거래를 얻은 뒤(WAN-228 census와 같은
+    규약), 익절로 닫힌 존마다 지정가를 재무장해 재진입 후보를 낸다(`reentry_candidates`,
+    WAN-228 로직 공유). 낸 후보는 청산이 확정돼 있어 북이 재시뮬 없이 배치한다. base
+    후보·격리 성과는 건드리지 않는다(별도 반환).
+    """
+    if not candidates:
+        return []
+    paired = sequence_with_candidates(list(candidates), cfg, window.funding_rates)
+    htf_ms = timeframe_to_ms(timeframe)
+    frame = _prepare_htf(window.htf_df)
+    htf_times = [int(t) for t in frame["open_time"].astype("int64").tolist()]
+    htf_closes = [float(v) for v in frame["close"].astype(float).tolist()]
+    substeps = build_substeps(window.df_1m, htf_ms)
+    substep_times = [s.time for s in substeps]
+    out: list[_Candidate] = []
+    for cand, trade in paired:
+        if cand.reason is not ExitReason.TAKE_PROFIT or cand.order_block is None:
+            continue
+        out.extend(
+            _reentry_candidates_for_cand(
+                cand,
+                parent_exit_time=trade.exit_time,
+                substeps=substeps,
+                substep_times=substep_times,
+                htf_times=htf_times,
+                htf_closes=htf_closes,
+                params=params,
+                cfg=cfg,
+                funding_rates=window.funding_rates,
+            )
+        )
+    return out
 
 
 def run_cell(task: _Task, *, log: bool = True) -> CellPayload:
@@ -264,6 +323,7 @@ def run_cell(task: _Task, *, log: bool = True) -> CellPayload:
 
     candidates: dict[str, tuple[_Candidate, ...]] = {}
     funding: dict[str, tuple[FundingRate, ...]] = {}
+    reentry: dict[str, tuple[_Candidate, ...]] = {}
     rows: list[CellRow] = []
 
     boundary = harness.eval_boundary_ms(market, WARM_OOS_SEGMENT)
@@ -286,6 +346,14 @@ def run_cell(task: _Task, *, log: bool = True) -> CellPayload:
         )
         candidates[segment_name] = tuple(cands)
         funding[segment_name] = tuple(window.funding_rates)
+        if task.reentry:
+            # WAN-261(옵트인): base 후보에서 「익절 후 존 내 재진입」 후보를 별도로 만든다.
+            # base 후보·격리 성과 행은 건드리지 않으므로 끄면 예전과 비트 단위로 같다.
+            reentry[segment_name] = tuple(
+                reentry_candidates_for_window(
+                    window, cands, params=params, cfg=cfg, timeframe=task.timeframe
+                )
+            )
 
         num_trades, win_rate, total_return, mdd = _isolated_metrics(
             cands, cfg, task.timeframe, window.funding_rates
@@ -345,6 +413,7 @@ def run_cell(task: _Task, *, log: bool = True) -> CellPayload:
         candidates=candidates,
         funding=funding,
         rows=tuple(rows),
+        reentry_candidates=reentry,
     )
 
 
@@ -360,11 +429,15 @@ def run_cells(
     end: str,
     jobs: int = 1,
     adv_fraction: float | None = None,
+    reentry: bool = False,
 ) -> list[CellPayload]:
     """전 칸을 돈다. `jobs`는 성능 노브이지 결과 축이 아니다(WAN-121).
 
     `adv_fraction`(WAN-244, 옵트인)을 주면 후보에 룩어헤드-안전 `adv_usd`를 실어 용량 상한을
     잴 수 있게 한다 — None(기본)이면 예전과 비트 단위로 같다(book_cli·wan180 무영향).
+
+    `reentry`(WAN-261, 옵트인)를 켜면 각 칸의 payload에 「익절 후 존 내 재진입」 후보를
+    함께 싣는다 — base 후보·격리 성과 행은 불변이라 끄면(기본) 예전과 비트 단위로 같다.
     """
     tasks = [
         _Task(
@@ -373,6 +446,7 @@ def run_cells(
             start_ms=parse_date_ms(start),
             end_ms=parse_date_ms(end),
             adv_fraction=adv_fraction,
+            reentry=reentry,
         )
         for symbol in symbols
         for timeframe in timeframes
@@ -388,22 +462,52 @@ def run_cells(
 # --------------------------------------------------------------------------- #
 
 
+def _reentry_for_segment(payload: CellPayload, segment: str) -> list[_Candidate]:
+    """이 구간에 얹을 재진입 후보(WAN-261) — base와 같은 규약으로 버킷한다.
+
+    `oos_warm`은 base처럼 full 재진입 후보를 칸별 경계로 거른다(재진입의 `trigger_time`은
+    진입 시각이라 base와 같은 straddle (b) 경계식을 탄다). payload에 재진입이 없으면 빈
+    리스트라 include_reentry=True여도 base만 남는다(비트 재현).
+    """
+    if not payload.reentry_candidates:
+        return []
+    if segment == SEGMENT_OOS_WARM:
+        return [
+            c
+            for c in payload.reentry_candidates.get(SEGMENT_FULL, ())
+            if c.trigger_time >= payload.boundary_ms
+        ]
+    return list(payload.reentry_candidates.get(segment, ()))
+
+
 def _segment_cells(
-    payloads: Sequence[CellPayload], segment: str, exclude_symbol: str
+    payloads: Sequence[CellPayload],
+    segment: str,
+    exclude_symbol: str,
+    *,
+    include_reentry: bool = False,
 ) -> list[BookCell]:
-    """이 구간의 북 입력 칸들. `oos_warm`은 full 후보를 칸별 경계로 거른다(straddle (b))."""
+    """이 구간의 북 입력 칸들. `oos_warm`은 full 후보를 칸별 경계로 거른다(straddle (b)).
+
+    `include_reentry`(WAN-261, 옵트인)를 켜면 각 칸의 재진입 후보(payload에 실려 있을 때만)를
+    base 후보와 **합쳐** 북에 넣는다 — 북 시퀀서가 칸당 1포지션·공유 자본·명목 상한으로
+    재탭과 재진입을 한 지갑에서 함께 배치한다. 기본(False)이면 base만 넣어 예전과 비트 단위로
+    같다(wan169 격자·book_cli 기본 경로 무영향).
+    """
     cells: list[BookCell] = []
     for payload in payloads:
         if exclude_symbol and _short(payload.symbol) == exclude_symbol:
             continue
         if segment == SEGMENT_OOS_WARM:
-            cands: Sequence[_Candidate] = [
+            cands: list[_Candidate] = [
                 c for c in payload.candidates[SEGMENT_FULL] if c.trigger_time >= payload.boundary_ms
             ]
             rates = payload.funding[SEGMENT_FULL]
         else:
             cands = list(payload.candidates[segment])
             rates = payload.funding[segment]
+        if include_reentry:
+            cands = [*cands, *_reentry_for_segment(payload, segment)]
         cells.append(
             BookCell(
                 symbol=payload.symbol,

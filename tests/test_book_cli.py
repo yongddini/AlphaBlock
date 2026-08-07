@@ -225,6 +225,54 @@ def test_bare_cli_default_runs_the_book_not_single_position() -> None:
     assert row.leverage_multiple == 5.0
 
 
+def test_reentry_on_requires_book_mode(capsys: pytest.CaptureFixture[str]) -> None:
+    """--reentry on은 북 전용 — per-cell 축과 함께 주면 종료 코드 2(조용한 무시 방지, WAN-261)."""
+    assert main(["--positions", "single", "--reentry", "on"]) == 2
+    assert "북 모드 전용" in capsys.readouterr().err
+
+
+def test_reentry_off_alone_is_still_the_book() -> None:
+    """--reentry off(기본)만 주면 여전히 북이다 — 재진입 플래그는 북 축이라 거부 대상이 아니다."""
+    assert _book_from_args(build_parser().parse_args(["--reentry", "off"])) == ADOPTED_BOOK
+    assert _book_from_args(build_parser().parse_args(["--reentry", "on"])) == ADOPTED_BOOK
+
+
+def test_reentry_off_bit_identical_to_default_book() -> None:
+    """재진입 off ≡ 인자 없는 채택 북(WAN-261 완료기준 2) — 실데이터에서 비트 일치."""
+    _require_real_data()
+    kw = dict(
+        start=_START,
+        end=_END,
+        book=ADOPTED_BOOK,
+        segments=[SEGMENT_FULL, SEGMENT_OOS_WARM],
+        jobs=1,
+        log=False,
+    )
+    default = book_cli.run_book(_SYMBOLS, _TFS, **kw)  # type: ignore[arg-type]
+    off = book_cli.run_book(_SYMBOLS, _TFS, reentry=False, **kw)  # type: ignore[arg-type]
+    for a, b in zip(default, off, strict=True):
+        assert a.model_dump() == b.model_dump()
+
+
+def test_reentry_on_adds_trades_and_rides_book() -> None:
+    """재진입 on은 base보다 후보가 늘어 북을 다르게 탄다(라벨만 붙는 실패 방지, WAN-261)."""
+    _require_real_data()
+    kw = dict(
+        start=_START,
+        end=_END,
+        book=ADOPTED_BOOK,
+        segments=[SEGMENT_FULL],
+        jobs=1,
+        log=False,
+    )
+    off = book_cli.run_book(_SYMBOLS, _TFS, reentry=False, **kw)[0]  # type: ignore[arg-type]
+    on = book_cli.run_book(_SYMBOLS, _TFS, reentry=True, **kw)[0]  # type: ignore[arg-type]
+    # 재진입은 익절 후 추가 후보이므로 거래가 늘거나 같다(줄지는 않는다).
+    assert on.num_trades >= off.num_trades
+    # 이 창엔 실제로 재진입이 생겨 후보가 늘어야 한다(동작 고정 — 아니면 배선이 죽은 것).
+    assert on.num_trades > off.num_trades
+
+
 def test_book_warm_and_cold_oos_parity() -> None:
     """`--oos-warm` 구간이 북 경로에서 나온다(WAN-213 §3 · WAN-166 정본).
 
