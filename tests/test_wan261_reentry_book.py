@@ -29,8 +29,10 @@ from backtest.wan228_reentry_census import reentry_candidates, reentry_events
 from backtest.wan261_reentry_book import (
     BookScopeRow,
     CellReturnRow,
+    _verdict_15m,
     book_from_csv,
     book_to_frame,
+    build_summary_markdown,
     cells_from_csv,
     cells_to_frame,
     merge_book,
@@ -306,12 +308,64 @@ def test_merge_book_drops_stale_all_on_new_run() -> None:
     assert next(r for r in merged if r.scope == "all").total_return == 0.5
 
 
-def _cell_return(timeframe: str, *, total_return: float = 0.1) -> CellReturnRow:
+def test_verdict_15m_present_when_scope_exists() -> None:
+    """15m 스코프가 있으면 판정에 15m 위험 델타 + 낙관 의존 경고가 붙는다(완료기준 — 15m 명시)."""
+    rows = [
+        _book_row(scope="15m", arm="off", max_drawdown=0.06, max_concurrent_risk=0.05),
+        _book_row(scope="15m", arm="on", max_drawdown=0.09, max_concurrent_risk=0.07),
+    ]
+    note = _verdict_15m(rows)
+    assert note.startswith("📌 **15m")
+    assert "6.00% → 9.00%" in note  # off→on MDD가 행에서 계산된다(하드코딩 아님).
+    assert "가장 크게 의존" in note
+
+
+def test_verdict_15m_absent_without_scope() -> None:
+    """15m 스코프가 없으면(1h·2h·4h만) 빈 문자열 — 렌더러가 문단을 건너뛴다."""
+    rows = [_book_row(scope="all", arm="off"), _book_row(scope="all", arm="on")]
+    assert _verdict_15m(rows) == ""
+
+
+def test_summary_renders_per_tf_loo_and_15m_note() -> None:
+    """`all` 주 스코프면 §4가 스코프별 LOO(전체 + 각 TF)를 렌더하고 15m 판정 주석이 붙는다.
+
+    15m append 후 `main_scope`는 `all`로 남지만(병합 규칙) 완료기준은 15m LOO 표와 15m
+    판정 명시를 요구한다 — 렌더러가 그 둘을 실제로 낸다는 것을 동작으로 고정한다.
+    """
+    cell_rows = [
+        _cell_return("15m", arm="off"),
+        _cell_return("15m", arm="on"),
+        _cell_return("1h", arm="off"),
+        _cell_return("1h", arm="on"),
+    ]
+    book_rows = [
+        _book_row(scope="all", arm="off"),
+        _book_row(scope="all", arm="on"),
+        _book_row(scope="all", arm="off", exclude="BTC"),
+        _book_row(scope="all", arm="on", exclude="BTC"),
+        _book_row(scope="15m", arm="off"),
+        _book_row(scope="15m", arm="on"),
+        _book_row(scope="15m", arm="off", exclude="BTC"),
+        _book_row(scope="15m", arm="on", exclude="BTC"),
+        _book_row(scope="1h", arm="off"),
+        _book_row(scope="1h", arm="on"),
+    ]
+    md = build_summary_markdown(
+        cell_rows, book_rows, cells_csv=Path("cells.csv"), book_csv=Path("book.csv")
+    )
+    loo_section = md.split("## 4.")[1].split("## 판정")[0]
+    assert "### all" in loo_section  # 주 스코프 LOO.
+    assert "### 15m" in loo_section  # 15m LOO 표(완료기준).
+    assert "### 1h" in loo_section
+    assert "📌 **15m — 낙관 가정 최대 의존 TF.**" in md  # 15m 판정 명시.
+
+
+def _cell_return(timeframe: str, *, total_return: float = 0.1, arm: str = "on") -> CellReturnRow:
     return CellReturnRow(
         symbol="BTC/USDT:USDT",
         timeframe=timeframe,
         segment=SEGMENT_OOS_WARM,
-        arm="on",
+        arm=arm,
         num_candidates=10,
         num_trades=8,
         win_rate=0.5,

@@ -335,6 +335,34 @@ def verdict(book_rows: Sequence[BookScopeRow]) -> str:
     )
 
 
+def _verdict_15m(book_rows: Sequence[BookScopeRow]) -> str:
+    """15m 스코프가 있으면 그 위험 델타 + 낙관 가정 최대 의존 경고를 낸다(완료기준 — 15m 명시).
+
+    주 판정(`verdict`)은 `all`(1h·2h·4h) 스코프라 15m이 빠진다(부분 TF 조합의 무의미한 `all`을
+    막는 병합 규칙 때문에 15m 단독 append는 `all`을 재계산하지 않는다). 15m은 봉이 짧아
+    「스치듯 닿은 체결」(`baseline` 낙관)에 네 TF 중 **가장 크게 의존**하므로(WAN-231/203) 별도로
+    명시한다. 숫자는 행에서 계산한다(문장에 박으면 재실행 뒤 거짓말한다 — WAN-164 패턴).
+    15m 스코프가 없으면(1h·2h·4h만 있는 실행) 빈 문자열이라 렌더러가 문단을 건너뛴다.
+    """
+    off = _pick_book(book_rows, scope="15m", arm="off", segment=SEGMENT_OOS_WARM)
+    on = _pick_book(book_rows, scope="15m", arm="on", segment=SEGMENT_OOS_WARM)
+    if off is None or on is None:
+        return ""
+    d_mdd = (on.max_drawdown - off.max_drawdown) * 100
+    d_risk = (on.max_concurrent_risk - off.max_concurrent_risk) * 100
+    d_liq = on.liquidation_events - off.liquidation_events
+    return (
+        f"📌 **15m — 낙관 가정 최대 의존 TF.** 15m·oos_warm: MDD "
+        f"{off.max_drawdown * 100:.2f}% → {on.max_drawdown * 100:.2f}% (Δ{d_mdd:+.2f}%p) · "
+        f"최대 동시 리스크 {off.max_concurrent_risk * 100:.2f}% → "
+        f"{on.max_concurrent_risk * 100:.2f}% (Δ{d_risk:+.2f}%p) · 청산 {off.liquidation_events} → "
+        f"{on.liquidation_events} (Δ{d_liq:+d}) · 거래 {off.num_trades} → {on.num_trades}. "
+        "⚠️ 15m은 봉이 짧아 「스치듯 닿은 체결」(`baseline` 「닿으면 체결」 낙관)에 네 TF 중 가장 "
+        "크게 의존하므로(WAN-231/203) 위 수치는 상한이다 — 1h·2h·4h보다 못 믿을 값이며, `all` 주 "
+        "판정에는 15m을 섞지 않았다(부분 TF 조합의 무의미한 `all`을 막는 병합 규칙)."
+    )
+
+
 # --------------------------------------------------------------------------- #
 # 프레임 왕복
 # --------------------------------------------------------------------------- #
@@ -514,12 +542,24 @@ def build_summary_markdown(
         "",
         "재진입 on의 이득/손해가 특정 종목에 쏠리는지. ⚠️ 총수익%는 복리 착시라 방향만 읽는다.",
         "",
+        f"### {main_scope}",
+        "",
         *_loo_table(book_rows, main_scope, SEGMENT_OOS_WARM),
         "",
+    ]
+    if main_scope == "all":
+        for tf in timeframes:
+            lines += [f"### {tf}", "", *_loo_table(book_rows, tf, SEGMENT_OOS_WARM), ""]
+    lines += [
         "## 판정 — 재진입을 북에 얹으면 전체 위험이 어떻게 되나",
         "",
         verdict(book_rows),
         "",
+    ]
+    note_15m = _verdict_15m(book_rows)
+    if note_15m:
+        lines += [note_15m, ""]
+    lines += [
         "⚠️ **이 표는 채택 근거가 아니라 측정이다.** 격리 값(WAN-231/242/243)과 셀 직접 비교 "
         "금지(격리는 1포지션·재진입만, 이 표는 북 공유 자본). 「엣지 없음」"
         "(WAN-84/88/111/114/124/151/201)은 탭 기준 진입 판정이라 이 축과 별개다. 채택(재진입 "
