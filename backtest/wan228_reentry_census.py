@@ -70,6 +70,7 @@ from collections.abc import Iterator, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import pandas as pd
 from pydantic import BaseModel, ConfigDict
@@ -86,6 +87,7 @@ from backtest.substep import (
 from backtest.sweep import timeframe_to_ms
 from backtest.zone_limit_backtest import (
     _Candidate,
+    _IntrabarLiveLimit,
     _prepare_htf,
     _to_trade,
     build_zone_limit_candidates,
@@ -98,7 +100,18 @@ from strategy.models import (
     OrderBlockParams,
     SignalExitReason,
 )
+from strategy.realtime_band import RealtimeBand
 from strategy.realtime_rsi import RealtimeRsi
+
+#: 재무장 지정가 규칙 (WAN-267) — 어떤 가격에 재진입 주문을 다시 거는가.
+#:
+#: * ``"freeze"`` — 첫 진입가(`cand.entry_price`)를 얼려 재사용(현행 = 검산 기준점).
+#:   override 안 주면(기본) wan228/231/263 CSV가 비트 단위로 재현된다.
+#: * ``"zone"`` — 존 근단(`zone_limit_price` + 오프셋)에 재무장. 볼린저 재산정 없음.
+#: * ``"band"`` — 재무장 순간의 봉내 라이브 밴드로 지정가 재산정(`_IntrabarLiveLimit`).
+#:   ⚠️ 볼린저 규칙 3(밴드가 존 반대편이면 진입 없음) 때문에 재진입을 **아예 건너뛰는**
+#:   경우가 생겨 세 팔의 체결 집합이 달라진다(combine_obs 부류 — 직접 비교 시 명시).
+ReentryEntryRule = Literal["freeze", "zone", "band"]
 
 REPORTS_DIR = Path("backtest/reports")
 DEFAULT_CELLS_CSV = REPORTS_DIR / "wan228_reentry_census.csv"
@@ -149,6 +162,9 @@ class _Reentry:
     """비용 전 R. 익절 +1.5 · 손절 −1.0 · 데이터끝(FILLED_OPEN)은 부분 R."""
     net_return_pp: float
     """격리 순수익(%p) — 기준자본에서 독립 체결시킨 `_to_trade` 순손익 ÷ 진입 명목."""
+    depth: int = 1
+    """이 존 사슬 안 재진입 순번(1-indexed, WAN-267). 부모 익절 거래는 depth 0(=재진입
+    아님)이라 이 열에 안 들어간다 — 승자-생존 편향 통제상 다른 모집단이다(WAN-149 §4)."""
 
 
 def _direction(side: PositionSide) -> OrderBlockDirection:
@@ -166,6 +182,7 @@ def _iter_reentries(
     params: ConfluenceParams,
     cfg: BacktestConfig,
     funding_rates: Sequence[FundingRate] | None,
+    entry_rule: ReentryEntryRule = "freeze",
 ) -> Iterator[tuple[_Candidate, _Reentry]]:
     """익절로 닫힌 한 존의 재무장 루프 코어 — `(_Candidate, _Reentry)`를 하나씩 낸다.
 
@@ -173,29 +190,37 @@ def _iter_reentries(
     **같은 이 루프**를 공유한다 — 두 곳이 재무장 로직을 복제하면 갈라진다(WAN-95 교훈). 낸
     `_Candidate`는 익절·손절·데이터끝 청산이 확정된 값이라 북이 재시뮬 없이 `_to_trade`로
     배치할 수 있고, `_Reentry`는 census/널의 격리 손익 자다. 체결·손절·익절·무효화 판정은
-    `simulate_zone_limit_trade`(엔진과 동일)를 그대로 쓴다. 지정가는 원래 체결가
-    (`cand.entry_price`)로 **고정**하고(이슈 §1 정의), 익절 목표는 고정 1.5R이다. 익절로
-    닫히면 다시 무장, 손절·미체결·데이터끝이면 그 존은 끝난다.
+    `simulate_zone_limit_trade`(엔진과 동일)를 그대로 쓴다. 익절로 닫히면 다시 무장,
+    손절·미체결·데이터끝이면 그 존은 끝난다.
+
+    `entry_rule`(WAN-267)이 재무장 지정가를 정한다 — `"freeze"`(기본)면 원래 체결가
+    (`cand.entry_price`)로 **고정**(이슈 §1 정의, 기존 wan228/231/263 CSV 비트 재현),
+    `"zone"`이면 존 근단+오프셋에 다시 걸고, `"band"`면 재무장 순간의 봉내 라이브 밴드로
+    지정가를 재산정한다(`_IntrabarLiveLimit` = 엔진 본 진입과 같은 사슬). 익절 목표는 어느
+    팔이든 진입가 기준 고정 1.5R이다(밴드 팔은 시뮬레이터가 체결 순간에 낸다).
     """
     ob = cand.order_block
     if ob is None:
         return
-    limit_price = cand.entry_price
     stop_price = cand.stop_price
-    risk = abs(limit_price - stop_price)
-    if risk <= 0.0:
-        return  # 1R을 못 재는 존은 재진입 손익도 못 낸다.
     is_long = cand.side is PositionSide.LONG
-    take_profit_price = (
-        limit_price + params.take_profit_r * risk
-        if is_long
-        else limit_price - params.take_profit_r * risk
-    )
-    invalidation_time = ob.break_time if params.use_order_block_stop else None
     direction = _direction(cand.side)
+    invalidation_time = ob.break_time if params.use_order_block_stop else None
+    deviation = params.deviation_filter
+    if entry_rule == "band" and deviation is None:
+        return  # 재계산할 밴드가 없다 — 팔 1(band)은 볼린저 필터가 있어야 성립한다.
+
+    # 정적 지정가(freeze·zone)는 사슬 내내 상수다. 밴드 팔은 봉내에 정해지므로 여기서 None.
+    static_limit: float | None
+    if entry_rule == "freeze":
+        static_limit = cand.entry_price
+    elif entry_rule == "zone":
+        static_limit = params.apply_zone_limit_offset(params.zone_limit_price(ob), is_long=is_long)
+    else:
+        static_limit = None
 
     cursor = parent_exit_time  # 익절 시각. 재무장은 그 **직후** 서브스텝부터.
-    for _ in range(_MAX_REARM_PER_ZONE):
+    for depth in range(1, _MAX_REARM_PER_ZONE + 1):
         start = bisect.bisect_right(substep_times, cursor)
         if start >= len(substeps):
             break
@@ -205,24 +230,71 @@ def _iter_reentries(
         # `unconditional`이라 값은 안 보지만, 다른 게이트에서도 올바르게 돌게 시딩한다.
         cut = bisect.bisect_left(htf_times, substeps[start].htf_bar_time)
         rsi_state = RealtimeRsi.seed_from_closed(htf_closes[:cut], length=params.rsi_length)
-        outcome = simulate_zone_limit_trade(
-            direction=direction,
-            limit_price=limit_price,
-            stop_price=stop_price,
-            substeps=substeps,
-            start=start,
-            rsi_state=rsi_state,
-            rsi_oversold=params.rsi_oversold,
-            rsi_overbought=params.rsi_overbought,
-            take_profit_price=take_profit_price,
-            limit_valid_bars=None,  # 무기한 대기 = 형성-즉시 예약의 체결 대리(WAN-223 §1).
-            invalidation_time=invalidation_time,
-            rsi_gate_mode=params.rsi_gate_mode,
-            rsi_neutral_band=params.rsi_neutral_band,
-            penetration_bps=params.fill_penetration_bps,
-        )
+
+        if entry_rule == "band":
+            assert deviation is not None
+            # 밴드를 재무장 봉 **직전까지의** 확정봉으로 시딩한다 — 20번째 표본은 현재가
+            # 몫으로 비워, 엔진 본 진입(WAN-119)과 완전히 같은 사슬을 돌린다. 익절·손절은
+            # 시뮬레이터가 체결 순간에 낸다(`resolve_exits`, 오버라이드 없음 = 고정 1.5R).
+            live_limit = _IntrabarLiveLimit(
+                band=RealtimeBand.seed_from_closed(htf_closes, deviation, end=cut),
+                order_block=ob,
+                is_long=is_long,
+                params=params,
+                stop_price=stop_price,
+                lines=[],
+                trigger_time=substeps[start].time,
+            )
+            outcome = simulate_zone_limit_trade(
+                direction=direction,
+                live_limit=live_limit,
+                stop_price=stop_price,
+                substeps=substeps,
+                start=start,
+                rsi_state=rsi_state,
+                rsi_oversold=params.rsi_oversold,
+                rsi_overbought=params.rsi_overbought,
+                take_profit_price=None,
+                limit_valid_bars=None,
+                invalidation_time=invalidation_time,
+                rsi_gate_mode=params.rsi_gate_mode,
+                rsi_neutral_band=params.rsi_neutral_band,
+                penetration_bps=params.fill_penetration_bps,
+            )
+        else:
+            assert static_limit is not None
+            risk_ref = abs(static_limit - stop_price)
+            if risk_ref <= 0.0:
+                break  # 1R을 못 재는 존은 재진입 손익도 못 낸다.
+            take_profit_price = (
+                static_limit + params.take_profit_r * risk_ref
+                if is_long
+                else static_limit - params.take_profit_r * risk_ref
+            )
+            outcome = simulate_zone_limit_trade(
+                direction=direction,
+                limit_price=static_limit,
+                stop_price=stop_price,
+                substeps=substeps,
+                start=start,
+                rsi_state=rsi_state,
+                rsi_oversold=params.rsi_oversold,
+                rsi_overbought=params.rsi_overbought,
+                take_profit_price=take_profit_price,
+                limit_valid_bars=None,  # 무기한 대기 = 형성-즉시 예약의 체결 대리(WAN-223 §1).
+                invalidation_time=invalidation_time,
+                rsi_gate_mode=params.rsi_gate_mode,
+                rsi_neutral_band=params.rsi_neutral_band,
+                penetration_bps=params.fill_penetration_bps,
+            )
         if not outcome.filled or outcome.entry_time is None or outcome.entry_price is None:
             break  # NO_TOUCH / CANCELLED_INVALIDATED — 더는 되돌아오지 않았다.
+
+        # 1R은 **실제 체결가** 기준이다 — 정적 팔은 체결가 = 지정가라 예전과 같고, 밴드
+        # 팔은 봉내 확정가라 다르다. 0R이면(밴드가 손절선에 붙었다면) 손익을 못 낸다.
+        risk = abs(outcome.entry_price - stop_price)
+        if risk <= 0.0:
+            break
 
         if outcome.status is ZoneLimitStatus.FILLED_EXITED:
             assert outcome.exit_time is not None and outcome.exit_price is not None
@@ -262,6 +334,7 @@ def _iter_reentries(
                 is_stop=is_stop,
                 gross_r=gross_r,
                 net_return_pp=net_return_pp,
+                depth=depth,
             ),
         )
         if not is_win:
@@ -280,6 +353,7 @@ def reentry_events(
     params: ConfluenceParams,
     cfg: BacktestConfig,
     funding_rates: Sequence[FundingRate] | None,
+    entry_rule: ReentryEntryRule = "freeze",
 ) -> list[_Reentry]:
     """익절로 닫힌 한 존을 익절 직후부터 무효화까지 지정가 재무장해 재진입 손익을 센다."""
     return [
@@ -294,6 +368,7 @@ def reentry_events(
             params=params,
             cfg=cfg,
             funding_rates=funding_rates,
+            entry_rule=entry_rule,
         )
     ]
 
