@@ -213,6 +213,13 @@ class _Task:
     (WAN-228 재무장 로직)를 추가로 만들어 `CellPayload.reentry_candidates`에 싣는다. base
     후보·격리 성과 행은 **불변**이라(재진입은 별도 dict에 담긴다) 끄면 예전과 비트 단위로
     같다 — 재진입은 `_segment_cells(include_reentry=True)`에서만 북에 들어간다."""
+    fill: harness.FillPreset | None = None
+    """WAN-264(옵트인): 체결 렌즈. `None`(기본)이면 `harness.build_params()`가 채택 기본값
+    (`baseline`, 관통 0bp)을 써 예전과 **비트 단위로 같다**. `pen_5bp` 등을 주면 후보 생성의
+    `fill_penetration_bps`가 바뀌어 「스치듯 닿은 체결」이 후보 집합에서 빠진다(WAN-96/124).
+    렌즈는 **후보 집합**을 바꾸므로 렌즈마다 후보 생성을 다시 해야 한다 — 비용(cost)은 반대로
+    후보에 무관하고 시퀀싱에서만 적용되므로(BookCell = 「비용 미반영 원가 셋업」) 렌즈당 한 번
+    생성한 후보를 여러 비용에 재사용할 수 있다(WAN-264 컴퓨트 최적화)."""
 
 
 @dataclass(frozen=True)
@@ -307,7 +314,9 @@ def run_cell(task: _Task, *, log: bool = True) -> CellPayload:
     )
     if market.empty or market.df_1m.empty:
         raise ValueError(f"{task.symbol} {task.timeframe}: 데이터가 없습니다(창 확인).")
-    params = harness.build_params()  # 인자 없음 = 채택 기본값(옛 핀 물려받기 금지 — 완료기준).
+    # 인자 없음 = 채택 기본값(옛 핀 물려받기 금지 — 완료기준). `fill`(WAN-264, 옵트인)을 주면
+    # 체결 렌즈만 갈아끼운다 — `None`이면 `build_params(fill=BASELINE_FILL)`과 같아 비트 재현.
+    params = harness.build_params() if task.fill is None else harness.build_params(fill=task.fill)
     cfg = harness.build_config(task.timeframe)
     if task.adv_fraction is not None:
         # WAN-244: 후보에 룩어헤드-안전 ADV를 싣기 위해 상한 프랙션을 build cfg에 얹는다.
@@ -430,6 +439,7 @@ def run_cells(
     jobs: int = 1,
     adv_fraction: float | None = None,
     reentry: bool = False,
+    fill: harness.FillPreset | None = None,
 ) -> list[CellPayload]:
     """전 칸을 돈다. `jobs`는 성능 노브이지 결과 축이 아니다(WAN-121).
 
@@ -438,6 +448,10 @@ def run_cells(
 
     `reentry`(WAN-261, 옵트인)를 켜면 각 칸의 payload에 「익절 후 존 내 재진입」 후보를
     함께 싣는다 — base 후보·격리 성과 행은 불변이라 끄면(기본) 예전과 비트 단위로 같다.
+
+    `fill`(WAN-264, 옵트인)을 주면 후보 생성의 체결 렌즈를 바꾼다 — None(기본)이면 채택
+    기본값(`baseline`)이라 비트 단위로 같다. 렌즈는 후보 집합을 바꾸므로 렌즈마다 다시
+    생성해야 하지만, 비용은 후보에 무관하니 렌즈당 한 번 생성해 여러 비용에 재사용한다.
     """
     tasks = [
         _Task(
@@ -447,6 +461,7 @@ def run_cells(
             end_ms=parse_date_ms(end),
             adv_fraction=adv_fraction,
             reentry=reentry,
+            fill=fill,
         )
         for symbol in symbols
         for timeframe in timeframes

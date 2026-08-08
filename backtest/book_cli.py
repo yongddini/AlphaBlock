@@ -138,6 +138,9 @@ def build_book_rows(
     start_ms: int,
     end_ms: int,
     include_reentry: bool = False,
+    fee_rate: float | None = None,
+    maker_fee_rate: float | None = None,
+    slippage: float | None = None,
 ) -> list[BookRunRow]:
     """이미 만든 칸 후보(payloads)에서 요청 구간별 북 행을 낸다.
 
@@ -147,6 +150,11 @@ def build_book_rows(
     `include_reentry`(WAN-261, 옵트인)를 켜면 각 칸의 재진입 후보(payload에 실려 있을 때만)를
     base 재탭 후보와 합쳐 한 지갑에서 시퀀싱한다. 기본(False)이면 base만 돌아 인자 없는
     `backtest.run`과 비트 단위로 같다(완료기준 2).
+
+    `fee_rate`·`maker_fee_rate`·`slippage`(WAN-264, 옵트인)를 주면 북 실행 cfg의 비용을
+    오버라이드한다 — 비용은 후보 집합에 무관하고 시퀀싱(`_to_trade`)에서만 적용되므로
+    (BookCell = 「비용 미반영 원가 셋업」) 같은 payloads를 여러 비용으로 재사용할 수 있다.
+    전부 None(기본)이면 채택 비용 그대로라 예전과 비트 단위로 같다.
     """
     unknown = [s for s in segments if s not in SUPPORTED_SEGMENTS]
     if unknown:
@@ -154,7 +162,12 @@ def build_book_rows(
             f"북 모드가 지원하지 않는 구간입니다: {unknown} "
             f"(지원: {', '.join(SUPPORTED_SEGMENTS)})."
         )
-    base_cfg = harness.build_config(BOOK_ANNUALIZATION_TF)
+    base_cfg = harness.build_config(
+        BOOK_ANNUALIZATION_TF,
+        fee_rate=fee_rate,
+        maker_fee_rate=maker_fee_rate,
+        slippage=slippage,
+    )
     num_symbols = len({p.symbol for p in payloads})
     rows: list[BookRunRow] = []
     for segment in segments:
