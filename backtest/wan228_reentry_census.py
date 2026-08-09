@@ -384,6 +384,7 @@ def reentry_candidates(
     params: ConfluenceParams,
     cfg: BacktestConfig,
     funding_rates: Sequence[FundingRate] | None,
+    entry_rule: ReentryEntryRule = "freeze",
 ) -> list[_Candidate]:
     """익절 후 재무장 재진입을 **북 시퀀서에 주입할 `_Candidate`로** 낸다(WAN-261).
 
@@ -391,7 +392,11 @@ def reentry_candidates(
     확정된 후보를 돌려준다 — 북(`run_leverage_book`)이 채택 지정가(재탭) 후보와 함께 한
     지갑에서 시퀀싱하면 칸당 1포지션·공유 자본·명목 상한 제약이 자연히 적용된다. 청산이
     미리 정해져 있어 북은 재시뮬 없이 `_to_trade`로 배치한다(base 후보와 같은 규약).
-    """
+
+    `entry_rule`(WAN-269, 옵트인)은 `_iter_reentries`로 그대로 흘러 재무장 지정가를 정한다 —
+    `"freeze"`(기본)면 첫 체결가를 얼려 **기존 wan261/262 북 CSV가 비트 재현**되고, `"band"`면
+    재무장 순간의 봉내 라이브 밴드로 지정가를 재산정한다(WAN-267 격리 분해의 리더 팔을 북에
+    얹는 경로). 재무장 루프가 하나뿐이라 census·격리 널·북 주입이 같은 규칙을 공유한다."""
     return [
         re_cand
         for re_cand, _event in _iter_reentries(
@@ -404,6 +409,7 @@ def reentry_candidates(
             params=params,
             cfg=cfg,
             funding_rates=funding_rates,
+            entry_rule=entry_rule,
         )
     ]
 

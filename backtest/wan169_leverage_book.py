@@ -60,6 +60,7 @@ from backtest.run import parse_date_ms
 from backtest.substep import build_substeps
 from backtest.sweep import timeframe_to_ms
 from backtest.wan167_position_census import ALL_SYMBOLS, MAIN_TIMEFRAMES
+from backtest.wan228_reentry_census import ReentryEntryRule
 from backtest.wan228_reentry_census import reentry_candidates as _reentry_candidates_for_cand
 from backtest.zone_limit_backtest import (
     _Candidate,
@@ -213,6 +214,10 @@ class _Task:
     (WAN-228 재무장 로직)를 추가로 만들어 `CellPayload.reentry_candidates`에 싣는다. base
     후보·격리 성과 행은 **불변**이라(재진입은 별도 dict에 담긴다) 끄면 예전과 비트 단위로
     같다 — 재진입은 `_segment_cells(include_reentry=True)`에서만 북에 들어간다."""
+    reentry_entry_rule: ReentryEntryRule = "freeze"
+    """WAN-269(옵트인): 재진입 후보의 재무장 지정가 규칙. `"freeze"`(기본)면 첫 체결가를 얼려
+    **기존 wan261/262 북 CSV가 비트 재현**되고, `"band"`면 봉내 라이브 밴드로 재산정한다
+    (WAN-267 리더 팔). `reentry=False`면 이 값은 무의미하다(재진입을 만들지 않는다)."""
     fill: harness.FillPreset | None = None
     """WAN-264(옵트인): 체결 렌즈. `None`(기본)이면 `harness.build_params()`가 채택 기본값
     (`baseline`, 관통 0bp)을 써 예전과 **비트 단위로 같다**. `pen_5bp` 등을 주면 후보 생성의
@@ -264,6 +269,7 @@ def reentry_candidates_for_window(
     params: ConfluenceParams,
     cfg: BacktestConfig,
     timeframe: str,
+    entry_rule: ReentryEntryRule = "freeze",
 ) -> list[_Candidate]:
     """이 창의 base 후보에서 「익절 후 존 내 재진입」 후보를 만든다(WAN-261, 옵트인).
 
@@ -272,7 +278,11 @@ def reentry_candidates_for_window(
     규약), 익절로 닫힌 존마다 지정가를 재무장해 재진입 후보를 낸다(`reentry_candidates`,
     WAN-228 로직 공유). 낸 후보는 청산이 확정돼 있어 북이 재시뮬 없이 배치한다. base
     후보·격리 성과는 건드리지 않는다(별도 반환).
-    """
+
+    `entry_rule`(WAN-269, 옵트인)은 `reentry_candidates`로 그대로 흐른다 — `"freeze"`(기본)면
+    첫 체결가를 얼려 **기존 wan261/262 북 CSV가 비트 재현**되고, `"band"`면 재무장 순간의 봉내
+    라이브 밴드로 지정가를 재산정한다(WAN-267 리더 팔을 북에 얹는 경로). base 후보 생성은 이
+    인자와 무관하므로 팔 사이에서 base는 불변이다."""
     if not candidates:
         return []
     paired = sequence_with_candidates(list(candidates), cfg, window.funding_rates)
@@ -297,6 +307,7 @@ def reentry_candidates_for_window(
                 params=params,
                 cfg=cfg,
                 funding_rates=window.funding_rates,
+                entry_rule=entry_rule,
             )
         )
     return out
@@ -360,7 +371,12 @@ def run_cell(task: _Task, *, log: bool = True) -> CellPayload:
             # base 후보·격리 성과 행은 건드리지 않으므로 끄면 예전과 비트 단위로 같다.
             reentry[segment_name] = tuple(
                 reentry_candidates_for_window(
-                    window, cands, params=params, cfg=cfg, timeframe=task.timeframe
+                    window,
+                    cands,
+                    params=params,
+                    cfg=cfg,
+                    timeframe=task.timeframe,
+                    entry_rule=task.reentry_entry_rule,
                 )
             )
 
@@ -439,6 +455,7 @@ def run_cells(
     jobs: int = 1,
     adv_fraction: float | None = None,
     reentry: bool = False,
+    reentry_entry_rule: ReentryEntryRule = "freeze",
     fill: harness.FillPreset | None = None,
 ) -> list[CellPayload]:
     """전 칸을 돈다. `jobs`는 성능 노브이지 결과 축이 아니다(WAN-121).
@@ -448,6 +465,10 @@ def run_cells(
 
     `reentry`(WAN-261, 옵트인)를 켜면 각 칸의 payload에 「익절 후 존 내 재진입」 후보를
     함께 싣는다 — base 후보·격리 성과 행은 불변이라 끄면(기본) 예전과 비트 단위로 같다.
+
+    `reentry_entry_rule`(WAN-269, 옵트인)은 재진입 후보의 재무장 지정가 규칙이다 —
+    `"freeze"`(기본)면 첫 체결가 고정이라 **wan261/262 CSV가 비트 재현**되고, `"band"`면 봉내
+    라이브 밴드 재산정이다(WAN-267 리더 팔). base 후보는 이 값과 무관해 팔 사이에서 불변이다.
 
     `fill`(WAN-264, 옵트인)을 주면 후보 생성의 체결 렌즈를 바꾼다 — None(기본)이면 채택
     기본값(`baseline`)이라 비트 단위로 같다. 렌즈는 후보 집합을 바꾸므로 렌즈마다 다시
@@ -461,6 +482,7 @@ def run_cells(
             end_ms=parse_date_ms(end),
             adv_fraction=adv_fraction,
             reentry=reentry,
+            reentry_entry_rule=reentry_entry_rule,
             fill=fill,
         )
         for symbol in symbols
