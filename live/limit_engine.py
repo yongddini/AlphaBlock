@@ -35,6 +35,7 @@
 
 from __future__ import annotations
 
+import enum
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -43,6 +44,7 @@ from typing import Literal
 import pandas as pd
 
 from backtest.sweep import timeframe_to_ms
+from backtest.wan228_reentry_census import ReentryEntryRule
 from backtest.zone_limit_backtest import IntrabarLiveLimit
 from live.limit_orders import LimitFill, LimitOrderBook, PendingLimitOrder
 from live.order_journal import (
@@ -58,6 +60,7 @@ from strategy.models import (
     OrderBlock,
     OrderBlockDirection,
     OrderBlockParams,
+    SignalExitReason,
 )
 from strategy.order_blocks import OrderBlockDetector
 from strategy.realtime_band import RealtimeBand
@@ -72,6 +75,7 @@ __all__ = [
     "IntrabarLiveLimit",
     "RealtimeBand",
     "RealtimeRsi",
+    "ReentryEntryRule",
     "ZoneLimitLiveEngine",
     "fixed_r_take_profit_price",
 ]
@@ -92,6 +96,16 @@ EventKind = Literal[
     "cancelled_condition_failed",
     "discarded",
 ]
+
+
+class _Unset(enum.Enum):
+    """`_build_order`의 `limit_valid_bars` 미지정 센티넬 — `None`(무기한)과 "채택 기본값을
+    쓴다"를 가른다(`--max-zone-width-atr` none vs 미지정과 같은 규약, WAN-159)."""
+
+    token = 0
+
+
+_UNSET = _Unset.token
 
 
 def _zone_id(ob: OrderBlock) -> ZoneId:
@@ -148,6 +162,10 @@ class _SeriesState:
     #: 대기 주문이 어느 존의 것인지(무효화 취소 매칭용).
     pending_zone: ZoneId | None = None
     pending_journal_id: int | None = None
+    #: 현재 오픈 포지션이 어느 존의 것인지 — 익절 후 재진입(WAN-274)이 같은 존에 band
+    #: 지정가를 다시 걸 때 읽는다. 체결 순간 `pending_zone`에서 넘겨받고, 청산(익절 재무장
+    #: 또는 손절 종료)에서 비운다. 재진입이 꺼져 있어도 채워지지만(무해) 읽히지 않는다.
+    occupied_zone: ZoneId | None = None
     refreshed: bool = False
     """`on_htf_bars`가 최소 한 번 존 대장을 세웠는지 — 그 전에는 예약하지 않는다."""
 
@@ -170,10 +188,17 @@ class ZoneLimitLiveEngine:
         session_id: int | None = None,
         has_position: Callable[[str, str], bool] | None = None,
         skip_listener: Callable[[str, str, str, int], None] | None = None,
+        reentry_entry_rule: ReentryEntryRule | None = None,
     ) -> None:
         _validate_live_params(params)
+        _validate_reentry_rule(params, reentry_entry_rule)
         self._params = params
         self._ob_params = order_block_params
+        #: 익절 후 존 내 재진입(WAN-273/274) 규칙. None이면 재진입 없음(옛 동작, 비트 동일).
+        #: 채택 값은 "band"(봉내 라이브 밴드 재산정 = 엔진 본 진입과 같은 사슬). 러너가
+        #: 설정에서 이 값을 정하고, 백테스트 채택 북(`reentry_entry_rule="band"`)과 같은
+        #: 규칙을 물려받는다 — 러너가 자기 버전을 새로 만들지 않는다(WAN-273 규약).
+        self._reentry_entry_rule = reentry_entry_rule
         self.book = book if book is not None else LimitOrderBook()
         self._journal = journal
         self._session_id = session_id
@@ -391,6 +416,9 @@ class ZoneLimitLiveEngine:
             journal_id = state.pending_journal_id
             if journal_id is not None and self._journal is not None:
                 self._journal.record_filled(journal_id, fill)
+            # 체결된 존을 오픈 포지션의 존으로 넘긴다 — 익절 후 재진입(WAN-274)이 같은 존에
+            # 다시 band 지정가를 걸 때 읽는다(재진입이 꺼져 있어도 채우되 읽히지 않는다).
+            state.occupied_zone = state.pending_zone
             state.pending_zone = None
             state.pending_journal_id = None
             events.append(
@@ -533,25 +561,85 @@ class ZoneLimitLiveEngine:
             order = self._build_order(state, symbol, timeframe, ob, tap_index, time_ms)
             if order is None:
                 continue
-            placed = self.book.place(order)
-            if placed is None:
-                continue
-            zid = _zone_id(ob)
-            state.pending_zone = zid
-            if self._journal is not None and self._session_id is not None:
-                order.journal_id = self._journal.record_placed(
-                    order,
-                    session_id=self._session_id,
-                    zone_start_time=ob.start_time,
-                    zone_confirmed_time=ob.confirmed_time,
-                )
-                state.pending_journal_id = order.journal_id
-            return [
-                EngineEvent(
-                    kind="placed", symbol=symbol, timeframe=timeframe, time_ms=time_ms, order=order
-                )
-            ]
+            placed = self._place(state, symbol, timeframe, ob, order, time_ms)
+            if placed:
+                return placed
         return []
+
+    def _place(
+        self,
+        state: _SeriesState,
+        symbol: str,
+        timeframe: str,
+        ob: OrderBlock,
+        order: PendingLimitOrder,
+        time_ms: int,
+    ) -> list[EngineEvent]:
+        """주문을 주문판에 걸고 존·장부 상태를 갱신해 `placed` 이벤트를 낸다.
+
+        탭 예약(`_maybe_arm`)과 익절 후 재진입 재무장(`on_position_exit`, WAN-274)이 **같은**
+        이 헬퍼를 쓴다 — 두 곳이 place/journal 배선을 복제하면 갈라진다(로직 이중화 금지)."""
+        placed = self.book.place(order)
+        if placed is None:
+            return []
+        state.pending_zone = _zone_id(ob)
+        if self._journal is not None and self._session_id is not None:
+            order.journal_id = self._journal.record_placed(
+                order,
+                session_id=self._session_id,
+                zone_start_time=ob.start_time,
+                zone_confirmed_time=ob.confirmed_time,
+            )
+            state.pending_journal_id = order.journal_id
+        return [
+            EngineEvent(
+                kind="placed", symbol=symbol, timeframe=timeframe, time_ms=time_ms, order=order
+            )
+        ]
+
+    def on_position_exit(
+        self, symbol: str, timeframe: str, *, reason: SignalExitReason, time_ms: int
+    ) -> list[EngineEvent]:
+        """오픈 포지션 청산 후 존 재진입을 처리한다(WAN-274, 러너가 청산마다 호출).
+
+        채택 규칙(WAN-273)을 그대로 물려받는다 — **익절**로 닫힌 존에만, 재진입이 켜져 있고
+        그 존이 여전히 활성일 때, 재무장 지정가를 band(봉내 라이브 밴드 재산정)로 다시 건다.
+        백테스트 재진입 루프(`backtest.wan228_reentry_census._iter_reentries`)의 라이브 대응:
+
+        * **익절이라야 재무장**한다 — 손절·무효화면 그 존은 끝이다(`_iter_reentries`의
+          `if not is_win: break`와 같은 규칙). 손절 청산은 여기서 `occupied_zone`만 비운다.
+        * **무효화된 존은 재진입하지 않는다** — 존이 대장(`state.zones`)에서 사라졌으면
+          (`on_htf_bars`가 무효화로 제거) 재무장하지 않는다(`_iter_reentries`의 무효화 break).
+        * 재무장 주문은 **무기한 대기**(`limit_valid_bars=None`)한다 — 백테스트 재진입과 같은
+          "형성-즉시 예약" 대리(WAN-223 §1). 채택 base 주문의 24봉 만료와 다르다.
+
+        재무장 지정가는 탭 예약과 **같은 `_build_order`**가 만든다 — 채택 진입가 사슬
+        (`IntrabarLiveLimit`, WAN-132)을 그대로 재사용하므로 재진입도 백테스트 band 팔과
+        같은 가격 규칙을 탄다(로직 이중화 금지). `has_position`은 러너가 이미 포지션을 닫은
+        뒤라 False이고, 대기 주문도 없어 슬롯은 비어 있다.
+        """
+        state = self._state(symbol, timeframe)
+        zid = state.occupied_zone
+        state.occupied_zone = None  # 재무장에 성공하면 체결 시 다시 채워진다.
+        if self._reentry_entry_rule is None:
+            return []
+        if reason is not SignalExitReason.TAKE_PROFIT:
+            return []  # 손절·무효화면 그 존은 끝(익절이라야 또 무장한다).
+        if zid is None:
+            return []
+        watch = state.zones.get(zid)
+        if watch is None:
+            return []  # 무효화로 대장에서 사라진 존은 재진입하지 않는다.
+        if self.book.pending(symbol, timeframe) is not None:
+            return []  # 슬롯이 이미 차 있다(정상 청산 후엔 없어야 한다 — 방어).
+        ob = watch.ob
+        tap_index = len(ob.tapped_times)
+        order = self._build_order(
+            state, symbol, timeframe, ob, tap_index, time_ms, limit_valid_bars=None
+        )
+        if order is None:
+            return []
+        return self._place(state, symbol, timeframe, ob, order, time_ms)
 
     def _record_skip(
         self,
@@ -598,8 +686,12 @@ class ZoneLimitLiveEngine:
         ob: OrderBlock,
         tap_index: int,
         time_ms: int,
+        limit_valid_bars: int | None | _Unset = _UNSET,
     ) -> PendingLimitOrder | None:
         params = self._params
+        # 재진입(WAN-274)은 `limit_valid_bars=None`(무기한)을 명시로 넘긴다 — 미지정이면
+        # 채택 base 주문의 기본 만료(`params.limit_valid_bars`, 24봉 WAN-222)를 쓴다.
+        valid_bars = params.limit_valid_bars if limit_valid_bars is _UNSET else limit_valid_bars
         is_long = ob.direction is OrderBlockDirection.BULLISH
         stop_price = ob.bottom if is_long else ob.top
         rsi_state = RealtimeRsi.seed_from_closed(state.seed_closes, params.rsi_length)
@@ -654,11 +746,33 @@ class ZoneLimitLiveEngine:
             first_tap_free=first_tap_free,
             rsi_oversold=params.rsi_oversold,
             rsi_overbought=params.rsi_overbought,
-            limit_valid_bars=params.limit_valid_bars,
+            limit_valid_bars=valid_bars,
             cancel_on_condition_fail=params.cancel_limit_on_condition_fail,
             placed_ms=time_ms,
             tap_index=tap_index,
             zone_width_atr=zone_width_atr,
+        )
+
+
+def _validate_reentry_rule(
+    params: ConfluenceParams, reentry_entry_rule: ReentryEntryRule | None
+) -> None:
+    """라이브가 배선하지 않은 재진입 규칙을 **조용히 무시하지 않고 거부**한다(WAN-95 교훈).
+
+    채택 값은 `"band"`(봉내 라이브 밴드 재산정)뿐이다 — `"freeze"`/`"zone"`는 백테스트
+    측정 팔(WAN-267)이라 라이브에 배선하지 않았고, 라벨만 붙고 다른 규칙으로 돌면 파리티가
+    깨진다. `None`은 재진입 없음(옛 동작)이라 항상 허용된다."""
+    if reentry_entry_rule is None:
+        return
+    if reentry_entry_rule != "band":
+        raise ValueError(
+            f"라이브 엔진은 재진입 규칙 'band'만 배선했습니다: {reentry_entry_rule!r}"
+            " ('freeze'/'zone'은 백테스트 측정 팔 전용, WAN-267). 채택 값은 'band'(WAN-273)."
+        )
+    if params.deviation_filter is None:
+        raise ValueError(
+            "band 재진입은 볼린저 필터가 있어야 재무장 지정가를 재산정할 수 있습니다"
+            " (채택 기본값은 켜짐)."
         )
 
 

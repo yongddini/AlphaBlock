@@ -192,6 +192,13 @@ class Settings(BaseSettings):
     # 아래 `live_tick_feed_exchange`가 ccxt 거래소 id(기본 binanceusdm).
     live_tick_feed_enabled: bool = Field(default=True)
     live_tick_feed_exchange: str = Field(default="binanceusdm")
+    # 익절 후 존 내 재진입(WAN-273 채택 = band). 페이퍼 러너가 익절 청산 뒤 같은 존에
+    # 봉내 라이브 밴드로 재산정한 지정가를 다시 걸어, 백테스트 채택 북(`reentry=True,
+    # reentry_entry_rule="band"`)과 같은 규칙을 물려받는다(파리티). 채택 기본값은 "band".
+    # "off"면 재진입 없음(WAN-273 이전 동작 — 익절로 존이 끝난다). ⚠️ 재진입은 알파가 아니라
+    # 위험의 모양만 바꾼다(WAN-90) · MDD·최대 동시 리스크가 오른다(WAN-273 알고 받는 손해).
+    # 페이퍼 한정 — 실거래 배선은 별도(WAN-241/235 넷팅 선행), `ALPHABLOCK_LIVE_TRADING=false` 유지.
+    live_reentry_entry_rule: Literal["off", "band"] = Field(default="band")
     # 전략 재평가 시 각 시리즈에서 사용할 최근 봉 수(최장 EMA 365봉 워밍업 여유 포함).
     live_signal_lookback_bars: int = Field(default=1500, ge=1)
     # 이미 보낸 신호를 기록해 재시작 시 중복 발송을 막는 상태 파일 경로.

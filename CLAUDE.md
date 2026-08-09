@@ -1447,7 +1447,12 @@ WAN-132). 근거는 WAN-272 CSV(band가 `pen_5bp`에서 가장 튼튼: 수익/MD
 - **재진입 = 켜짐, band 규칙**(채택 북이 「익절 후 존 내 재진입」을 봉내 라이브 밴드로 재무장,
   **WAN-273** — 위 📌 문단). 인자 없는 `backtest.run`(채택 북)이 재진입을 돈다. `--reentry off`
   = WAN-273 이전 재진입-off 북(옛 CSV 비트 재현, 미지정과 다르다) · `freeze`/`zone` 옵트인
-  존치. per-cell(`--positions single`/숫자)과는 함께 못 쓴다.
+  존치. per-cell(`--positions single`/숫자)과는 함께 못 쓴다. 📌 **페이퍼 러너도 같은 규칙으로
+  재진입한다(WAN-274)** — `live.zone_limit_runner`가 익절 청산 후 같은 존에 band 지정가를 다시
+  걸고(엔진 `on_position_exit`, 무기한 대기), 백테스트 채택 북과 같은 규칙을 물려받는다(러너가
+  자기 버전을 만들지 않음). 설정 `live_reentry_entry_rule` 기본 `"band"` · `"off"`로 옵트아웃 ·
+  `"freeze"`/`"zone"`은 라이브 미배선(거부). ⚠️ **실거래는 여전히 별도 게이트**(경로 자체 없음 —
+  WAN-241/235 넷팅 선행) · `ALPHABLOCK_LIVE_TRADING=false` 유지.
 - **존 병합 없음 — 원본 존 단위로 탐지·진입·손절한다**(`combine_obs=False`, **WAN-149**
   사용자 결정 2026-07-21). 겹치는 오더블록을 하나로 접지 않는다. ⚠️ 옛 기본값 `True`는
   옵트인으로 **존치**한다 — 아래 📌 WAN-149 문단.
