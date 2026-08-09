@@ -23,7 +23,14 @@ from backtest.harness import (
     normalize_symbol,
 )
 from backtest.leverage_book import LeverageBookParams
-from backtest.run import ADOPTED_BOOK, _book_from_args, _book_segments, build_parser, main
+from backtest.run import (
+    ADOPTED_BOOK,
+    _book_from_args,
+    _book_segments,
+    _resolve_reentry,
+    build_parser,
+    main,
+)
 
 # --------------------------------------------------------------------------- #
 # 채택 기본값 = 라벨이 아니라 값
@@ -225,37 +232,42 @@ def test_bare_cli_default_runs_the_book_not_single_position() -> None:
     assert row.leverage_multiple == 5.0
 
 
-def test_reentry_on_requires_book_mode(capsys: pytest.CaptureFixture[str]) -> None:
-    """--reentry on은 북 전용 — per-cell 축과 함께 주면 종료 코드 2(조용한 무시 방지, WAN-261)."""
+def test_reentry_arg_resolution() -> None:
+    """`--reentry`가 미지정과 off를 가른다(WAN-273 완료기준 2 · 라벨 아닌 값).
+
+    미지정(None)·on = 채택(band 켬), off = 끔, freeze/zone/band = 그 규칙으로 켬.
+    """
+    assert _resolve_reentry(None) == (True, "band")  # 미지정 = 채택 기본값
+    assert _resolve_reentry("on") == (True, "band")  # on = 채택 규칙(band) 별칭
+    assert _resolve_reentry("off") == (False, "band")  # 끔(규칙은 무의미)
+    assert _resolve_reentry("freeze") == (True, "freeze")
+    assert _resolve_reentry("zone") == (True, "zone")
+    assert _resolve_reentry("band") == (True, "band")
+
+
+def test_reentry_requires_book_mode(capsys: pytest.CaptureFixture[str]) -> None:
+    """명시 재진입(on/band 등)은 북 전용 — per-cell 축과 함께 주면 종료 코드 2(WAN-261/273).
+
+    ⚠️ 미지정·off는 per-cell에서도 「재진입 없음」이라 거부 대상이 아니다(WAN-273).
+    """
     assert main(["--positions", "single", "--reentry", "on"]) == 2
+    assert "북 모드 전용" in capsys.readouterr().err
+    assert main(["--positions", "single", "--reentry", "band"]) == 2
     assert "북 모드 전용" in capsys.readouterr().err
 
 
-def test_reentry_off_alone_is_still_the_book() -> None:
-    """--reentry off(기본)만 주면 여전히 북이다 — 재진입 플래그는 북 축이라 거부 대상이 아니다."""
+def test_reentry_flag_alone_is_still_the_book() -> None:
+    """재진입 토큰만 주면 여전히 북이다 — 북 축이라 `_book_from_args` 거부 대상이 아니다."""
     assert _book_from_args(build_parser().parse_args(["--reentry", "off"])) == ADOPTED_BOOK
-    assert _book_from_args(build_parser().parse_args(["--reentry", "on"])) == ADOPTED_BOOK
+    assert _book_from_args(build_parser().parse_args(["--reentry", "band"])) == ADOPTED_BOOK
 
 
-def test_reentry_off_bit_identical_to_default_book() -> None:
-    """재진입 off ≡ 인자 없는 채택 북(WAN-261 완료기준 2) — 실데이터에서 비트 일치."""
-    _require_real_data()
-    kw = dict(
-        start=_START,
-        end=_END,
-        book=ADOPTED_BOOK,
-        segments=[SEGMENT_FULL, SEGMENT_OOS_WARM],
-        jobs=1,
-        log=False,
-    )
-    default = book_cli.run_book(_SYMBOLS, _TFS, **kw)  # type: ignore[arg-type]
-    off = book_cli.run_book(_SYMBOLS, _TFS, reentry=False, **kw)  # type: ignore[arg-type]
-    for a, b in zip(default, off, strict=True):
-        assert a.model_dump() == b.model_dump()
+def test_default_book_runs_band_reentry() -> None:
+    """인자 없는 run_book() = 채택 북(band 재진입 켬, WAN-273) — off보다 거래가 는다.
 
-
-def test_reentry_on_adds_trades_and_rides_book() -> None:
-    """재진입 on은 base보다 후보가 늘어 북을 다르게 탄다(라벨만 붙는 실패 방지, WAN-261)."""
+    미지정 기본값이 band 켬임을 값으로 고정하고(라벨 아닌 동작), off와 실제로 갈림을 후보
+    수(거래 수)로 확인한다.
+    """
     _require_real_data()
     kw = dict(
         start=_START,
@@ -265,12 +277,53 @@ def test_reentry_on_adds_trades_and_rides_book() -> None:
         jobs=1,
         log=False,
     )
+    default = book_cli.run_book(_SYMBOLS, _TFS, **kw)[0]  # type: ignore[arg-type]
+    band = book_cli.run_book(
+        _SYMBOLS,
+        _TFS,
+        reentry=True,
+        reentry_entry_rule="band",
+        **kw,  # type: ignore[arg-type]
+    )[0]
     off = book_cli.run_book(_SYMBOLS, _TFS, reentry=False, **kw)[0]  # type: ignore[arg-type]
-    on = book_cli.run_book(_SYMBOLS, _TFS, reentry=True, **kw)[0]  # type: ignore[arg-type]
-    # 재진입은 익절 후 추가 후보이므로 거래가 늘거나 같다(줄지는 않는다).
-    assert on.num_trades >= off.num_trades
+    assert default.model_dump() == band.model_dump()  # 미지정 = band 켬
     # 이 창엔 실제로 재진입이 생겨 후보가 늘어야 한다(동작 고정 — 아니면 배선이 죽은 것).
-    assert on.num_trades > off.num_trades
+    assert default.num_trades > off.num_trades
+
+
+def test_reentry_off_reproduces_pre_wan273_book() -> None:
+    """재진입 off ≡ WAN-273 이전 재진입-off 북(옛 CSV 비트 재현, 완료기준 2).
+
+    off 경로가 base 후보만으로 도는지 후보 집합으로 고정한다(라벨이 아니라 동작) —
+    `run_cells`(reentry=False) + `build_book_rows`(include_reentry=False)로 만든 「재진입 없는
+    북」과 `run_book(reentry=False)`가 비트 일치한다.
+    """
+    _require_real_data()
+    from backtest.run import parse_date_ms
+    from backtest.wan169_leverage_book import run_cells
+
+    base = run_cells(_SYMBOLS, _TFS, start=_START, end=_END, jobs=1)  # reentry=False 기본
+    ref = book_cli.build_book_rows(
+        base,
+        book=ADOPTED_BOOK,
+        segments=[SEGMENT_FULL, SEGMENT_OOS_WARM],
+        start_ms=parse_date_ms(_START),
+        end_ms=parse_date_ms(_END),
+        include_reentry=False,
+    )
+    off = book_cli.run_book(
+        _SYMBOLS,
+        _TFS,
+        start=_START,
+        end=_END,
+        book=ADOPTED_BOOK,
+        segments=[SEGMENT_FULL, SEGMENT_OOS_WARM],
+        jobs=1,
+        log=False,
+        reentry=False,
+    )
+    for a, b in zip(ref, off, strict=True):
+        assert a.model_dump() == b.model_dump()
 
 
 def test_book_warm_and_cold_oos_parity() -> None:

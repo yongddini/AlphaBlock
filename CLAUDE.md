@@ -1364,6 +1364,34 @@ WAN-175/176 못 박은 6년 창(2020-09-15~2026-07-22)으로 옮기고, **cap-on
 - 📌 **페이퍼 러너 배선은 별도 이슈(WAN-171)** — 북 모드는 전략·비용 격자·거래별 출력·
   `--walkforward`·미끄러지는 창을 아직 **거부**한다(채택 기본값만 · 필요해지면 별도 이슈).
 
+📌 **채택 북이 「익절 후 존 내 재진입」을 band 규칙으로 켠다(WAN-273 = 사용자 결정 2026-08-09):
+인자 없는 `backtest.run`(채택 북)이 재진입을 돈다.** [`docs/decisions/wan273.md`](docs/decisions/wan273.md).
+파라미터가 아니라 **채택 북의 후보 집합**이 바뀐다 — 익절 후 같은 존에 다시 지정가를 걸되,
+재무장 지정가를 **봉내 라이브 밴드로 재산정(`band`)**한다(엔진 진입가 산정과 같은 사슬,
+WAN-132). 근거는 WAN-272 CSV(band가 `pen_5bp`에서 가장 튼튼: 수익/MDD band 119.69 > freeze
+99.16 > off 83.88).
+- 📌 **`book_cli.run_book` 기본값이 채택 값이다**(`reentry=True` · `reentry_entry_rule="band"`,
+  `ADOPTED_REENTRY_ENTRY_RULE`) — 인자 없는 `run_book()`이 곧 채택 북. warm/cold OOS도 재진입
+  포함(`--oos-warm`). 재진입은 `LeverageBookParams` 필드가 아니라 **후보 생성 축**이라 별도로
+  표현된다.
+- 📌 **`--reentry` 미지정 = 채택(band 켬) · `off` = WAN-273 이전 재진입-off 북(옛 CSV 비트
+  재현)** — 둘은 다르다(WAN-159 `none` vs 미지정과 같은 규약). `on` = band 별칭,
+  `freeze`/`zone`/`band` = 규칙 명시. 안 가르면 「off」 라벨을 달고 조용히 band로 도는 이중
+  배선(WAN-91/95/112/123/159 부류) — 회귀 테스트가 **동작**으로 고정(미지정 ≡ band 켬,
+  off ≡ 재진입 없는 북 비트 재현). per-cell(`--positions single`/숫자)과 명시 재진입은 함께
+  못 쓴다(exit 2).
+- 🚨 **알고 받는 손해**(사용자가 경고 알고 선택): 재진입 켜면 MDD 12.17%→15.59% · 최대 동시
+  리스크 9.80%→11.36%(청산 0건). 전부 `baseline`(닿으면 체결) 낙관 위 값 · band는 밴드가
+  체결이라 큐 우선순위상 가장 안 될 체결에 기댄다 · 6년 MDD는 폭락 미포함 **바닥선**.
+  **「엣지 없음」(WAN-84/88/111/114/124/151/201/248) 불변**(재진입은 알파가 아니라 위험의 모양,
+  WAN-90) · 총수익%는 복리 착시(WAN-213).
+- 📌 **파급이 예외적으로 작다** — `LeverageBookParams`·`ConfluenceParams` 기본값 불변(재진입은
+  어디에도 안 실림). `build_book_rows` 기본값 `include_reentry=False` **그대로**(측정 모듈
+  wan169/180/261/264/269/271이 명시 입력이라 무영향). **wan95는 재산출·핀 대상이 아니다** —
+  per-cell 리포트라 재진입을 아예 안 돌아 비트 재현. 채택 북 새 정본 수치는 WAN-272 CSV(band).
+- **라이브/페이퍼 러너 재진입 배선은 별도**(WAN-45/171 · 실거래는 WAN-241/235 넷팅 선행) ·
+  다른 토대 불변 · 실거래 보류 유지(`ALPHABLOCK_LIVE_TRADING=false`).
+
 - **진입 방식** = **존 근단 지정가 + 오프셋 2bp**(`entry_mode="zone_limit"`,
   `zone_limit_ref="proximal"`, WAN-95 / `zone_limit_offset_bps=2.0`, **WAN-112** — 존 근단보다
   2bp 체결 쉬운 쪽(롱=위)에 건다. 위 📌 오프셋 문단 참고: 데이터가 아니라 사용자 판단이다).
@@ -1416,6 +1444,10 @@ WAN-175/176 못 박은 6년 창(2020-09-15~2026-07-22)으로 옮기고, **cap-on
   — 위 📌 문단). 칸=(종목,TF)마다 1포지션 · 여러 칸 동시 · 한 지갑 공유. 인자 없는
   `backtest.run`이 이 북을 돈다(`--positions single`으로 옛 동시 1포지션 per-cell 경로).
   ⚠️ 옛 「동시 1포지션」은 `--positions single`로 존치 — 옛 리포트 대조용.
+- **재진입 = 켜짐, band 규칙**(채택 북이 「익절 후 존 내 재진입」을 봉내 라이브 밴드로 재무장,
+  **WAN-273** — 위 📌 문단). 인자 없는 `backtest.run`(채택 북)이 재진입을 돈다. `--reentry off`
+  = WAN-273 이전 재진입-off 북(옛 CSV 비트 재현, 미지정과 다르다) · `freeze`/`zone` 옵트인
+  존치. per-cell(`--positions single`/숫자)과는 함께 못 쓴다.
 - **존 병합 없음 — 원본 존 단위로 탐지·진입·손절한다**(`combine_obs=False`, **WAN-149**
   사용자 결정 2026-07-21). 겹치는 오더블록을 하나로 접지 않는다. ⚠️ 옛 기본값 `True`는
   옵트인으로 **존치**한다 — 아래 📌 WAN-149 문단.
@@ -1823,9 +1855,10 @@ WAN-194 잔여 §1·§4)**: [`docs/decisions/wan195.md`](docs/decisions/wan195.m
 **"파라미터 바꿔서 다시 돌려보기"에는 새 스크립트를 만들지 않는다.** 범용 CLI가 있다:
 
 ```bash
-uv run python -m backtest.run                                # 인자 없이 = 채택 북(cap_only 5배, WAN-213)
-uv run python -m backtest.run --oos-warm                     # 정본 리포트 = 채택 북 warm/cold(WAN-166/213)
+uv run python -m backtest.run                                # 인자 없이 = 채택 북(cap_only 5배·band 재진입, WAN-213/273)
+uv run python -m backtest.run --oos-warm                     # 정본 리포트 = 채택 북 warm/cold(WAN-166/213/273)
 uv run python -m backtest.run --positions book --tf 15m,1h   # 채택 북을 명시(wan180 both 좌표)
+uv run python -m backtest.run --reentry off --tf 15m,1h      # WAN-273 이전 재진입-off 북(옛 CSV 비트 재현, 미지정과 다름)
 uv run python -m backtest.run --tp-r 1.0,1.5,2.0,3.0          # 익절 R 스윕(전략 축 → per-cell 단일 자동)
 uv run python -m backtest.run --tf 15m --fill baseline,pen_5bp,pen_5bp_drop_50
 uv run python -m backtest.run --symbol BTCUSDT,ETHUSDT --oos --format csv --out x.csv
@@ -1867,8 +1900,9 @@ uv run python -m backtest.run --symbol BTCUSDT --tf 15m --persist         # DB �
 **존폭 필터**(`--max-zone-width-atr`, WAN-159 — 채택 기본값 `1.28`, `none`은 **끄기**이고 인자
 미지정(1.28)과 다르다, 단위는 **ATR 배수**다)·**지정가 유효기간**(`--limit-valid-bars`, WAN-222 —
 채택 기본값 `24`봉, `none`은 **무기한**이고 인자 미지정(24)과 다르다, 단위는 **봉 수**지 시간이
-아니다)·체결 가정·시드이며, `--oos`/`--walkforward`가
-IS/OOS 분할을 기본 제공한다. **정본 리포트의 OOS는 `--oos-warm`**(WAN-166: `oos_warm` 주 수치
+아니다)·**재진입**(`--reentry`, WAN-273 — 북 전용, **미지정 = 채택 band 켬**, `off`는 재진입
+없는 옛 북이고 미지정과 다르다, `freeze`/`zone`/`band`로 규칙 명시)·체결 가정·시드이며,
+`--oos`/`--walkforward`가 IS/OOS 분할을 기본 제공한다. **정본 리포트의 OOS는 `--oos-warm`**(WAN-166: `oos_warm` 주 수치
 + `oos` 스트레스 병기)이다.
 📌 **포지션 기본값 = 채택 북(WAN-213)** — 인자 없는(또는 좌표만 준) 실행은 **레버리지 북**
 (cap_only 5배 · 칸=(종목,TF) 공유 자본)을 돌아 **구간당 집계 행**을 낸다(`backtest/book_cli.py`).

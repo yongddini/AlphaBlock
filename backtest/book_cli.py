@@ -49,7 +49,13 @@ from backtest.wan169_leverage_book import (
     run_cells,
 )
 from backtest.wan180_leverage_book_nine import apply_funding_proxy
+from backtest.wan228_reentry_census import ReentryEntryRule
 from backtest.zone_limit_backtest import build_result_from_trades
+
+#: 채택 재진입 규칙(WAN-273 = 사용자 결정 2026-08-09) — 「익절 후 존 내 재진입」의 재무장
+#: 지정가를 봉내 라이브 밴드(볼린저)로 재산정한다. `"freeze"`(첫 체결가 고정)·`"zone"`(존
+#: 근단)이 옵트인으로 존치한다. 채택 근거는 WAN-272 CSV(band가 pen_5bp에서 가장 튼튼).
+ADOPTED_REENTRY_ENTRY_RULE: ReentryEntryRule = "band"
 
 #: CLI 북 모드가 낼 수 있는 구간 이름 — wan169가 만든 후보 구간과 같다(walkforward 미배선).
 SUPPORTED_SEGMENTS: tuple[str, ...] = (
@@ -193,7 +199,8 @@ def run_book(
     funding_proxy: bool = True,
     jobs: int = 1,
     log: bool = True,
-    reentry: bool = False,
+    reentry: bool = True,
+    reentry_entry_rule: ReentryEntryRule = ADOPTED_REENTRY_ENTRY_RULE,
 ) -> list[BookRunRow]:
     """채택 북을 실데이터에서 돌려 구간별 집계 행을 낸다.
 
@@ -201,13 +208,27 @@ def run_book(
     `_segment_cells`(구간별 칸) → `run_leverage_book`(공유 자본 배치). 전부 측정 리포트가
     쓰는 함수 그대로라 wan180 셀과 구성상 비트 일치한다.
 
-    `reentry`(WAN-261, 옵트인)를 켜면 「익절 후 존 내 재진입」 후보를 만들어(`run_cells`) base
-    재탭 후보와 함께 북에 넣는다(`build_book_rows(include_reentry=True)`). 끄면(기본) 인자 없는
-    `backtest.run`과 비트 단위로 같다.
+    ⚠️ **채택 기본값은 재진입 켬(band)이다(WAN-273 = 사용자 결정 2026-08-09)** — `reentry`
+    기본이 `True`, `reentry_entry_rule` 기본이 `"band"`라 인자 없는 `run_book()`이 채택 북을
+    낸다(`LeverageBookParams()`가 채택 북을 내는 것과 대칭). 「익절 후 존 내 재진입」 후보를
+    만들어(`run_cells`) base 재탭 후보와 함께 한 지갑에서 시퀀싱한다
+    (`build_book_rows(include_reentry=True)`).
+
+    `reentry=False`는 **WAN-273 이전의 재진입-off 북**이다(옛 CSV 비트 재현) — 라벨이 아니라
+    후보 집합으로 갈린다(회귀 테스트가 동작으로 고정). `reentry_entry_rule`은 `reentry=True`일
+    때만 의미가 있고 `"freeze"`(첫 체결가 고정)·`"zone"`(존 근단)이 옵트인으로 존치한다.
     """
     from backtest.run import parse_date_ms  # 지연 import(사이클 회피)
 
-    payloads = run_cells(symbols, timeframes, start=start, end=end, jobs=jobs, reentry=reentry)
+    payloads = run_cells(
+        symbols,
+        timeframes,
+        start=start,
+        end=end,
+        jobs=jobs,
+        reentry=reentry,
+        reentry_entry_rule=reentry_entry_rule,
+    )
     if funding_proxy:
         payloads, note = apply_funding_proxy(payloads)
         if note and log:

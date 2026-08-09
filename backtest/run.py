@@ -99,6 +99,11 @@ from collections.abc import Iterator, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    # 런타임 import는 사이클(run → wan228 → run)이라 타입 검사에만 들인다.
+    from backtest.wan228_reentry_census import ReentryEntryRule
 
 from backtest.harness import (
     BASELINE_FILL,
@@ -881,13 +886,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     execution.add_argument(
         "--reentry",
-        choices=["on", "off"],
-        default="off",
+        choices=["off", "on", "freeze", "zone", "band"],
+        default=None,
         help=(
-            "「익절 후 존 내 재진입」을 채택 북에 켠다(WAN-261, 북 모드 전용, 기본 off). on이면 "
-            "익절 후 재무장(WAN-228)이 낸 재진입 후보를 채택 재탭 후보와 함께 한 지갑에서 "
-            "시퀀싱한다. off면 인자 없는 실행과 비트 단위로 같다. per-cell(--positions single/"
-            "숫자)과는 함께 못 쓴다."
+            "「익절 후 존 내 재진입」(북 모드 전용). ⚠️ 미지정 = 채택 기본값(band 켬, WAN-273) "
+            "이고 off는 이것과 다르다 — off는 WAN-273 이전 재진입-off 북(옛 CSV 비트 재현). "
+            "on은 채택 규칙(band)의 별칭, freeze/zone/band는 재무장 지정가 규칙을 명시한다. "
+            "per-cell(--positions single/숫자)과는 함께 못 쓴다."
         ),
     )
 
@@ -987,6 +992,26 @@ BOOK_POSITION_TOKEN = "book"
 #: (WAN-213 — cap_only 5배). `ConfluenceParams()`가 채택 전략을 내는 것과 대칭.
 ADOPTED_BOOK = LeverageBookParams()
 
+#: 채택 재진입 규칙(WAN-273 = 사용자 결정 2026-08-09). 인자 없는 `backtest.run`(채택 북)이
+#: 「익절 후 존 내 재진입」을 이 규칙(봉내 라이브 밴드 재산정)으로 켠다. `book_cli`가 값의
+#: 정본을 들고(`ADOPTED_REENTRY_ENTRY_RULE`) 여기선 재진입 인자 파싱에만 쓴다.
+ADOPTED_REENTRY_RULE: ReentryEntryRule = "band"
+
+
+def _resolve_reentry(arg: str | None) -> tuple[bool, ReentryEntryRule]:
+    """`--reentry` 값을 (재진입 켬?, 재무장 규칙)으로 푼다(WAN-273).
+
+    ⚠️ **미지정과 `off`를 가른다** — 미지정(None)은 채택 기본값(band 켬)이고 `off`는
+    명시적 끔(WAN-273 이전 북 비트 재현)이다. 둘을 안 가르면 「재진입 off」 라벨을 단 채
+    조용히 band로 도는 이중 배선(WAN-91/95/112/123/159 부류)이 된다. `on`은 채택 규칙(band)의
+    별칭이고, `off`일 때 규칙 값은 무의미하다(후보를 아예 안 만든다).
+    """
+    if arg is None or arg == "on":
+        return True, ADOPTED_REENTRY_RULE
+    if arg == "off":
+        return False, ADOPTED_REENTRY_RULE
+    return True, cast("ReentryEntryRule", arg)
+
 
 def _book_from_args(args: argparse.Namespace) -> LeverageBookParams | None:
     """`--positions`가 북 모드인지 판정한다(WAN-213).
@@ -1082,6 +1107,7 @@ def run_book_main(args: argparse.Namespace, book: LeverageBookParams) -> int:
 
     from backtest import book_cli  # 지연 import(사이클 회피 — 모듈 독스트링).
 
+    reentry_on, reentry_rule = _resolve_reentry(args.reentry)
     try:
         jobs = parse_jobs(args.jobs)
         rows = book_cli.run_book(
@@ -1093,7 +1119,8 @@ def run_book_main(args: argparse.Namespace, book: LeverageBookParams) -> int:
             segments=segments,
             jobs=jobs,
             log=not args.quiet,
-            reentry=args.reentry == "on",
+            reentry=reentry_on,
+            reentry_entry_rule=reentry_rule,
         )
     except ValueError as exc:
         print(f"오류: {exc}", file=sys.stderr)
@@ -1304,12 +1331,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ValueError as exc:
         print(f"오류: {exc}", file=sys.stderr)
         return 2
-    if args.reentry == "on" and book is None:
+    if book is None and args.reentry is not None and args.reentry != "off":
         # 재진입은 북 회계 전용이다 — per-cell 경로엔 공유 자본이 없어 「재진입 켰다」는
-        # 라벨을 단 채 조용히 무시된다(WAN-95 교훈). 조용히 접지 않고 거부한다.
+        # 라벨을 단 채 조용히 무시된다(WAN-95 교훈). 조용히 접지 않고 거부한다. 미지정(None)·
+        # off는 per-cell에서도 「재진입 없음」이라 거부 대상이 아니다(WAN-273).
         print(
-            "오류: --reentry on은 북 모드 전용입니다(WAN-261) — per-cell 축(--positions "
-            "single/숫자·전략·비용·거래별)과 함께 쓸 수 없습니다.",
+            "오류: --reentry(on/freeze/zone/band)는 북 모드 전용입니다(WAN-261/273) — "
+            "per-cell 축(--positions single/숫자·전략·비용·거래별)과 함께 쓸 수 없습니다.",
             file=sys.stderr,
         )
         return 2
