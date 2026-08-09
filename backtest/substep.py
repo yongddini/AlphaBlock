@@ -157,6 +157,15 @@ class ZoneLimitOutcome:
     `stop_loss_override`가 걸려 있으면 손절이 **체결 순간**에 정해지므로, 호출부가
     1R 사이징에 쓸 값을 여기로 돌려준다 — 지어내지 않게 하려는 것이다.
     """
+    exit_extreme: float | None = None
+    """손절로 청산된 봉의 **불리 극값**(롱=저가, 숏=고가) (WAN-276). 손절 체결 시에만 값이
+    있고 익절·데이터종료 청산이면 `None`이다.
+
+    손절 갭-체결 민감도(WAN-276) 측정용 순수 관측값이다: 시장가 손절 슬리피지 α 스윕은
+    `exit_price = active_stop − α·(active_stop − exit_extreme)`(롱, 숏 대칭)라, 이 극값만
+    있으면 후보를 다시 시뮬레이션하지 않고 α를 사후 변환으로 얹을 수 있다(`stop_slippage_alpha`
+    엔진 인자와 같은 값을 낸다). α=0(기본)에서는 `exit_price`가 `active_stop` 그대로라 이
+    필드가 있어도 손익은 비트 단위로 불변이다."""
     order_rested: bool = True
     """이 셋업에 주문이 **한 번이라도 주문판에 걸렸는지** (WAN-119).
 
@@ -219,6 +228,8 @@ def simulate_zone_limit_trade(
     rsi_neutral_band: tuple[float, float] = (40.0, 60.0),
     penetration_bps: float = 0.0,
     first_tap_free: bool = False,
+    stop_slippage_alpha: float = 0.0,
+    limit_stop_nonfill: bool = False,
 ) -> ZoneLimitOutcome:
     """한 오더블록 셋업의 존-지정가 진입·청산을 1분 서브스텝으로 시뮬레이션한다.
 
@@ -257,12 +268,39 @@ def simulate_zone_limit_trade(
     다른 값을 내면 그것이 청산·MFE/MAE 기준이 되며 `ZoneLimitOutcome.stop_price`로
     돌려준다. 계약이 `None`을 내면 유효한 청산 규칙이 없다는 뜻이라 체결시키지 않고
     `CANCELLED_CONDITION_FAILED`로 끝낸다(정적 경로가 탭 봉에서 셋업을 빼는 것의 봉내 판(版)).
+
+    ## 손절 갭-체결 민감도 (WAN-276, 옵트인 · 기본은 현행과 비트 동일)
+
+    현행 엔진은 손절 발동 봉에서 손절가 `active_stop` **그 값**으로 체결한다 — "지정가처럼
+    정확한 가격 + 시장가처럼 무조건 체결"을 공짜로 가정한 것이다. 급락 갭 날엔 그 조합이
+    현실에 없다. 두 인자로 그 가정을 보수화한다(둘은 다른 청산 모델이라 함께 켤 수 없다).
+
+    * `stop_slippage_alpha`(팔 1, **시장가 손절 슬리피지**) ∈ [0, 1]: 손절이 발동한 봉에서
+      `exit_price = active_stop − α·(active_stop − step.low)`(롱, 숏 대칭 = 봉 고가 쪽)로
+      체결한다. α=0(기본)이면 `active_stop` 그대로라 예전과 비트 동일하고, α=1이면 봉 저가
+      = 1분 해상도 안의 최악 체결이다. 체결 봉·시각은 안 바뀌고 체결 **가격**만 나빠진다.
+    * `limit_stop_nonfill`(팔 2, **지정가 손절 미체결**): 손절 봉이 손절가를 **갭 관통**
+      (롱: 봉 전체가 손절가 아래 = `step.high < active_stop`)하면 그 봉에서 미체결로 두고
+      포지션을 계속 끌고 간다. 이후 가격이 손절가로 되돌아온 봉(롱: `step.high >= active_stop`)
+      에서 **손절가 그대로**(지정가는 자기 가격에 체결 — 슬리피지 없음) 청산하고, 끝까지
+      안 돌아오면 데이터 종료까지 홀드한다(`FILLED_OPEN` → 호출부가 마지막 종가로 강제 청산).
+      봉 범위가 손절가를 품는 정상 터치(`step.low <= active_stop <= step.high`)는 예전처럼
+      즉시 손절가 체결이라, 팔 2는 **진짜 갭 관통 봉에서만** 현행과 갈린다. α는 지정가
+      체결에 안 붙으므로 두 인자를 동시에 주는 것은 무의미해 거부한다.
     """
     if not substeps:
         # 서브스텝이 없으면 live 밴드는 값을 낼 기회조차 없었다 = 주문이 걸린 적 없다.
         return ZoneLimitOutcome(status=ZoneLimitStatus.NO_TOUCH, order_rested=live_limit is None)
     if penetration_bps < 0.0:
         raise ValueError(f"penetration_bps는 음수일 수 없습니다: {penetration_bps}")
+    if not 0.0 <= stop_slippage_alpha <= 1.0:
+        raise ValueError(f"stop_slippage_alpha는 [0, 1] 범위여야 합니다: {stop_slippage_alpha}")
+    if limit_stop_nonfill and stop_slippage_alpha != 0.0:
+        # 지정가는 자기 가격에 체결(슬리피지 없음)이라 α와 함께 켜는 것은 모순이다(WAN-276).
+        raise ValueError(
+            "limit_stop_nonfill(지정가 미체결)과 stop_slippage_alpha(시장가 슬리피지)는 "
+            "다른 청산 모델이라 함께 켤 수 없습니다(WAN-276)."
+        )
     if (limit_price is None) == (live_limit is None):
         raise ValueError("limit_price와 live_limit 중 정확히 하나를 줘야 합니다.")
     if live_limit is not None and take_profit_price is not None:
@@ -299,6 +337,20 @@ def simulate_zone_limit_trade(
     # 청산 판정에 쓰는 익절 목표·손절선. `live_limit`이면 둘 다 체결 순간에 정해진다(WAN-143).
     active_tp = take_profit_price
     active_stop = stop_price
+
+    def _stop_fill_price(extreme: float) -> float:
+        """arm(1) 시장가 손절 슬리피지: 손절가에서 봉 극값 쪽으로 α만큼 나쁘게 체결(WAN-276).
+
+        롱은 `active_stop − α·(active_stop − 봉저가)`, 숏은 `active_stop + α·(봉고가 −
+        active_stop)`. α=0이면 `active_stop` 그대로다. `extreme`은 손절 봉의 불리 극값
+        (롱=저가, 숏=고가)이고 손절 발동 봉에서 `active_stop`보다 불리하므로 슬리피지는 항상
+        비음(≥0)이다."""
+        if is_long:
+            return active_stop - stop_slippage_alpha * (active_stop - extreme)
+        return active_stop + stop_slippage_alpha * (extreme - active_stop)
+
+    # WAN-276 팔 2: 지정가 손절이 갭 관통으로 미체결돼 손절가 복귀를 기다리는 상태.
+    stop_armed = False
 
     # 상수 지정가는 탭 봉부터 이미 주문판에 걸려 있다. live는 밴드가 값을 낸 순간부터다.
     order_rested = live_limit is None
@@ -398,11 +450,38 @@ def simulate_zone_limit_trade(
             # 청산을 판정한다 — 청산 봉의 범위까지가 보유 구간이고 그 이후는 보지 않는다.
             hold_high = step.high if hold_high is None else max(hold_high, step.high)
             hold_low = step.low if hold_low is None else min(hold_low, step.low)
-            stop_hit = step.low <= active_stop if is_long else step.high >= active_stop
             tp_hit = active_tp is not None and (
                 step.high >= active_tp if is_long else step.low <= active_tp
             )
-            if stop_hit and (not tp_hit or stop_before_tp):
+            # WAN-276: 손절 체결을 두 모델 중 하나로 판정한다. 기본(둘 다 끔)은 현행 그대로
+            # "손절가 터치 즉시 손절가 체결"이라 예전과 비트 단위로 같다.
+            stop_fill = False
+            stop_exit_price = active_stop
+            stop_extreme: float | None = None
+            if limit_stop_nonfill:
+                # 팔 2 지정가 미체결: 정상 터치(봉 범위가 손절가를 품음)면 즉시 손절가 체결,
+                # 갭 관통(봉 전체가 손절가 너머)이면 미체결로 무장하고 손절가 복귀를 기다린다.
+                if not stop_armed:
+                    reached = step.low <= active_stop if is_long else step.high >= active_stop
+                    if reached:
+                        spans = step.high >= active_stop if is_long else step.low <= active_stop
+                        if spans:
+                            stop_fill = True
+                            stop_extreme = step.low if is_long else step.high
+                        else:
+                            stop_armed = True  # 갭 관통 — 그 봉엔 미체결, 계속 끌고 간다.
+                else:
+                    returned = step.high >= active_stop if is_long else step.low <= active_stop
+                    if returned:  # 가격이 손절가로 되돌아옴 → 지정가 그대로 체결.
+                        stop_fill = True
+                        stop_extreme = step.low if is_long else step.high
+            else:
+                # 팔 1/기본: 손절가 터치 즉시 시장가 체결(α 슬리피지, α=0이면 손절가 그대로).
+                stop_fill = step.low <= active_stop if is_long else step.high >= active_stop
+                if stop_fill:
+                    stop_extreme = step.low if is_long else step.high
+                    stop_exit_price = _stop_fill_price(stop_extreme)
+            if stop_fill and (not tp_hit or stop_before_tp):
                 mfe_r, mae_r = _excursions()
                 return ZoneLimitOutcome(
                     status=ZoneLimitStatus.FILLED_EXITED,
@@ -410,11 +489,12 @@ def simulate_zone_limit_trade(
                     entry_price=entry_price,
                     entry_rsi=entry_rsi,
                     exit_time=step.time,
-                    exit_price=active_stop,
+                    exit_price=stop_exit_price,
                     exit_reason=SignalExitReason.STOP_LOSS,
                     mfe_r=mfe_r,
                     mae_r=mae_r,
                     stop_price=active_stop,
+                    exit_extreme=stop_extreme,
                     order_rested=order_rested,
                 )
             if tp_hit:

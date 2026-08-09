@@ -52,6 +52,8 @@ def _simulate_long(
     rsi_neutral_band: tuple[float, float] = (40.0, 60.0),
     penetration_bps: float = 0.0,
     first_tap_free: bool = False,
+    stop_slippage_alpha: float = 0.0,
+    limit_stop_nonfill: bool = False,
 ) -> ZoneLimitOutcome:
     return simulate_zone_limit_trade(
         direction=OrderBlockDirection.BULLISH,
@@ -69,6 +71,8 @@ def _simulate_long(
         rsi_neutral_band=rsi_neutral_band,
         penetration_bps=penetration_bps,
         first_tap_free=first_tap_free,
+        stop_slippage_alpha=stop_slippage_alpha,
+        limit_stop_nonfill=limit_stop_nonfill,
     )
 
 
@@ -792,3 +796,121 @@ def test_mfe_mae_none_when_not_filled() -> None:
     assert out.status is ZoneLimitStatus.NO_TOUCH
     assert out.mfe_r is None
     assert out.mae_r is None
+
+
+# ---------------------------------------------------- WAN-276 손절 갭-체결 민감도
+
+
+def test_stop_slippage_alpha_zero_is_bit_identical() -> None:
+    """α=0(기본)은 손절가 그대로 체결 — 명시적 α=0과 기본이 완전히 같은 결과."""
+    steps = [_step(0, high=101, low=80, close=85)]  # 존 관통: 진입 100, 봉 저가 80, 손절 90
+    default = _simulate_long(steps)
+    explicit = _simulate_long(steps, stop_slippage_alpha=0.0)
+    assert default == explicit
+    assert default.exit_price == _STOP  # 90 — 현행과 비트 동일
+    assert default.exit_extreme == 80.0  # 손절 봉의 불리 극값(저가)을 관측값으로 실어 준다
+
+
+def test_stop_slippage_alpha_widens_stop_fill_price() -> None:
+    """팔 1: α가 손절 체결가를 봉 저가 쪽으로 밀어 나쁘게 만든다(α=1 = 봉 저가)."""
+    steps = [_step(0, high=101, low=80, close=85)]  # 손절 90, 봉 저가 80 → 최악 10 아래
+    half = _simulate_long(steps, stop_slippage_alpha=0.5)
+    assert half.exit_reason is SignalExitReason.STOP_LOSS
+    assert half.exit_price == pytest.approx(85.0)  # 90 - 0.5*(90-80)
+    full = _simulate_long(steps, stop_slippage_alpha=1.0)
+    assert full.exit_price == pytest.approx(80.0)  # 봉 저가 = 1분 해상도 안의 최악
+
+
+def test_stop_slippage_alpha_matches_transform_formula() -> None:
+    """엔진 α가 사후 변환 공식(active_stop − α·(active_stop − exit_extreme))과 같은 값을 낸다."""
+    steps = [_step(0, high=101, low=80, close=85)]
+    base = _simulate_long(steps)  # α=0 → exit_extreme=80, stop_price=90
+    assert base.stop_price == _STOP and base.exit_extreme == 80.0
+    for alpha in (0.25, 0.5, 1.0):
+        eng = _simulate_long(steps, stop_slippage_alpha=alpha)
+        expected = base.stop_price - alpha * (base.stop_price - base.exit_extreme)
+        assert eng.exit_price == pytest.approx(expected)
+
+
+def test_stop_slippage_short_widens_toward_bar_high() -> None:
+    """숏 대칭: α가 손절 체결가를 봉 고가 쪽으로 민다."""
+    steps = [_step(0, high=120, low=99, close=115)]  # 숏 지정가 100 터치(high>=100), 손절 110 관통
+    out = simulate_zone_limit_trade(
+        direction=OrderBlockDirection.BEARISH,
+        limit_price=100.0,
+        stop_price=110.0,
+        substeps=steps,
+        rsi_state=RealtimeRsi.seed_from_closed(_OVERBOUGHT_SEED, length=3),
+        rsi_oversold=30.0,
+        rsi_overbought=70.0,
+        take_profit_price=None,
+        rsi_gate_mode="unconditional",
+        stop_slippage_alpha=1.0,
+    )
+    assert out.exit_reason is SignalExitReason.STOP_LOSS
+    assert out.exit_extreme == 120.0
+    assert out.exit_price == pytest.approx(120.0)  # 봉 고가 = 숏의 1분 최악
+
+
+def test_exit_extreme_none_on_take_profit() -> None:
+    """익절 청산이면 손절 극값이 없다(α 변환 대상이 아니다)."""
+    steps = [_step(0, high=101, low=99, close=99), _step(60_000, high=111, low=100, close=110)]
+    out = _simulate_long(steps)
+    assert out.exit_reason is SignalExitReason.TAKE_PROFIT
+    assert out.exit_extreme is None
+
+
+def test_limit_nonfill_clean_touch_fills_at_stop() -> None:
+    """팔 2: 봉 범위가 손절가를 품는 정상 터치는 예전처럼 손절가에 즉시 체결."""
+    steps = [
+        _step(0, high=101, low=99, close=99),  # 진입 100
+        _step(60_000, high=95, low=88, close=90),  # 손절 90을 범위가 품음(high95≥90≥low88)
+    ]
+    out = _simulate_long(steps, limit_stop_nonfill=True)
+    assert out.status is ZoneLimitStatus.FILLED_EXITED
+    assert out.exit_reason is SignalExitReason.STOP_LOSS
+    assert out.exit_price == _STOP
+    assert out.exit_time == 60_000
+
+
+def test_limit_nonfill_gap_bar_holds_to_end() -> None:
+    """팔 2: 봉 전체가 손절가 아래(갭 관통)면 미체결로 계속 끌고 간다 — 복귀 없으면 홀드."""
+    steps = [
+        _step(0, high=101, low=99, close=99),  # 진입 100
+        _step(60_000, high=85, low=80, close=82),  # 봉 전체가 손절 90 아래 = 갭 관통
+    ]
+    out = _simulate_long(steps, limit_stop_nonfill=True)
+    assert out.status is ZoneLimitStatus.FILLED_OPEN  # 손절가로 안 돌아와 데이터 끝까지 홀드
+    # 대조: 같은 봉을 현행 엔진은 손절가에 체결한다.
+    base = _simulate_long(steps)
+    assert base.status is ZoneLimitStatus.FILLED_EXITED
+    assert base.exit_price == _STOP
+
+
+def test_limit_nonfill_gap_then_return_fills_at_stop() -> None:
+    """팔 2: 갭 관통 후 가격이 손절가로 되돌아온 봉에서 손절가 그대로 체결(슬리피지 없음)."""
+    steps = [
+        _step(0, high=101, low=99, close=99),  # 진입 100
+        _step(60_000, high=85, low=80, close=82),  # 갭 관통 → 무장(미체결)
+        _step(120_000, high=95, low=88, close=93),  # high95 ≥ 손절 90 → 복귀 체결
+    ]
+    out = _simulate_long(steps, limit_stop_nonfill=True)
+    assert out.status is ZoneLimitStatus.FILLED_EXITED
+    assert out.exit_price == _STOP  # 지정가는 자기 가격에 체결(슬리피지 없음)
+    assert out.exit_time == 120_000
+    assert out.exit_reason is SignalExitReason.STOP_LOSS
+
+
+def test_stop_slippage_alpha_out_of_range_rejected() -> None:
+    steps = [_step(0, high=101, low=80, close=85)]
+    with pytest.raises(ValueError, match="stop_slippage_alpha"):
+        _simulate_long(steps, stop_slippage_alpha=1.5)
+    with pytest.raises(ValueError, match="stop_slippage_alpha"):
+        _simulate_long(steps, stop_slippage_alpha=-0.1)
+
+
+def test_alpha_and_nonfill_together_rejected() -> None:
+    """두 팔은 다른 청산 모델이라 함께 켤 수 없다(지정가는 슬리피지 없음)."""
+    steps = [_step(0, high=101, low=80, close=85)]
+    with pytest.raises(ValueError, match="함께 켤 수 없"):
+        _simulate_long(steps, stop_slippage_alpha=0.5, limit_stop_nonfill=True)
