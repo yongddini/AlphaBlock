@@ -23,11 +23,14 @@ from backtest.models import BacktestResult, PositionSide
 from backtest.report import COL_EQUITY_AFTER, trades_to_display_frame
 from backtest.substep import ZoneLimitStatus
 from backtest.trade_store import (
+    ENGINE_SOURCE_FILES,
     BacktestRunStore,
     DuplicateRunError,
     RunFingerprint,
     UnknownRunError,
     engine_revision,
+    engine_source_revision,
+    scan_engine_source_tree,
 )
 from backtest.zone_limit_backtest import SetupDiagnostic, ZoneLimitStats
 from strategy.models import ConfluenceParams, OrderBlockParams
@@ -113,6 +116,98 @@ def test_engine_revision_is_a_string_even_without_git(monkeypatch: pytest.Monkey
 
     monkeypatch.setattr("backtest.trade_store.subprocess.run", _boom)
     assert engine_revision() == "unknown"
+
+
+# ---------------------------------------------- 엔진 소스 지문 (WAN-253 §2)
+
+
+def _write_fake_repo(root: Path) -> None:
+    """엔진 목록의 모든 파일 + 대표 비-엔진 파일을 가짜 레포로 만든다.
+
+    실 레포를 건드리지 않고 (a) 엔진 변경 → 지문 변화 · (b) 비-엔진 변경 → 지문 불변 ·
+    (c) 미분류 감지를 검증하려고, `engine_source_revision(root=)`가 읽는 상대 경로 구조를
+    그대로 재현한다.
+    """
+    for rel in ENGINE_SOURCE_FILES:
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"# {rel}\n", encoding="utf-8")
+    # 대표 비-엔진 파일들(리포트·라이브 집행·아카이브)도 스캔 루트 안에 둔다.
+    for rel in (
+        "backtest/wan999_demo_report.py",
+        "backtest/run.py",
+        "backtest/archive/old.py",
+        "execution/engine.py",
+        "strategy/parity/chart.py",
+    ):
+        path = root / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"# non-engine {rel}\n", encoding="utf-8")
+
+
+def test_engine_source_revision_changes_when_engine_file_changes(tmp_path: Path) -> None:
+    """(a) 엔진 파일이 바뀌면 소스 지문이 달라진다 → 캐시 키 무효화."""
+    _write_fake_repo(tmp_path)
+    before = engine_source_revision(root=tmp_path)
+    assert before.startswith("eng:")
+    (tmp_path / "strategy" / "confluence.py").write_text("# changed\n", encoding="utf-8")
+    assert engine_source_revision(root=tmp_path) != before
+
+
+def test_engine_source_revision_stable_when_non_engine_changes(tmp_path: Path) -> None:
+    """(b) 비-엔진 파일(리포트·라이브 집행·아카이브)이 바뀌어도 지문은 불변 → 캐시 유지."""
+    _write_fake_repo(tmp_path)
+    before = engine_source_revision(root=tmp_path)
+    for rel in (
+        "backtest/wan999_demo_report.py",
+        "backtest/run.py",
+        "execution/engine.py",
+        "strategy/parity/chart.py",
+    ):
+        (tmp_path / rel).write_text("# edited non-engine\n", encoding="utf-8")
+    # 스캔 루트 밖(대시보드·문서)은 애초에 지문 입력이 아니다.
+    (tmp_path / "dashboard").mkdir()
+    (tmp_path / "dashboard" / "app.py").write_text("# ui\n", encoding="utf-8")
+    assert engine_source_revision(root=tmp_path) == before
+
+
+def test_engine_source_revision_missing_file_is_unknown(tmp_path: Path) -> None:
+    """목록의 파일을 못 읽으면(삭제·비-레포) 조용히 죽지 않고 'unknown'으로 접는다."""
+    _write_fake_repo(tmp_path)
+    (tmp_path / "strategy" / "confluence.py").unlink()
+    assert engine_source_revision(root=tmp_path) == "unknown"
+
+
+def test_scan_detects_unclassified_new_engine_file(tmp_path: Path) -> None:
+    """(c) 스캔 루트에 미분류 `.py`가 생기면 잡아낸다 — 새 엔진 파일이 목록 없이 못 스며든다."""
+    _write_fake_repo(tmp_path)
+    assert scan_engine_source_tree(root=tmp_path) == []
+    (tmp_path / "strategy" / "mystery_signal.py").write_text("# new engine?\n", encoding="utf-8")
+    assert scan_engine_source_tree(root=tmp_path) == ["strategy/mystery_signal.py"]
+
+
+def test_scan_real_repo_has_no_unclassified_files() -> None:
+    """(c) 실 레포의 엔진 스캔 루트가 전부 분류돼 있다 — 미분류가 남으면 실패.
+
+    새 엔진 파일을 추가했다면 `ENGINE_SOURCE_FILES`에, 새 비-엔진 파일이면 `_is_declared_
+    non_engine` 규칙에 넣어야 이 테스트가 통과한다(조용한 stale 서빙 방지, WAN-106 공포).
+    """
+    assert scan_engine_source_tree() == []
+
+
+def test_engine_source_files_exist_and_are_sorted() -> None:
+    """목록이 정렬돼 있고(결정성) 실제로 존재한다 — 엔진 파일 삭제·오타를 잡는다."""
+    assert list(ENGINE_SOURCE_FILES) == sorted(ENGINE_SOURCE_FILES)
+    repo_root = Path(__file__).resolve().parent.parent
+    missing = [rel for rel in ENGINE_SOURCE_FILES if not (repo_root / rel).is_file()]
+    assert missing == []
+
+
+def test_engine_source_revision_on_real_repo_is_prefixed() -> None:
+    """실 레포에서 실제 지문이 뽑히고 `eng:` 접두로 옛 git 해시와 구분된다(§3)."""
+    rev = engine_source_revision()
+    assert rev.startswith("eng:")
+    assert len(rev) == len("eng:") + 12
 
 
 # ------------------------------------------------------------------ 적재·조회

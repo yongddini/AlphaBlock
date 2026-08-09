@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 import subprocess
 import threading
@@ -104,6 +105,139 @@ def engine_revision(*, cwd: str | Path | None = None) -> str:
     if not head:  # pragma: no cover - 방어
         return UNKNOWN_REVISION
     return f"{head}-dirty" if dirty else head
+
+
+# --------------------------------------------------------------------------- #
+# 엔진 소스 지문 — 레포 전체 해시(`engine_revision`)를 「백테 결과를 바꿀 수 있는
+# 소스 트리」로 좁힌 자동 리비전 (WAN-253)
+# --------------------------------------------------------------------------- #
+#
+# `engine_revision()`(레포 HEAD 해시)는 **백테 결과와 무관한 커밋**(대시보드 UI·리포트
+# 스크립트·PM 도구·문서)에도 값이 달라져, 그걸 캐시 키에 쓰면 배포 때마다 캐시가 통째로
+# 무효화된다(WAN-239 야간 캐시 6/6 미스). 이 지문은 **엔진을 실제로 바꿀 때만** 달라지도록
+# 좁힌다 — WAN-106의 "바꿨다고 믿으면서 안 바뀐"(WAN-91/95/112) 방어는 유지하되 자를 정밀화.
+#
+# ⚠️ **이 목록이 이 축의 위험 중심이다** — 엔진 파일을 빠뜨리면 그 파일을 고쳐도 지문이 안
+# 바뀌어 **stale을 조용히 서빙**한다(WAN-106이 뭉툭한 레포 해시를 쓴 이유). 그래서
+# `scan_engine_source_tree()`가 스캔 루트의 **모든** `.py`를 엔진/비-엔진으로 강제 분류하고,
+# 미분류가 하나라도 있으면 회귀 테스트(§2-c)가 실패한다 — 새 엔진 파일이 목록 없이 스며들 수
+# 없다. 「err toward inclusion」: 애매하면 엔진으로 넣는다(과잉 무효화는 안전, 누락은 stale).
+
+#: 저장소 루트 = `backtest/` 패키지의 부모. cwd·git과 무관하게 파일을 찾을 수 있다.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+#: 내용이 바뀌면 백테스트 산출을 바꿀 수 있는 소스 파일(레포 상대 경로, POSIX). 정렬 고정.
+#: `execution/{broker,engine,models}.py`는 **라이브 집행 전용**이라 백테 수치에 안 실려 제외
+#: (아래 `_ENGINE_NON_SOURCE`). `backtest/{run,trade_store,report,synthetic}.py`와 `wan*`
+#: 리포트·`archive/`·`reports/`, `strategy/{parity,reference}`도 비-엔진이다.
+ENGINE_SOURCE_FILES: tuple[str, ...] = (
+    "backtest/__init__.py",
+    "backtest/book_cli.py",
+    "backtest/harness.py",
+    "backtest/leverage_book.py",
+    "backtest/metrics.py",
+    "backtest/models.py",
+    "backtest/multi_tf_overlap.py",
+    "backtest/portfolio.py",
+    "backtest/substep.py",
+    "backtest/sweep.py",
+    "backtest/zone_limit_backtest.py",
+    "config/__init__.py",
+    "config/settings.py",
+    "execution/__init__.py",
+    "execution/leverage.py",
+    "execution/risk.py",
+    "execution/sizing.py",
+    "strategy/__init__.py",
+    "strategy/confluence.py",
+    "strategy/indicators.py",
+    "strategy/models.py",
+    "strategy/order_blocks.py",
+    "strategy/realtime_band.py",
+    "strategy/realtime_rsi.py",
+)
+
+#: `scan_engine_source_tree`가 훑는 루트. 이 아래의 모든 `.py`는 엔진(위 목록)이거나
+#: 아래 규칙으로 **명시적 비-엔진**이어야 한다. 그 외는 미분류 → §2-c 테스트 실패.
+_ENGINE_SCAN_ROOTS: tuple[str, ...] = ("backtest", "config", "execution", "strategy")
+
+#: 스캔 루트 안이지만 백테 수치에 안 실리는 잎 파일(리포트/저장/합성/라이브 집행).
+_ENGINE_NON_SOURCE: frozenset[str] = frozenset(
+    {
+        "backtest/run.py",
+        "backtest/trade_store.py",
+        "backtest/report.py",
+        "backtest/synthetic.py",
+        "execution/broker.py",
+        "execution/engine.py",
+        "execution/models.py",
+    }
+)
+
+#: `backtest/wan…` 리포트 모듈(예 `wan95_zone_limit_report.py`)을 잡는 규칙.
+_WAN_REPORT_RE = re.compile(r"^wan\d")
+
+
+def _is_declared_non_engine(rel: str) -> bool:
+    """스캔 루트 안의 이 `.py`가 **명시적으로 비-엔진**이면 True.
+
+    비-엔진 판정은 좁고 명시적이다(넓히면 엔진을 놓친다). 판정에 안 걸리고 엔진 목록에도
+    없으면 `scan_engine_source_tree`가 미분류로 돌려주고 §2-c 테스트가 실패한다.
+    """
+    if rel.startswith(("backtest/archive/", "backtest/reports/")):
+        return True
+    if rel.startswith(("strategy/parity/", "strategy/reference/")):
+        return True
+    parts = rel.split("/")
+    if parts[0] == "backtest" and len(parts) == 2 and _WAN_REPORT_RE.match(parts[1]):
+        return True
+    return rel in _ENGINE_NON_SOURCE
+
+
+def scan_engine_source_tree(root: str | Path | None = None) -> list[str]:
+    """스캔 루트의 `.py` 중 엔진/비-엔진 어디에도 분류되지 않은 경로를 정렬해 돌려준다.
+
+    빈 리스트 = 트리의 모든 파일이 분류돼 있음(§2-c 가드 통과). 새 엔진 파일이 목록 없이
+    생기면 여기 잡혀 회귀 테스트가 실패한다 — WAN-106이 두려워한 "엔진 파일 목록 누락"을
+    **동작으로** 막는다.
+    """
+    base = Path(root) if root is not None else _REPO_ROOT
+    engine = set(ENGINE_SOURCE_FILES)
+    unknown: list[str] = []
+    for name in _ENGINE_SCAN_ROOTS:
+        tree = base / name
+        if not tree.exists():
+            continue
+        for path in tree.rglob("*.py"):
+            if "__pycache__" in path.parts:
+                continue
+            rel = path.relative_to(base).as_posix()
+            if rel in engine or _is_declared_non_engine(rel):
+                continue
+            unknown.append(rel)
+    return sorted(unknown)
+
+
+def engine_source_revision(root: str | Path | None = None) -> str:
+    """엔진 정의 소스 트리의 내용 해시(`eng:` 접두 + hex 12자, WAN-253).
+
+    `ENGINE_SOURCE_FILES`의 각 파일 내용(과 경로)을 고정 순서로 해시한다 — 엔진 파일이
+    한 글자라도 바뀌면(워킹트리 기준, 커밋 전이라도) 값이 달라지고, 비-엔진 파일은
+    영향이 없다. `git` 없이도 동작한다(파일을 직접 읽는다). 목록의 파일을 못 읽으면
+    (삭제·비-레포 환경) `UNKNOWN_REVISION`으로 접어 적재를 막지 않되 "모른다"를 남긴다.
+    `eng:` 접두로 옛 git 짧은 해시와 화면에서 구분된다.
+    """
+    base = Path(root) if root is not None else _REPO_ROOT
+    digest = hashlib.sha256()
+    try:
+        for rel in ENGINE_SOURCE_FILES:
+            digest.update(rel.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update((base / rel).read_bytes())
+            digest.update(b"\0")
+    except OSError:  # pragma: no cover - 삭제/비-레포 환경 방어
+        return UNKNOWN_REVISION
+    return f"eng:{digest.hexdigest()[:12]}"
 
 
 class DuplicateRunError(RuntimeError):
