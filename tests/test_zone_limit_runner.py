@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -100,8 +101,12 @@ def _m1(t: int, low: float, high: float, close: float) -> Candle:
     )
 
 
-@pytest.fixture()
-def rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, object]]:
+def _make_rig(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    reentry_entry_rule: str | None = None,
+) -> dict[str, object]:
     _install_stub_detector(monkeypatch)
     db = tmp_path / "ohlcv.db"
     store = OhlcvStore(db)
@@ -126,6 +131,7 @@ def rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, o
         has_position=lambda s, t: any(
             p.symbol == s and p.timeframe == t for p in executor.open_positions
         ),
+        reentry_entry_rule=reentry_entry_rule,  # type: ignore[arg-type]
     )
     state_path = tmp_path / "runtime_state.json"
     runner = ZoneLimitPaperRunner(
@@ -141,7 +147,7 @@ def rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, o
         runtime_state=RuntimeStateStore(state_path),
         now_ms=lambda: 999_999,
     )
-    yield {
+    return {
         "store": store,
         "runner": runner,
         "executor": executor,
@@ -149,9 +155,26 @@ def rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, o
         "paper_store": paper_store,
         "state_path": state_path,
     }
-    store.close()
-    journal.close()
-    paper_store.close()
+
+
+def _close_rig(d: dict[str, object]) -> None:
+    for key in ("store", "journal", "paper_store"):
+        d[key].close()  # type: ignore[attr-defined]
+
+
+@pytest.fixture()
+def rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, object]]:
+    d = _make_rig(tmp_path, monkeypatch)
+    yield d
+    _close_rig(d)
+
+
+@pytest.fixture()
+def reentry_rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, object]]:
+    """재진입 band를 켠 러너(채택 규칙, WAN-273/274)."""
+    d = _make_rig(tmp_path, monkeypatch, reentry_entry_rule="band")
+    yield d
+    _close_rig(d)
 
 
 def test_reserve_fill_open_and_exit_roundtrip(rig: dict[str, object]) -> None:
@@ -236,6 +259,91 @@ def test_stop_loss_exit(rig: dict[str, object]) -> None:
     store.upsert_candles([_m1(_FORMING + _M, 89.5, 104.0, 90.5)])
     runner.poll_once()
     assert executor.open_positions == []
+
+
+# -- 익절 후 존 내 재진입 (WAN-273/274) --------------------------------------
+
+
+def test_reentry_reenters_same_zone_after_take_profit(reentry_rig: dict[str, object]) -> None:
+    """재진입 band를 켜면 익절 후 같은 존에 다시 진입해 두 번째 거래가 성사된다."""
+    store: OhlcvStore = reentry_rig["store"]  # type: ignore[assignment]
+    runner: ZoneLimitPaperRunner = reentry_rig["runner"]  # type: ignore[assignment]
+    executor: PaperExecutor = reentry_rig["executor"]  # type: ignore[assignment]
+    paper_store: PaperTradeStore = reentry_rig["paper_store"]  # type: ignore[assignment]
+
+    # 1) base 체결 → 포지션 오픈.
+    store.upsert_candles([_m1(_FORMING + _M, 94.9, 99.0, 95.2)])
+    runner.poll_once()
+    assert len(executor.open_positions) == 1
+
+    # 2) 익절 관통 → 청산 + 같은 존에 band 재무장(이 봉에서는 재무장 주문이 아직 안 걸린 뒤라
+    #    체결 안 됨 — 백테스트 재진입도 익절 직후 서브스텝부터 대기한다).
+    store.upsert_candles([_m1(_FORMING + 2 * _M, 95.0, 103.5, 103.0)])
+    runner.poll_once()
+    assert executor.open_positions == []
+    assert paper_store.count(_SYMBOL, _TF) == 1
+    assert runner._engine.book.pending(_SYMBOL, _TF) is not None  # 재무장 대기.
+
+    # 3) 재무장 지정가에 닿았다가 다시 익절 관통 → 두 번째 거래가 같은 존에서 성사된다.
+    store.upsert_candles([_m1(_FORMING + 3 * _M, 94.9, 103.5, 103.0)])
+    runner.poll_once()
+    assert paper_store.count(_SYMBOL, _TF) == 2
+
+
+def test_reentry_off_ends_zone_after_take_profit(rig: dict[str, object]) -> None:
+    """재진입 off(기본 rig)면 같은 시나리오에서 두 번째 거래가 생기지 않는다(대조군)."""
+    store: OhlcvStore = rig["store"]  # type: ignore[assignment]
+    runner: ZoneLimitPaperRunner = rig["runner"]  # type: ignore[assignment]
+    paper_store: PaperTradeStore = rig["paper_store"]  # type: ignore[assignment]
+
+    store.upsert_candles([_m1(_FORMING + _M, 94.9, 99.0, 95.2)])
+    runner.poll_once()
+    store.upsert_candles([_m1(_FORMING + 2 * _M, 95.0, 103.5, 103.0)])
+    runner.poll_once()
+    assert runner._engine.book.pending(_SYMBOL, _TF) is None  # 재무장 없음.
+    store.upsert_candles([_m1(_FORMING + 3 * _M, 94.9, 103.5, 103.0)])
+    runner.poll_once()
+    assert paper_store.count(_SYMBOL, _TF) == 1  # 익절로 존이 끝났다.
+
+
+def test_run_zone_limit_runner_wires_reentry_rule_from_settings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`run_zone_limit_runner`가 설정의 재진입 규칙을 엔진에 물려준다 — 기본 band · off→None."""
+    captured: dict[str, object] = {}
+
+    class _CaptureEngine:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+        book = SimpleNamespace(open_orders=[])
+
+    class _NoRunRunner:
+        def __init__(self, **kwargs: object) -> None:
+            pass
+
+        def run(self, *, max_polls: int | None = None) -> None:
+            pass
+
+    monkeypatch.setattr(zlr, "ZoneLimitLiveEngine", _CaptureEngine)
+    monkeypatch.setattr(zlr, "ZoneLimitPaperRunner", _NoRunRunner)
+
+    db = tmp_path / "ohlcv.db"
+    OhlcvStore(db).close()  # 빈 DB 파일 생성(러너가 열 수 있게).
+    base = dict(
+        db_path=str(db),
+        live_signal_symbols=[_SYMBOL],
+        live_signal_timeframes=[_TF],
+        paper_trade_notify_enabled=False,
+        live_tick_feed_enabled=False,
+    )
+
+    zlr.run_zone_limit_runner(Settings(**base), once=True)  # type: ignore[arg-type]
+    assert captured["reentry_entry_rule"] == "band"  # 채택 기본값.
+
+    captured.clear()
+    zlr.run_zone_limit_runner(Settings(live_reentry_entry_rule="off", **base), once=True)  # type: ignore[arg-type]
+    assert captured["reentry_entry_rule"] is None  # 옵트아웃.
 
 
 def test_pending_order_exposed_in_runtime_state(

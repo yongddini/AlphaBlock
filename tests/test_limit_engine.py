@@ -32,6 +32,7 @@ from strategy.models import (
     OrderBlock,
     OrderBlockDirection,
     OrderBlockResult,
+    SignalExitReason,
 )
 from strategy.realtime_band import RealtimeBand
 from strategy.realtime_rsi import RealtimeRsi
@@ -449,6 +450,150 @@ def test_journal_records_full_lifecycle(monkeypatch: pytest.MonkeyPatch, tmp_pat
     journal.close()
 
 
+# -- 익절 후 존 내 재진입 (WAN-273/274) --------------------------------------
+
+
+def _band_reentry_engine(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    journal: OrderJournal | None = None,
+    session_id: int | None = None,
+) -> ZoneLimitLiveEngine:
+    """재진입 band를 켠 엔진(채택 규칙)에서 존 대장을 세운다."""
+    _install_stub_detector(monkeypatch, [_zone()])
+    engine = ZoneLimitLiveEngine(
+        params=_params(),
+        journal=journal,
+        session_id=session_id,
+        has_position=lambda _s, _t: False,
+        reentry_entry_rule="band",
+    )
+    engine.on_htf_bars(_SYMBOL, _TF, _htf_df())
+    return engine
+
+
+def _fill_base(engine: ZoneLimitLiveEngine) -> None:
+    """base 지정가를 체결시켜 `occupied_zone`을 세운다(재진입 준비 단계)."""
+    events = engine.on_substep(_SYMBOL, _TF, time_ms=_FORMING + _M, low=94.9, high=99.0, close=95.2)
+    assert "filled" in [e.kind for e in events]
+    assert engine.book.pending(_SYMBOL, _TF) is None  # 탭 봉 안에서 즉시 체결됐다.
+
+
+def test_reentry_band_rearms_after_take_profit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """익절 청산 후 같은 존에 band 지정가를 다시 건다(무기한 대기 · 봉내 재산정)."""
+    engine = _band_reentry_engine(monkeypatch)
+    _fill_base(engine)
+    # 러너가 익절을 감지했다고 보고 재진입 훅을 호출한다.
+    events = engine.on_position_exit(
+        _SYMBOL, _TF, reason=SignalExitReason.TAKE_PROFIT, time_ms=_FORMING + 2 * _M
+    )
+    assert [e.kind for e in events] == ["placed"]
+    order = events[0].order
+    assert order.live_limit is not None  # 정적 지정가가 아니라 봉내 라이브 밴드 재산정.
+    assert order.limit_valid_bars is None  # 무기한 대기(백테스트 재진입과 같은 대리, WAN-223).
+    assert engine.book.pending(_SYMBOL, _TF) is not None
+
+
+def test_reentry_off_does_not_rearm_after_take_profit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """재진입 off(기본)면 익절로 존이 끝난다 — 재무장 없음(옛 동작)."""
+    engine = _engine(monkeypatch, [_zone()])  # reentry_entry_rule 미지정 = None.
+    _fill_base(engine)
+    events = engine.on_position_exit(
+        _SYMBOL, _TF, reason=SignalExitReason.TAKE_PROFIT, time_ms=_FORMING + 2 * _M
+    )
+    assert events == []
+    assert engine.book.pending(_SYMBOL, _TF) is None
+
+
+def test_reentry_stop_loss_ends_the_zone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """손절 청산은 재무장하지 않고 존을 끝낸다(`_iter_reentries`의 `if not is_win: break`)."""
+    engine = _band_reentry_engine(monkeypatch)
+    _fill_base(engine)
+    assert (
+        engine.on_position_exit(
+            _SYMBOL, _TF, reason=SignalExitReason.STOP_LOSS, time_ms=_FORMING + 2 * _M
+        )
+        == []
+    )
+    assert engine.book.pending(_SYMBOL, _TF) is None
+    # occupied_zone이 비워졌으므로 뒤늦은 익절 훅(가상)도 재무장할 존을 못 찾는다.
+    assert (
+        engine.on_position_exit(
+            _SYMBOL, _TF, reason=SignalExitReason.TAKE_PROFIT, time_ms=_FORMING + 3 * _M
+        )
+        == []
+    )
+
+
+def test_reentry_skips_invalidated_zone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """무효화로 대장에서 사라진 존은 익절 후에도 재진입하지 않는다."""
+    engine = _band_reentry_engine(monkeypatch)
+    _fill_base(engine)
+    # 존이 무효화됐다 — 탐지기가 이제 빈 대장을 낸다(on_htf_bars가 존을 뺀다).
+    _install_stub_detector(monkeypatch, [])
+    engine.on_htf_bars(_SYMBOL, _TF, _htf_df())
+    events = engine.on_position_exit(
+        _SYMBOL, _TF, reason=SignalExitReason.TAKE_PROFIT, time_ms=_FORMING + 2 * _M
+    )
+    assert events == []
+    assert engine.book.pending(_SYMBOL, _TF) is None
+
+
+def test_reentry_rearm_matches_backtest_band_chain(monkeypatch: pytest.MonkeyPatch) -> None:
+    """재무장 체결이 백테스트 band 사슬과 같은 가격·시각을 낸다(파리티, 로직 이중화 금지).
+
+    재진입도 탭 예약과 **같은 `IntrabarLiveLimit`**(백테스트 재진입 팔과 공유)로 지정가를
+    산정하므로, 같은 확정봉·서브스텝을 넣으면 `simulate_zone_limit_trade`와 일치한다.
+    """
+    params = _params()
+    ob = _zone()
+    engine = _band_reentry_engine(monkeypatch)
+    _fill_base(engine)
+    placed = engine.on_position_exit(
+        _SYMBOL, _TF, reason=SignalExitReason.TAKE_PROFIT, time_ms=_FORMING + 2 * _M
+    )
+    assert [e.kind for e in placed] == ["placed"]
+
+    # 재무장 주문은 다음 서브스텝에서 체결된다.
+    rearm_fill = None
+    for event in engine.on_substep(
+        _SYMBOL, _TF, time_ms=_FORMING + 3 * _M, low=94.0, high=95.0, close=94.5
+    ):
+        if event.kind == "filled":
+            rearm_fill = event.fill
+    assert rearm_fill is not None
+
+    # 백테스트 시뮬레이터 — 같은 시딩([100]*30), 재무장 서브스텝만.
+    closes = [100.0] * _N_CLOSED
+    deviation = params.deviation_filter
+    assert deviation is not None
+    provider = zlb.IntrabarLiveLimit(
+        band=RealtimeBand.seed_from_closed(closes, deviation),
+        order_block=ob,
+        is_long=True,
+        params=params,
+        stop_price=ob.bottom,
+        lines=[],
+        trigger_time=_FORMING + 3 * _M,
+    )
+    outcome = simulate_zone_limit_trade(
+        direction=ob.direction,
+        live_limit=provider,
+        stop_price=ob.bottom,
+        substeps=[
+            SubStep(time=_FORMING + 3 * _M, high=95.0, low=94.0, close=94.5, htf_bar_time=_FORMING)
+        ],
+        rsi_state=RealtimeRsi.seed_from_closed(closes, params.rsi_length),
+        rsi_oversold=params.rsi_oversold,
+        rsi_overbought=params.rsi_overbought,
+        limit_valid_bars=None,  # 재진입은 무기한 대기.
+        rsi_gate_mode=params.rsi_gate_mode,
+    )
+    assert outcome.filled
+    assert outcome.entry_price == pytest.approx(rearm_fill.price)
+    assert outcome.entry_time == rearm_fill.time
+
+
 class TestLiveParamValidation:
     """라이브가 재현 못 하는 설정은 조용히 무시하지 않고 거부한다(WAN-95의 교훈)."""
 
@@ -467,3 +612,13 @@ class TestLiveParamValidation:
     def test_rejects_min_rr(self) -> None:
         with pytest.raises(ValueError, match="min_rr"):
             ZoneLimitLiveEngine(params=_params(min_rr=1.0))
+
+    def test_rejects_unwired_reentry_rules(self) -> None:
+        """라이브는 재진입 'band'만 배선했다 — 'freeze'/'zone'은 거부(WAN-267 측정 팔)."""
+        for rule in ("freeze", "zone"):
+            with pytest.raises(ValueError, match="재진입 규칙 'band'만"):
+                ZoneLimitLiveEngine(params=_params(), reentry_entry_rule=rule)
+
+    def test_band_reentry_requires_deviation_filter(self) -> None:
+        with pytest.raises(ValueError, match="볼린저 필터가 있어야"):
+            ZoneLimitLiveEngine(params=_params(deviation_filter=None), reentry_entry_rule="band")

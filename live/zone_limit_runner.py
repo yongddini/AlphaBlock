@@ -55,7 +55,7 @@ from data.freshness import window_gap_summary
 from data.storage import OhlcvStore
 from execution.engine import EntryIntent
 from live.executor import PaperExecutor
-from live.limit_engine import EngineEvent, ZoneLimitLiveEngine
+from live.limit_engine import EngineEvent, ReentryEntryRule, ZoneLimitLiveEngine
 from live.order_journal import SKIP_REASON_ZONE_WIDTH, OrderJournal
 from live.paper import PaperPosition
 from live.price_feed import PriceFeed
@@ -431,6 +431,14 @@ class ZoneLimitPaperRunner:
         )
         if self._notifier is not None:
             self._notifier.handle_exit(report, exit_price=price, reason=reason, exit_time=time_ms)
+        # 익절 후 존 내 재진입(WAN-273/274) — 청산이 실제로 성사됐을 때만. 익절이면 엔진이
+        # 같은 존에 band 지정가를 다시 걸고(재진입 켜짐일 때), 손절이면 그 존을 끝내 재무장
+        # 상태를 비운다. 재진입 규칙은 엔진이 설정에서 물려받은 채택 규약이다(러너가 자기
+        # 버전을 새로 만들지 않는다). placed 이벤트는 예약 로그·장부·알림을 태운다.
+        if report.accepted:
+            self._handle_events(
+                self._engine.on_position_exit(symbol, timeframe, reason=reason, time_ms=time_ms)
+            )
 
     # -- 스냅샷 --------------------------------------------------------------
 
@@ -541,6 +549,11 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
 
             skip_listener = _forward_skip
 
+        # 재진입 규칙(WAN-273/274): 채택 값 "band"를 엔진이 물려받는다. "off"면 None(재진입
+        # 없음). 백테스트 채택 북과 같은 규칙이라 러너가 자기 버전을 새로 만들지 않는다.
+        reentry_rule: ReentryEntryRule | None = (
+            None if settings.live_reentry_entry_rule == "off" else "band"
+        )
         engine = ZoneLimitLiveEngine(
             params=settings.confluence,
             book=None,
@@ -550,6 +563,7 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
                 p.symbol == s and p.timeframe == t for p in executor.open_positions
             ),
             skip_listener=skip_listener,
+            reentry_entry_rule=reentry_rule,
         )
         # 옵트인 웹소켓 틱 피드(WAN-246, 페이퍼 한정 · 공개 체결 스트림만). 기본 꺼짐이면
         # None → 러너는 확정 1분봉만 소비(예전과 비트 동일). 켜면 심볼별 실시간 체결가로
