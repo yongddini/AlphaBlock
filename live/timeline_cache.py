@@ -16,22 +16,29 @@ WAN-234의 `alphablock trades`(당일 거래별 타임라인)는 라이브를 �
 
 거래 행만 저장하면 "이게 어느 엔진의 대조인지" 알 수 없다. 이 캐시는 **실행 지문 없이는
 적재도 조회도 되지 않는다**. 지문은 하루(KST)·심볼·TF·워밍업과 채택 파라미터
-(`ConfluenceParams`/`OrderBlockParams`/`BacktestConfig`)의 직렬화, 그리고 **엔진 버전과 코드
-리비전(git 짧은 해시)** 을 담고, 그 전부의 해시가 `run_id`가 된다.
+(`ConfluenceParams`/`OrderBlockParams`/`BacktestConfig`)의 직렬화, 그리고 **엔진 버전과
+엔진 소스 지문**(`eng:…`, `backtest.trade_store.engine_source_revision`)을 담고, 그 전부의
+해시가 `run_id`가 된다.
 
-**코드 리비전을 지문에 넣는 것이 특히 중요하다.** 파라미터만으로 키를 만들면 엔진 버그를
+**엔진 소스 지문을 넣는 것이 특히 중요하다.** 파라미터만으로 키를 만들면 엔진 버그를
 고쳐도 키가 같아 옛 결과를 꺼내 준다 — WAN-91/95/112가 반복해 당한 "바꿨다고 믿으면서 안
-바뀐" 사고의 재현이다. 규칙(완료 기준 4): (a) 엔진이 바뀌면(= 리비전 해시가 달라지면) 옛
+바뀐" 사고의 재현이다. 규칙(완료 기준 4): (a) 엔진이 바뀌면(= 소스 지문이 달라지면) 옛
 행을 **덮어쓰지 않고** 새 행을 따로 쓴다(엔진 간 대조·이력 보존), (b) 조회는 **지금 지문과
 일치하는 셀만** 꺼내고 없으면 캐시 미스로 취급, (c) 화면·터미널에 **(Ⅰ) 설명형 엔진 이름 +
-(Ⅱ) git 해시 보조**를 표시한다(옛 엔진 숫자를 오늘 것인 양 읽는 사고 방지).
+(Ⅱ) 엔진 소스 지문 보조**를 표시한다(옛 엔진 숫자를 오늘 것인 양 읽는 사고 방지).
+
+⚠️ **리비전 축을 「레포 HEAD 해시」에서 「엔진 소스 지문」으로 좁혔다(WAN-253).** 옛
+`engine_revision()`(레포 전체 git 해시)은 대시보드 UI·리포트·PM·문서 커밋에도 값이 달라져
+배포 때마다 야간 캐시가 통째로 무효화됐다. `engine_source_revision()`은 **백테 결과를 바꿀
+수 있는 소스 파일**(`ENGINE_SOURCE_FILES`)의 내용만 해시하므로, 비-엔진 배포에는 캐시가
+살아 있고 **엔진을 실제로 바꿀 때만** 무효화된다(WAN-106 방어는 유지, 자만 정밀화).
 
 두 겹 태그:
 * **(Ⅰ) 설명형 이름** = 실제 파라미터에서 자동 조합한 요약(예:
   `오프셋2bp · 라이브밴드 · 게이트없음 · 필터1.28 · 1.5R · 단일포지션`). 손으로 짓는 이름이
   아니라 파라미터에서 뽑으므로 엔진이 바뀌면 이름도 저절로 바뀐다.
-* **(Ⅱ) 정확한 키** = git 짧은 해시(+ 파라미터 직렬화 전체의 `run_id`). 설명형 이름은 노브가
-  안 바뀌고 결과만 바뀌는 변경(버그 수정)을 못 가르므로, 해시가 기계 판별을 맡는다.
+* **(Ⅱ) 정확한 키** = 엔진 소스 지문 `eng:…`(+ 파라미터 직렬화 전체의 `run_id`). 설명형
+  이름은 노브가 안 바뀌고 결과만 바뀌는 변경(버그 수정)을 못 가르므로, 지문이 기계 판별을 맡는다.
 
 ## 캐시 미스 = "아직 계산 안 됨" (조용한 폴백 금지)
 
@@ -59,7 +66,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
-from backtest.trade_store import ENGINE_VERSION, UNKNOWN_REVISION, engine_revision
+from backtest.trade_store import ENGINE_VERSION, UNKNOWN_REVISION, engine_source_revision
 from data.sqlite_util import configure_connection
 from live.trade_timeline import SOURCE_BACKTEST, TimelineRow, backtest_timeline_by_cell
 
@@ -207,7 +214,7 @@ class TimelineCacheFingerprint(BaseModel):
         return _engine_name_from_confluence(json.loads(self.confluence_json))
 
     def display_label(self) -> str:
-        """화면·터미널 배지: (Ⅰ) 설명형 이름 + (Ⅱ) git 해시 보조 — 옛 엔진 오독 방지."""
+        """화면·터미널 배지: (Ⅰ) 설명형 이름 + (Ⅱ) 엔진 소스 지문 보조 — 옛 엔진 오독 방지."""
         return f"{self.engine_name()} ({self.revision})"
 
 
@@ -245,14 +252,14 @@ def cell_fingerprint(
 
 
 def current_engine_label(*, revision: str | None = None) -> str:
-    """지금 코드가 도는 채택 엔진의 배지((Ⅰ) 설명형 이름 + (Ⅱ) git 해시).
+    """지금 코드가 도는 채택 엔진의 배지((Ⅰ) 설명형 이름 + (Ⅱ) 엔진 소스 지문).
 
     캐시가 비어 있어도 "무엇을 계산하려는지"를 화면에 보여 줄 수 있게, 셀과 무관한 채택
     파라미터에서 뽑는다(모든 셀이 같은 파라미터·리비전을 공유하므로 라벨은 하나다).
     """
     from backtest.harness import BASELINE_FILL, build_params
 
-    rev = revision if revision is not None else engine_revision()
+    rev = revision if revision is not None else engine_source_revision()
     name = describe_engine(build_params(fill=BASELINE_FILL).model_dump_json())
     return f"{name} ({rev})"
 
@@ -541,7 +548,7 @@ def persist_day(
     from live.live_vs_backtest import DEFAULT_WARMUP_DAYS
 
     warm = warmup_days if warmup_days is not None else DEFAULT_WARMUP_DAYS
-    rev = revision if revision is not None else engine_revision()
+    rev = revision if revision is not None else engine_source_revision()
 
     by_cell = backtest_timeline_by_cell(
         day_start_ms=day_start_ms,
@@ -605,7 +612,7 @@ def load_cached_day(
     from live.live_vs_backtest import DEFAULT_WARMUP_DAYS
 
     warm = warmup_days if warmup_days is not None else DEFAULT_WARMUP_DAYS
-    rev = revision if revision is not None else engine_revision()
+    rev = revision if revision is not None else engine_source_revision()
 
     rows: list[TimelineRow] = []
     hits: list[tuple[str, str]] = []
