@@ -133,6 +133,12 @@ class _Candidate:
     """보유 구간의 최대유리이탈(MFE), R 단위(WAN-90). 시뮬레이터가 낸 값 그대로 싣는다."""
     mae_r: float | None = None
     """보유 구간의 최대불리이탈(MAE), R 단위(WAN-90). 시뮬레이터가 낸 값 그대로 싣는다."""
+    exit_extreme: float | None = None
+    """손절 청산 봉의 불리 극값(롱=저가, 숏=고가) (WAN-276). 손절 청산일 때만 값이 있다.
+
+    시장가 손절 슬리피지 α를 후보 재시뮬 없이 사후 변환으로 얹을 수 있게 하는 순수
+    관측값이다(`backtest.wan276_stop_gap_fill.apply_stop_slippage`). 있어도 손익·체결에는
+    영향이 없어 후보 생성은 예전과 비트 단위로 같다."""
     refinement_tf: str | None = None
     """겹침을 찾은 하위TF(WAN-126 캐스케이드가 멈춘 칸). 겹침 미적용(`A`·overlap=None)이면
     None. 바닥 TF별 성과 분해(어느 TF에서 찾은 겹침이 좋은가)를 위한 진단 전용 필드다."""
@@ -726,6 +732,8 @@ def build_zone_limit_candidates(
     zone_provider: ZoneProvider | None = None,
     take_profit_override: TakeProfitOverride | None = None,
     stop_loss_override: StopLossOverride | None = None,
+    stop_slippage_alpha: float = 0.0,
+    limit_stop_nonfill: bool = False,
 ) -> tuple[list[_Candidate], ZoneLimitStats]:
     """B안 셋업 순회 → 1분 서브스텝 시뮬레이션까지(비용 반영 전 원가 후보 목록).
 
@@ -760,6 +768,11 @@ def build_zone_limit_candidates(
     기본과 **비트 단위로 같고**, 달라지는 건 청산(손절선·거기서 파생되는 고정 R 익절 목표·
     뚫림/버팀)과 1R 사이징뿐이다. 콜러블이 None을 돌려주면(유효 장벽 불가) 그 셋업만
     제외한다. None이면(기본) 이 경로도 비활성이라 엔진이 예전과 같다.
+
+    `stop_slippage_alpha`(WAN-276, 옵트인)와 `limit_stop_nonfill`(WAN-276, 옵트인)은 손절
+    체결 모델을 보수화한다 — 시뮬레이터로 그대로 흘려보낸다. α=0 · 미체결 끔(기본)이면
+    체결·청산이 예전과 **비트 단위로 같다**. 진입·체결 집합은 두 옵션과 무관하고
+    (손절은 청산만 바꾼다), 달라지는 건 손절 후보의 청산가(팔 1)·청산시각/홀드(팔 2)뿐이다.
 
     ⚠️ **두 훅은 봉내 라이브 밴드(`intrabar_live`/`intrabar_causal`)에서도 동작한다**
     (WAN-143 §0 = 구 WAN-144, 사용자 결정 `배선-새밴드`). 그 밴드는 진입가가 봉 안에서
@@ -1035,6 +1048,8 @@ def build_zone_limit_candidates(
             rsi_neutral_band=params.rsi_neutral_band,
             penetration_bps=params.fill_penetration_bps,
             first_tap_free=first_tap_free,
+            stop_slippage_alpha=stop_slippage_alpha,
+            limit_stop_nonfill=limit_stop_nonfill,
         )
 
         if not outcome.order_rested:
@@ -1115,6 +1130,7 @@ def build_zone_limit_candidates(
                 trigger_time=signal.trigger_time,
                 mfe_r=outcome.mfe_r,
                 mae_r=outcome.mae_r,
+                exit_extreme=outcome.exit_extreme,
                 refinement_tf=refinement_tf,
                 # WAN-244: 탭 봉 pos의 룩어헤드-안전 ADV. 상한이 꺼져 있으면 None(무시).
                 adv_usd=adv_usd_by_pos[pos] if adv_usd_by_pos is not None else None,

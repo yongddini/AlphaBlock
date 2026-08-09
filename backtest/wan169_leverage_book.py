@@ -225,6 +225,14 @@ class _Task:
     렌즈는 **후보 집합**을 바꾸므로 렌즈마다 후보 생성을 다시 해야 한다 — 비용(cost)은 반대로
     후보에 무관하고 시퀀싱에서만 적용되므로(BookCell = 「비용 미반영 원가 셋업」) 렌즈당 한 번
     생성한 후보를 여러 비용에 재사용할 수 있다(WAN-264 컴퓨트 최적화)."""
+    stop_slippage_alpha: float = 0.0
+    """WAN-276(옵트인): 시장가 손절 슬리피지 α. 0(기본)이면 손절가 그대로라 **비트 단위로
+    같다**. α 스윕은 후보의 손절 청산가만 바꾸므로(진입·체결 집합 불변) 후보를 한 번 생성해
+    `apply_stop_slippage`로 사후 변환하는 편이 싸다 — 이 인자는 그 변환의 검산용 직접 경로다."""
+    limit_stop_nonfill: bool = False
+    """WAN-276(옵트인): 지정가 손절 미체결(갭 관통 봉을 미체결 처리). False(기본)이면 예전과
+    **비트 단위로 같다**. 손절 청산의 시각/홀드를 바꾸므로 후보 집합이 α 사후 변환처럼
+    싸게 파생되지 않아 별도 생성이 필요하다."""
 
 
 @dataclass(frozen=True)
@@ -363,6 +371,8 @@ def run_cell(task: _Task, *, log: bool = True) -> CellPayload:
             params=params,
             cfg=cfg,
             order_block_result=ob_result,
+            stop_slippage_alpha=task.stop_slippage_alpha,
+            limit_stop_nonfill=task.limit_stop_nonfill,
         )
         candidates[segment_name] = tuple(cands)
         funding[segment_name] = tuple(window.funding_rates)
@@ -457,6 +467,8 @@ def run_cells(
     reentry: bool = False,
     reentry_entry_rule: ReentryEntryRule = "freeze",
     fill: harness.FillPreset | None = None,
+    stop_slippage_alpha: float = 0.0,
+    limit_stop_nonfill: bool = False,
 ) -> list[CellPayload]:
     """전 칸을 돈다. `jobs`는 성능 노브이지 결과 축이 아니다(WAN-121).
 
@@ -473,6 +485,9 @@ def run_cells(
     `fill`(WAN-264, 옵트인)을 주면 후보 생성의 체결 렌즈를 바꾼다 — None(기본)이면 채택
     기본값(`baseline`)이라 비트 단위로 같다. 렌즈는 후보 집합을 바꾸므로 렌즈마다 다시
     생성해야 하지만, 비용은 후보에 무관하니 렌즈당 한 번 생성해 여러 비용에 재사용한다.
+
+    `stop_slippage_alpha`·`limit_stop_nonfill`(WAN-276, 옵트인)은 손절 체결 모델을 보수화한다
+    — 둘 다 기본(0 · False)이면 예전과 비트 단위로 같다(WAN-276 손절 갭-체결 민감도 측정용).
     """
     tasks = [
         _Task(
@@ -484,6 +499,8 @@ def run_cells(
             reentry=reentry,
             reentry_entry_rule=reentry_entry_rule,
             fill=fill,
+            stop_slippage_alpha=stop_slippage_alpha,
+            limit_stop_nonfill=limit_stop_nonfill,
         )
         for symbol in symbols
         for timeframe in timeframes
