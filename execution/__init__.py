@@ -20,7 +20,12 @@ from execution.models import (
     side_for_exit,
 )
 from execution.risk import CircuitBreakerStatus, RiskDecision, RiskManager, RiskParams
-from execution.sizing import PositionSizingParams, position_size
+from execution.sizing import (
+    PositionSizingParams,
+    SizingRejectReason,
+    position_size,
+    size_with_reason,
+)
 
 __all__ = [
     "Broker",
@@ -40,8 +45,10 @@ __all__ = [
     "RiskDecision",
     "RiskManager",
     "RiskParams",
+    "SizingRejectReason",
     "build_execution_engine",
     "position_size",
     "side_for_entry",
     "side_for_exit",
+    "size_with_reason",
 ]

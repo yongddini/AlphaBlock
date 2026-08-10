@@ -38,7 +38,7 @@ from execution.risk import (
     RiskManager,
     RiskParams,
 )
-from execution.sizing import PositionSizingParams, position_size
+from execution.sizing import PositionSizingParams, SizingRejectReason, size_with_reason
 from strategy.models import OrderBlockDirection, SignalExitReason
 
 _logger = logging.getLogger(__name__)
@@ -61,6 +61,38 @@ REJECT_CODE_NOTIONAL = "notional"
 REJECT_CODE_RISK = "risk"
 #: 브로커가 주문을 체결하지 않았다(페이퍼에서는 사실상 발생하지 않는다).
 REJECT_CODE_UNFILLED = "unfilled"
+
+
+def _sizing_reject_reason(
+    reason: SizingRejectReason,
+    *,
+    entry_price: float,
+    stop_price: float,
+    params: PositionSizingParams,
+) -> str:
+    """사이징이 수량 0을 낸 바닥 이유를 사람용 구체 사유 문자열로 옮긴다 (WAN-275).
+
+    예전엔 이 자리가 전부 "사이징 수량 0 — 진입 스킵" 한 뭉치였다(증상만 보임). 이제
+    `size_with_reason`이 돌려준 원인을 받아 어느 가드에 걸렸는지(손절폭 하한 미달·명목
+    상한 소진·용량 상한·자본 부족)를 표기한다. 손절폭 하한 미달이면 **실제 손절폭 %를
+    병기**해 사용자가 왜 걸렀는지 화면 숫자로 바로 확인하게 한다(WAN-79 하한 가드).
+
+    ⚠️ 라벨만 세분화한다 — 거부 동작·수량·기본값은 불변이다.
+    """
+    if reason == "stop_too_tight":
+        stop_pct = abs(entry_price - stop_price) / entry_price * 100.0
+        min_pct = params.min_stop_distance_fraction * 100.0
+        return f"손절폭 {stop_pct:.2f}% < {min_pct:.2f}% 하한(WAN-79) — 진입 스킵"
+    if reason == "notional_exhausted":
+        return "명목·레버리지 상한 소진(WAN-103) — 진입 스킵"
+    if reason == "capacity_cap":
+        return "용량 상한(ADV 비례, WAN-244)이 명목을 0으로 clamp — 진입 스킵"
+    if reason == "no_equity":
+        return "자본 부족 — 진입 스킵"
+    if reason == "below_min_qty":
+        return "최소 주문 수량 미달 — 진입 스킵"
+    # "ok"는 이 함수를 타지 않는다(수량 > 0). 방어적 폴백.
+    return "사이징 수량 0 — 진입 스킵"
 
 
 class EntryIntent(BaseModel):
@@ -218,12 +250,8 @@ class ExecutionEngine:
             )
 
         if self._leverage_book is None:
-            qty = position_size(
-                equity=self._equity,
-                entry_price=intent.entry_price,
-                stop_price=intent.stop_price,
-                params=self._sizing,
-            )
+            size_params = self._sizing
+            size_open = 0.0
         else:
             # 레버리지 북(WAN-171): 배수·북 명목 상한·cap-only 합성 여유를 백테스트
             # (`run_leverage_book`)와 **같은** `resolve_book_sizing`으로 정하고, 공유 지갑의
@@ -239,15 +267,29 @@ class ExecutionEngine:
                 return ExecutionOutcome.rejected(
                     "북 명목 상한 소진 — 진입 스킵", REJECT_CODE_NOTIONAL
                 )
-            qty = position_size(
-                equity=self._equity,
-                entry_price=intent.entry_price,
-                stop_price=intent.stop_price,
-                params=book_sizing.params,
-                open_notional=book_sizing.synthetic_open,
-            )
+            size_params = book_sizing.params
+            size_open = book_sizing.synthetic_open
+
+        # 수량과 함께 **왜 그 수량인지**를 받는다(WAN-275). 0이면 어느 가드에 걸렸는지를
+        # 구체 사유로 실어 보낸다 — 예전의 "사이징 수량 0" 한 뭉치를 세분화. 수량 계산·
+        # 거부 동작은 불변이라 `size_open=0.0`(북 없음)은 예전 per-trade clamp와 비트 동일.
+        qty, sizing_reason = size_with_reason(
+            equity=self._equity,
+            entry_price=intent.entry_price,
+            stop_price=intent.stop_price,
+            params=size_params,
+            open_notional=size_open,
+        )
         if qty <= 0.0:
-            return ExecutionOutcome.rejected("사이징 수량 0 — 진입 스킵", REJECT_CODE_SIZING)
+            return ExecutionOutcome.rejected(
+                _sizing_reject_reason(
+                    sizing_reason,
+                    entry_price=intent.entry_price,
+                    stop_price=intent.stop_price,
+                    params=size_params,
+                ),
+                REJECT_CODE_SIZING,
+            )
 
         new_notional = intent.entry_price * qty
         if self._leverage_book is None:

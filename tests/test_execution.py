@@ -252,11 +252,14 @@ def test_max_concurrent_positions_blocks() -> None:
 
 
 def test_zero_size_skips_entry() -> None:
-    # min_qty가 커서 사이징이 0을 반환 → 진입 스킵.
+    # min_qty가 커서 사이징이 0을 반환 → 진입 스킵. 사유는 구체 가드(최소 주문 수량
+    # 미달)로 표기된다(WAN-275) — 옛 "사이징 수량 0" 뭉치가 아니다.
     engine = _engine(sizing=_sizing(min_qty=1000.0))
     outcome = engine.on_entry(_long_intent(), now_ms=_DAY0)
     assert not outcome.accepted
-    assert "사이징" in outcome.reason
+    assert outcome.reason_code == REJECT_CODE_SIZING
+    assert "최소 주문 수량" in outcome.reason
+    assert outcome.reason != "사이징 수량 0 — 진입 스킵"
 
 
 # -- 일일 손실 서킷브레이커 --------------------------------------------------
