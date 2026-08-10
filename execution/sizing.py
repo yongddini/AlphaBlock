@@ -61,7 +61,7 @@ SizingRejectReason = Literal[
 """사이징이 왜 그 수량을 냈는지 (WAN-275).
 
 `position_size`는 **서로 다른 이유로 0.0을 반환**하는데(손절폭 가드·명목 상한 소진·
-용량 상한·자본 부족), 예전엔 호출부가 그걸 전부 "수량 0"으로 뭉갰다. `size_with_reason`이
+유동성 한도·자본 부족), 예전엔 호출부가 그걸 전부 "수량 0"으로 뭉갰다. `size_with_reason`이
 그 바닥 이유를 함께 돌려줘 진입 거부 사유를 **증상**이 아니라 **원인**으로 표기하게 한다.
 
 * `ok` — 진입 가능한 양수 수량이 나왔다.
@@ -70,7 +70,7 @@ SizingRejectReason = Literal[
   WAN-79) 미만이다. LINK 15m 같은 극단 근접 손절이 여기 걸린다.
 * `notional_exhausted` — 남은 명목 여유(레버리지·`max_notional_fraction` 상한 − 열린 명목)가
   0 이하다(WAN-103).
-* `capacity_cap` — 용량 상한(ADV 비례 절대 명목 상한, WAN-244)이 명목을 0으로 clamp했다.
+* `capacity_cap` — 유동성 한도(ADV 비례 절대 명목 상한, WAN-244)이 명목을 0으로 clamp했다.
 * `below_min_qty` — 내림·최소 주문 수량(`qty_step`·`min_qty`)에 걸려 0이 됐다.
 
 ⚠️ **라벨일 뿐 수량 계산 로직·값은 불변이다** — `position_size`는 이 함수의 첫 성분만
@@ -108,17 +108,25 @@ class PositionSizingParams(BaseModel):
     max_notional_fraction: float | None = Field(default=None, gt=0)
     """추가 명목가치 상한 = `자본 × 이 값`. None이면 `leverage`만 상한으로 쓴다.
     설정 시 `leverage`와 함께 더 작은 쪽이 실제 상한이 된다."""
-    max_notional_adv_fraction: float | None = Field(default=None, gt=0)
-    """용량 상한 = `이 값 × ADV_usd`(일거래량 비례 **절대(달러)** 명목 상한, WAN-244, 옵트인).
+    max_notional_adv_fraction: float | None = Field(default=0.005, gt=0)
+    """유동성 한도 = `이 값 × ADV_usd`(일거래량 비례 **절대(달러)** 명목 상한, WAN-244).
+
+    📌 **채택 기본값 = 0.005(0.5% ADV)다(WAN-279 재-베이스라인, 사용자 결정 2026-08-10).**
+    옛 기본값 `None`(끔)은 옵트아웃으로 존치한다 — 명시적 `None`은 이 상한을 **끄고**,
+    미지정(기본값)은 0.005다. CLI/리포트에서 둘을 가르는 규약은 `harness.build_config
+    (max_notional_adv_fraction=...)`(UNSET=채택 0.005 물려받기 · `None`=끔)이다.
 
     ⚠️ **위 두 상한(`leverage`·`max_notional_fraction`)과 성격이 다르다** — 그 둘은 자본에
     비례해 커지지만 이 항은 **자본과 무관한 절대 달러 상한**이다(`ADV_usd`는 시장 유동성이지
     내 계좌가 아니다). 그래서 자본이 수백만 배로 커져도 포지션은 시장 용량에 걸려 잘린다 —
     복리 착시를 깨는 것이 이 항의 유일한 목적이다(WAN-90 「레버리지는 위험의 모양만 바꾼다」).
+    개인 계좌 손익엔 사실상 영향이 없다 — 0.5% ADV 실측 상한이 크므로($10k 계좌는 수십 배
+    성장 전엔 안 걸린다) 효과는 「거대 자본 구간의 백테스트 착시 제거」다(WAN-279).
 
-    `None`(기본)이면 이 상한을 쓰지 않는다 — 그때 `position_size(adv_usd=...)`는 무시되고
-    실행이 예전과 비트 단위로 같다. 설정하면 `position_size`에 넘어온 `adv_usd`가 있을 때만
-    발동한다(`adv_usd`가 `None`이면 = ADV 정보 없음(워밍업 등) → 이 항은 걸지 않는다).
+    명시적 `None`이면 이 상한을 쓰지 않는다 — 그때 `position_size(adv_usd=...)`는 무시되고
+    실행이 이 항을 넣기 전과 비트 단위로 같다(옛 CSV 재현). 켜져 있어도 `position_size`에
+    넘어온 `adv_usd`가 있을 때만 발동한다(`adv_usd`가 `None`이면 = ADV 정보 없음(워밍업 등,
+    또는 라이브 러너처럼 ADV를 안 넘기는 경로) → 이 항은 걸지 않는다).
 
     단위는 **ADV 대비 분수**다(예: `0.005` = 0.5% ADV). 자본 비율이 아니다."""
     adv_window_days: int = Field(default=30, gt=0)
@@ -155,7 +163,7 @@ def size_with_reason(
     `position_size`와 계산 로직·값이 **동일**하고, 다른 점은 0을 반환한 바닥 이유를
     `SizingRejectReason`으로 함께 돌려주는 것뿐이다. 호출부(`execution.engine`)가 진입
     거부 사유를 "수량 0"이라는 증상 대신 구체 가드(손절폭 하한 미달·명목 상한 소진·
-    용량 상한·자본 부족)로 표기하는 데 쓴다.
+    유동성 한도·자본 부족)로 표기하는 데 쓴다.
 
     Args:
         equity: 현재 계좌 자본. 0 이하이면 `(0.0, "no_equity")`.
@@ -169,10 +177,10 @@ def size_with_reason(
             포트폴리오 전체에 걸리므로, 이 값을 뺀 **남은 여유분**만 새 포지션에
             배정한다. 여유가 없으면(상한 소진) `(0.0, "notional_exhausted")`. 기본
             `0.0`이면 동시 1포지션 시절과 동일한 per-trade clamp가 된다.
-        adv_usd: 이 진입 시점의 평균 일 달러거래량(ADV, USD, WAN-244). 용량 상한
+        adv_usd: 이 진입 시점의 평균 일 달러거래량(ADV, USD, WAN-244). 유동성 한도
             (`params.max_notional_adv_fraction`)이 설정됐을 때만 쓰인다 — 이 포지션의
             명목을 `max_notional_adv_fraction × adv_usd`로 clamp한다(자본과 무관한 **절대**
-            상한이라 복리 착시를 깬다). `None`이면(기본, 또는 ADV 정보 없음) 용량 상한을
+            상한이라 복리 착시를 깬다). `None`이면(기본, 또는 ADV 정보 없음) 유동성 한도를
             걸지 않는다 — 그러면 실행이 이 항을 넣기 전과 비트 단위로 같다.
 
     Returns:
@@ -216,7 +224,7 @@ def size_with_reason(
     max_qty = remaining / entry_price
     qty = min(qty, max_qty)
 
-    # 용량 상한(WAN-244, 옵트인): 포지션 명목 ≤ `max_notional_adv_fraction × ADV_usd`.
+    # 유동성 한도(WAN-244, 옵트인): 포지션 명목 ≤ `max_notional_adv_fraction × ADV_usd`.
     # 위 clamp들과 달리 이 상한은 **자본에 비례하지 않는 절대 달러 값**이라(ADV = 시장
     # 유동성) 자본이 커져도 포지션이 시장 용량에 걸려 잘린다 — 복리 착시를 깨는 항이다.
     # 포지션당 상한이므로 `open_notional`(포트폴리오 여유)과 무관하게 이 진입 하나에 건다.
@@ -224,7 +232,7 @@ def size_with_reason(
     if params.max_notional_adv_fraction is not None and adv_usd is not None:
         adv_notional_cap = params.max_notional_adv_fraction * adv_usd
         qty = min(qty, adv_notional_cap / entry_price)
-        # 용량 상한이 명목을 0으로 clamp했다(ADV 0 등). 아래 최종 검사가 어차피 0으로
+        # 유동성 한도가 명목을 0으로 clamp했다(ADV 0 등). 아래 최종 검사가 어차피 0으로
         # 거르지만, 여기서 사유를 확정해야 "최소 수량 미달"과 구분된다. 반환 수량은 동일.
         if qty <= 0.0:
             return 0.0, "capacity_cap"

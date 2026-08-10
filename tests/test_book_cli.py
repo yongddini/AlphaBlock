@@ -163,6 +163,26 @@ def _require_real_data() -> None:
         pytest.skip("BTCUSDT 1h 실데이터가 없어 북 검산을 건너뜁니다(CI 기본).")
 
 
+def test_run_book_adv_sentinel_drives_candidate_adv_usd() -> None:
+    """WAN-279: 채택 북(`adv_fraction=UNSET`)은 후보에 `adv_usd`를 싣고, `None`(끄기)은 안 싣는다.
+
+    유동성 한도는 후보 `adv_usd`가 있어야 발동하므로(사이징 게이트) 이 두 갈래가 곧 북의
+    상한 켜짐/꺼짐이다 — 라벨이 아니라 후보 집합의 **동작**으로 고정한다(WAN-91/95/112 부류
+    방지). 채택 기본값(미지정 = `UNSET`)이 켜짐, 명시적 `None`이 끔이다.
+    """
+    _require_real_data()
+    from backtest.harness import UNSET
+    from backtest.wan169_leverage_book import run_cells
+
+    off = run_cells(_SYMBOLS, _TFS, start=_START, end=_END, jobs=1, adv_fraction=None)
+    on = run_cells(_SYMBOLS, _TFS, start=_START, end=_END, jobs=1, adv_fraction=UNSET)
+    off_cands = [c for p in off for cands in p.candidates.values() for c in cands]
+    on_cands = [c for p in on for cands in p.candidates.values() for c in cands]
+    assert off_cands and on_cands  # 후보가 실제로 나왔다.
+    assert all(c.adv_usd is None for c in off_cands)  # 끔 = ADV 미계산(옛 북 비트 재현).
+    assert any(c.adv_usd is not None for c in on_cands)  # 켬 = 룩어헤드-안전 ADV 적재.
+
+
 def test_book_cli_matches_wan180_aggregation_bit_for_bit() -> None:
     """CLI 북 경로가 wan180 측정 aggregation과 비트 단위로 같다(WAN-213 완료기준).
 

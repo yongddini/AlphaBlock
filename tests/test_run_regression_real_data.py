@@ -337,25 +337,21 @@ def test_intrabar_live_seeding_preserves_real_filled_trades(
 
 
 def test_adv_cap_metadata_does_not_change_candidate_set() -> None:
-    """WAN-244 완료기준 — 용량 상한을 켜서 `adv_usd`를 계산해 실어도 **후보 집합은 그대로**다.
+    """WAN-244 완료기준 — 유동성 한도를 켜서 `adv_usd`를 계산해 실어도 **후보 집합은 그대로**다.
 
     상한은 사이징 시점에만 걸리므로(체결·청산 로직 무관), 상한을 켠 cfg로 후보를 지어도
-    `adv_usd`만 채워지고 나머지 필드는 비트 단위로 같아야 한다 — 「기본 꺼짐 = 채택 셀
+    `adv_usd`만 채워지고 나머지 필드는 비트 단위로 같아야 한다 — 「상한 끔 = 옛 북 셀
     비트 재현」의 후보 생성 단위 보증(실데이터로 실제 체결 후보 위에서 확인).
-    """
+
+    ⚠️ WAN-279가 채택 기본값을 0.005로 올린 뒤라 상한 끔 팔은 **명시적 `None`으로 고정**한다
+    (build_config에 맡기면 0.005로 켜진다)."""
     market = load_market_data(_SYMBOL, _TIMEFRAME, start_ms=_START_MS, end_ms=_END_MS)
     assert market.df_1m is not None and not market.df_1m.empty
     params = ConfluenceParams()  # 채택 기본값.
 
-    cfg_off = build_config(_TIMEFRAME)
-    assert cfg_off.risk_sizing is not None
-    cfg_on = cfg_off.model_copy(
-        update={
-            "risk_sizing": cfg_off.risk_sizing.model_copy(
-                update={"max_notional_adv_fraction": 0.005}
-            )
-        }
-    )
+    cfg_off = build_config(_TIMEFRAME, max_notional_adv_fraction=None)
+    cfg_on = build_config(_TIMEFRAME, max_notional_adv_fraction=0.005)
+    assert cfg_off.risk_sizing is not None and cfg_on.risk_sizing is not None
 
     cands_off, stats_off = build_zone_limit_candidates(
         market.htf_df, market.df_1m, _TIMEFRAME, params=params, cfg=cfg_off

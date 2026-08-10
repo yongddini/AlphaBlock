@@ -1,4 +1,4 @@
-"""WAN-244 용량 상한 측정 모듈의 CI-안전 단위 테스트.
+"""WAN-244 유동성 한도 측정 모듈의 CI-안전 단위 테스트.
 
 무거운 후보 생성(실데이터)은 여기서 돌리지 않는다 — 판정 로직·행 모델·base_cfg 스위치·
 CSV 왕복만 고정한다. 상한이 실제로 명목을 자르는 **동작**은 `tests/test_leverage_book.py`
@@ -126,7 +126,7 @@ def test_verdict_detects_collapse_on_full_is() -> None:
         first_full=9_976.0,
     )
     out = verdict(rows)
-    assert out.startswith("**(a) 용량 상한이 복리 착시를 걷어낸다")
+    assert out.startswith("**(a) 유동성 한도가 복리 착시를 걷어낸다")
     assert "$9,976" in out  # full 첫 발동 자본.
     assert "$350,000" in out  # oos_warm 첫 발동 자본.
 

@@ -151,12 +151,12 @@ def test_duplicate_cell_key_rejected() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# WAN-244 — 용량 상한(일거래량 비례 절대 명목 상한)이 북에서 동작으로 존재한다
+# WAN-244 — 유동성 한도(일거래량 비례 절대 명목 상한)이 북에서 동작으로 존재한다
 # --------------------------------------------------------------------------- #
 
 
 def _adv_cfg(fraction: float | None) -> BacktestConfig:
-    """용량 상한 프랙션만 얹은 채택-형 cfg(cap_only 북과 함께 쓴다)."""
+    """유동성 한도 프랙션만 얹은 채택-형 cfg(cap_only 북과 함께 쓴다)."""
     cfg = _cfg(leverage=1.0)  # cap_only 북이 상한을 5배로 연다.
     assert cfg.risk_sizing is not None
     sizing = cfg.risk_sizing.model_copy(update={"max_notional_adv_fraction": fraction})

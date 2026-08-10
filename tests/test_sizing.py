@@ -207,14 +207,34 @@ def test_fixed_notional_rejects_bad_fraction() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# WAN-244 — 용량 상한(일거래량 비례 절대 명목 상한)
+# WAN-244 — 유동성 한도(일거래량 비례 절대 명목 상한)
 # --------------------------------------------------------------------------- #
 
 
-def test_adv_cap_default_off_ignores_adv_usd() -> None:
-    """기본(`max_notional_adv_fraction=None`)이면 `adv_usd`를 넘겨도 결과가 안 변한다 —
-    이 항을 넣기 전과 비트 단위로 같다(기본 실행 재현의 사이징 단위 보장)."""
+def test_adv_cap_default_is_the_adopted_fraction() -> None:
+    """채택 기본값이 0.005(유동성 한도 켜짐)다(WAN-279 재-베이스라인)."""
+    assert PositionSizingParams().max_notional_adv_fraction == 0.005
+
+
+def test_adv_cap_default_on_binds_when_adv_usd_present() -> None:
+    """기본값(0.005)이면 `adv_usd`가 있을 때 상한이 발동해 결과가 달라진다(WAN-279).
+
+    옛 기본값(None = 끔)에서는 `adv_usd`를 무시했지만, 이제 켜져 있어 명목을
+    `0.005 × ADV_usd`로 자른다 — 「인자 없는 실행이 상한 켜짐으로 돈다」의 사이징 단위 보장."""
     params = PositionSizingParams(risk_per_trade=0.01, leverage=5.0)
+    base = position_size(equity=1_000_000.0, entry_price=100.0, stop_price=90.0, params=params)
+    with_adv = position_size(
+        equity=1_000_000.0, entry_price=100.0, stop_price=90.0, params=params, adv_usd=1.0
+    )
+    # ADV_usd=1 → 상한 = 0.005 명목 → 진입가 100 → 0.00005주. 리스크 사이징(자본×1%/손절10 =
+    # 명목 100_000 = 1_000주)보다 한참 작으므로 상한이 구속한다.
+    assert with_adv < base
+    assert with_adv * 100.0 == pytest.approx(0.005)  # 명목 = 0.005 × ADV_usd.
+
+
+def test_adv_cap_explicit_none_reproduces_uncapped() -> None:
+    """명시적 `None`(끄기)이면 `adv_usd`를 넘겨도 상한 전과 비트 단위로 같다(옛 CSV 재현)."""
+    params = PositionSizingParams(risk_per_trade=0.01, leverage=5.0, max_notional_adv_fraction=None)
     base = position_size(equity=1_000_000.0, entry_price=100.0, stop_price=90.0, params=params)
     with_adv = position_size(
         equity=1_000_000.0, entry_price=100.0, stop_price=90.0, params=params, adv_usd=1.0
@@ -223,7 +243,7 @@ def test_adv_cap_default_off_ignores_adv_usd() -> None:
 
 
 def test_adv_cap_binds_absolute_not_scaled_by_equity() -> None:
-    """용량 상한은 **절대 달러**다 — 자본이 커져도 명목이 `k×ADV_usd`로 고정된다."""
+    """유동성 한도는 **절대 달러**다 — 자본이 커져도 명목이 `k×ADV_usd`로 고정된다."""
     params = PositionSizingParams(
         risk_per_trade=0.01, leverage=5.0, max_notional_adv_fraction=0.005
     )
@@ -343,7 +363,7 @@ def test_reason_notional_exhausted() -> None:
 
 
 def test_reason_capacity_cap_when_adv_zero() -> None:
-    """용량 상한(ADV)이 명목을 0으로 clamp하면 capacity_cap — below_min_qty와 구분된다."""
+    """유동성 한도(ADV)이 명목을 0으로 clamp하면 capacity_cap — below_min_qty와 구분된다."""
     params = PositionSizingParams(
         risk_per_trade=0.01, leverage=100.0, max_notional_adv_fraction=0.005
     )
@@ -359,7 +379,7 @@ def test_reason_capacity_cap_when_adv_zero() -> None:
 
 
 def test_reason_below_min_qty() -> None:
-    """내림·최소 수량에 걸려 0이 되면 below_min_qty(용량 상한과 다른 갈래)."""
+    """내림·최소 수량에 걸려 0이 되면 below_min_qty(유동성 한도와 다른 갈래)."""
     params = PositionSizingParams(risk_per_trade=0.01, leverage=100.0, min_qty=1_000.0)
     # 리스크 사이징 수량은 작은데 min_qty가 커서 걸린다.
     qty, reason = size_with_reason(

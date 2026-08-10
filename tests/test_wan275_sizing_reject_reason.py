@@ -61,7 +61,7 @@ def test_stop_too_tight_reports_stop_percent_and_floor() -> None:
 def test_reason_mapping_covers_each_guard() -> None:
     """네 갈래 사유가 각기 다른 구체 문구로 옮겨진다(집계는 여전히 `REJECT_CODE_SIZING`).
 
-    엔진 비북 경로는 `open_notional=0`·`adv_usd=None`이라 명목 소진·용량 상한을
+    엔진 비북 경로는 `open_notional=0`·`adv_usd=None`이라 명목 소진·유동성 한도를
     end-to-end로 재현하기 어렵다(그 경로는 각각 북·ADV 옵트인 소관). 사유→문구 매핑
     함수를 직접 고정해 세 나머지 갈래의 라벨을 회귀로 남긴다. stop_too_tight는 위
     end-to-end 테스트가 담당한다."""

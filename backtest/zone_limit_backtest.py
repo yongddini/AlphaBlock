@@ -143,7 +143,7 @@ class _Candidate:
     """겹침을 찾은 하위TF(WAN-126 캐스케이드가 멈춘 칸). 겹침 미적용(`A`·overlap=None)이면
     None. 바닥 TF별 성과 분해(어느 TF에서 찾은 겹침이 좋은가)를 위한 진단 전용 필드다."""
     adv_usd: float | None = None
-    """탭 시점의 평균 일 달러거래량(ADV, USD, WAN-244 용량 상한). 탭 봉 **직전까지 완료된**
+    """탭 시점의 평균 일 달러거래량(ADV, USD, WAN-244 유동성 한도). 탭 봉 **직전까지 완료된**
     일자들에서만 잰 룩어헤드-안전 값이다. `cfg.risk_sizing.max_notional_adv_fraction`이
     설정됐을 때만 `build_zone_limit_candidates`가 채우고, 그때 `_to_trade`가 이 값을
     `position_size(adv_usd=...)`로 넘겨 포지션 명목을 시장 용량에 맞춰 clamp한다. 상한이
@@ -220,7 +220,7 @@ def _trailing_adv_usd_by_pos(
     volumes: Sequence[float],
     window_days: int,
 ) -> list[float | None]:
-    """봉 pos마다 「탭 봉 **직전까지 완료된** 일자들의 평균 일 달러거래량」(WAN-244 용량 상한).
+    """봉 pos마다 「탭 봉 **직전까지 완료된** 일자들의 평균 일 달러거래량」(WAN-244 유동성 한도).
 
     ⚠️ **룩어헤드 금지가 이 함수의 핵심이다** — 탭 봉이 속한 날(및 그 이후)은 아직
     완료되지 않았으므로 ADV에서 **통째로 제외**하고, 그 날 **직전**의 최근 `window_days`
@@ -231,7 +231,7 @@ def _trailing_adv_usd_by_pos(
     `× 가격`으로 USD 환산해야 한다(WAN-112/158 단위 함정). TF와 무관하게 하루의 봉들을
     합치면 같은 일 달러거래량이 나온다(15m·1h·2h·4h가 같은 상한을 본다).
 
-    완료된 직전 일자가 하나도 없으면(창 초입) `None` — 사이징이 그 진입에 용량 상한을
+    완료된 직전 일자가 하나도 없으면(창 초입) `None` — 사이징이 그 진입에 유동성 한도를
     걸지 않는다(워밍업 처리, `position_size(adv_usd=None)`).
     """
     # 1) 일별 달러거래량 합. 봉이 시간 오름차순이 아니어도 dict 집계라 안전하다.
@@ -796,7 +796,7 @@ def build_zone_limit_candidates(
     closes = [float(v) for v in frame["close"].astype(float).tolist()]
     time_to_pos = {t: i for i, t in enumerate(times)}
 
-    # 용량 상한(WAN-244, 옵트인). 꺼져 있으면(기본) ADV를 아예 계산하지 않으므로 기본
+    # 유동성 한도(WAN-244, 옵트인). 꺼져 있으면(기본) ADV를 아예 계산하지 않으므로 기본
     # 실행은 예전과 비트 단위로 같다 — 후보의 `adv_usd`가 전부 None이라 사이징이 무시한다.
     adv_usd_by_pos: list[float | None] | None = None
     risk_sizing = cfg.risk_sizing
@@ -1261,7 +1261,7 @@ def _to_trade(
             stop_price=cand.stop_price,
             params=cfg.risk_sizing,
             open_notional=open_notional,
-            # WAN-244 용량 상한: 후보가 실은 룩어헤드-안전 ADV를 넘긴다. 상한이 꺼져 있거나
+            # WAN-244 유동성 한도: 후보가 실은 룩어헤드-안전 ADV를 넘긴다. 상한이 꺼져 있거나
             # (`max_notional_adv_fraction=None`) ADV가 없으면(`None`) 사이징이 무시한다.
             adv_usd=cand.adv_usd,
         )
