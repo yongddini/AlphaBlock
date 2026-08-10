@@ -205,10 +205,15 @@ class _Task:
     timeframe: str
     start_ms: int
     end_ms: int
-    adv_fraction: float | None = None
-    """WAN-244(옵트인): 설정하면 후보 생성 cfg의 `max_notional_adv_fraction`을 이 값으로 둬
-    각 후보에 룩어헤드-안전 `adv_usd`를 싣는다(용량 상한 측정용). None(기본)이면 예전과
-    비트 단위로 같다 — ADV를 계산조차 하지 않고 후보 집합·격리 성과가 불변이다."""
+    adv_fraction: harness.AdvCapArg = harness.LEGACY_MAX_NOTIONAL_ADV_FRACTION
+    """유동성 한도(WAN-244/279): 후보 생성 cfg의 `max_notional_adv_fraction`을 이 값으로 **명시
+    고정**한다(`run_cell`이 `build_config(max_notional_adv_fraction=...)`으로 항상 얹는다).
+
+    `None`(기본, 측정 모듈)이면 상한을 **끄고** ADV를 계산조차 하지 않아 후보 집합·격리 성과가
+    옛 북 CSV와 비트 단위로 같다(WAN-279가 채택 기본값을 0.005로 올린 뒤에도). `UNSET`이면
+    채택 기본값(= 0.005 = 유동성 한도 켜짐)을 물려받아 각 후보에 룩어헤드-안전 `adv_usd`를
+    싣는다 — 채택 북(`book_cli.run_book`)이 이 경로로 옵트인한다. `float`이면 그 프랙션으로 켠다
+    (wan244 측정)."""
     reentry: bool = False
     """WAN-261(옵트인): 켜면 각 구간의 base 후보에서 「익절 후 존 내 재진입」 후보
     (WAN-228 재무장 로직)를 추가로 만들어 `CellPayload.reentry_candidates`에 싣는다. base
@@ -336,18 +341,13 @@ def run_cell(task: _Task, *, log: bool = True) -> CellPayload:
     # 인자 없음 = 채택 기본값(옛 핀 물려받기 금지 — 완료기준). `fill`(WAN-264, 옵트인)을 주면
     # 체결 렌즈만 갈아끼운다 — `None`이면 `build_params(fill=BASELINE_FILL)`과 같아 비트 재현.
     params = harness.build_params() if task.fill is None else harness.build_params(fill=task.fill)
-    cfg = harness.build_config(task.timeframe)
-    if task.adv_fraction is not None:
-        # WAN-244: 후보에 룩어헤드-안전 ADV를 싣기 위해 상한 프랙션을 build cfg에 얹는다.
-        # 상한 발동은 큰 자본에서만 일어나므로 후보 집합은 불변이고 adv_usd만 채워진다.
-        assert cfg.risk_sizing is not None
-        cfg = cfg.model_copy(
-            update={
-                "risk_sizing": cfg.risk_sizing.model_copy(
-                    update={"max_notional_adv_fraction": task.adv_fraction}
-                )
-            }
-        )
+    # 유동성 한도(WAN-244/279): `task.adv_fraction`으로 후보 cfg의 상한을 **항상 명시 고정**한다.
+    # 기본 `None`(측정 모듈)이면 상한을 끄고 — WAN-279가 채택 기본값을 0.005로 올린 뒤라 pin
+    # 없이 build_config에 맡기면 조용히 켜진다(WAN-91/95/112 부류) — 옛 북 CSV가 비트 재현된다.
+    # 이 저장소의 북 후보 생성은 전부 이 함수를 지나므로(wan180/261/264/269/271이 run_cells를
+    # 공유) 여기 한 곳의 고정이 그 모듈들을 한꺼번에 상한-끔으로 보존한다. 채택 북
+    # (`book_cli.run_book`)만 `UNSET`을 넘겨 채택 0.005를 물려받는다. wan244는 0.005를 넘겨 켠다.
+    cfg = harness.build_config(task.timeframe, max_notional_adv_fraction=task.adv_fraction)
 
     candidates: dict[str, tuple[_Candidate, ...]] = {}
     funding: dict[str, tuple[FundingRate, ...]] = {}
@@ -463,7 +463,7 @@ def run_cells(
     start: str,
     end: str,
     jobs: int = 1,
-    adv_fraction: float | None = None,
+    adv_fraction: harness.AdvCapArg = harness.LEGACY_MAX_NOTIONAL_ADV_FRACTION,
     reentry: bool = False,
     reentry_entry_rule: ReentryEntryRule = "freeze",
     fill: harness.FillPreset | None = None,
@@ -472,8 +472,11 @@ def run_cells(
 ) -> list[CellPayload]:
     """전 칸을 돈다. `jobs`는 성능 노브이지 결과 축이 아니다(WAN-121).
 
-    `adv_fraction`(WAN-244, 옵트인)을 주면 후보에 룩어헤드-안전 `adv_usd`를 실어 용량 상한을
-    잴 수 있게 한다 — None(기본)이면 예전과 비트 단위로 같다(book_cli·wan180 무영향).
+    `adv_fraction`(유동성 한도, WAN-244/279)은 후보 cfg의 상한을 **명시 고정**한다 —
+    `None`(기본, 측정 모듈)이면 상한을 끄고 ADV를 계산조차 하지 않아 옛 북 CSV와 비트 단위로
+    같다(wan180/261/264/269/271 무영향). `UNSET`이면 채택 기본값(0.005)을 물려받아 후보에
+    룩어헤드-안전 `adv_usd`를 싣는다(채택 북 `book_cli.run_book`의 옵트인 경로). `float`이면 그
+    프랙션으로 켠다(wan244 측정).
 
     `reentry`(WAN-261, 옵트인)를 켜면 각 칸의 payload에 「익절 후 존 내 재진입」 후보를
     함께 싣는다 — base 후보·격리 성과 행은 불변이라 끄면(기본) 예전과 비트 단위로 같다.

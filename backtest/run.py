@@ -122,6 +122,7 @@ from backtest.harness import (
     SEGMENT_OOS,
     SEGMENT_OOS_WARM,
     UNSET,
+    AdvCapArg,
     FillPreset,
     LimitValidBarsArg,
     RunRow,
@@ -431,6 +432,11 @@ class RunOptions:
     fee_rate: float | None = None
     maker_fee_rate: float | None = None
     slippage: float | None = None
+    max_notional_adv_fraction: AdvCapArg = UNSET
+    """유동성 한도(WAN-279). `UNSET`(기본)이면 채택 기본값(0.005 = 유동성 한도 켜짐)을
+    물려받고, 명시적 `None`이면 끈다(옛 상한-끔 재현), `float`이면 그 프랙션으로 고정.
+    per-cell 실행에선 자본 규모상 사실상 발동하지 않아(inert) 비트 재현되지만, 켜진 상한을
+    라벨이 아니라 값으로 나른다(`_Unset`은 `enum.Enum`이라 워커 피클을 넘어도 싱글턴)."""
     oos: bool = False
     warm_oos: bool = False
     """따뜻한 연속 OOS(WAN-166, `--oos-warm`) — 정본 리포트 기준. 전 구간을 연속으로
@@ -554,6 +560,7 @@ def _run_cell(task: _CellTask) -> _CellOutcome:
         maker_fee_rate=options.maker_fee_rate,
         slippage=options.slippage,
         funding_enabled=options.funding,
+        max_notional_adv_fraction=options.max_notional_adv_fraction,
     )
     rows: list[RunRow] = []
     artifacts: list[RunArtifact] = []
@@ -858,6 +865,15 @@ def build_parser() -> argparse.ArgumentParser:
     costs.add_argument("--fee", type=float, help="테이커 수수료율(기본 0.0004)")
     costs.add_argument("--maker-fee", type=float, help="메이커 수수료율(기본 0.0002)")
     costs.add_argument("--slippage", type=float, help="테이커 슬리피지(기본 0.0005)")
+    costs.add_argument(
+        "--max-notional-adv-fraction",
+        help=(
+            "유동성 한도(WAN-279 채택 기본값 0.005 = 0.5% ADV). 포지션 명목을 이 값×ADV_usd로 "
+            "자른다(자본에 안 비례하는 절대 상한 → 북 복리 착시 제거). none = 끄기(옛 상한-끔 "
+            "CSV 재현). 안 주면 채택 기본값(0.005). 단위는 ADV 대비 분수지 퍼센트가 아니다. "
+            "예: --max-notional-adv-fraction none"
+        ),
+    )
 
     validation = parser.add_argument_group("과최적화 방어")
     validation.add_argument("--oos", action="store_true", help="IS(앞 2/3)/OOS(뒤 1/3) 분할 실행")
@@ -1121,6 +1137,7 @@ def run_book_main(args: argparse.Namespace, book: LeverageBookParams) -> int:
             log=not args.quiet,
             reentry=reentry_on,
             reentry_entry_rule=reentry_rule,
+            adv_fraction=_adv_fraction_from_args(args),
         )
     except ValueError as exc:
         print(f"오류: {exc}", file=sys.stderr)
@@ -1240,6 +1257,38 @@ def _limit_valid_bars_from_args(args: argparse.Namespace) -> tuple[LimitValidBar
     return tuple(values)
 
 
+#: `--max-notional-adv-fraction`에서 "유동성 한도 끄기"를 가리키는 토큰. 0으로 표현하지 않는
+#: 이유는 `--max-zone-width-atr none`과 같다 — 필드가 `gt=0`이라 0은 값으로도 못 쓴다.
+#: ⚠️ `none`(끄기)은 인자 미지정(채택 기본값 0.005)과 다르다(WAN-279).
+NO_ADV_CAP_TOKEN = "none"
+
+
+def _adv_fraction_from_args(args: argparse.Namespace) -> AdvCapArg:
+    """`--max-notional-adv-fraction none` → None(끄기), 숫자 → float, 미지정 → UNSET(채택 0.005).
+
+    ⚠️ 존폭 필터·유효기간 `none`과 **같은 규약**(WAN-159/222/279): `none`(끄기)은 인자 미지정
+    (`UNSET` = 채택 기본값 0.005)과 다르다 — 안 가르면 「상한 끔」이라 믿으며 0.005로 도는
+    이중 배선이 된다(WAN-91/95/112 부류). 단위는 ADV 대비 분수(0.005 = 0.5%)지 퍼센트가
+    아니다. **단일 값**이다(격자 축 아님) — 북 정본을 재는 회계 축이라 콤마 복수를 안 받는다.
+    """
+    raw = args.max_notional_adv_fraction
+    if raw is None:
+        return UNSET
+    token = raw.strip()
+    if token.lower() == NO_ADV_CAP_TOKEN:
+        return None
+    try:
+        value = float(token)
+    except ValueError as exc:
+        raise ValueError(
+            f"--max-notional-adv-fraction에 알 수 없는 값입니다: {token!r} "
+            f"({NO_ADV_CAP_TOKEN} 또는 ADV 대비 분수 숫자)"
+        ) from exc
+    if value <= 0:
+        raise ValueError(f"--max-notional-adv-fraction은 0보다 커야 합니다: {token!r}")
+    return value
+
+
 def _positions_from_args(args: argparse.Namespace) -> tuple[float | None, ...]:
     """`--positions single,3` → `(None, 3.0)`. 안 주면 `(None,)`(채택 기본값)."""
     if not args.positions:
@@ -1313,6 +1362,7 @@ def options_from_args(args: argparse.Namespace) -> RunOptions:
         fee_rate=args.fee,
         maker_fee_rate=args.maker_fee,
         slippage=args.slippage,
+        max_notional_adv_fraction=_adv_fraction_from_args(args),
         oos=args.oos,
         warm_oos=args.oos_warm,
         walkforward=args.walkforward,

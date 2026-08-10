@@ -231,6 +231,35 @@ def test_limit_valid_bars_rejects_unknown_and_non_positive_values() -> None:
         _grid_from(["--limit-valid-bars", "0"])
 
 
+def _options_from(argv: list[str]) -> RunOptions:
+    return options_from_args(build_parser().parse_args(argv))
+
+
+def test_adv_fraction_defaults_to_unset_not_the_adopted_value() -> None:
+    """WAN-279: `--max-notional-adv-fraction`를 안 주면 `UNSET`(채택 0.005 물려받음)이다.
+
+    여기에 0.005를 하드코딩하면 기본값이 바뀔 때 CLI 기본 실행만 조용히 옛 값을 물고
+    돈다(존폭 필터·유효기간 `UNSET` 규약과 같은 자리, WAN-159/222)."""
+    assert _options_from([]).max_notional_adv_fraction is UNSET
+
+
+def test_adv_fraction_none_token_turns_the_cap_off() -> None:
+    """WAN-279: `none`은 끄기(`None`)이고, 인자 미지정(`UNSET` = 채택 0.005)과 다르다."""
+    assert _options_from(["--max-notional-adv-fraction", "none"]).max_notional_adv_fraction is None
+
+
+def test_adv_fraction_numeric_token_pins_the_fraction() -> None:
+    opts = _options_from(["--max-notional-adv-fraction", "0.01"])
+    assert opts.max_notional_adv_fraction == 0.01
+
+
+def test_adv_fraction_rejects_unknown_and_non_positive_values() -> None:
+    with pytest.raises(ValueError, match="--max-notional-adv-fraction"):
+        _options_from(["--max-notional-adv-fraction", "half"])
+    with pytest.raises(ValueError, match="0보다 커야"):
+        _options_from(["--max-notional-adv-fraction", "0"])
+
+
 def test_comma_values_expand_to_cartesian_product() -> None:
     """완료기준: `--tp-r 1.0,1.5,2.0,3.0 --tf 15m,1h` 형태가 조합별 1행을 낸다."""
     grid = _grid_from(["--tf", "15m,1h", "--tp-r", "1.0,1.5,2.0,3.0", "--offset-bps", "0,5"])

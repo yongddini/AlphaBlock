@@ -394,6 +394,28 @@ def test_build_config_applies_cost_overrides_only_when_given() -> None:
     assert build_config(_TIMEFRAME, funding_enabled=False).funding_enabled is False
 
 
+def test_build_config_adv_cap_unset_inherits_the_adopted_default() -> None:
+    """WAN-279: `max_notional_adv_fraction=UNSET`(기본)이면 채택 기본값(0.005)을 물려받는다.
+
+    존폭 필터·유효기간 `UNSET` 규약과 같은 자리 — `risk_sizing`을 손대지 않는다."""
+    cfg = build_config(_TIMEFRAME)  # UNSET 기본
+    assert cfg.risk_sizing is not None
+    assert cfg.risk_sizing.max_notional_adv_fraction == 0.005
+
+
+def test_build_config_adv_cap_explicit_none_turns_it_off() -> None:
+    """WAN-279: 명시적 `None`은 유동성 한도를 **끈다**(옛 상한-끔 북 CSV 재현)."""
+    cfg = build_config(_TIMEFRAME, max_notional_adv_fraction=None)
+    assert cfg.risk_sizing is not None
+    assert cfg.risk_sizing.max_notional_adv_fraction is None
+
+
+def test_build_config_adv_cap_float_pins_the_fraction() -> None:
+    cfg = build_config(_TIMEFRAME, max_notional_adv_fraction=0.01)
+    assert cfg.risk_sizing is not None
+    assert cfg.risk_sizing.max_notional_adv_fraction == 0.01
+
+
 # ---------------------------------------------------- 구간 분할
 
 

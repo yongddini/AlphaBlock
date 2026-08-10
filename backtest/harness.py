@@ -377,6 +377,28 @@ ZoneWidthArg = float | None | _Unset
 #: `is UNSET`이면 `base`의 값을 물려받고(= 채택 기본값 = `24`), 명시적 `None`이면 무기한이다.
 LimitValidBarsArg = int | None | _Unset
 
+#: 유동성 한도(ADV 비례 절대 명목 상한, `max_notional_adv_fraction`) 인자의 타입 —
+#: 실제 프랙션(`float`)·끄기(`None`)·미지정(`UNSET`)(WAN-279). 존폭 필터·유효기간과 **같은
+#: 규약**이다: `None`이 "끄기"라는 유의미한 값이라 "손대지 않는다"로 못 쓴다 — 미지정을
+#: 센티넬로 따로 나른다. `is UNSET`이면 `build_config`가 `risk_sizing`을 손대지 않아 채택
+#: 기본값(= `PositionSizingParams`의 `0.005`)을 물려받고, 명시적 `None`이면 **끈다**.
+AdvCapArg = float | None | _Unset
+
+#: WAN-244~WAN-278 북 측정 리포트가 상한을 **끈** 채 낸 수치(= `max_notional_adv_fraction=None`).
+#:
+#: **WAN-279가 기본값을 `0.005`(0.5% ADV, 유동성 한도)로 올렸다.** 그 이전 수치를 결론
+#: 문장에 박아 둔 북 리포트(wan169/180/261/264/269/271 등)는 이 값을 **명시 고정**해 당시
+#: 회계의 기록으로 보존한다 — `combine_obs`·`band_bar`·`max_zone_width_atr`과 같은 부류라
+#: 고정하지 않으면 기본값을 따라 조용히 상한 켜진 북으로 다시 돌아 본문과 어긋난다
+#: (「안 바꿨다고 믿었는데 바뀐 것」, WAN-91/95/112 부류). 이 저장소의 북 후보 생성은 전부
+#: `wan169.run_cell`을 지나므로 그 한 곳이 상한을 `task.adv_fraction`(기본 `None`)으로 **항상
+#: 명시 고정**해 고정을 중앙화한다 — 채택 북(`book_cli.run_book`)만 `UNSET`으로 옵트인한다.
+#:
+#: ⚠️ 반대로 **"지금 채택된 것"을 재는 리포트는 고정하지 않는다** — 기본값이 움직이면 그
+#: 수치는 낡은 것이 되어야 맞다. per-cell 리포트(wan95)는 상한이 자본 규모상 사실상 발동하지
+#: 않아(inert) 비트 재현된다 — 별도 고정이 필요 없다.
+LEGACY_MAX_NOTIONAL_ADV_FRACTION: float | None = None
+
 
 def build_params(
     *,
@@ -455,6 +477,7 @@ def build_config(
     maker_fee_rate: float | None = None,
     slippage: float | None = None,
     funding_enabled: bool | None = None,
+    max_notional_adv_fraction: AdvCapArg = UNSET,
     seed: int = 0,
 ) -> BacktestConfig:
     """공용 팩토리(`default_backtest_config`) 위에 비용·펀딩 오버라이드만 얹는다.
@@ -462,6 +485,13 @@ def build_config(
     `BacktestConfig()`를 직접 만들지 않는 이유는 WAN-65와 같다 — 그러면
     `settings.effective_risk_sizing`이 조용히 빠져 모든 진입이 자본 100%를 쓰는
     경로로 되돌아간다.
+
+    ⚠️ **`max_notional_adv_fraction`은 존폭 필터·유효기간과 같은 센티넬 규약이다**(WAN-279) —
+    끄기가 `None`이라 `None`을 "손대지 않는다"로 못 쓴다. `UNSET`(기본)이면 `risk_sizing`을
+    손대지 않아 채택 기본값(= `PositionSizingParams`의 `0.005` = 유동성 한도 켜짐)을 물려받고,
+    명시적 `None`이면 **끈다**(옛 상한-끔 북 리포트 재현), `float`이면 그 프랙션으로 고정한다.
+    안 가르면 "상한 끔" 라벨을 단 채 조용히 0.005로 도는 이중 배선이 된다(WAN-91/95/112 부류).
+    `risk_sizing`이 `None`(사이징 비활성)이면 상한 개념 자체가 없어 이 인자를 무시한다.
     """
     cfg = default_backtest_config(timeframe, seed=seed)
     update: dict[str, object] = {}
@@ -473,6 +503,11 @@ def build_config(
         update["slippage"] = slippage
     if funding_enabled is not None:
         update["funding_enabled"] = funding_enabled
+    if max_notional_adv_fraction is not UNSET and cfg.risk_sizing is not None:
+        # 명시적 `None`은 **끄기**(채택 0.005를 덮어씀), `float`이면 그 프랙션으로 고정.
+        update["risk_sizing"] = cfg.risk_sizing.model_copy(
+            update={"max_notional_adv_fraction": max_notional_adv_fraction}
+        )
     return cfg.model_copy(update=update) if update else cfg
 
 

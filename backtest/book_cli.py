@@ -201,6 +201,7 @@ def run_book(
     log: bool = True,
     reentry: bool = True,
     reentry_entry_rule: ReentryEntryRule = ADOPTED_REENTRY_ENTRY_RULE,
+    adv_fraction: harness.AdvCapArg = harness.UNSET,
 ) -> list[BookRunRow]:
     """채택 북을 실데이터에서 돌려 구간별 집계 행을 낸다.
 
@@ -217,6 +218,12 @@ def run_book(
     `reentry=False`는 **WAN-273 이전의 재진입-off 북**이다(옛 CSV 비트 재현) — 라벨이 아니라
     후보 집합으로 갈린다(회귀 테스트가 동작으로 고정). `reentry_entry_rule`은 `reentry=True`일
     때만 의미가 있고 `"freeze"`(첫 체결가 고정)·`"zone"`(존 근단)이 옵트인으로 존치한다.
+
+    ⚠️ **채택 기본값은 유동성 한도 켬(0.005)이다(WAN-279 = 사용자 결정 2026-08-10)** —
+    `adv_fraction` 기본이 `UNSET`이라 `run_cells`가 채택 기본값(`PositionSizingParams`의 0.005)을
+    물려받아 후보에 룩어헤드-안전 `adv_usd`를 싣고, 북 시퀀싱이 명목을 `0.005 × ADV_usd`로
+    자른다(자본에 안 비례하는 절대 상한이라 복리 착시를 깬다, WAN-90/213). `adv_fraction=None`은
+    **WAN-279 이전의 상한-끔 북**이다(옛 CSV 비트 재현) — 미지정(`UNSET`)과 다르다(WAN-159 규약).
     """
     from backtest.run import parse_date_ms  # 지연 import(사이클 회피)
 
@@ -226,6 +233,7 @@ def run_book(
         start=start,
         end=end,
         jobs=jobs,
+        adv_fraction=adv_fraction,
         reentry=reentry,
         reentry_entry_rule=reentry_entry_rule,
     )

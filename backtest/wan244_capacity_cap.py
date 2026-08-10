@@ -1,4 +1,4 @@
-"""WAN-244 — 용량 상한(일거래량 비례)이 채택 북의 복리 착시를 걷어내는가.
+"""WAN-244 — 유동성 한도(일거래량 비례)이 채택 북의 복리 착시를 걷어내는가.
 
 ## 왜
 
@@ -89,7 +89,7 @@ DEFAULT_END: str = harness.DEFAULT_END
 #: 채택 북 = cap_only 5배(WAN-213). `LeverageBookParams()`가 채택 북을 낸다.
 ADOPTED_BOOK = LeverageBookParams()
 
-#: 용량 상한 프랙션 k(사용자 확정 2026-08-04). ⚠️ 데이터가 고른 값이 아니다(자유 파라미터).
+#: 유동성 한도 프랙션 k(사용자 확정 2026-08-04). ⚠️ 데이터가 고른 값이 아니다(자유 파라미터).
 ADV_FRACTION = 0.005
 
 
@@ -99,12 +99,12 @@ ADV_FRACTION = 0.005
 
 
 class CapRow(BaseModel):
-    """한 (상한 끔/켬 × 스코프 × 구간 × 제외 종목)의 북 성과·위험·용량 상한 계측."""
+    """한 (상한 끔/켬 × 스코프 × 구간 × 제외 종목)의 북 성과·위험·유동성 한도 계측."""
 
     model_config = ConfigDict(frozen=True)
 
     cap_on: bool
-    """용량 상한 켬 여부. False = wan180/wan236 채택 셀 그대로(비트 재현)."""
+    """유동성 한도 켬 여부. False = wan180/wan236 채택 셀 그대로(비트 재현)."""
     scope: str
     """`both`(전 칸 = 사용자 정의 실제 북) 또는 개별 TF(`15m`·`1h`·`2h`·`4h`)."""
     segment: str
@@ -122,7 +122,7 @@ class CapRow(BaseModel):
     liquidation_events: int
     clamped_entries: int
     adv_capped_entries: int
-    """용량 상한이 구속 제약이었던 진입 수(WAN-244). 상한 끔이면 0."""
+    """유동성 한도가 구속 제약이었던 진입 수(WAN-244). 상한 끔이면 0."""
     first_adv_cap_time: int | None = None
     first_adv_cap_equity: float | None = None
     """상한이 처음 구속한 순간의 공유 자본(판정 c). 한 번도 안 걸렸으면 None."""
@@ -158,21 +158,16 @@ class CapRow(BaseModel):
 
 
 def _base_cfg(cap_on: bool) -> BacktestConfig:
-    """북 실행용 기준 cfg. `cap_on`이면 용량 상한 프랙션을 risk_sizing에 얹는다.
+    """북 실행용 기준 cfg. `cap_on`이면 유동성 한도 프랙션을 risk_sizing에 얹는다.
 
     상한을 끄면(cap_on=False) `book_cli`/wan180과 같은 base_cfg라 후보에 `adv_usd`가
     실려 있어도 사이징이 무시해 **채택 셀을 비트 단위로 재현**한다.
     """
-    cfg = harness.build_config(BOOK_ANNUALIZATION_TF)
-    if not cap_on:
-        return cfg
-    assert cfg.risk_sizing is not None
-    return cfg.model_copy(
-        update={
-            "risk_sizing": cfg.risk_sizing.model_copy(
-                update={"max_notional_adv_fraction": ADV_FRACTION}
-            )
-        }
+    # WAN-279가 채택 기본값을 0.005로 올린 뒤라 상한 끔 팔은 **명시적 `None`으로 고정**한다
+    # (pin 없이 build_config에 맡기면 조용히 0.005로 돌아 off/on 대조가 깨진다, WAN-91/95/112 부류).
+    return harness.build_config(
+        BOOK_ANNUALIZATION_TF,
+        max_notional_adv_fraction=ADV_FRACTION if cap_on else None,
     )
 
 
@@ -249,7 +244,7 @@ def build_cap_rows(payloads: Sequence[CellPayload]) -> list[CapRow]:
     """상한 끔/켬 × 스코프 × 구간 격자 + leave-one-out(oos_warm 종목 편중).
 
     후보 생성(무거움)은 이미 끝났고 이 격자는 배치 회계(가벼움)뿐이다 — 상한 끔/켬은
-    같은 후보를 base_cfg만 바꿔 돌린다(끔 = 채택 셀 재현, 켬 = 용량 상한 적용).
+    같은 후보를 base_cfg만 바꿔 돌린다(끔 = 채택 셀 재현, 켬 = 유동성 한도 적용).
     """
     symbols = sorted({_short(p.symbol) for p in payloads})
     tf_scopes = [tf for tf in DEFAULT_TIMEFRAMES if any(p.timeframe == tf for p in payloads)]
@@ -312,7 +307,7 @@ def _main_scope(rows: Sequence[CapRow]) -> str:
 
 
 def verdict(rows: Sequence[CapRow]) -> str:
-    """완료기준 3 판정 — 용량 상한이 복리 착시를 걷어내는가(핵심 a) + b·c·d.
+    """완료기준 3 판정 — 유동성 한도가 복리 착시를 걷어내는가(핵심 a) + b·c·d.
 
     숫자는 전부 행에서 계산한다(문장에 박으면 재실행 뒤 리포트가 거짓말을 한다, WAN-164).
     """
@@ -370,7 +365,7 @@ def verdict(rows: Sequence[CapRow]) -> str:
     )
 
     if illusion_ok:
-        head = "**(a) 용량 상한이 복리 착시를 걷어낸다 — full·is의 천문학적 %가 주저앉는다.**"
+        head = "**(a) 유동성 한도가 복리 착시를 걷어낸다 — full·is의 천문학적 %가 주저앉는다.**"
     else:
         head = "**(a) full·is에서 착시가 예상만큼 걷히지 않았다(축소 <10배 또는 발동 없음).**"
 
@@ -469,14 +464,14 @@ def build_summary_markdown(
     scope = _main_scope(cap_rows)
     tf_scopes = sorted({r.scope for r in cap_rows if r.scope != "both"})
     lines = [
-        "# WAN-244 — 용량 상한(일거래량 비례): 채택 북의 복리 착시를 걷어내는가",
+        "# WAN-244 — 유동성 한도(일거래량 비례): 채택 북의 복리 착시를 걷어내는가",
         "",
         "**성격** 측정 전용(옵트인 엔진 `max_notional_adv_fraction` 위의 대조). 채택 회계 = "
         "레버리지 북 **cap_only 5배**(WAN-213) · 9종목 · 못 박은 6년"
         f"({DEFAULT_START}~{DEFAULT_END}) · 15m·1h·2h·4h(WAN-252) · 렌즈 `baseline` 단독 · "
         "채택 기본값 그대로(옛 핀 없음). **상한 끔 vs 켬(k = 0.5% ADV, 사용자 확정)**.",
         "",
-        "**용량 상한** = 포지션 명목 ≤ `0.5% × ADV_usd`. ADV는 탭 봉 **직전까지 완료된** "
+        "**유동성 한도** = 포지션 명목 ≤ `0.5% × ADV_usd`. ADV는 탭 봉 **직전까지 완료된** "
         "일자들의 평균 일 달러거래량(룩어헤드 금지) — `ADV_usd = Σ(봉 volume × 봉 close)`, "
         "ccxt volume은 base 수량이라 × 가격으로 USD 환산. ⚠️ **이 항만 자본에 안 비례하는 "
         "절대 달러 상한**이라 복리를 깬다.",
@@ -516,7 +511,7 @@ def build_summary_markdown(
         "",
         "🚨 **북의 수익률(상한 끔)은 수백~수천 거래의 복리 값이다 — 달성 가능 성과로 인용 "
         "금지**(WAN-90/169). 결정에 실질적인 열은 수익률 절대 크기가 아니라 **MDD · 최대 "
-        "동시 리스크 · 청산 · 상한 발동률**이다. 용량 상한이 하는 일은 그 복리 %를 시장이 "
+        "동시 리스크 · 청산 · 상한 발동률**이다. 유동성 한도가 하는 일은 그 복리 %를 시장이 "
         "실제로 받아 줄 수 있는 규모로 되돌리는 것이지 알파를 더하는 게 아니다.",
         "",
     ]
@@ -534,7 +529,7 @@ def build_summary_markdown(
         "",
         "⚠️ **oos_warm에선 상한이 거의 안 물려(발동률 11%) 끔/켬 행이 거의 같다** — 편중 판정은 "
         "끔 행으로 읽는다. 어느 한 종목이 전부를 만들지 않는다(어느 종목을 빼도 크게 남는다). "
-        "**용량 상한의 편중 효과(full·is)는 이 표에 안 담긴다** — 상한은 유동성이 얇은 소형 "
+        "**유동성 한도의 편중 효과(full·is)는 이 표에 안 담긴다** — 상한은 유동성이 얇은 소형 "
         "알트에서 먼저·더 세게 물리므로(첫 발동 $9,976) 종목마다 다르게 깎지만, 그 구간은 "
         "복리 %가 천문학적이라 leave-one-out 표로 비교하는 것이 무의미하다.",
         "",
@@ -581,7 +576,7 @@ def _load_payloads(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="WAN-244 용량 상한(ADV 비례) 측정")
+    parser = argparse.ArgumentParser(description="WAN-244 유동성 한도(ADV 비례) 측정")
     parser.add_argument("--symbols", type=str, default=",".join(DEFAULT_SYMBOLS))
     parser.add_argument("--tf", type=str, default=",".join(DEFAULT_TIMEFRAMES))
     parser.add_argument("--start", type=str, default=DEFAULT_START)
