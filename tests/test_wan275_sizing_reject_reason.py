@@ -52,7 +52,8 @@ def test_stop_too_tight_reports_stop_percent_and_floor() -> None:
     # (WAN-275 코멘트 2026-08-10): "손절 0.3% 하한 미달" + 실제 손절폭 % 병기.
     assert "손절 0.3% 하한 미달" in out.reason
     assert "손절폭 0.20%" in out.reason  # 실제 손절폭
-    assert "WAN-79" in out.reason
+    # 표시 문구엔 WAN-xxx 이슈 코드를 넣지 않는다(사용자 결정).
+    assert "WAN-" not in out.reason
     # 옛 catch-all 문구가 남지 않았다.
     assert out.reason != "사이징 수량 0 — 진입 스킵"
 
@@ -71,12 +72,12 @@ def test_reason_mapping_covers_each_guard() -> None:
     notional = _sizing_reject_reason(
         "notional_exhausted", entry_price=100.0, stop_price=90.0, params=params
     )
-    assert "레버리지 한도 소진" in notional and "WAN-103" in notional
+    assert notional == "레버리지 한도 소진 — 진입 스킵"
 
     capacity = _sizing_reject_reason(
         "capacity_cap", entry_price=100.0, stop_price=90.0, params=params
     )
-    assert "유동성 한도 초과" in capacity and "WAN-244" in capacity
+    assert capacity == "유동성 한도 초과 (하루 거래량 대비 주문이 너무 큼) — 진입 스킵"
 
     no_equity = _sizing_reject_reason(
         "no_equity", entry_price=100.0, stop_price=90.0, params=params
@@ -88,6 +89,7 @@ def test_reason_mapping_covers_each_guard() -> None:
     )
     assert "최소 주문 수량" in below_min
 
-    # 어느 갈래도 옛 catch-all 문구가 아니다.
+    # 어느 갈래도 옛 catch-all 문구가 아니고, 표시 문구에 WAN-xxx 코드가 없다(사용자 결정).
     for reason in (notional, capacity, no_equity, below_min):
         assert reason != "사이징 수량 0 — 진입 스킵"
+        assert "WAN-" not in reason

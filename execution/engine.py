@@ -85,14 +85,16 @@ def _sizing_reject_reason(
 
     ⚠️ 라벨만 세분화한다 — 거부 동작·수량·기본값은 불변이다.
     """
+    # ⚠️ 표시 문구에 WAN-xxx 이슈 코드를 넣지 않는다(사용자 결정) — 폰으로 알림을 보는
+    # 사람에겐 개발자 참조라 뜻이 없다. 근거 이슈는 아래 주석·docstring으로만 남긴다.
     if reason == "stop_too_tight":
         stop_pct = abs(entry_price - stop_price) / entry_price * 100.0
         min_pct = params.min_stop_distance_fraction * 100.0
-        return f"손절 {min_pct:.1f}% 하한 미달 (손절폭 {stop_pct:.2f}%, WAN-79) — 진입 스킵"
+        return f"손절 {min_pct:.1f}% 하한 미달 (손절폭 {stop_pct:.2f}%) — 진입 스킵"  # WAN-79 하한
     if reason == "notional_exhausted":
-        return "레버리지 한도 소진(WAN-103) — 진입 스킵"
+        return "레버리지 한도 소진 — 진입 스킵"  # WAN-103 명목 여유 소진
     if reason == "capacity_cap":
-        return "유동성 한도 초과 (하루 거래량 대비 주문이 너무 큼, WAN-244) — 진입 스킵"
+        return "유동성 한도 초과 (하루 거래량 대비 주문이 너무 큼) — 진입 스킵"  # WAN-244 ADV
     if reason == "no_equity":
         return "자본 부족 — 진입 스킵"
     if reason == "below_min_qty":
