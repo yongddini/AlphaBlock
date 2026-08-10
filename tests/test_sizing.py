@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from execution import PositionSizingParams, position_size
+from execution import PositionSizingParams, position_size, size_with_reason
 
 
 def test_quantity_inversely_proportional_to_stop_distance() -> None:
@@ -281,3 +281,117 @@ def test_adv_cap_rejects_non_positive_fraction() -> None:
         PositionSizingParams(max_notional_adv_fraction=0.0)
     with pytest.raises(ValueError):
         PositionSizingParams(adv_window_days=0)
+
+
+# -- 사이징 거부 사유 (WAN-275) -------------------------------------------------
+#
+# `size_with_reason`이 0을 낸 **바닥 이유**를 네 갈래(+최소수량)로 구분해 돌려주는지를
+# 동작으로 고정한다. 진입 거부 표기가 "수량 0"이라는 증상 대신 어느 가드에 걸렸는지를
+# 보이려면 이 구분이 정확해야 한다. 각 케이스는 그 사유로 실제로 0이 나오도록 구성한다.
+
+
+def test_reason_ok_when_quantity_positive() -> None:
+    params = PositionSizingParams(risk_per_trade=0.01, leverage=100.0)
+    qty, reason = size_with_reason(
+        equity=10_000.0, entry_price=100.0, stop_price=90.0, params=params
+    )
+    assert qty > 0.0
+    assert reason == "ok"
+
+
+def test_reason_no_equity() -> None:
+    params = PositionSizingParams(risk_per_trade=0.01, leverage=100.0)
+    qty, reason = size_with_reason(equity=0.0, entry_price=100.0, stop_price=90.0, params=params)
+    assert qty == 0.0
+    assert reason == "no_equity"
+
+
+def test_reason_stop_too_tight_below_guard() -> None:
+    """LINK 15m 케이스: 손절폭이 0.3% 하한 미만이라 사이징이 0을 낸다."""
+    params = PositionSizingParams(risk_per_trade=0.01, leverage=100.0)  # 하한 기본 0.3%
+    # 진입 8.316663 · 손절 8.3 → 손절폭 ≈ 0.20% < 0.30% 하한(이슈 원 관찰).
+    qty, reason = size_with_reason(
+        equity=10_000.0, entry_price=8.316663, stop_price=8.3, params=params
+    )
+    assert qty == 0.0
+    assert reason == "stop_too_tight"
+
+
+def test_reason_stop_too_tight_when_distance_zero() -> None:
+    """손절 참조가가 진입가와 겹쳐(거리 0) 사이징 불가여도 stop_too_tight로 묶인다."""
+    params = PositionSizingParams(risk_per_trade=0.01, leverage=100.0)
+    qty, reason = size_with_reason(
+        equity=10_000.0, entry_price=100.0, stop_price=100.0, params=params
+    )
+    assert qty == 0.0
+    assert reason == "stop_too_tight"
+
+
+def test_reason_notional_exhausted() -> None:
+    """이미 열린 명목이 상한을 다 써 남은 여유가 없으면 notional_exhausted."""
+    params = PositionSizingParams(risk_per_trade=0.01, leverage=1.0)
+    # 상한 = 자본×leverage = 10_000. 이미 그만큼 열려 있으면 여유 0.
+    qty, reason = size_with_reason(
+        equity=10_000.0,
+        entry_price=100.0,
+        stop_price=90.0,
+        params=params,
+        open_notional=10_000.0,
+    )
+    assert qty == 0.0
+    assert reason == "notional_exhausted"
+
+
+def test_reason_capacity_cap_when_adv_zero() -> None:
+    """용량 상한(ADV)이 명목을 0으로 clamp하면 capacity_cap — below_min_qty와 구분된다."""
+    params = PositionSizingParams(
+        risk_per_trade=0.01, leverage=100.0, max_notional_adv_fraction=0.005
+    )
+    qty, reason = size_with_reason(
+        equity=10_000.0,
+        entry_price=100.0,
+        stop_price=90.0,
+        params=params,
+        adv_usd=0.0,  # ADV 0 → 상한 0 → 명목 0.
+    )
+    assert qty == 0.0
+    assert reason == "capacity_cap"
+
+
+def test_reason_below_min_qty() -> None:
+    """내림·최소 수량에 걸려 0이 되면 below_min_qty(용량 상한과 다른 갈래)."""
+    params = PositionSizingParams(risk_per_trade=0.01, leverage=100.0, min_qty=1_000.0)
+    # 리스크 사이징 수량은 작은데 min_qty가 커서 걸린다.
+    qty, reason = size_with_reason(
+        equity=10_000.0, entry_price=100.0, stop_price=90.0, params=params
+    )
+    assert qty == 0.0
+    assert reason == "below_min_qty"
+
+
+def test_position_size_matches_size_with_reason_quantity() -> None:
+    """`position_size`는 `size_with_reason`의 수량 성분과 비트 단위로 같다(래퍼 검산)."""
+    params = PositionSizingParams(
+        risk_per_trade=0.01, leverage=5.0, max_notional_adv_fraction=0.005, qty_step=0.1
+    )
+    for entry, stop, adv in [
+        (100.0, 90.0, 10_000_000.0),
+        (8.316663, 8.3, None),
+        (100.0, 99.9, 1_000.0),
+        (50.0, 40.0, 0.0),
+    ]:
+        qty_wrapper = position_size(
+            equity=12_345.0,
+            entry_price=entry,
+            stop_price=stop,
+            params=params,
+            adv_usd=adv,
+        )
+        qty_detail, _reason = size_with_reason(
+            equity=12_345.0,
+            entry_price=entry,
+            stop_price=stop,
+            params=params,
+            adv_usd=adv,
+        )
+        assert qty_wrapper == qty_detail  # 부동소수까지 동일.

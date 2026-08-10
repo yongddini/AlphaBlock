@@ -523,7 +523,9 @@ def test_rejected_entry_is_recorded_not_silent(
     reason = journal._conn.execute(  # noqa: SLF001 — 사유가 실제로 찍혔는지 보는 회귀 테스트.
         "SELECT entry_reject_reason FROM live_limit_orders WHERE status = 'filled'"
     ).fetchone()[0]
-    assert reason and "사이징" in reason
+    # WAN-275: 좁은 존은 손절폭 하한 미달로 거부되고, 사유가 구체 가드로 찍힌다
+    # (옛 "사이징 수량 0" 뭉치가 아니라 실제 손절폭 %와 하한이 병기된다).
+    assert reason and "손절 0.3% 하한 미달" in reason and "WAN-" not in reason
 
 
 def test_rejected_entry_stores_reject_code(
@@ -807,7 +809,9 @@ def test_rejected_entry_notifies(rig: dict[str, object], monkeypatch: pytest.Mon
 
     assert len(sent) == 1
     assert "진입 거부" in sent[0]
-    assert "사이징" in sent[0]
+    # WAN-275: 알림도 구체 가드 사유를 담는다(손절 하한 미달) — 옛 "사이징" 뭉치 대신.
+    # 표시 문구엔 WAN-xxx 코드가 없다(사용자 결정).
+    assert "손절 0.3% 하한 미달" in sent[0] and "WAN-" not in sent[0]
 
 
 def _losing_record(exit_time: int) -> object:

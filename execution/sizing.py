@@ -50,6 +50,32 @@ SizingMode = Literal["risk_pct", "fixed_notional"]
   않으므로 손절 시 손실이 자리마다 다르고 상한이 없다.
 """
 
+SizingRejectReason = Literal[
+    "ok",
+    "no_equity",
+    "stop_too_tight",
+    "notional_exhausted",
+    "capacity_cap",
+    "below_min_qty",
+]
+"""사이징이 왜 그 수량을 냈는지 (WAN-275).
+
+`position_size`는 **서로 다른 이유로 0.0을 반환**하는데(손절폭 가드·명목 상한 소진·
+용량 상한·자본 부족), 예전엔 호출부가 그걸 전부 "수량 0"으로 뭉갰다. `size_with_reason`이
+그 바닥 이유를 함께 돌려줘 진입 거부 사유를 **증상**이 아니라 **원인**으로 표기하게 한다.
+
+* `ok` — 진입 가능한 양수 수량이 나왔다.
+* `no_equity` — 자본이 0 이하다(진입 불가).
+* `stop_too_tight` — 손절 거리가 0 이하이거나 `min_stop_distance_fraction`(0.3% 하한,
+  WAN-79) 미만이다. LINK 15m 같은 극단 근접 손절이 여기 걸린다.
+* `notional_exhausted` — 남은 명목 여유(레버리지·`max_notional_fraction` 상한 − 열린 명목)가
+  0 이하다(WAN-103).
+* `capacity_cap` — 용량 상한(ADV 비례 절대 명목 상한, WAN-244)이 명목을 0으로 clamp했다.
+* `below_min_qty` — 내림·최소 주문 수량(`qty_step`·`min_qty`)에 걸려 0이 됐다.
+
+⚠️ **라벨일 뿐 수량 계산 로직·값은 불변이다** — `position_size`는 이 함수의 첫 성분만
+꺼내 쓰므로 반환 수량이 비트 단위로 같다(회귀 테스트가 동작으로 고정)."""
+
 
 class PositionSizingParams(BaseModel):
     """포지션 사이징 파라미터. 백테스트·실행이 공유한다."""
@@ -115,7 +141,7 @@ class PositionSizingParams(BaseModel):
     `0.0`으로 두면 하한이 꺼진다(과거 동작)."""
 
 
-def position_size(
+def size_with_reason(
     *,
     equity: float,
     entry_price: float,
@@ -123,11 +149,16 @@ def position_size(
     params: PositionSizingParams,
     open_notional: float = 0.0,
     adv_usd: float | None = None,
-) -> float:
-    """진입 수량을 산출한다 — `params.sizing_mode`에 따라 손절 역산 또는 명목 고정.
+) -> tuple[float, SizingRejectReason]:
+    """진입 수량과 **왜 그 수량이 나왔는지**를 함께 산출한다 (WAN-275).
+
+    `position_size`와 계산 로직·값이 **동일**하고, 다른 점은 0을 반환한 바닥 이유를
+    `SizingRejectReason`으로 함께 돌려주는 것뿐이다. 호출부(`execution.engine`)가 진입
+    거부 사유를 "수량 0"이라는 증상 대신 구체 가드(손절폭 하한 미달·명목 상한 소진·
+    용량 상한·자본 부족)로 표기하는 데 쓴다.
 
     Args:
-        equity: 현재 계좌 자본. 0 이하이면 0을 반환한다.
+        equity: 현재 계좌 자본. 0 이하이면 `(0.0, "no_equity")`.
         entry_price: 진입(체결) 가격. 반드시 양수.
         stop_price: 손절 참조가(오더블록 distal 경계). `risk_pct` 모드에서는 진입가와의
             절대 거리가 곧 리스크 단위이고, `fixed_notional` 모드에서는 수량에 영향을
@@ -136,7 +167,7 @@ def position_size(
         params: 사이징 파라미터.
         open_notional: 이미 열려 있는 포지션들의 명목가치 합(WAN-103). 명목 상한은
             포트폴리오 전체에 걸리므로, 이 값을 뺀 **남은 여유분**만 새 포지션에
-            배정한다. 여유가 없으면(상한 소진) 0을 반환해 진입을 스킵한다. 기본
+            배정한다. 여유가 없으면(상한 소진) `(0.0, "notional_exhausted")`. 기본
             `0.0`이면 동시 1포지션 시절과 동일한 per-trade clamp가 된다.
         adv_usd: 이 진입 시점의 평균 일 달러거래량(ADV, USD, WAN-244). 용량 상한
             (`params.max_notional_adv_fraction`)이 설정됐을 때만 쓰인다 — 이 포지션의
@@ -145,8 +176,8 @@ def position_size(
             걸지 않는다 — 그러면 실행이 이 항을 넣기 전과 비트 단위로 같다.
 
     Returns:
-        진입 수량. 진입을 스킵해야 하면(손절 거리 과소·자본 없음·명목 상한 소진·
-        용량 상한이 명목을 0으로 clamp·최소 수량 미달) 0.0.
+        `(수량, 사유)`. 수량이 양수면 사유는 `"ok"`. 진입을 스킵해야 하면 0.0과 함께
+        그 이유(`SizingRejectReason`)를 돌려준다.
 
     Raises:
         ValueError: `entry_price`가 양수가 아니거나 `open_notional`이 음수일 때.
@@ -156,7 +187,7 @@ def position_size(
     if open_notional < 0:
         raise ValueError("open_notional은 음수일 수 없습니다.")
     if equity <= 0:
-        return 0.0
+        return 0.0, "no_equity"
 
     # ⚠️ 손절 거리 가드는 `fixed_notional`에도 건다. 그 모드에서 손절 거리는 수량을 정하지
     # 않지만, 이 가드가 거르는 건 **사이징이 아니라 셋업**이다(손절폭이 체결 비용에 묻히는
@@ -165,7 +196,7 @@ def position_size(
     stop_distance = abs(entry_price - stop_price)
     min_distance = params.min_stop_distance_fraction * entry_price
     if stop_distance <= 0.0 or stop_distance < min_distance:
-        return 0.0
+        return 0.0, "stop_too_tight"
 
     if params.sizing_mode == "fixed_notional":
         # 명목 고정: 손절 거리를 보지 않는다. 손절 시 손실 = 명목 × 손절거리라 상한이 없다.
@@ -181,7 +212,7 @@ def position_size(
         max_notional = min(max_notional, equity * params.max_notional_fraction)
     remaining = max_notional - open_notional
     if remaining <= 0.0:
-        return 0.0
+        return 0.0, "notional_exhausted"
     max_qty = remaining / entry_price
     qty = min(qty, max_qty)
 
@@ -193,11 +224,43 @@ def position_size(
     if params.max_notional_adv_fraction is not None and adv_usd is not None:
         adv_notional_cap = params.max_notional_adv_fraction * adv_usd
         qty = min(qty, adv_notional_cap / entry_price)
+        # 용량 상한이 명목을 0으로 clamp했다(ADV 0 등). 아래 최종 검사가 어차피 0으로
+        # 거르지만, 여기서 사유를 확정해야 "최소 수량 미달"과 구분된다. 반환 수량은 동일.
+        if qty <= 0.0:
+            return 0.0, "capacity_cap"
 
     # 최소 주문 단위로 내림.
     if params.qty_step > 0:
         qty = math.floor(qty / params.qty_step) * params.qty_step
 
     if qty <= 0.0 or qty < params.min_qty:
-        return 0.0
+        return 0.0, "below_min_qty"
+    return qty, "ok"
+
+
+def position_size(
+    *,
+    equity: float,
+    entry_price: float,
+    stop_price: float,
+    params: PositionSizingParams,
+    open_notional: float = 0.0,
+    adv_usd: float | None = None,
+) -> float:
+    """진입 수량을 산출한다 — `params.sizing_mode`에 따라 손절 역산 또는 명목 고정.
+
+    `size_with_reason`의 수량 성분만 꺼내는 얇은 래퍼다(WAN-275). 반환 수량은 이 함수가
+    독립적으로 계산하던 시절과 **비트 단위로 동일**하다 — 사유가 필요하면(진입 거부
+    표기 등) `size_with_reason`을 직접 쓴다.
+
+    Args/Returns/Raises: `size_with_reason` 참고. 반환은 수량(float) 하나뿐.
+    """
+    qty, _reason = size_with_reason(
+        equity=equity,
+        entry_price=entry_price,
+        stop_price=stop_price,
+        params=params,
+        open_notional=open_notional,
+        adv_usd=adv_usd,
+    )
     return qty
