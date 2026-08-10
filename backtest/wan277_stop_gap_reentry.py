@@ -130,7 +130,10 @@ def _reentry_delta_table(on_rows: Sequence[StressRow], off_rows: Sequence[Stress
         (
             r
             for r in on_rows
-            if (r.scope, r.segment, r.scenario) in off
+            # `both`은 WAN-276(1h+4h)과 WAN-277(15m·1h·2h·4h)이 다른 지갑이라 제외 — 단일 TF
+            # (1h·4h)만 지갑 구성이 같아 ON/OFF 대조가 성립한다(15m·2h는 WAN-276에 없다).
+            if r.scope != "both"
+            and (r.scope, r.segment, r.scenario) in off
             and r.scenario in {"alpha_0.00", "alpha_1.00", NONFILL_LABEL}
             and r.segment in {SEGMENT_FULL, SEGMENT_OOS_WARM}
         ),

@@ -127,11 +127,23 @@ def test_slip_candidate_reentry_non_stop_untouched() -> None:
     assert slip_candidate(tp, 1.0) is tp
 
 
-def test_reentry_delta_table_matches_overlapping_scopes_only() -> None:
-    """OFF 대조 표는 겹치는 (scope, segment, scenario)만 낸다 — 없으면 헤더만."""
+def test_reentry_delta_table_empty_off_is_header_only() -> None:
+    """OFF 대조가 없으면(빈 목록) 데이터 행 없이 헤더만."""
     payloads = [_payload_with_reentry("BTCUSDT")]
     on = build_grid(payloads, payloads, ["1h"], include_reentry=True)
-    # OFF에 대응 행이 없으면(빈 목록) 데이터 행이 없다.
-    assert _reentry_delta_table(on, []) == _reentry_delta_table(on, [])
-    lines = _reentry_delta_table(on, [])
-    assert len(lines) == 2  # 헤더 2줄만
+    assert _reentry_delta_table(on, []) == [
+        "| 스코프 | 구간 | 시나리오 | MDD OFF→ON | Δ | 청산 OFF→ON | 최대동시리스크 OFF→ON |",
+        "| -- | -- | -- | --: | --: | --: | --: |",
+    ]
+
+
+def test_reentry_delta_table_excludes_both_scope() -> None:
+    """`both`은 WAN-276(1h+4h)과 WAN-277(채택 집합)이 다른 지갑이라 대조에서 빠진다 —
+    OFF에 both 행이 있어도 표에는 단일 TF만 나온다."""
+    payloads = [_payload_with_reentry("BTCUSDT"), _payload_with_reentry("ETHUSDT")]
+    on = build_grid(payloads, payloads, ["1h", "both"], include_reentry=True)
+    off = build_grid(payloads, payloads, ["1h", "both"], include_reentry=False)
+    lines = _reentry_delta_table(on, off)
+    body = "\n".join(lines)
+    assert "| 1h |" in body  # 단일 TF는 대조된다
+    assert "| both |" not in body  # both은 제외
