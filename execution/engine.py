@@ -73,20 +73,26 @@ def _sizing_reject_reason(
     """사이징이 수량 0을 낸 바닥 이유를 사람용 구체 사유 문자열로 옮긴다 (WAN-275).
 
     예전엔 이 자리가 전부 "사이징 수량 0 — 진입 스킵" 한 뭉치였다(증상만 보임). 이제
-    `size_with_reason`이 돌려준 원인을 받아 어느 가드에 걸렸는지(손절폭 하한 미달·명목
-    상한 소진·용량 상한·자본 부족)를 표기한다. 손절폭 하한 미달이면 **실제 손절폭 %를
+    `size_with_reason`이 돌려준 원인을 받아 어느 가드에 걸렸는지(손절 하한 미달·레버리지
+    한도 소진·유동성 한도 초과·자본 부족)를 표기한다. 손절 하한 미달이면 **실제 손절폭 %를
     병기**해 사용자가 왜 걸렀는지 화면 숫자로 바로 확인하게 한다(WAN-79 하한 가드).
+
+    표시 문구는 **사용자 확정**이다(WAN-275 코멘트 2026-08-10) — enum(내부)은 그대로 두고
+    화면·리포트·알림에 뜨는 라벨만 쉬운 말로 통일했다: "레버리지 한도 소진"(cap_only 5배
+    북은 거래당 리스크가 아니라 동시 명목 한도만 키우므로 "증거금 소진"의 청산 뉘앙스보다
+    정확) · "유동성 한도 초과"(WAN-279가 `max_notional_adv_fraction`을 "유동성 한도"로
+    통일 중 — 같은 단어를 쓴다).
 
     ⚠️ 라벨만 세분화한다 — 거부 동작·수량·기본값은 불변이다.
     """
     if reason == "stop_too_tight":
         stop_pct = abs(entry_price - stop_price) / entry_price * 100.0
         min_pct = params.min_stop_distance_fraction * 100.0
-        return f"손절폭 {stop_pct:.2f}% < {min_pct:.2f}% 하한(WAN-79) — 진입 스킵"
+        return f"손절 {min_pct:.1f}% 하한 미달 (손절폭 {stop_pct:.2f}%, WAN-79) — 진입 스킵"
     if reason == "notional_exhausted":
-        return "명목·레버리지 상한 소진(WAN-103) — 진입 스킵"
+        return "레버리지 한도 소진(WAN-103) — 진입 스킵"
     if reason == "capacity_cap":
-        return "용량 상한(ADV 비례, WAN-244)이 명목을 0으로 clamp — 진입 스킵"
+        return "유동성 한도 초과 (하루 거래량 대비 주문이 너무 큼, WAN-244) — 진입 스킵"
     if reason == "no_equity":
         return "자본 부족 — 진입 스킵"
     if reason == "below_min_qty":

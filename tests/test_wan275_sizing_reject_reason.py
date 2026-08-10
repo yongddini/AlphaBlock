@@ -48,10 +48,10 @@ def test_stop_too_tight_reports_stop_percent_and_floor() -> None:
 
     assert not out.accepted
     assert out.reason_code == REJECT_CODE_SIZING
-    # 증상("수량 0")이 아니라 원인(손절폭 하한 미달)이 보인다.
-    assert "0.20%" in out.reason  # 실제 손절폭
-    assert "0.30%" in out.reason  # 하한
-    assert "하한" in out.reason
+    # 증상("수량 0")이 아니라 원인(손절 하한 미달)이 보인다. 표시 문구는 사용자 확정
+    # (WAN-275 코멘트 2026-08-10): "손절 0.3% 하한 미달" + 실제 손절폭 % 병기.
+    assert "손절 0.3% 하한 미달" in out.reason
+    assert "손절폭 0.20%" in out.reason  # 실제 손절폭
     assert "WAN-79" in out.reason
     # 옛 catch-all 문구가 남지 않았다.
     assert out.reason != "사이징 수량 0 — 진입 스킵"
@@ -66,16 +66,17 @@ def test_reason_mapping_covers_each_guard() -> None:
     end-to-end 테스트가 담당한다."""
     from execution.engine import _sizing_reject_reason
 
+    # 표시 문구는 사용자 확정(WAN-275 코멘트 2026-08-10).
     params = PositionSizingParams()
     notional = _sizing_reject_reason(
         "notional_exhausted", entry_price=100.0, stop_price=90.0, params=params
     )
-    assert "명목" in notional and "WAN-103" in notional
+    assert "레버리지 한도 소진" in notional and "WAN-103" in notional
 
     capacity = _sizing_reject_reason(
         "capacity_cap", entry_price=100.0, stop_price=90.0, params=params
     )
-    assert "용량 상한" in capacity and "WAN-244" in capacity
+    assert "유동성 한도 초과" in capacity and "WAN-244" in capacity
 
     no_equity = _sizing_reject_reason(
         "no_equity", entry_price=100.0, stop_price=90.0, params=params
