@@ -30,6 +30,8 @@ from backtest.wan282_resistance_short_mirror import (
     BookScopeRow,
     HedgeRow,
     ShortDiagRow,
+    _book_table,
+    _lenses_present,
     _max_drawdown_window,
     _net_r,
     _short_candidates,
@@ -41,6 +43,9 @@ from backtest.wan282_resistance_short_mirror import (
     diag_to_frame,
     hedge_from_csv,
     hedge_to_frame,
+    merge_book,
+    merge_diag,
+    merge_hedge,
     verdict,
 )
 from backtest.zone_limit_backtest import _Candidate, build_zone_limit_candidates
@@ -303,10 +308,19 @@ def test_net_r_definition() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _book_row(arm: str, *, mdd: float, rm: float, trades: int = 100) -> BookScopeRow:
+def _book_row(
+    arm: str,
+    *,
+    mdd: float,
+    rm: float,
+    trades: int = 100,
+    fill: str = "baseline",
+    scope: str = "all",
+) -> BookScopeRow:
     return BookScopeRow(
-        scope="all",
+        scope=scope,
         arm=arm,
+        fill=fill,
         segment="oos_warm",
         exclude_symbol="",
         num_cells=9,
@@ -445,6 +459,138 @@ def test_describe_engine_reports_adopted_defaults() -> None:
     assert "max_zone_width_atr=1.28" in text
     assert "band_bar=intrabar_live" in text
     assert "reentry=band" in text
+
+
+# --------------------------------------------------------------------------- #
+# 7. 렌즈 병기 (WAN-283) — pen_5bp를 baseline 옆에 남기고, 판정이 렌즈를 가른다
+# --------------------------------------------------------------------------- #
+
+
+def _diag(fill: str, *, tf: str = "1h", net_r: float = -3.0) -> ShortDiagRow:
+    return ShortDiagRow(
+        symbol="BTC/USDT",
+        timeframe=tf,
+        fill=fill,
+        segment="oos_warm",
+        short_trades=10,
+        wins=3,
+        stops=6,
+        unclosed=1,
+        net_r_sum=net_r,
+        net_pp_sum=-2.0,
+        funding_coverage_gap=False,
+    )
+
+
+def test_book_row_default_fill_is_baseline() -> None:
+    row = _book_row(ARM_LONG_ONLY, mdd=0.2, rm=5.0)
+    assert row.fill == "baseline"
+
+
+def test_merge_book_juxtaposes_lenses() -> None:
+    """`--fill pen_5bp --append`가 baseline 행을 덮지 않고 나란히 남긴다(WAN-283 핵심)."""
+    existing = [_book_row(ARM_LONG_ONLY, mdd=0.2, rm=5.0, fill="baseline")]
+    new = [_book_row(ARM_LONG_ONLY, mdd=0.3, rm=4.0, fill="pen_5bp")]
+    merged = merge_book(existing, new)
+    fills = {r.fill for r in merged}
+    assert fills == {"baseline", "pen_5bp"}
+    # 같은 (스코프, 렌즈)는 갱신된다.
+    same_lens = merge_book(existing, [_book_row(ARM_LONG_ONLY, mdd=0.9, rm=1.0, fill="baseline")])
+    assert len(same_lens) == 1 and abs(same_lens[0].max_drawdown - 0.9) < 1e-12
+
+
+def test_merge_diag_juxtaposes_lenses() -> None:
+    merged = merge_diag([_diag("baseline")], [_diag("pen_5bp")])
+    assert {r.fill for r in merged} == {"baseline", "pen_5bp"}
+    # 같은 (TF, 렌즈)는 갱신.
+    again = merge_diag([_diag("baseline", net_r=-3.0)], [_diag("baseline", net_r=-9.0)])
+    assert len(again) == 1 and abs(again[0].net_r_sum - (-9.0)) < 1e-12
+
+
+def test_merge_hedge_preserves_other_lens() -> None:
+    base = HedgeRow(
+        scope="all",
+        fill="baseline",
+        segment="oos_warm",
+        long_only_mdd=0.2,
+        long_short_mdd=0.15,
+        window_start=1,
+        window_end=2,
+        long_only_window_return=-0.2,
+        long_short_window_return=-0.05,
+    )
+    pen = base.model_copy(update={"fill": "pen_5bp"})
+    merged = merge_hedge([base], [pen])
+    assert {r.fill for r in merged} == {"baseline", "pen_5bp"}
+
+
+def test_old_csv_without_fill_column_loads_as_baseline(tmp_path: Path) -> None:
+    """WAN-282가 낸 옛 CSV엔 fill 열이 없다 — 로드 시 기본값 baseline으로 채워진다."""
+    row = _book_row(ARM_LONG_SHORT, mdd=0.15, rm=7.0)
+    frame = book_to_frame([row]).drop(columns=["fill"])
+    path = tmp_path / "old_book.csv"
+    frame.to_csv(path, index=False)
+    loaded = book_from_csv(path)
+    assert len(loaded) == 1 and loaded[0].fill == "baseline"
+
+
+def test_lenses_present_orders_baseline_first() -> None:
+    rows = [
+        _book_row(ARM_LONG_ONLY, mdd=0.3, rm=4.0, fill="pen_5bp"),
+        _book_row(ARM_LONG_ONLY, mdd=0.2, rm=5.0, fill="baseline"),
+    ]
+    assert _lenses_present(rows) == ["baseline", "pen_5bp"]
+
+
+def test_book_table_juxtaposes_lenses() -> None:
+    rows = [
+        _book_row(ARM_LONG_ONLY, mdd=0.2, rm=5.0, fill="baseline"),
+        _book_row(ARM_LONG_SHORT, mdd=0.15, rm=7.0, fill="baseline"),
+        _book_row(ARM_LONG_ONLY, mdd=0.25, rm=4.0, fill="pen_5bp"),
+        _book_row(ARM_LONG_SHORT, mdd=0.30, rm=3.0, fill="pen_5bp"),
+    ]
+    table = _book_table(rows, "all", "oos_warm")
+    assert "렌즈" in table[0]
+    body = "\n".join(table)
+    assert "baseline" in body and "pen_5bp" in body
+    # 네 조합(2렌즈 × 2팔)이 전부 행으로 나온다.
+    assert sum(1 for line in table if "롱-온리" in line or "롱+숏" in line) == 4
+
+
+def test_verdict_reports_pen_5bp_survival_kept() -> None:
+    """baseline과 pen_5bp에서 헤지 방향이 같으면 '부호 유지'로 병기한다."""
+    rows = [
+        _book_row(ARM_LONG_ONLY, mdd=0.20, rm=5.0, fill="baseline"),
+        _book_row(ARM_LONG_SHORT, mdd=0.15, rm=7.0, fill="baseline"),
+        _book_row(ARM_LONG_ONLY, mdd=0.22, rm=4.0, fill="pen_5bp"),
+        _book_row(ARM_LONG_SHORT, mdd=0.18, rm=5.0, fill="pen_5bp"),
+    ]
+    text = verdict(rows, [_diag("baseline", net_r=-3.0), _diag("pen_5bp", net_r=-4.0)])
+    assert "pen_5bp 병기" in text
+    assert "헤지 방향(MDD 감소 여부) 부호 유지" in text
+    assert "격리 숏 순R 부호 유지" in text
+
+
+def test_verdict_reports_pen_5bp_survival_flipped() -> None:
+    """baseline은 MDD가 줄지만 pen_5bp에선 늘면 '뒤집힘'으로 병기한다."""
+    rows = [
+        _book_row(ARM_LONG_ONLY, mdd=0.20, rm=5.0, fill="baseline"),
+        _book_row(ARM_LONG_SHORT, mdd=0.15, rm=7.0, fill="baseline"),
+        _book_row(ARM_LONG_ONLY, mdd=0.20, rm=5.0, fill="pen_5bp"),
+        _book_row(ARM_LONG_SHORT, mdd=0.28, rm=3.0, fill="pen_5bp"),
+    ]
+    text = verdict(rows, [_diag("baseline", net_r=-3.0), _diag("pen_5bp", net_r=1.0)])
+    assert "헤지 방향(MDD 감소 여부) 부호 뒤집힘" in text
+    assert "격리 숏 순R 부호 뒤집힘" in text
+
+
+def test_verdict_without_pen_5bp_notes_absence() -> None:
+    rows = [
+        _book_row(ARM_LONG_ONLY, mdd=0.2, rm=5.0),
+        _book_row(ARM_LONG_SHORT, mdd=0.15, rm=7.0),
+    ]
+    text = verdict(rows, [])
+    assert "pen_5bp 행 없음" in text
 
 
 # --------------------------------------------------------------------------- #

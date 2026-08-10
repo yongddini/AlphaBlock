@@ -1,4 +1,8 @@
-"""WAN-282 — 저항-존(공급 OB) 숏을 현행 롱 모델의 거울로 (측정 전용 · 옵트인 · 기본값 불변).
+"""WAN-282/283 — 저항-존(공급 OB) 숏을 현행 롱 모델의 거울로 (측정 전용 · 옵트인 · 기본값 불변).
+
+WAN-283 후속: 체결 렌즈(`baseline`·`pen_5bp`)를 행 차원으로 실어 **열로 병기**하고(북·격리 숏
+진단·헤지 분해·leave-one-out 전부), 15m 스코프를 `--append`로 잇는다. `--fill pen_5bp --append`가
+baseline 행을 덮지 않고 나란히 남는다(병합 키에 렌즈가 들어간다 — WAN-282는 스코프만 봤다).
 
 ## 무엇을 묻나 (사용자 아이디어 2026-08-10)
 
@@ -217,6 +221,9 @@ class BookScopeRow(BaseModel):
 
     scope: str
     arm: str
+    fill: str = "baseline"
+    """체결 렌즈(WAN-283) — `baseline`(닿으면 체결) · `pen_5bp`(관통 5bp 스트레스, WAN-96).
+    옛 CSV(WAN-282)엔 이 열이 없어 로드 시 기본값 `baseline`으로 채워진다."""
     segment: str
     exclude_symbol: str = ""
     num_cells: int
@@ -242,10 +249,11 @@ class BookScopeRow(BaseModel):
         return self.num_trades >= MIN_TRADES
 
 
-def _to_scope_row(br: BookRunRow, *, scope: str, arm: str, exclude: str) -> BookScopeRow:
+def _to_scope_row(br: BookRunRow, *, scope: str, arm: str, exclude: str, fill: str) -> BookScopeRow:
     return BookScopeRow(
         scope=scope,
         arm=arm,
+        fill=fill,
         segment=br.segment,
         exclude_symbol=exclude,
         num_cells=br.num_cells,
@@ -267,6 +275,7 @@ def build_book_scope_rows(
     *,
     start_ms: int,
     end_ms: int,
+    fill: str = "baseline",
 ) -> list[BookScopeRow]:
     """스코프(각 TF + 전체 `all`) × 구간 × 팔(롱-온리·롱+숏) × leave-one-out의 북 집계."""
     arm_cells = {ARM_LONG_ONLY: long_only_cells, ARM_LONG_SHORT: long_short_cells}
@@ -289,7 +298,8 @@ def build_book_scope_rows(
                     include_reentry=True,
                 )
                 rows.extend(
-                    _to_scope_row(br, scope=scope, arm=arm, exclude=exclude) for br in book_rows
+                    _to_scope_row(br, scope=scope, arm=arm, exclude=exclude, fill=fill)
+                    for br in book_rows
                 )
     return rows
 
@@ -329,6 +339,8 @@ class ShortDiagRow(BaseModel):
 
     symbol: str
     timeframe: str
+    fill: str = "baseline"
+    """체결 렌즈(WAN-283) — `baseline` · `pen_5bp`. 옛 CSV엔 없어 로드 시 `baseline`."""
     segment: str
     short_trades: int
     """per-cell 단독 시퀀싱으로 실제 잡힌 숏 거래 수."""
@@ -356,7 +368,12 @@ class ShortDiagRow(BaseModel):
 
 
 def _diag_row(
-    cell: CellPayload, segment: str, paired: Sequence[tuple[_Candidate, Trade]], gap: bool
+    cell: CellPayload,
+    segment: str,
+    paired: Sequence[tuple[_Candidate, Trade]],
+    gap: bool,
+    *,
+    fill: str,
 ) -> ShortDiagRow:
     wins = stops = unclosed = 0
     net_r_sum = net_pp_sum = 0.0
@@ -373,6 +390,7 @@ def _diag_row(
     return ShortDiagRow(
         symbol=cell.symbol,
         timeframe=cell.timeframe,
+        fill=fill,
         segment=segment,
         short_trades=len(paired),
         wins=wins,
@@ -384,7 +402,9 @@ def _diag_row(
     )
 
 
-def build_diag_rows(long_short_cells: Sequence[CellPayload]) -> list[ShortDiagRow]:
+def build_diag_rows(
+    long_short_cells: Sequence[CellPayload], *, fill: str = "baseline"
+) -> list[ShortDiagRow]:
     """롱+숏 셀에서 저항-존 숏만 per-cell 단독으로 시퀀싱해 진단 행을 낸다.
 
     격리 = 실매매가 아니라 「숏이 애초에 돈이 되나」 진단이다(실제 북은 롱과 슬롯을 공유한다).
@@ -397,7 +417,7 @@ def build_diag_rows(long_short_cells: Sequence[CellPayload]) -> list[ShortDiagRo
         for segment in SEGMENTS:
             shorts = _short_candidates(cell, segment)
             paired = sequence_with_candidates(shorts, cfg, _funding_for(cell, segment))
-            rows.append(_diag_row(cell, segment, paired, gap))
+            rows.append(_diag_row(cell, segment, paired, gap, fill=fill))
     return rows
 
 
@@ -468,6 +488,8 @@ class HedgeRow(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     scope: str
+    fill: str = "baseline"
+    """체결 렌즈(WAN-283) — `baseline` · `pen_5bp`. 옛 CSV엔 없어 로드 시 `baseline`."""
     segment: str
     long_only_mdd: float
     long_short_mdd: float
@@ -487,6 +509,8 @@ class HedgeRow(BaseModel):
 def build_hedge_rows(
     long_only_cells: Sequence[CellPayload],
     long_short_cells: Sequence[CellPayload],
+    *,
+    fill: str = "baseline",
 ) -> list[HedgeRow]:
     """전체 스코프(all)의 구간별 하락장 헤지 분해. 곡선 재계산이 필요해 별도로 낸다."""
     rows: list[HedgeRow] = []
@@ -498,6 +522,7 @@ def build_hedge_rows(
         rows.append(
             HedgeRow(
                 scope="all",
+                fill=fill,
                 segment=segment,
                 long_only_mdd=lo_mdd,
                 long_short_mdd=ls_mdd,
@@ -515,8 +540,26 @@ def build_hedge_rows(
 # --------------------------------------------------------------------------- #
 
 
+#: 렌즈 표시 순서(WAN-283) — baseline(공식) 먼저, 그 뒤 스트레스 렌즈.
+LENS_ORDER: tuple[str, ...] = ("baseline", "pen_1bp", "pen_5bp", "pen_5bp_drop_50")
+
+
+def _lenses_present(rows: Sequence[BookScopeRow] | Sequence[ShortDiagRow]) -> list[str]:
+    """행에 실제로 있는 렌즈를 표시 순서대로. 알 수 없는 렌즈는 뒤에 붙인다."""
+    present = {r.fill for r in rows}
+    ordered = [lens for lens in LENS_ORDER if lens in present]
+    ordered += sorted(present - set(ordered))
+    return ordered
+
+
 def _pick_book(
-    rows: Sequence[BookScopeRow], *, scope: str, arm: str, segment: str, exclude: str = ""
+    rows: Sequence[BookScopeRow],
+    *,
+    scope: str,
+    arm: str,
+    segment: str,
+    exclude: str = "",
+    fill: str = "baseline",
 ) -> BookScopeRow | None:
     for r in rows:
         if (
@@ -524,13 +567,49 @@ def _pick_book(
             and r.arm == arm
             and r.segment == segment
             and r.exclude_symbol == exclude
+            and r.fill == fill
         ):
             return r
     return None
 
 
-def _short_net_r(diag_rows: Sequence[ShortDiagRow], segment: str) -> float:
-    return sum(r.net_r_sum for r in diag_rows if r.segment == segment)
+def _short_net_r(
+    diag_rows: Sequence[ShortDiagRow], segment: str, *, fill: str = "baseline"
+) -> float:
+    return sum(r.net_r_sum for r in diag_rows if r.segment == segment and r.fill == fill)
+
+
+def _lens_headline(*, mdd_down: bool, rm_up: bool, sample_ok: bool) -> str:
+    if mdd_down and rm_up and sample_ok:
+        return (
+            "**저항-존 숏이 하락장 헤지가 된다 — 롱+숏이 롱-온리보다 MDD가 낮고 수익/MDD가 높다.** "
+            "단 격리 숏 순 R을 함께 읽을 것(아래)."
+        )
+    if not mdd_down and not rm_up:
+        return (
+            "**헤지가 되지 않는다 — 저항-존 숏을 얹어도 롱+숏의 MDD가 안 줄고 수익/MDD도 안 "
+            "오른다.** 숏이 롱과 슬롯·자본을 나눠 쓰며 노출만 키운다."
+        )
+    return (
+        "**엇갈린다 — MDD와 수익/MDD가 같은 방향으로 개선되지 않는다(한쪽만 나아진다).** "
+        "강건한 헤지 이득으로 읽지 않는다."
+    )
+
+
+def _lens_body(
+    lo: BookScopeRow, ls: BookScopeRow, short_net: float, *, main_scope: str, label: str
+) -> str:
+    d_mdd = (ls.max_drawdown - lo.max_drawdown) * 100
+    lo_rm, ls_rm = lo.return_over_mdd, ls.return_over_mdd
+    rm_txt = f"{lo_rm:.2f}→{ls_rm:.2f}" if lo_rm is not None and ls_rm is not None else "—"
+    gate = "" if (ls.sample_ok and lo.sample_ok) else " ⚠️(20거래 미만)"
+    return (
+        f"{main_scope}·oos_warm·{label}: MDD {lo.max_drawdown * 100:.2f}%→"
+        f"{ls.max_drawdown * 100:.2f}% (Δ{d_mdd:+.2f}%p) · 수익/MDD {rm_txt} · 최대동시리스크 "
+        f"{lo.max_concurrent_risk * 100:.2f}%→{ls.max_concurrent_risk * 100:.2f}% · 청산 "
+        f"{lo.liquidation_events}→{ls.liquidation_events} · 거래 {lo.num_trades}→{ls.num_trades}"
+        f"{gate} · 격리 숏 순R {short_net:+.1f}."
+    )
 
 
 def verdict(book_rows: Sequence[BookScopeRow], diag_rows: Sequence[ShortDiagRow]) -> str:
@@ -538,7 +617,9 @@ def verdict(book_rows: Sequence[BookScopeRow], diag_rows: Sequence[ShortDiagRow]
 
     주 스코프(all) oos_warm에서 롱-온리 vs 롱+숏의 MDD·수익/MDD·최대 동시 리스크·청산을 비교하고,
     격리 숏 순 R의 부호를 병기한다(숏이 순 손실이면 헤지 이득도 진입 알파가 아니라 위험의 모양일
-    뿐이다). 숫자는 전부 행에서 계산한다(문장에 박으면 재실행 뒤 거짓말 — WAN-164).
+    뿐이다). WAN-283은 `baseline`(주) 판정에 이어 **`pen_5bp`(체결 보수화)에서 헤지 방향과 격리
+    숏 순 R의 부호가 살아남는지**를 병기한다. 숫자는 전부 행에서 계산한다(문장에 박으면 재실행 뒤
+    거짓말 — WAN-164).
     """
     main_scope = "all" if any(r.scope == "all" for r in book_rows) else None
     if main_scope is None:
@@ -548,42 +629,42 @@ def verdict(book_rows: Sequence[BookScopeRow], diag_rows: Sequence[ShortDiagRow]
     ls = _pick_book(book_rows, scope=main_scope, arm=ARM_LONG_SHORT, segment=SEGMENT_OOS_WARM)
     if lo is None or ls is None:
         return "**판정 불가** — 주 스코프의 oos_warm 롱-온리/롱+숏 행이 없습니다."
-    d_mdd = (ls.max_drawdown - lo.max_drawdown) * 100
     short_net = _short_net_r(diag_rows, SEGMENT_OOS_WARM)
     lo_rm, ls_rm = lo.return_over_mdd, ls.return_over_mdd
     rm_up = lo_rm is not None and ls_rm is not None and ls_rm > lo_rm
     mdd_down = ls.max_drawdown < lo.max_drawdown
     sample_ok = ls.sample_ok and lo.sample_ok
-    if mdd_down and rm_up and sample_ok:
-        head = (
-            "**저항-존 숏이 하락장 헤지가 된다 — 롱+숏이 롱-온리보다 MDD가 낮고 수익/MDD가 높다.** "
-            "단 격리 숏 순 R을 함께 읽을 것(아래)."
-        )
-    elif not mdd_down and not rm_up:
-        head = (
-            "**헤지가 되지 않는다 — 저항-존 숏을 얹어도 롱+숏의 MDD가 안 줄고 수익/MDD도 안 "
-            "오른다.** 숏이 롱과 슬롯·자본을 나눠 쓰며 노출만 키운다."
+    head = _lens_headline(mdd_down=mdd_down, rm_up=rm_up, sample_ok=sample_ok)
+    body = _lens_body(lo, ls, short_net, main_scope=main_scope, label="baseline")
+
+    # WAN-283 — pen_5bp(체결 보수화)에서 헤지 방향·격리 숏 순R 부호가 살아남는지 병기.
+    pen_lo = _pick_book(
+        book_rows, scope=main_scope, arm=ARM_LONG_ONLY, segment=SEGMENT_OOS_WARM, fill="pen_5bp"
+    )
+    pen_ls = _pick_book(
+        book_rows, scope=main_scope, arm=ARM_LONG_SHORT, segment=SEGMENT_OOS_WARM, fill="pen_5bp"
+    )
+    pen_sentence = ""
+    if pen_lo is not None and pen_ls is not None:
+        pen_short = _short_net_r(diag_rows, SEGMENT_OOS_WARM, fill="pen_5bp")
+        pen_mdd_down = pen_ls.max_drawdown < pen_lo.max_drawdown
+        base_short = _short_net_r(diag_rows, SEGMENT_OOS_WARM, fill="baseline")
+        hedge_kept = "유지" if pen_mdd_down == mdd_down else "뒤집힘"
+        sign_kept = "유지" if (pen_short >= 0) == (base_short >= 0) else "뒤집힘"
+        pen_body = _lens_body(pen_lo, pen_ls, pen_short, main_scope=main_scope, label="pen_5bp")
+        pen_sentence = (
+            f" **pen_5bp 병기:** {pen_body} 관통 5bp에서 헤지 방향(MDD 감소 여부) 부호 "
+            f"{hedge_kept}, 격리 숏 순R 부호 {sign_kept}."
         )
     else:
-        head = (
-            "**엇갈린다 — MDD와 수익/MDD가 같은 방향으로 개선되지 않는다(한쪽만 나아진다).** "
-            "강건한 헤지 이득으로 읽지 않는다."
-        )
-    rm_txt = f"{lo_rm:.2f}→{ls_rm:.2f}" if lo_rm is not None and ls_rm is not None else "—"
-    gate = "" if sample_ok else " ⚠️(20거래 미만)"
-    body = (
-        f"{main_scope}·oos_warm: MDD {lo.max_drawdown * 100:.2f}%→{ls.max_drawdown * 100:.2f}% "
-        f"(Δ{d_mdd:+.2f}%p) · 수익/MDD {rm_txt} · 최대동시리스크 "
-        f"{lo.max_concurrent_risk * 100:.2f}%→{ls.max_concurrent_risk * 100:.2f}% · 청산 "
-        f"{lo.liquidation_events}→{ls.liquidation_events} · 거래 {lo.num_trades}→{ls.num_trades}"
-        f"{gate} · 격리 숏 순R {short_net:+.1f}."
-    )
+        pen_sentence = " (pen_5bp 행 없음 — `--fill pen_5bp --append` 미실행 스코프.)"
+
     return (
-        f"{head} {body} ⚠️ 총수익% 변화는 복리 착시라 판정에 넣지 않는다(WAN-213). 전부 "
-        "`baseline`(닿으면 체결) 낙관 위 값이고 숏은 존 경계 체결이라 큐 우선순위(WAN-98 "
-        "Canceled)에 특히 약하다(`--fill pen_5bp` 병기). 「엣지 없음」(WAN-84/88/111/114/124/151/"
-        "201/248)은 다른 질문이라 불변이고, 헤지 이득이 있어도 진입 알파가 아니라 위험의 모양"
-        "(WAN-90)이다. 채택은 재-베이스라인 = 사용자 결정이다."
+        f"{head} {body}{pen_sentence} ⚠️ 총수익% 변화는 복리 착시라 판정에 넣지 않는다(WAN-213). "
+        "전부 `baseline`(닿으면 체결) 낙관 위 값이고 숏은 존 경계 체결이라 큐 우선순위(WAN-98 "
+        "Canceled)에 특히 약하다. 「엣지 없음」(WAN-84/88/111/114/124/151/201/248)은 다른 질문이라 "
+        "불변이고, 헤지 이득이 있어도 진입 알파가 아니라 위험의 모양(WAN-90)이다. 채택은 "
+        "재-베이스라인 = 사용자 결정이다."
     )
 
 
@@ -622,23 +703,28 @@ def hedge_from_csv(path: Path) -> list[HedgeRow]:
 
 
 def merge_book(existing: Sequence[BookScopeRow], new: Sequence[BookScopeRow]) -> list[BookScopeRow]:
-    new_scopes = {r.scope for r in new if r.scope != "all"}
-    has_new_all = any(r.scope == "all" for r in new)
-    kept = [
-        r for r in existing if r.scope not in new_scopes and not (has_new_all and r.scope == "all")
-    ]
+    """(스코프, 렌즈) 키로 병합 — 같은 렌즈의 같은 스코프만 갱신하고 다른 렌즈는 보존한다.
+
+    렌즈를 키에 넣기 전(WAN-282)에는 스코프만 봤으므로 `--fill pen_5bp --append`가 baseline
+    행을 덮어썼다. WAN-283은 `pen_5bp`를 `baseline` 옆에 나란히 두기 위해 렌즈를 키로 쓴다.
+    """
+    new_keys = {(r.scope, r.fill) for r in new}
+    kept = [r for r in existing if (r.scope, r.fill) not in new_keys]
     return [*kept, *new]
 
 
 def merge_diag(existing: Sequence[ShortDiagRow], new: Sequence[ShortDiagRow]) -> list[ShortDiagRow]:
-    new_tfs = {r.timeframe for r in new}
-    kept = [r for r in existing if r.timeframe not in new_tfs]
+    new_keys = {(r.timeframe, r.fill) for r in new}
+    kept = [r for r in existing if (r.timeframe, r.fill) not in new_keys]
     return [*kept, *new]
 
 
 def merge_hedge(existing: Sequence[HedgeRow], new: Sequence[HedgeRow]) -> list[HedgeRow]:
-    # 헤지 행은 전체 스코프(all)만이라 append는 통째로 교체한다(새 전 구간 곡선으로 재계산).
-    return list(new)
+    # 헤지 행은 전체 스코프(all)뿐이라 같은 렌즈는 통째로 교체(새 전 구간 곡선으로 재계산)하고
+    # 다른 렌즈(예: baseline)는 보존한다.
+    new_fills = {r.fill for r in new}
+    kept = [r for r in existing if r.fill not in new_fills]
+    return [*kept, *new]
 
 
 # --------------------------------------------------------------------------- #
@@ -672,99 +758,134 @@ def describe_engine() -> str:
 
 
 def _book_table(book_rows: Sequence[BookScopeRow], scope: str, segment: str) -> list[str]:
+    """렌즈(baseline·pen_5bp)를 열로 병기(WAN-283) — 각 렌즈 안에서 롱-온리→롱+숏."""
+    lenses = _lenses_present(book_rows) or ["baseline"]
     lines = [
-        "| 팔 | 거래 | 총수익%† | MDD | 수익/MDD | 최대동시리스크 | 청산 | 최대칸 |",
-        "| -- | --: | --: | --: | --: | --: | --: | --: |",
+        "| 렌즈 | 팔 | 거래 | 총수익%† | MDD | 수익/MDD | 최대동시리스크 | 청산 | 최대칸 |",
+        "| -- | -- | --: | --: | --: | --: | --: | --: | --: |",
     ]
-    for arm in ARMS:
-        r = _pick_book(book_rows, scope=scope, arm=arm, segment=segment)
-        if r is None:
-            continue
-        gate = "" if r.sample_ok else " ⚠️"
-        label = "롱-온리(현행)" if arm == ARM_LONG_ONLY else "롱+숏(거울)"
-        lines.append(
-            f"| {label} | {r.num_trades}{gate} | {_pct(r.total_return)} | {_pct(r.max_drawdown)} | "
-            f"{_rr(r.return_over_mdd)} | {_pct(r.max_concurrent_risk)} | {r.liquidation_events} | "
-            f"{r.peak_concurrency} |"
-        )
+    for lens in lenses:
+        for arm in ARMS:
+            r = _pick_book(book_rows, scope=scope, arm=arm, segment=segment, fill=lens)
+            if r is None:
+                continue
+            gate = "" if r.sample_ok else " ⚠️"
+            label = "롱-온리(현행)" if arm == ARM_LONG_ONLY else "롱+숏(거울)"
+            lines.append(
+                f"| {lens} | {label} | {r.num_trades}{gate} | {_pct(r.total_return)} | "
+                f"{_pct(r.max_drawdown)} | {_rr(r.return_over_mdd)} | "
+                f"{_pct(r.max_concurrent_risk)} | {r.liquidation_events} | {r.peak_concurrency} |"
+            )
     return lines
 
 
 def _diag_table(diag_rows: Sequence[ShortDiagRow], timeframe: str, segment: str) -> list[str]:
-    scoped = sorted(
-        (
-            r
-            for r in diag_rows
-            if r.timeframe == timeframe and r.segment == segment and r.short_trades
-        ),
-        key=lambda r: r.symbol,
+    """격리 숏 진단 — 렌즈를 열로 병기(WAN-283). 심볼별로 baseline→pen_5bp를 나란히."""
+    lenses = _lenses_present(diag_rows) or ["baseline"]
+    symbols = sorted(
+        {r.symbol for r in diag_rows if r.timeframe == timeframe and r.segment == segment}
     )
     lines = [
-        "| 심볼 | 숏 | 승률 | 붕괴익절 | 무효화손절 | 미청산 | 순R | 평균순R | 순%p |",
-        "| -- | --: | --: | --: | --: | --: | --: | --: | --: |",
+        "| 심볼 | 렌즈 | 숏 | 승률 | 붕괴익절 | 무효화손절 | 미청산 | 순R | 평균순R | 순%p |",
+        "| -- | -- | --: | --: | --: | --: | --: | --: | --: | --: |",
     ]
-    for r in scoped:
-        fund = "†" if r.funding_coverage_gap else ""
-        wr = f"{r.win_rate * 100:.1f}%" if r.win_rate is not None else "—"
-        mnr = f"{r.mean_net_r:+.3f}" if r.mean_net_r is not None else "—"
-        lines.append(
-            f"| {_short(r.symbol)}{fund} | {r.short_trades} | {wr} | {r.wins} | {r.stops} | "
-            f"{r.unclosed} | {r.net_r_sum:+.2f} | {mnr} | {r.net_pp_sum:+.1f} |"
-        )
+    for symbol in symbols:
+        for lens in lenses:
+            r = next(
+                (
+                    x
+                    for x in diag_rows
+                    if x.symbol == symbol
+                    and x.timeframe == timeframe
+                    and x.segment == segment
+                    and x.fill == lens
+                    and x.short_trades
+                ),
+                None,
+            )
+            if r is None:
+                continue
+            fund = "†" if r.funding_coverage_gap else ""
+            wr = f"{r.win_rate * 100:.1f}%" if r.win_rate is not None else "—"
+            mnr = f"{r.mean_net_r:+.3f}" if r.mean_net_r is not None else "—"
+            lines.append(
+                f"| {_short(r.symbol)}{fund} | {lens} | {r.short_trades} | {wr} | {r.wins} | "
+                f"{r.stops} | {r.unclosed} | {r.net_r_sum:+.2f} | {mnr} | {r.net_pp_sum:+.1f} |"
+            )
     return lines
 
 
 def _per_symbol_short_table(diag_rows: Sequence[ShortDiagRow], segment: str) -> list[str]:
-    """종목별 숏 기여(완료기준 4) — 전 TF 합. 헤지가 특정 종목에 쏠리는지."""
+    """종목별 숏 기여(완료기준 4) — 전 TF 합. 렌즈를 열로 병기(WAN-283)."""
+    lenses = _lenses_present(diag_rows) or ["baseline"]
     symbols = sorted({r.symbol for r in diag_rows})
     lines = [
-        "| 심볼 | 숏 | 순R합 | 순%p합 |",
-        "| -- | --: | --: | --: |",
+        "| 심볼 | 렌즈 | 숏 | 순R합 | 순%p합 |",
+        "| -- | -- | --: | --: | --: |",
     ]
     for symbol in symbols:
-        scoped = [r for r in diag_rows if r.symbol == symbol and r.segment == segment]
-        fills = sum(r.short_trades for r in scoped)
-        if fills == 0:
-            continue
-        fund = "†" if any(r.funding_coverage_gap for r in scoped) else ""
-        net_r = sum(r.net_r_sum for r in scoped)
-        net_pp = sum(r.net_pp_sum for r in scoped)
-        lines.append(f"| {_short(symbol)}{fund} | {fills} | {net_r:+.2f} | {net_pp:+.1f} |")
+        for lens in lenses:
+            scoped = [
+                r
+                for r in diag_rows
+                if r.symbol == symbol and r.segment == segment and r.fill == lens
+            ]
+            fills = sum(r.short_trades for r in scoped)
+            if fills == 0:
+                continue
+            fund = "†" if any(r.funding_coverage_gap for r in scoped) else ""
+            net_r = sum(r.net_r_sum for r in scoped)
+            net_pp = sum(r.net_pp_sum for r in scoped)
+            lines.append(
+                f"| {_short(symbol)}{fund} | {lens} | {fills} | {net_r:+.2f} | {net_pp:+.1f} |"
+            )
     return lines
 
 
 def _hedge_table(hedge_rows: Sequence[HedgeRow]) -> list[str]:
+    """하락장 헤지 분해 — 렌즈를 열로 병기(WAN-283). 구간 안에서 baseline→pen_5bp."""
+    lenses = [lens for lens in LENS_ORDER if any(h.fill == lens for h in hedge_rows)] or [
+        "baseline"
+    ]
     lines = [
-        "| 구간 | 롱-온리 MDD | 롱+숏 MDD | 롱-온리 창수익 | 롱+숏 창수익 |",
-        "| -- | --: | --: | --: | --: |",
+        "| 구간 | 렌즈 | 롱-온리 MDD | 롱+숏 MDD | 롱-온리 창수익 | 롱+숏 창수익 |",
+        "| -- | -- | --: | --: | --: | --: |",
     ]
     for segment in SEGMENTS:
-        r = next((h for h in hedge_rows if h.segment == segment), None)
-        if r is None:
-            continue
-        lines.append(
-            f"| {segment} | {_pct(r.long_only_mdd)} | {_pct(r.long_short_mdd)} | "
-            f"{_signed_pct(r.long_only_window_return)} | "
-            f"{_signed_pct(r.long_short_window_return)} |"
-        )
+        for lens in lenses:
+            r = next((h for h in hedge_rows if h.segment == segment and h.fill == lens), None)
+            if r is None:
+                continue
+            lines.append(
+                f"| {segment} | {lens} | {_pct(r.long_only_mdd)} | {_pct(r.long_short_mdd)} | "
+                f"{_signed_pct(r.long_only_window_return)} | "
+                f"{_signed_pct(r.long_short_window_return)} |"
+            )
     return lines
 
 
 def _loo_table(book_rows: Sequence[BookScopeRow], scope: str, segment: str) -> list[str]:
+    """종목 편중(leave-one-out) — 렌즈를 열로 병기(WAN-283)."""
+    lenses = _lenses_present(book_rows) or ["baseline"]
     lines = [
-        "| 팔 | 전체 | " + " | ".join(f"−{s}" for s in LOO_SYMBOLS) + " |",
-        "| -- | --: | " + " | ".join("--:" for _ in LOO_SYMBOLS) + " |",
+        "| 렌즈 | 팔 | 전체 | " + " | ".join(f"−{s}" for s in LOO_SYMBOLS) + " |",
+        "| -- | -- | --: | " + " | ".join("--:" for _ in LOO_SYMBOLS) + " |",
     ]
-    for arm in ARMS:
-        base = _pick_book(book_rows, scope=scope, arm=arm, segment=segment)
-        if base is None:
-            continue
-        cells = []
-        for s in LOO_SYMBOLS:
-            r = _pick_book(book_rows, scope=scope, arm=arm, segment=segment, exclude=s)
-            cells.append(_pct(r.total_return) if r is not None else "—")
-        label = "롱-온리" if arm == ARM_LONG_ONLY else "롱+숏"
-        lines.append(f"| {label} | {_pct(base.total_return)} | " + " | ".join(cells) + " |")
+    for lens in lenses:
+        for arm in ARMS:
+            base = _pick_book(book_rows, scope=scope, arm=arm, segment=segment, fill=lens)
+            if base is None:
+                continue
+            cells = []
+            for s in LOO_SYMBOLS:
+                r = _pick_book(
+                    book_rows, scope=scope, arm=arm, segment=segment, exclude=s, fill=lens
+                )
+                cells.append(_pct(r.total_return) if r is not None else "—")
+            label = "롱-온리" if arm == ARM_LONG_ONLY else "롱+숏"
+            lines.append(
+                f"| {lens} | {label} | {_pct(base.total_return)} | " + " | ".join(cells) + " |"
+            )
     return lines
 
 
@@ -780,13 +901,20 @@ def build_summary_markdown(
     main_scope = (
         "all" if any(r.scope == "all" for r in book_rows) else (timeframes[0] if timeframes else "")
     )
+    lenses_txt = " · ".join(_lenses_present(book_rows) or ["baseline"])
     lines = [
-        "# WAN-282 — 저항-존(공급 OB) 숏을 현행 롱 모델의 거울로 (측정 전용)",
+        "# WAN-282/283 — 저항-존(공급 OB) 숏을 현행 롱 모델의 거울로 (측정 전용)",
         "",
         "**성격** 측정 전용. 채택 기본값 그대로(`ConfluenceParams()`·채택 북 cap_only 5배 · 재진입 "
         "ON band) 돌리며 옛 핀은 하나도 물려받지 않는다. `short_enabled=False` **기본값 유지**"
-        "(측정용 숏이지 재활성화 아님). 렌즈 `baseline`(+`--fill pen_5bp` 옵트인) · 못 박은 6년 "
-        "창(WAN-182) · 기본값·토대 불변(`ALPHABLOCK_LIVE_TRADING=false` 유지).",
+        "(측정용 숏이지 재활성화 아님). 못 박은 6년 창(WAN-182) · 기본값·토대 불변"
+        "(`ALPHABLOCK_LIVE_TRADING=false` 유지).",
+        "",
+        f"**WAN-283 후속**: 체결 렌즈 `{lenses_txt}`를 **열로 병기**한다 — `pen_5bp`(관통 5bp "
+        "스트레스, WAN-96)에서 헤지 방향(MDD 감소)과 격리 숏 순 R의 부호가 살아남는지, 그리고 "
+        "**15m 스코프**가 1h·2h·4h와 같은 방향인지가 이 후속의 질문이다. 숏은 존 경계(밴드가) "
+        "체결이라 큐 우선순위(WAN-98 Canceled)에 가장 약해 `baseline`(닿으면 체결) 낙관이 특히 "
+        "위험한 축이다.",
         "",
         "## 이 표가 돌린 엔진",
         "",
@@ -799,8 +927,9 @@ def build_summary_markdown(
         "`롱+숏(거울)` = 거기에 베어리시 OB 숏을 같은 지갑에 추가.",
         "",
         f"재현: `uv run python -m backtest.wan282_resistance_short_mirror --tf "
-        f"{','.join(DEFAULT_TIMEFRAMES)} --jobs 6` (요약만: `--from-csv`). 15m은 별도 무거운 "
-        f"실행(`--tf 15m --append`). 원자료: `{book_csv}`(북) · `{diag_csv}`(격리 숏 진단).",
+        f"{','.join(DEFAULT_TIMEFRAMES)} --jobs 6` → `--fill pen_5bp --append` → `--tf 15m "
+        f"--append`(baseline·pen_5bp, 무거움). 요약만: `--from-csv`. 원자료: `{book_csv}`(북) · "
+        f"`{diag_csv}`(격리 숏 진단).",
         "",
         "⚠️ **총수익%는 복리 착시**(WAN-213) — 판단은 **MDD · 수익/MDD · 최대 동시 리스크 · "
         "청산**의 롱-온리→롱+숏 차이다. 전부 `baseline`(닿으면 체결) 낙관 위 값이고 숏은 존 경계 "
@@ -914,10 +1043,13 @@ def run_report(
         funding_proxy=funding_proxy,
         log=log,
     )
+    lens = fill.name if fill is not None else "baseline"
     start_ms, end_ms = parse_date_ms(start), parse_date_ms(end)
-    book_rows = build_book_scope_rows(long_only, long_short, start_ms=start_ms, end_ms=end_ms)
-    diag_rows = build_diag_rows(long_short)
-    hedge_rows = build_hedge_rows(long_only, long_short)
+    book_rows = build_book_scope_rows(
+        long_only, long_short, start_ms=start_ms, end_ms=end_ms, fill=lens
+    )
+    diag_rows = build_diag_rows(long_short, fill=lens)
+    hedge_rows = build_hedge_rows(long_only, long_short, fill=lens)
     return Wan282Report(book_rows=book_rows, diag_rows=diag_rows, hedge_rows=hedge_rows)
 
 
