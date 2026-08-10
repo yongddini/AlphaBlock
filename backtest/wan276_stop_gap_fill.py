@@ -156,7 +156,16 @@ def apply_stop_slippage(payloads: Sequence[CellPayload], alpha: float) -> list[C
             seg: tuple(slip_candidate(c, alpha) for c in cands)
             for seg, cands in p.candidates.items()
         }
-        out.append(dataclasses.replace(p, candidates=new_candidates))
+        # 재진입 후보(WAN-261/273, 옵트인)도 같은 α를 받는다 — 재진입 손절도 갭 체결을
+        # 겪는다(WAN-277). 재진입이 없는 payload(빈 dict = WAN-276 재진입 OFF)는 빈 dict로
+        # 남아 비트 재현된다.
+        new_reentry = {
+            seg: tuple(slip_candidate(c, alpha) for c in cands)
+            for seg, cands in p.reentry_candidates.items()
+        }
+        out.append(
+            dataclasses.replace(p, candidates=new_candidates, reentry_candidates=new_reentry)
+        )
     return out
 
 
@@ -251,8 +260,13 @@ def build_grid(
     base_payloads: Sequence[CellPayload],
     nonfill_payloads: Sequence[CellPayload],
     scopes: Sequence[str],
+    *,
+    include_reentry: bool = False,
 ) -> list[StressRow]:
-    """시나리오(α 스윕 + 미체결) × 스코프 × 구간의 채택 북 스트레스 행."""
+    """시나리오(α 스윕 + 미체결) × 스코프 × 구간의 채택 북 스트레스 행.
+
+    `include_reentry`(WAN-277, 옵트인)를 켜면 payload에 실린 재진입 후보(WAN-273 채택 band)를
+    base와 함께 북에 넣는다 — 끄면(WAN-276 기본) base만 넣어 비트 재현된다."""
     base_cfg = harness.build_config(BOOK_ANNUALIZATION_TF)
     rows: list[StressRow] = []
     for scope in scopes:
@@ -263,11 +277,11 @@ def build_grid(
         for alpha in ALPHAS:
             slipped = apply_stop_slippage(base_scope, alpha)
             for segment in SEGMENTS:
-                cells = _segment_cells(slipped, segment, "")
+                cells = _segment_cells(slipped, segment, "", include_reentry=include_reentry)
                 rows.append(_book_row(cells, f"alpha_{alpha:.2f}", scope, segment, base_cfg))
         if nonfill_scope:
             for segment in SEGMENTS:
-                cells = _segment_cells(nonfill_scope, segment, "")
+                cells = _segment_cells(nonfill_scope, segment, "", include_reentry=include_reentry)
                 rows.append(_book_row(cells, NONFILL_LABEL, scope, segment, base_cfg))
     return rows
 
@@ -318,11 +332,18 @@ def build_crash_rows(
 # --------------------------------------------------------------------------- #
 
 
-def verify_alpha0_identity(base_payloads: Sequence[CellPayload], scopes: Sequence[str]) -> float:
+def verify_alpha0_identity(
+    base_payloads: Sequence[CellPayload],
+    scopes: Sequence[str],
+    *,
+    include_reentry: bool = False,
+) -> float:
     """α=0 사후 변환 북이 원본 후보 북과 **비트 일치**하는지 — 최대 절대 수익률 차.
 
     `apply_stop_slippage(·, 0.0)`은 항등이라 원본과 같은 후보를 낸다. 갈라지면 사후 변환이
-    후보를 조용히 건드린 것이라 α 스윕 전체가 오염된다(회귀 테스트가 동작으로도 고정)."""
+    후보를 조용히 건드린 것이라 α 스윕 전체가 오염된다(회귀 테스트가 동작으로도 고정).
+
+    `include_reentry`(WAN-277)를 켜면 재진입 ON 북에서 α=0 항등을 확인한다."""
     base_cfg = harness.build_config(BOOK_ANNUALIZATION_TF)
     worst = 0.0
     for scope in scopes:
@@ -331,8 +352,20 @@ def verify_alpha0_identity(base_payloads: Sequence[CellPayload], scopes: Sequenc
             continue
         slipped = apply_stop_slippage(scoped, 0.0)
         for segment in SEGMENTS:
-            a = _book_row(_segment_cells(scoped, segment, ""), "base", scope, segment, base_cfg)
-            b = _book_row(_segment_cells(slipped, segment, ""), "a0", scope, segment, base_cfg)
+            a = _book_row(
+                _segment_cells(scoped, segment, "", include_reentry=include_reentry),
+                "base",
+                scope,
+                segment,
+                base_cfg,
+            )
+            b = _book_row(
+                _segment_cells(slipped, segment, "", include_reentry=include_reentry),
+                "a0",
+                scope,
+                segment,
+                base_cfg,
+            )
             worst = max(worst, abs(a.total_return - b.total_return))
     return worst
 

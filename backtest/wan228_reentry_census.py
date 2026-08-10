@@ -317,11 +317,16 @@ def _iter_reentries(
             exit_price=exit_price,
             reason=reason,
             stop_price=stop_price,
-            # 아래 둘은 진단·북 배선 전용이라 `_to_trade`가 무시한다(격리 손익 불변) —
+            # 아래 셋은 진단·북 배선 전용이라 `_to_trade`가 무시한다(격리 손익 불변) —
             # `order_block`은 재진입도 같은 존을 근거로 삼음을 남기고, `trigger_time`은
             # 탭이 없는 재진입을 북의 구간 버킷(`trigger_time >= 경계`)에 올바로 넣는 키다.
+            # `exit_extreme`(WAN-276/277)은 손절 봉의 불리 극값이라 재진입 손절도 base 후보와
+            # 같은 시장가 슬리피지 α 사후 변환을 받을 수 있다(손절 아닌 청산이면 엔진이 None).
+            # 이 값은 `slip_candidate`만 읽고 손익·시퀀싱은 무시하므로 wan261/269 북 CSV는
+            # 비트 재현된다(손절 슬리피지를 안 얹으면 exit_price가 그대로다).
             order_block=ob,
             trigger_time=outcome.entry_time,
+            exit_extreme=outcome.exit_extreme,
         )
         # 격리 순손익: 기준자본에서 독립 체결(동시 1포지션·자본 경합 미반영 = 상한).
         trade = _to_trade(re_cand, cfg.initial_capital, cfg, funding_rates)
