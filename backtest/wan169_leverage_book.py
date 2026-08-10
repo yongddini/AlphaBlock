@@ -238,6 +238,12 @@ class _Task:
     """WAN-276(옵트인): 지정가 손절 미체결(갭 관통 봉을 미체결 처리). False(기본)이면 예전과
     **비트 단위로 같다**. 손절 청산의 시각/홀드를 바꾸므로 후보 집합이 α 사후 변환처럼
     싸게 파생되지 않아 별도 생성이 필요하다."""
+    short_enabled: bool = False
+    """WAN-282(옵트인): 켜면 후보 생성이 베어리시 OB **숏**(기존 숏 경로, WAN-89/145/164)을
+    같이 낸다 — 롱 모델의 좌우 반전 거울(근단 지정가 매도 · 존 위 무효화 손절 · 1.5R 익절 ·
+    band 재진입 대칭). False(기본)이면 `params`에 `short_enabled`를 얹지 않아 예전과 **비트
+    단위로 같다**(`ConfluenceParams()` 기본값 `short_enabled=False`). 측정용 숏이지 재활성화가
+    아니다 — 판정은 롱-온리 북 vs 롱+숏 북(WAN-282)이 낸다."""
 
 
 @dataclass(frozen=True)
@@ -341,6 +347,11 @@ def run_cell(task: _Task, *, log: bool = True) -> CellPayload:
     # 인자 없음 = 채택 기본값(옛 핀 물려받기 금지 — 완료기준). `fill`(WAN-264, 옵트인)을 주면
     # 체결 렌즈만 갈아끼운다 — `None`이면 `build_params(fill=BASELINE_FILL)`과 같아 비트 재현.
     params = harness.build_params() if task.fill is None else harness.build_params(fill=task.fill)
+    if task.short_enabled:
+        # WAN-282(옵트인): 베어리시 OB 숏을 후보에 같이 낸다. 끄면(기본) 이 model_copy를
+        # 아예 타지 않아 예전과 비트 단위로 같다 — 롱 후보는 short_enabled와 무관하게 같은
+        # 시그널에서 나온다(숏 게이트는 롱을 건드리지 않는다, zone_limit_backtest.py L883).
+        params = params.model_copy(update={"short_enabled": True})
     # 유동성 한도(WAN-244/279): `task.adv_fraction`으로 후보 cfg의 상한을 **항상 명시 고정**한다.
     # 기본 `None`(측정 모듈)이면 상한을 끄고 — WAN-279가 채택 기본값을 0.005로 올린 뒤라 pin
     # 없이 build_config에 맡기면 조용히 켜진다(WAN-91/95/112 부류) — 옛 북 CSV가 비트 재현된다.
@@ -469,6 +480,7 @@ def run_cells(
     fill: harness.FillPreset | None = None,
     stop_slippage_alpha: float = 0.0,
     limit_stop_nonfill: bool = False,
+    short_enabled: bool = False,
 ) -> list[CellPayload]:
     """전 칸을 돈다. `jobs`는 성능 노브이지 결과 축이 아니다(WAN-121).
 
@@ -491,6 +503,9 @@ def run_cells(
 
     `stop_slippage_alpha`·`limit_stop_nonfill`(WAN-276, 옵트인)은 손절 체결 모델을 보수화한다
     — 둘 다 기본(0 · False)이면 예전과 비트 단위로 같다(WAN-276 손절 갭-체결 민감도 측정용).
+
+    `short_enabled`(WAN-282, 옵트인)를 켜면 후보 생성이 베어리시 OB 숏을 같이 낸다(롱 모델의
+    거울) — 끄면(기본) `params`에 얹지 않아 예전과 비트 단위로 같다. 롱+숏 북 측정용이다.
     """
     tasks = [
         _Task(
@@ -504,6 +519,7 @@ def run_cells(
             fill=fill,
             stop_slippage_alpha=stop_slippage_alpha,
             limit_stop_nonfill=limit_stop_nonfill,
+            short_enabled=short_enabled,
         )
         for symbol in symbols
         for timeframe in timeframes
