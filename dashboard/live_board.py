@@ -29,6 +29,7 @@ import pandas as pd
 from config.settings import Settings
 from dashboard.health_data import OpenPositionView
 from data.models import timeframe_to_ms
+from paper.report import exit_reason_label
 from paper.store import PaperTradeRecord
 from strategy.models import OrderBlock, OrderBlockDirection
 
@@ -159,6 +160,30 @@ def total_unrealized_pct(views: Sequence[OpenPositionView]) -> float | None:
     """
     values = [v.unrealized_pct for v in views if v.unrealized_pct is not None]
     return sum(values) if values else None
+
+
+def filter_reason_options(records: Sequence[PaperTradeRecord]) -> list[str]:
+    """거래 원장에 실제로 있는 청산 사유 라벨(화면 표기 그대로).
+
+    고정 목록이 아니라 **데이터에서** 만든다 — 없는 사유를 고를 수 있게 두면 필터가
+    항상 빈 표를 낼 수 있고, 새 사유가 생겼는데 목록에 없어 조용히 숨는 일도 막는다.
+    """
+    seen = {exit_reason_label(r.reason) for r in records}
+    return sorted(seen)
+
+
+def filter_records_by_reason(
+    records: Sequence[PaperTradeRecord], reasons: Sequence[str]
+) -> list[PaperTradeRecord]:
+    """청산 사유 라벨로 거래를 좁힌다. 빈 선택은 **전부 보여준다**.
+
+    빈 선택을 "아무것도 안 보여줌"으로 두면 사용자가 필터를 다 지웠을 때 화면이 비어
+    고장처럼 보인다 — 이 화면에서 필터는 좁히는 도구이지 끄는 스위치가 아니다.
+    """
+    wanted = set(reasons)
+    if not wanted:
+        return list(records)
+    return [r for r in records if exit_reason_label(r.reason) in wanted]
 
 
 @dataclass(frozen=True)

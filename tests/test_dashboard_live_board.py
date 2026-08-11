@@ -18,6 +18,8 @@ from dashboard.live_board import (
     chart_start_ms,
     chart_symbols,
     chart_timeframes,
+    filter_reason_options,
+    filter_records_by_reason,
     legend_title,
     max_drawdown_window,
     open_positions_frame,
@@ -173,7 +175,12 @@ def test_legend_title_matches_tradingview_style() -> None:
     assert legend_title("BTC/USDT:USDT", "1h") == "BTC/USDT PERPETUAL SWAP · 1시간"
 
 
-def _record(*, exit_time: int, realized_pnl: float | None) -> PaperTradeRecord:
+def _record(
+    *,
+    exit_time: int,
+    realized_pnl: float | None,
+    reason: SignalExitReason = SignalExitReason.TAKE_PROFIT,
+) -> PaperTradeRecord:
     return PaperTradeRecord(
         symbol="BTC/USDT:USDT",
         timeframe="1h",
@@ -182,7 +189,7 @@ def _record(*, exit_time: int, realized_pnl: float | None) -> PaperTradeRecord:
         entry_price=100.0,
         exit_time=exit_time,
         exit_price=101.0,
-        reason=SignalExitReason.TAKE_PROFIT,
+        reason=reason,
         gross_pct=1.0,
         fee_pct=0.0,
         funding_pct=0.0,
@@ -240,3 +247,28 @@ def test_max_drawdown_window_is_none_when_the_curve_only_rises() -> None:
 
     assert max_drawdown_window(rising) is None
     assert max_drawdown_window([]) is None
+
+
+def test_exit_reason_filter_uses_the_labels_the_table_shows() -> None:
+    """필터 옵션이 **거래 표와 같은 문자열**이어야 한다 — 두 벌이면 결과가 늘 비어 보인다."""
+    from paper.report import records_to_display_frame
+
+    records = [
+        _record(exit_time=_HOUR, realized_pnl=10.0),
+        _record(exit_time=2 * _HOUR, realized_pnl=-5.0, reason=SignalExitReason.STOP_LOSS),
+    ]
+
+    options = filter_reason_options(records)
+
+    assert options == ["손절", "익절"]
+    assert set(records_to_display_frame(records)["청산사유"]) == set(options)
+
+
+def test_exit_reason_filter_narrows_and_empty_selection_shows_everything() -> None:
+    """빈 선택은 **전부 보여준다** — 필터를 다 지웠을 때 빈 화면은 고장으로 읽힌다."""
+    win = _record(exit_time=_HOUR, realized_pnl=10.0)
+    loss = _record(exit_time=2 * _HOUR, realized_pnl=-5.0, reason=SignalExitReason.STOP_LOSS)
+
+    assert filter_records_by_reason([win, loss], ["손절"]) == [loss]
+    assert filter_records_by_reason([win, loss], []) == [win, loss]
+    assert filter_records_by_reason([win, loss], ["익절", "손절"]) == [win, loss]

@@ -188,6 +188,16 @@ _EXIT_REASON_LABELS: Mapping[SignalExitReason, str] = {
     SignalExitReason.STOP_LOSS: "손절",
 }
 
+
+def exit_reason_label(reason: SignalExitReason) -> str:
+    """청산 사유의 **화면 표기**(익절/손절). 모르는 값은 원문 그대로.
+
+    거래 표와 청산 사유 필터가 같은 문자열을 쓰도록 한 곳에서만 만든다 — 두 벌로
+    갈라지면 필터가 표에 없는 라벨을 고르게 되고 결과가 늘 비어 보인다.
+    """
+    return _EXIT_REASON_LABELS.get(reason, reason.value)
+
+
 #: 전체 성과 행의 `scope` 원문 라벨.
 _SCOPE_ALL = "ALL"
 
@@ -207,7 +217,7 @@ def records_to_display_frame(records: Sequence[PaperTradeRecord]) -> pd.DataFram
             COL_ENTRY_PRICE: r.entry_price,
             COL_EXIT_KST: format_time_kst(r.exit_time),
             COL_EXIT_PRICE: r.exit_price,
-            COL_EXIT_REASON: _EXIT_REASON_LABELS.get(r.reason, r.reason.value),
+            COL_EXIT_REASON: exit_reason_label(r.reason),
             COL_GROSS_PCT: r.gross_pct,
             COL_FEE_PCT: r.fee_pct,
             COL_SLIPPAGE_PCT: r.slippage_pct,

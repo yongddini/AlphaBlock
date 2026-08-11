@@ -87,6 +87,8 @@ from dashboard.live_board import (
     chart_start_ms,
     chart_symbols,
     chart_timeframes,
+    filter_reason_options,
+    filter_records_by_reason,
     legend_title,
     max_drawdown_window,
     open_positions_frame,
@@ -1613,11 +1615,25 @@ def _render_balance(settings: Settings) -> None:
     )
 
     st.subheader("거래 원장")
-    st.dataframe(records_to_display_frame(records), use_container_width=True, hide_index=True)
+    # 손절/익절 필터(WAN-245 확정 사양) — 저장된 거래 탭이 이미 하던 것을 페이퍼 원장에도
+    # 둔다. ⚠️ **표시 필터일 뿐** 위 성과 카드·곡선은 전체 거래 기준 그대로다(필터가 지표를
+    # 바꾸면 "지금 보는 숫자가 무엇의 것인지"가 흐려진다 — 저장된 거래 탭과 같은 규약).
+    reasons = filter_reason_options(records)
+    chosen = st.multiselect(
+        "청산 사유",
+        reasons,
+        default=reasons,
+        key="paper_exit_reason_filter",
+        help="표시할 거래만 좁힙니다. 위 성과 카드·잔고 곡선은 전체 거래 기준입니다.",
+    )
+    shown = filter_records_by_reason(records, chosen)
+    st.caption(f"{len(shown):,} / {len(records):,}건 표시")
+    st.dataframe(records_to_display_frame(shown), use_container_width=True, hide_index=True)
     st.download_button(
         "거래 원장 CSV",
         records_to_dataframe(records).to_csv(index=False),
         file_name="paper_trades.csv",
+        help="CSV는 필터와 무관하게 **전체 원장**입니다(데이터 축 — WAN-190).",
         mime="text/csv",
     )
 
