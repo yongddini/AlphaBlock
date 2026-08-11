@@ -59,12 +59,23 @@ WAN-164/201은 **엣지 질문**(진입 규칙이 무작위와 구분되는가)�
 ## 재현
 
 ```
-uv run python -m backtest.wan284_resistance_short_profit_null --tf 4h --jobs 6
-uv run python -m backtest.wan284_resistance_short_profit_null --tf 1h,2h --append --jobs 6
-uv run python -m backtest.wan284_resistance_short_profit_null --fill pen_5bp --append
-uv run python -m backtest.wan284_resistance_short_profit_null --tf 15m --append --jobs 9  # 무거움
-uv run python -m backtest.wan284_resistance_short_profit_null --from-csv                  # 요약만
+M=backtest.wan284_resistance_short_profit_null
+uv run python -m $M --tf 4h --jobs 6                       # WAN-284
+uv run python -m $M --fill pen_5bp --append                # WAN-284 (4h)
+uv run python -m $M --tf 1h --append --jobs 6              # ↓ WAN-285: 한 TF씩
+uv run python -m $M --tf 1h --fill pen_5bp --append --jobs 6
+uv run python -m $M --tf 2h --append --jobs 6
+uv run python -m $M --tf 2h --fill pen_5bp --append --jobs 6
+uv run python -m $M --tf 15m --append --jobs 6             # 무거움(WAN-203)
+uv run python -m $M --tf 15m --fill pen_5bp --append --jobs 6
+uv run python -m $M --from-csv                             # 요약만
 ```
+
+⚠️ **축은 한 TF씩 잇는다**(WAN-285). `--tf 1h,2h`처럼 여러 TF를 한 번에 돌리면 북 자에
+**그 두 TF만 담은 교차 스코프**가 생기는데, 4h·15m을 따로 이어 붙인 CSV에서는 그 라벨이
+「전부」로 읽혀 WAN-283이 교정한 **`all` 스코프 오염**을 되풀이한다. 그래서 교차 스코프
+라벨에는 구성 TF가 박히고(`all:1h+2h`, `cross_scope_label`) 한 TF씩 이으면 그 스코프가
+아예 생기지 않는다.
 """
 
 from __future__ import annotations
@@ -148,10 +159,57 @@ LOO_ALL = "ETH+DOGE+LINK"
 #: 렌즈 표시 순서 — baseline(공식) 먼저, 그 뒤 스트레스.
 LENS_ORDER: tuple[str, ...] = ("baseline", "pen_1bp", "pen_5bp")
 
+#: 여러 TF를 한 지갑으로 묶은 북 스코프의 라벨 머리(구성 TF가 뒤에 박힌다).
+CROSS_SCOPE_PREFIX = "all"
+
+
+def cross_scope_label(timeframes: Sequence[str]) -> str:
+    """교차 TF 북 스코프의 라벨 — **구성 TF를 이름에 박는다**(WAN-285).
+
+    옛 라벨은 그냥 `all`이었는데, 축을 `--append`로 잇는 이 모듈에서는 그 이름이 거짓말을
+    한다: `--tf 1h,2h`만 돌린 실행이 만든 `all`은 4h·15m을 이어 붙인 CSV 안에서 「전부」로
+    읽힌다(WAN-283이 헤지 표에서 교정한 `all` 스코프 오염과 같은 부류). 구성 TF를 라벨에
+    박으면 부분 집합이 전체를 사칭할 수 없고, 한 TF씩 이으면 이 스코프는 아예 안 생긴다.
+    """
+    return CROSS_SCOPE_PREFIX + ":" + "+".join(sorted(timeframes, key=timeframe_to_ms))
+
+
+def is_cross_scope(scope: str) -> bool:
+    """교차 TF 스코프인가(옛 `all` 라벨과 새 `all:15m+1h` 라벨 둘 다)."""
+    return scope == CROSS_SCOPE_PREFIX or scope.startswith(CROSS_SCOPE_PREFIX + ":")
+
 
 # --------------------------------------------------------------------------- #
 # 널 숏 한 건 — 엔진과 같은 시뮬레이터로 청산까지
 # --------------------------------------------------------------------------- #
+
+
+#: RSI를 **읽지 않는** 게이트 모드 — 시딩을 건너뛰어도 결과가 비트 동일한 모드다.
+#:
+#: `simulate_zone_limit_trade`의 진입 판정은 `unconditional`에서 `rsi_gate_mode ==
+#: "unconditional"`에 단락돼 `live_rsi`를 **보지 않는다**(`backtest/substep.py`). 그런데
+#: 널은 후보 하나마다 그 시점까지의 확정봉 전부를 커밋해 상태를 만들었다 — 후보 수 × 봉 수의
+#: O(N×M)이라 15m·6년(상위TF 21만 봉 × 시드 20 × 후보 수천)에서 널 생성이 통째로 이 시딩에
+#: 잡아먹힌다. WAN-203이 밴드 시딩·서브스텝 슬라이스에서 고친 것과 **같은 부류**의 초선형
+#: 비용이고, 여기서도 고침은 **비트 동일**이다(테스트가 동작으로 고정).
+#:
+#: ⚠️ 다른 모드에서는 건너뛰면 안 된다 — 그 모드들은 실제로 RSI 값을 읽는다.
+RSI_FREE_GATE_MODES: frozenset[str] = frozenset({"unconditional"})
+
+
+def _null_rsi_state(
+    *,
+    start: int,
+    substeps: Sequence[SubStep],
+    htf_times: Sequence[int],
+    htf_closes: Sequence[float],
+    params: ConfluenceParams,
+) -> RealtimeRsi:
+    """이 널 후보에 물릴 RSI 상태 — 게이트가 RSI를 안 읽으면 시딩을 건너뛴다(비트 동일)."""
+    if params.rsi_gate_mode in RSI_FREE_GATE_MODES:
+        return RealtimeRsi(length=params.rsi_length)
+    cut = bisect.bisect_left(htf_times, substeps[start].htf_bar_time)
+    return RealtimeRsi.seed_from_closed(htf_closes[:cut], length=params.rsi_length)
 
 
 def _null_short_candidate(
@@ -179,8 +237,9 @@ def _null_short_candidate(
     take_profit_price = entry_price - params.take_profit_r * risk
     if take_profit_price <= 0.0:
         return None
-    cut = bisect.bisect_left(htf_times, substeps[start].htf_bar_time)
-    rsi_state = RealtimeRsi.seed_from_closed(htf_closes[:cut], length=params.rsi_length)
+    rsi_state = _null_rsi_state(
+        start=start, substeps=substeps, htf_times=htf_times, htf_closes=htf_closes, params=params
+    )
     outcome = simulate_zone_limit_trade(
         direction=_direction(PositionSide.SHORT),
         limit_price=entry_price,
@@ -718,7 +777,9 @@ def build_book_null_rows(
     """채택 북 수익 자에서 실제 롱+숏 대 「숏만 널로 갈아끼운」 북 20개 + 롱-온리 기준선."""
     by_key = {(d.symbol, d.timeframe): d for d in draws}
     timeframes = sorted({c.timeframe for c in cells}, key=timeframe_to_ms)
-    scopes: list[str] = ["all", *timeframes] if len(timeframes) > 1 else list(timeframes)
+    scopes: list[str] = (
+        [cross_scope_label(timeframes), *timeframes] if len(timeframes) > 1 else list(timeframes)
+    )
     seeds = min((len(d.draws.get(NULL_SEGMENTS[0], ())) for d in draws), default=0)
     rows: list[BookNullRow] = []
     for scope in scopes:
@@ -894,6 +955,163 @@ def _eligible(rows: Sequence[ShortNullRow], *, segment: str, fill: str) -> list[
     return [r for r in rows if r.segment == segment and r.fill == fill and r.sample_ok]
 
 
+@dataclass(frozen=True)
+class AxisStat:
+    """한 작업 TF(축)의 격리 순 R 자 성적 — 판정 문자는 셀 수에서 계산한다."""
+
+    timeframe: str
+    cells: int
+    """그 축의 행 수(20거래 게이트 이전)."""
+    eligible: int
+    """유효 셀(20거래 이상) — 게이트에 걸린 셀은 판정에서 빠진다."""
+    significant: int
+    significant_per_trade: int
+    alpha: float
+    beat: int
+
+    @property
+    def strongest(self) -> int:
+        """두 자 중 더 많이 유의한 쪽 — 판정은 강한 쪽으로 낸다(합 대 거래당)."""
+        return max(self.significant, self.significant_per_trade)
+
+    @property
+    def letter(self) -> str:
+        if not self.eligible:
+            return "?"
+        if self.strongest * 2 > self.eligible:
+            return "a"
+        return "c" if self.strongest else "b"
+
+    @property
+    def passes(self) -> bool:
+        """이 축이 매칭 널을 **이겼다**고 부를 수 있는가 = 유효 셀의 과반이 유의."""
+        return self.letter == "a"
+
+
+def axis_stats(
+    rows: Sequence[ShortNullRow], *, segment: str = SEGMENT_OOS_WARM, fill: str = "baseline"
+) -> list[AxisStat]:
+    """축(TF)별 격리 순 R 성적 — 완료기준 2의 「이기는 축이 있는가」를 행에서 센다."""
+    scoped = [r for r in rows if r.segment == segment and r.fill == fill]
+    out: list[AxisStat] = []
+    for tf in sorted({r.timeframe for r in scoped}, key=timeframe_to_ms):
+        cells = [r for r in scoped if r.timeframe == tf]
+        eligible = [r for r in cells if r.sample_ok]
+        out.append(
+            AxisStat(
+                timeframe=tf,
+                cells=len(cells),
+                eligible=len(eligible),
+                significant=sum(1 for r in eligible if r.significant),
+                significant_per_trade=sum(1 for r in eligible if r.significant_per_trade),
+                alpha=sum(r.alpha_net_r for r in eligible),
+                beat=sum(1 for r in eligible if r.actual_net_r > r.null_mean_net_r),
+            )
+        )
+    return out
+
+
+def _axis_sentence(stats: Sequence[AxisStat]) -> str:
+    if not stats:
+        return ""
+    parts = [
+        f"{s.timeframe} ({s.letter}) 유효 {s.eligible}/{s.cells}셀 · 유의 합 {s.significant} · "
+        f"거래당 {s.significant_per_trade} · 알파 {s.alpha:+.1f}"
+        for s in stats
+    ]
+    return " **축별(따뜻한 OOS·baseline):** " + " / ".join(parts) + "."
+
+
+#: 채택 작업 TF(WAN-252) — 완료기준 2의 「네 작업 TF 전부 …」를 라벨이 아니라 목록으로 센다.
+WORKING_TIMEFRAMES: tuple[str, ...] = ("15m", "1h", "2h", "4h")
+
+
+def _book_pick(rows: Sequence[BookNullRow], *, scope: str, fill: str) -> BookNullRow | None:
+    return next(
+        (
+            b
+            for b in rows
+            if b.scope == scope
+            and b.segment == SEGMENT_OOS_WARM
+            and b.fill == fill
+            and not b.exclude_symbol
+        ),
+        None,
+    )
+
+
+def _beats_null(row: BookNullRow) -> bool:
+    a, n = row.actual_return_over_mdd, row.null_mean_return_over_mdd
+    return a is not None and n is not None and a > n
+
+
+def _book_sentence(book_rows: Sequence[BookNullRow], fill: str) -> str:
+    """북 자를 **스코프별로** 읽는다 — 축을 이어 붙이면 스코프가 TF마다 하나씩 는다."""
+    scopes = sorted({b.scope for b in book_rows}, key=_scope_sort_key)
+    picked = [row for s in scopes if (row := _book_pick(book_rows, scope=s, fill=fill))]
+    if not picked:
+        return ""
+    beat = sum(1 for b in picked if _beats_null(b))
+    sig = sum(1 for b in picked if b.significant_rm)
+    detail = " / ".join(
+        f"{b.scope} 롱온리 {_rr(b.long_only_return_over_mdd)} → 실제 "
+        f"{_rr(b.actual_return_over_mdd)} vs 널 {_rr(b.null_mean_return_over_mdd)}"
+        f"(p={_p(b.p_return_over_mdd)})"
+        for b in picked
+    )
+    return (
+        f" **북 자(따뜻한 OOS · 스코프 {len(picked)}개):** 널을 이긴 스코프 "
+        f"{beat}/{len(picked)} · 유의 {sig}/{len(picked)} — {detail}. 즉 숏을 얹어 수익/MDD가 "
+        "올라도 **그 상승분이 무작위 숏으로도 나오는지**가 판정이다."
+    )
+
+
+def _loo_signs(book_rows: Sequence[BookNullRow], *, scope: str, fill: str) -> tuple[int, int]:
+    """그 스코프의 leave-one-out에서 실제 > 널 부호가 유지된 팔 수 / 전체."""
+    rows = [
+        b
+        for b in book_rows
+        if b.scope == scope
+        and b.segment == SEGMENT_OOS_WARM
+        and b.fill == fill
+        and b.exclude_symbol
+    ]
+    return sum(1 for b in rows if _beats_null(b)), len(rows)
+
+
+def _conclusion(
+    axes: Sequence[AxisStat],
+    short_rows: Sequence[ShortNullRow],
+    book_rows: Sequence[BookNullRow],
+) -> str:
+    """완료기준 2 — 이기는 축이 있는가, 있으면 pen_5bp·leave-one-out에서 살아남는가."""
+    covered = [s.timeframe for s in axes]
+    missing = [tf for tf in WORKING_TIMEFRAMES if tf not in covered]
+    passing = [s.timeframe for s in axes if s.passes]
+    if not passing:
+        label = (
+            "네 작업 TF 전부" if not missing else f"측정한 축({', '.join(covered) or '없음'}) 전부"
+        )
+        tail = f" (미측정 축: {', '.join(missing)})" if missing else ""
+        return (
+            f" **종합: {label} 채택 근거 아님** — 저항-존 숏의 수익 자가 매칭 널을 유효 셀의 "
+            f"과반으로 이기는 축이 하나도 없다.{tail}"
+        )
+    pen_pass = {s.timeframe for s in axis_stats(short_rows, fill="pen_5bp") if s.passes}
+    survived = [tf for tf in passing if tf in pen_pass]
+    loo: list[str] = []
+    for tf in passing:
+        ok, total = _loo_signs(book_rows, scope=tf, fill="baseline")
+        if total:
+            loo.append(f"{tf} {ok}/{total}")
+    return (
+        f" **종합: 이기는 축 {', '.join(passing)}** — 그중 pen_5bp(체결 보수화)에서도 이기는 축 "
+        f"{', '.join(survived) if survived else '없음'} · 북 자 leave-one-out 부호 유지"
+        f"{(' ' + ' / '.join(loo)) if loo else ' —'}. ⚠️ **그래도 채택 근거가 아니다** — 측정 "
+        "전용이고 채택은 재-베이스라인 = 사용자 결정이다."
+    )
+
+
 def verdict(short_rows: Sequence[ShortNullRow], book_rows: Sequence[BookNullRow]) -> str:
     """저항-존 숏의 **수익**이 무작위 숏 대비 초과분(알파)인가, 하락 노출(베타)인가.
 
@@ -937,46 +1155,28 @@ def verdict(short_rows: Sequence[ShortNullRow], book_rows: Sequence[BookNullRow]
         f"{falling}/{len(eligible)}."
     )
 
+    axes = axis_stats(short_rows, segment=SEGMENT_OOS_WARM, fill=lens)
+    axis_txt = _axis_sentence(axes)
+
     pen = _eligible(short_rows, segment=SEGMENT_OOS_WARM, fill="pen_5bp")
     if pen:
         pen_sig = sum(1 for r in pen if r.significant)
         pen_sig_pt = sum(1 for r in pen if r.significant_per_trade)
         pen_alpha = sum(r.alpha_net_r for r in pen)
+        pen_axes = axis_stats(short_rows, segment=SEGMENT_OOS_WARM, fill="pen_5bp")
+        pen_pass = [s.timeframe for s in pen_axes if s.passes]
         pen_txt = (
             f" **pen_5bp 병기:** 유효 {len(pen)}셀 중 유의 합 {pen_sig}셀 · 거래당 "
-            f"{pen_sig_pt}셀 · 알파 합 {pen_alpha:+.1f}."
+            f"{pen_sig_pt}셀 · 알파 합 {pen_alpha:+.1f} · 관통을 요구해도 이기는 축 "
+            f"{', '.join(pen_pass) if pen_pass else '없음'}."
         )
     else:
         pen_txt = " (pen_5bp 행 없음 — `--fill pen_5bp --append` 미실행.)"
 
-    scope = "all" if any(b.scope == "all" for b in book_rows) else None
-    if scope is None:
-        scopes = sorted({b.scope for b in book_rows}, key=_scope_sort_key)
-        scope = scopes[0] if scopes else ""
-    book = next(
-        (
-            b
-            for b in book_rows
-            if b.scope == scope
-            and b.segment == SEGMENT_OOS_WARM
-            and b.fill == lens
-            and not b.exclude_symbol
-        ),
-        None,
-    )
-    if book is not None:
-        book_txt = (
-            f" **북 자({scope}·따뜻한 OOS):** 수익/MDD 롱-온리 "
-            f"{_rr(book.long_only_return_over_mdd)} · 실제 롱+숏 "
-            f"{_rr(book.actual_return_over_mdd)} · 널 평균 "
-            f"{_rr(book.null_mean_return_over_mdd)} (p={_p(book.p_return_over_mdd)}). "
-            "즉 숏을 얹어 수익/MDD가 올라도 **그 상승분이 무작위 숏으로도 나오는지**가 판정이다."
-        )
-    else:
-        book_txt = ""
-
     return (
-        f"{head}{body}{pen_txt}{book_txt} ⚠️ 총수익%는 복리 착시라 방향만 읽는다(WAN-213). "
+        f"{head}{body}{axis_txt}{pen_txt}{_book_sentence(book_rows, lens)}"
+        f"{_conclusion(axes, short_rows, book_rows)}"
+        " ⚠️ 총수익%는 복리 착시라 방향만 읽는다(WAN-213). "
         "전부 `baseline`(닿으면 체결) 낙관 위 값이고 숏은 존 경계 체결이라 큐 우선순위에 특히 "
         "약하다(실해소는 틱·호가 WAN-98, Canceled). 「엣지 없음」(WAN-84/88/111/114/124/151/201/"
         "248)은 다른 질문이라 불변이고, 유의가 나와도 진입 알파가 아니라 위험의 모양(WAN-90)일 "
@@ -998,14 +1198,23 @@ def book_to_frame(rows: Sequence[BookNullRow]) -> pd.DataFrame:
     return pd.DataFrame([r.model_dump() for r in rows], columns=list(BookNullRow.model_fields))
 
 
+#: CSV 왕복을 **무손실**로 만드는 파서 옵션 — `--append`가 남의 행을 바꾸지 않게 하는 장치.
+#:
+#: pandas 기본 부동소수 파서는 마지막 자리에서 값을 바꿀 수 있다. 이 모듈은 축을 `--append`로
+#: 이으므로 **읽고 다시 쓰는 일이 반복**되는데, 그때마다 손실이 얹히면 이미 확정된 축(WAN-284
+#: 4h)의 행이 재실행도 안 했는데 CSV에서 슬금슬금 달라진다 — 완료기준 「기존 행을 안 건드림」이
+#: 텍스트 층에서 깨진다. `round_trip`은 정확 반올림이라 `repr` 왕복이 바이트로 닫힌다.
+FLOAT_ROUND_TRIP = "round_trip"
+
+
 def short_from_csv(path: Path) -> list[ShortNullRow]:
-    frame = pd.read_csv(path, keep_default_na=False)
+    frame = pd.read_csv(path, keep_default_na=False, float_precision=FLOAT_ROUND_TRIP)
     records = frame.astype(object).where(pd.notna(frame), None).to_dict(orient="records")
     return [ShortNullRow.model_validate(rec) for rec in records]
 
 
 def book_from_csv(path: Path) -> list[BookNullRow]:
-    frame = pd.read_csv(path, keep_default_na=False)
+    frame = pd.read_csv(path, keep_default_na=False, float_precision=FLOAT_ROUND_TRIP)
     records = frame.astype(object).where(pd.notna(frame), None).to_dict(orient="records")
     return [BookNullRow.model_validate(rec) for rec in records]
 
@@ -1034,7 +1243,7 @@ def merge_book(existing: Sequence[BookNullRow], new: Sequence[BookNullRow]) -> l
 
 
 def _scope_sort_key(scope: str) -> int:
-    return -1 if scope == "all" else timeframe_to_ms(scope)
+    return -1 if is_cross_scope(scope) else timeframe_to_ms(scope)
 
 
 def _pct(value: float) -> str:
@@ -1150,10 +1359,13 @@ def build_summary_markdown(
 ) -> str:
     timeframes = sorted({r.timeframe for r in short_rows}, key=timeframe_to_ms)
     scopes = sorted({r.scope for r in book_rows}, key=_scope_sort_key)
-    main_scope = scopes[0] if scopes else ""
     lenses_txt = " · ".join(_lenses_present(short_rows) or ["baseline"])
     lines = [
-        "# WAN-284 — 저항-존 숏을 「헤지」가 아니라 「수익」으로 재판정 (측정 전용)",
+        "# WAN-284/285 — 저항-존 숏을 「헤지」가 아니라 「수익」으로 재판정 (측정 전용)",
+        "",
+        f"**축** 4h는 WAN-284, {', '.join(tf for tf in WORKING_TIMEFRAMES if tf != '4h')}는 "
+        "WAN-285가 같은 모듈에 `--append`로 이어 붙였다(새 파이프라인·새 기하 없음). 이 표에 "
+        f"실린 축: `{', '.join(timeframes) or '없음'}`.",
         "",
         "**성격** 측정 전용. 채택 기본값 그대로(`ConfluenceParams()` · 채택 북 cap_only 5배 · "
         "재진입 ON band) 돌리며 핀을 하나도 쓰지 않는다. `short_enabled=False` **기본값 유지**"
@@ -1186,8 +1398,9 @@ def build_summary_markdown(
         f"{MIN_TRADES_GATE}건 이상(WAN-84) **그리고** p ≤ {ALPHA} **그리고** 실제 > 널 평균.",
         "",
         f"재현: `uv run python -m backtest.wan284_resistance_short_profit_null --tf "
-        f"{','.join(DEFAULT_TIMEFRAMES)} --jobs 6` → `--tf 1h,2h --append` → "
-        "`--fill pen_5bp --append` → `--tf 15m --append`(무거움). 요약만: `--from-csv`. "
+        f"{','.join(DEFAULT_TIMEFRAMES)} --jobs 6` → `--fill pen_5bp --append` → 축마다 "
+        "`--tf <TF> --append`와 `--tf <TF> --fill pen_5bp --append`(**한 TF씩** — 여러 TF를 "
+        "한 번에 돌리면 그 TF들만 담은 교차 스코프가 생긴다). 요약만: `--from-csv`. "
         f"원자료: `{short_csv}`(격리 순R 자) · `{book_csv}`(북 수익/MDD 자).",
         "",
         "⚠️ **총수익%는 복리 착시**(WAN-213) — 방향만 읽는다. 판정은 **널 대비 초과분**이다.",
@@ -1216,31 +1429,38 @@ def build_summary_markdown(
             if len(table) > 2:
                 lines += [f"#### {tf}", "", *table, ""]
     lines += [
-        f"## 2. 북 수익/MDD 자 — 롱은 그대로, 숏만 널로 ({main_scope})",
+        "## 2. 북 수익/MDD 자 — 롱은 그대로, 숏만 널로",
         "",
         "실제 롱+숏 북과 **롱 후보가 글자 그대로 같은** 널 북(숏만 무작위 시각)을 대조한다. "
         "롱-온리(숏 0개)는 같은 롱 위의 기준선이다.",
         "",
+        "⚠️ **스코프는 그 스코프가 실제로 담은 칸만 뜻한다** — 축을 한 TF씩 `--append`로 이었으므로 "
+        "TF마다 독립된 북(그 TF 칸들만 공유 자본)이고, 네 TF를 한 지갑으로 묶은 교차 스코프는 "
+        "네 TF를 **한 실행에서** 돌려야 나온다(그 라벨에는 구성 TF가 박힌다 — "
+        f"`{cross_scope_label(('1h', '2h'))}` 꼴).",
+        "",
     ]
-    for seg_title, segment in (
-        ("oos_warm (주 수치)", SEGMENT_OOS_WARM),
-        ("is (맥락)", SEGMENT_IS),
-    ):
-        lines += [f"### {seg_title}", "", *_book_table(book_rows, main_scope, segment), ""]
-    if main_scope == "all":
-        lines += ["### TF 스코프별 (oos_warm)", ""]
-        for scope in scopes:
-            if scope == "all":
-                continue
-            lines += [f"#### {scope}", "", *_book_table(book_rows, scope, SEGMENT_OOS_WARM), ""]
+    for scope in scopes:
+        lines += [f"### {scope}", ""]
+        for seg_title, segment in (
+            ("oos_warm (주 수치)", SEGMENT_OOS_WARM),
+            ("is (맥락)", SEGMENT_IS),
+        ):
+            table = _book_table(book_rows, scope, segment)
+            if len(table) > 2:
+                lines += [f"#### {seg_title}", "", *table, ""]
     lines += [
         "## 3. leave-one-out — 종목 편중 (완료기준 3 · oos_warm)",
         "",
         "수익이 DOGE·LINK·ETH가 만드는지. 신규 종목(DOGE·LINK)은 펀딩이 BTC 대리라 값에 가정이 "
         "섞여 있다. `실제−널 부호`가 종목을 빼도 유지되면 편중이 아니다.",
         "",
-        *_loo_table(book_rows, main_scope, SEGMENT_OOS_WARM),
-        "",
+    ]
+    for scope in scopes:
+        table = _loo_table(book_rows, scope, SEGMENT_OOS_WARM)
+        if len(table) > 2:
+            lines += [f"### {scope}", "", *table, ""]
+    lines += [
         "## 4. 검산 — 실제 팔이 WAN-282 §3과 같은가 (완료기준 4)",
         "",
         crosscheck_wan282(short_rows)[0],
