@@ -24,8 +24,9 @@ from dashboard.health import (
     compute_runner_status,
 )
 from data.funding import FundingRateStore
+from data.models import timeframe_to_ms
 from data.repair import RepairStateStore, RepairSummary
-from data.storage import OhlcvStore
+from data.storage import OhlcvStore, source_timeframe
 from live.runtime_state import EventRecord, PositionSnapshot, RunnerRuntimeState, RuntimeStateStore
 from strategy.models import OrderBlockDirection
 
@@ -111,9 +112,20 @@ def funding_rows(
     return rows
 
 
-def _latest_close(store: OhlcvStore, symbol: str, timeframe: str) -> float | None:
-    """해당 시리즈 최신 봉의 종가. 없으면 None."""
-    df = store.load(symbol, timeframe)
+def latest_close(store: OhlcvStore, symbol: str, timeframe: str) -> float | None:
+    """해당 시리즈 최신 봉의 종가. 없으면 None.
+
+    ⚠️ **꼬리만 읽는다**(WAN-245). 예전에는 전 구간을 로드해 마지막 행을 봤는데, 6년
+    15m 시리즈는 21만 행이라 포지션 한 건의 미실현 손익을 구하자고 수십 MB를 읽었다
+    (분석 탭 cold load ~10초와 같은 부류의 비용, WAN-202). 결과는 **글자 그대로 같고**
+    읽는 양만 다르다. 파생 TF(`2h`)는 저장 행이 없어 경계를 원본 TF에서 구한다.
+    """
+    last = store.last_open_time(symbol, source_timeframe(timeframe))
+    if last is None:
+        # 물리 저장도 파생 원본도 없다 — 옛 경로로 물러나 "정말 없음"을 확인한다.
+        df = store.load(symbol, timeframe)
+    else:
+        df = store.load(symbol, timeframe, start_ms=last - timeframe_to_ms(timeframe))
     if df.empty:
         return None
     return float(df["close"].iloc[-1])
@@ -131,7 +143,7 @@ def build_position_views(
     """오픈 포지션에 현재가·미실현 손익을 붙여 뷰로 만든다."""
     views: list[OpenPositionView] = []
     for pos in positions:
-        price = _latest_close(store, pos.symbol, pos.timeframe)
+        price = latest_close(store, pos.symbol, pos.timeframe)
         pnl = _unrealized_pct(pos, price) if price is not None else None
         views.append(OpenPositionView(snapshot=pos, current_price=price, unrealized_pct=pnl))
     return views

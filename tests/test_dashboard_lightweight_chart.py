@@ -766,7 +766,8 @@ def test_initial_view_shows_recent_window_not_fitcontent() -> None:
     # 우리 스크립트 블록만 본다 — fitContent는 벤더링된 라이브러리에도 있는 이름이다.
     script = html.rsplit("<script>", 1)[1].split("</script>", 1)[0]
     assert "fitContent()" not in script
-    assert "setVisibleLogicalRange({ from: rendered - n, to: rendered })" in script
+    # WAN-245에서 `to`에 오른쪽 여백(pad)이 붙었다 — 여백이 0이면 예전과 같은 범위다.
+    assert "setVisibleLogicalRange({ from: rendered - n, to: rendered + pad })" in script
     assert "payload.initialVisibleBars" in script
 
 
@@ -832,3 +833,98 @@ def test_chart_script_is_valid_javascript() -> None:
         path = Path(tmp) / "chart.js"
         path.write_text(script, encoding="utf-8")
         subprocess.run([node, "--check", str(path)], check=True, capture_output=True)  # noqa: S603
+
+
+# --- WAN-245: 죽은 존 회색 · 크로스헤어 Normal · OHLC 범례 · 독립축 ---------------
+
+
+def test_dead_zone_is_grey_from_creation_not_direction_coloured() -> None:
+    """죽은 존은 **생성부터 통째로 회색**이고 무효화 봉에서 끝난다(사용자 확정 2026-08-11).
+
+    옛 규칙("무효화 시점 기준으로 좌: 방향색 / 우: 회색")은 폐기됐다 — 색이 곧 상태다.
+    """
+    from dashboard.lightweight_chart import _DARK_THEME
+
+    df = _df(10)
+    broken = _order_block(breaker=True, break_time=3 * _STEP)
+
+    boxes = _payload(build_chart_html(df, [broken]))["boxes"]
+
+    box = boxes[0]  # type: ignore[index]
+    assert box["fill"] == _DARK_THEME.dead_zone_fill
+    assert box["line"] == _DARK_THEME.dead_zone_line
+    assert box["fill"] != _DARK_THEME.bull_zone_fill_faded  # 방향색 계열이 아니다
+    assert box["start"] == 0
+    assert box["end"] == (3 * _STEP) // 1000  # 무효화 봉에서 끝 — 그 뒤로 안 그린다
+    assert box["dashed"] is True
+
+
+def test_swept_zone_is_grey_too() -> None:
+    """되쓸려 소멸한 존도 「죽은 존」이다(breaker 플래그와 무관)."""
+    from dashboard.lightweight_chart import _DARK_THEME
+
+    swept = _order_block(swept_time=4 * _STEP)
+
+    box = _payload(build_chart_html(_df(10), [swept]))["boxes"][0]  # type: ignore[index]
+
+    assert box["fill"] == _DARK_THEME.dead_zone_fill
+
+
+def test_live_zone_keeps_its_direction_colour_to_the_last_bar() -> None:
+    """살아있는 존만 방향색으로 현재 봉까지 연장된다."""
+    from dashboard.lightweight_chart import _DARK_THEME
+
+    df = _df(10)
+    alive = _order_block()
+
+    box = _payload(build_chart_html(df, [alive]))["boxes"][0]  # type: ignore[index]
+
+    assert box["fill"] == _DARK_THEME.bull_zone_fill
+    assert box["end"] == (9 * _STEP) // 1000
+    assert box["dashed"] is False
+
+
+def test_crosshair_mode_is_pinned_to_normal() -> None:
+    """크로스헤어 Normal을 **명시**한다(WAN-245) — 기본값(Magnet)에 기대면 y축 라벨이
+    캔들·밴드 값에 스냅돼 "커서 자리의 실제 가격"이 아니게 된다."""
+    html = build_chart_html(_df(5), [])
+
+    assert "LightweightCharts.CrosshairMode.Normal" in html
+
+
+def test_chart_options_default_to_the_old_behaviour() -> None:
+    """새 옵션 셋은 **기본값이 옛 동작**이라 다른 화면(분석·저장된 거래)은 그대로다."""
+    payload = _payload(build_chart_html(_df(5), []))
+
+    assert payload["ohlcLegend"] is None
+    assert payload["independentAxis"] is False
+    assert payload["rightPadRatio"] == 0.0
+
+
+def test_main_chart_options_reach_the_payload() -> None:
+    """메인 차트(WAN-245)가 주는 세 옵션이 실제로 렌더에 실린다 — 라벨만 붙는 배선 금지."""
+    payload = _payload(
+        build_chart_html(
+            _df(5),
+            [],
+            ohlc_legend_title="BTC/USDT PERPETUAL SWAP · 1시간",
+            independent_axis=True,
+            right_pad_ratio=0.06,
+        )
+    )
+
+    legend = payload["ohlcLegend"]
+    assert isinstance(legend, dict)
+    assert legend["title"] == "BTC/USDT PERPETUAL SWAP · 1시간"
+    assert legend["upColor"] == "#26a69a" and legend["downColor"] == "#ef5350"
+    assert payload["independentAxis"] is True
+    assert payload["rightPadRatio"] == 0.06
+
+
+def test_independent_axis_turns_off_autoscale_after_the_initial_fit() -> None:
+    """독립축의 실체 = 첫 fit 뒤 `autoScale: false`. 이게 없으면 좌우로 움직일 때마다
+    세로가 다시 잡혀 "가로만 움직였는데 세로가 튄다"(사용자 정정 2026-08-11)."""
+    html = build_chart_html(_df(5), [], independent_axis=True)
+
+    assert "autoScale: false" in html
+    assert "axisDoubleClickReset" in html  # y축 더블클릭 = 세로 맞춤 복귀

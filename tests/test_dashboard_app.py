@@ -107,7 +107,7 @@ def test_analysis_defaults_to_recent_window_not_the_whole_history(long_span_db_p
     at = AppTest.from_file("dashboard/app.py")
     at.run(timeout=60)
     assert not at.exception
-    _open_backtest_tab(at, "load_analysis_tab")
+    _open_backtest_tab(at, "load_reference_tab")
 
     assert not at.exception
     period = next(s for s in at.slider if s.label == "기간")
@@ -134,7 +134,7 @@ def test_full_range_checkbox_really_widens_the_window(long_span_db_path: str) ->
     at = AppTest.from_file("dashboard/app.py")
     at.run(timeout=60)
     assert not at.exception
-    _open_backtest_tab(at, "load_analysis_tab")
+    _open_backtest_tab(at, "load_reference_tab")
     assert not at.exception
     narrow_start, _ = next(s for s in at.slider if s.label == "기간").value
 
@@ -155,7 +155,7 @@ def test_analysis_display_lines_are_off_by_default(seeded_db_path: str) -> None:
     at = AppTest.from_file("dashboard/app.py")
     at.run(timeout=30)
     assert not at.exception
-    _open_backtest_tab(at, "load_analysis_tab")
+    _open_backtest_tab(at, "load_reference_tab")
 
     assert not at.exception
     line_toggles = [c for c in at.checkbox if c.label.startswith(("EMA ", "VWMA "))]
@@ -224,7 +224,7 @@ def test_app_renders_price_chart_and_metrics_when_data_available(seeded_db_path:
     at.run(timeout=30)
     assert not at.exception
     assert at.title[0].value == "AlphaBlock — 통합 트레이딩 대시보드"
-    _open_backtest_tab(at, "load_analysis_tab", timeout=30)
+    _open_backtest_tab(at, "load_reference_tab", timeout=30)
 
     assert not at.exception
     # 분석 탭의 백테스트 성과 지표 6종이 실제로 그려졌는지 라벨로 확인한다.
@@ -255,7 +255,7 @@ def test_app_trade_table_is_korean_time_and_keeps_engine_labels(seeded_db_path: 
     at = AppTest.from_file("dashboard/app.py")
     at.run(timeout=30)
     assert not at.exception
-    _open_backtest_tab(at, "load_analysis_tab", timeout=30)
+    _open_backtest_tab(at, "load_reference_tab", timeout=30)
 
     assert not at.exception
     assert "거래 목록" in [s.value for s in at.subheader]
@@ -327,7 +327,7 @@ def test_analysis_tab_hints_to_persist_when_no_zone_limit_run(seeded_db_path: st
     at = AppTest.from_file("dashboard/app.py")
     at.run(timeout=30)
     assert not at.exception
-    _open_backtest_tab(at, "load_analysis_tab", timeout=30)
+    _open_backtest_tab(at, "load_reference_tab", timeout=30)
 
     assert not at.exception
     infos = [i.value for i in at.info]
@@ -342,7 +342,7 @@ def test_saved_trades_tab_hints_how_to_persist_when_empty(seeded_db_path: str) -
     at = AppTest.from_file("dashboard/app.py")
     at.run(timeout=30)
     assert not at.exception
-    _open_backtest_tab(at, "load_saved_tab", timeout=30)
+    _open_backtest_tab(at, "load_reference_tab", timeout=30)
 
     assert not at.exception
     assert any("--persist" in i.value for i in at.info)
@@ -355,7 +355,7 @@ def test_saved_trades_tab_renders_stored_trades_with_fingerprint(seeded_db_path:
     at = AppTest.from_file("dashboard/app.py")
     at.run(timeout=30)
     assert not at.exception
-    _open_backtest_tab(at, "load_saved_tab", timeout=30)
+    _open_backtest_tab(at, "load_reference_tab", timeout=30)
 
     assert not at.exception
     captions = [c.value for c in at.caption]
@@ -374,15 +374,18 @@ def test_backtest_tabs_are_lazy_and_demoted_reference(seeded_db_path: str) -> No
     "라벨은 바뀌었는데 동작은 그대로"(WAN-91/95/112/123) 부류를 동작으로 막는다 —
     로드 전에는 "불러오기" 버튼과 "참고·대조" 안내만 보이고 무거운 성과 지표는 없으며,
     버튼을 눌러야 비로소 조회가 실행된다.
+
+    ⚠️ WAN-245에서 분석·저장된 거래가 **한 탭으로 합쳐졌다**(사용자 결정 2026-08-11) —
+    지연 로딩 버튼도 하나다. 강등 원칙(WAN-220)은 그대로다.
     """
     _seed_backtest_run(seeded_db_path)
     at = AppTest.from_file("dashboard/app.py")
     at.run(timeout=30)
     assert not at.exception
 
-    # 두 백테스트 탭의 지연 로딩 버튼이 존재한다(분석·저장된 거래).
+    # 합쳐진 백테스트 탭의 지연 로딩 버튼이 존재한다(분석 + 저장된 거래).
     button_keys = {b.key for b in at.button}
-    assert {"load_analysis_tab", "load_saved_tab"} <= button_keys
+    assert "load_reference_tab" in button_keys
 
     # 강등된 탭의 "참고·대조" 성격이 화면에 드러난다(약속·기대수익 아님).
     from dashboard.app import _BACKTEST_REFERENCE_NOTE
@@ -395,7 +398,7 @@ def test_backtest_tabs_are_lazy_and_demoted_reference(seeded_db_path: str) -> No
     assert "Total Return" not in {m.label for m in at.metric}
 
     # 버튼을 누르면 비로소 조회가 실행돼 지표가 뜬다.
-    _open_backtest_tab(at, "load_analysis_tab", timeout=30)
+    _open_backtest_tab(at, "load_reference_tab", timeout=30)
     assert not at.exception
     assert "Total Return" in {m.label for m in at.metric}
 
@@ -489,3 +492,119 @@ def test_wallet_balance_none_when_empty() -> None:
     from dashboard.app import _wallet_balance
 
     assert _wallet_balance([], initial_equity=10_000.0) is None
+
+
+# --- WAN-245: 차트-우선 재설계 ------------------------------------------------
+
+
+def test_main_chart_tab_renders_on_cold_start_without_a_load_button(seeded_db_path: str) -> None:
+    """첫 화면 = 차트(WAN-245). 심볼·TF 선택이 **버튼 없이** 바로 그려진다.
+
+    백테스트 탭은 여전히 지연 로딩(버튼)인데 메인 차트는 아니다 — 최근 봉 + 존 4개만
+    읽으므로 cold start에서 바로 그려도 가볍다(WAN-202 흡수의 핵심).
+    """
+    at = AppTest.from_file("dashboard/app.py")
+    at.run(timeout=60)
+
+    assert not at.exception
+    labels = {s.label for s in at.selectbox}
+    assert "심볼" in labels
+    radio_labels = {r.label for r in at.radio}
+    assert "타임프레임" in radio_labels
+    assert "현재 오픈 포지션" in {s.value for s in at.subheader}
+
+
+def test_main_chart_timeframe_toggle_offers_derived_2h(seeded_db_path: str) -> None:
+    """2h가 토글에 있다 — 저장된 시리즈에서 만들면 파생 TF라 영영 안 뜬다(WAN-24).
+
+    옛 대시보드의 TF 드롭다운은 `list_series()`(물리 저장 행)에서 만들어져 2h가 아예
+    선택지에 없었다. 이 화면은 러너 설정에서 목록을 만들어 그 구멍을 막는다.
+    """
+    at = AppTest.from_file("dashboard/app.py")
+    at.run(timeout=60)
+
+    assert not at.exception
+    timeframe_radio = next(r for r in at.radio if r.label == "타임프레임")
+    # 라벨은 목업대로 **원문 TF**다(한글이 아니다) — 한글은 차트 좌상단 OHLC 범례에서만.
+    assert list(timeframe_radio.options[:4]) == ["15m", "1h", "2h", "4h"]
+
+
+def test_main_chart_switches_timeframe_without_error(seeded_db_path: str) -> None:
+    """TF를 바꿔도 예외 없이 다시 그린다(파생 2h 경로 포함)."""
+    at = AppTest.from_file("dashboard/app.py")
+    at.run(timeout=60)
+    assert not at.exception
+
+    next(r for r in at.radio if r.label == "타임프레임").set_value("2h")
+    at.run(timeout=60)
+
+    assert not at.exception
+
+
+def test_balance_tab_shows_the_wallet_equity_curve_section(seeded_db_path: str) -> None:
+    """잔고 탭(구 「페이퍼 성과」)에 지갑 곡선 자리가 생긴다(WAN-245).
+
+    거래가 없으면 곡선 대신 안내가 뜨므로 여기서는 소제목만 확인한다 — 곡선·MDD 구간의
+    숫자는 `tests/test_dashboard_live_board.py`가 순수 함수로 고정한다.
+    """
+    from paper.store import PaperTradeStore
+
+    with PaperTradeStore(seeded_db_path) as store:
+        store.upsert_record(
+            _paper_record(exit_time=5 * _STEP, equity_after=10_050.0, realized_pnl=50.0)
+        )
+        store.upsert_record(
+            _paper_record(exit_time=6 * _STEP, equity_after=10_020.0, realized_pnl=-30.0)
+        )
+
+    at = AppTest.from_file("dashboard/app.py")
+    at.run(timeout=60)
+
+    assert not at.exception
+    # 목업의 카드 5개 + MDD 구간 캡션이 잔고 탭에 그려진다.
+    metric_labels = {m.label for m in at.metric}
+    assert {"지갑 잔고", "누적 실현손익", "미실현손익", "MDD (최대 낙폭)", "승률 · 거래"} <= (
+        metric_labels
+    )
+    assert any(c.value.startswith("에쿼티 곡선") for c in at.caption)
+    # 청산사유 칩(전체/익절만/손절만)이 목업대로 세 갈래다.
+    reason_radio = next(r for r in at.radio if r.label == "청산사유")
+    assert list(reason_radio.options) == ["전체", "익절만", "손절만"]
+
+
+def test_status_pill_reflects_the_real_runner_state_not_a_decoration(
+    seeded_db_path: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """상단 pill(목업)의 점 색은 **실제 판정**에서 온다 — 늘 초록인 장식이면 러너가
+    죽어도 화면이 멀쩡해 보인다. 상태파일이 없으면 「폴링 기록 없음」이다."""
+    monkeypatch.setenv("ALPHABLOCK_LIVE_RUNTIME_STATE_PATH", str(tmp_path / "state.json"))
+    get_settings.cache_clear()
+    at = AppTest.from_file("dashboard/app.py")
+    at.run(timeout=60)
+
+    assert not at.exception
+    pill = next(c.value for c in at.caption if "페이퍼 러너" in c.value)
+    assert "폴링 기록 없음" in pill  # 러너를 안 돌린 환경
+    assert not pill.startswith("🟢")  # 죽은/모르는 러너를 초록으로 칠하지 않는다
+    assert "틱 피드" in pill  # WAN-256 기본값(live_tick_feed_enabled=True)
+
+
+def test_tab_labels_follow_the_mockup(seeded_db_path: str) -> None:
+    """탭 이름이 목업 표기와 같다(차트 · 잔고 · 거래내역 · Health · 분석 · 거래).
+
+    ⚠️ 목업은 **4탭**인데 화면은 6탭이다 — 「진입/미진입 장부」(WAN-217/219)와 「거래
+    타임라인」(WAN-234)은 사양이 제거를 말한 적이 없어 뒤에 남겨 뒀다(개발자 판단).
+    이 테스트는 그 상태를 **명시적으로** 고정한다 — 지우기로 정해지면 여기가 먼저 깨진다.
+    """
+    at = AppTest.from_file("dashboard/app.py")
+    at.run(timeout=60)
+
+    assert not at.exception
+    assert [t.label for t in at.tabs] == [
+        "차트",
+        "잔고 · 거래내역",
+        "진입/미진입 장부",
+        "거래 타임라인",
+        "Health",
+        "분석 · 거래 (참고·대조)",
+    ]

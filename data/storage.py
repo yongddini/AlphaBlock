@@ -101,6 +101,18 @@ SELECT timeframe FROM tfs WHERE timeframe IS NOT NULL
 # 2h는 미수집(WAN-6은 1h까지만)이라 1h 두 봉을 합쳐 무손실로 만든다 (WAN-24).
 _DERIVED_TIMEFRAMES: dict[str, str] = {"2h": "1h"}
 
+
+def source_timeframe(timeframe: str) -> str:
+    """저장소에 **물리적으로 있는** TF로 바꾼다(파생이면 원본, 아니면 자기 자신).
+
+    파생 TF(`2h`)는 `ohlcv` 테이블에 행이 없어 `list_series`·`last_open_time` 같은
+    인덱스 경로가 전부 "없음"을 낸다. 그 경계를 알고 싶은 호출부(대시보드 차트 창
+    계산 등)가 `_DERIVED_TIMEFRAMES`를 **자기 사본으로 베끼지 않게** 여기서 한 번만
+    공개한다 — 사본을 두면 파생 TF가 하나 늘 때 한쪽만 고쳐져 조용히 갈라진다.
+    """
+    return _DERIVED_TIMEFRAMES.get(timeframe, timeframe)
+
+
 # `load`가 반환하는 컬럼 순서.
 _COLUMNS = [
     "symbol",
