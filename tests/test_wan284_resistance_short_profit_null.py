@@ -15,6 +15,9 @@
 5. **재현성** — 같은 시드는 같은 추출, 다른 시드는 다른 추출.
 6. **판정·병합·프레임 왕복** — 판정이 행에서 계산되고(문장에 안 박힘), 단일 TF `--append`가
    `all` 라벨을 덮지 않으며(WAN-283 PM 교정), CSV가 None p값을 보존한다.
+7. **축을 이어 붙여도 표가 안 사라진다**(WAN-285) — 교차 스코프 라벨에 구성 TF가 박혀 부분
+   집합이 「전부」를 사칭하지 못하고, 요약이 **모든 스코프**의 북·leave-one-out 표를 낸다.
+   판정은 축별로 세고, 이기는 축이 없으면 「채택 근거 아님」을 **명시**한다(완료기준 2).
 """
 
 from __future__ import annotations
@@ -36,21 +39,27 @@ from backtest.wan284_resistance_short_profit_null import (
     MIN_TRADES_GATE,
     NULL_SEGMENTS,
     SEEDS,
+    WORKING_TIMEFRAMES,
     BookNullRow,
     ShortNullRow,
     _drop_shorts,
     _median,
+    _null_rsi_state,
     _null_short_candidate,
     _replace_shorts,
     _sample_indices,
+    _scope_sort_key,
     _stop_ratios,
+    axis_stats,
     book_from_csv,
     book_to_frame,
     build_null_tasks,
     build_summary_markdown,
+    cross_scope_label,
     crosscheck_wan282,
     describe_engine,
     draw_null_shorts,
+    is_cross_scope,
     merge_book,
     merge_short,
     short_from_csv,
@@ -204,6 +213,62 @@ def test_null_stop_ratio_comes_from_supplied_distribution() -> None:
     for c in drawn:
         actual = (c.stop_price - c.entry_price) / c.entry_price
         assert min(abs(actual - r) for r in ratios) < 1e-9
+
+
+def test_skipping_rsi_seeding_is_bit_identical_for_the_adopted_gate() -> None:
+    """채택 게이트(`unconditional`)는 RSI를 **안 읽으므로** 시딩을 건너뛰어도 결과가 같다.
+
+    널은 후보 하나마다 그 시점까지의 확정봉을 전부 커밋해 상태를 만들었다 — 후보 수 × 봉
+    수의 O(N×M)이라 15m·6년에서 널 생성을 통째로 잡아먹는다(WAN-203이 밴드 시딩에서 고친
+    것과 같은 부류). 건너뛰기가 **비트 동일**임을 라벨이 아니라 **동작**으로 고정한다.
+    """
+    steps = _substeps(drift=0.01)
+    times, closes = _htf_arrays(steps)
+    params = _params()
+    assert params.rsi_gate_mode == "unconditional"  # 채택 기본값이 전제다
+    for start in (5, 40, 120, 300):
+        for ratio in (0.005, 0.02):
+            kw = dict(
+                start=start,
+                stop_ratio=ratio,
+                substeps=steps,
+                htf_times=times,
+                htf_closes=closes,
+            )
+            fast = _null_short_candidate(params=params, **kw)  # type: ignore[arg-type]
+            seeded = _null_short_candidate(
+                params=params.model_copy(update={"rsi_gate_mode": "first_tap_free"}),
+                **kw,  # type: ignore[arg-type]
+            )
+            # 게이트가 진입을 막을 수 있으니(다른 모드) 비교는 「둘 다 있을 때」만 한다 —
+            # 여기서 재는 것은 **시딩이 결과를 바꾸는가**이지 게이트 판정이 아니다.
+            assert fast is not None
+            direct = _null_rsi_state(
+                start=start, substeps=steps, htf_times=times, htf_closes=closes, params=params
+            )
+            assert not direct.ready  # 채택 게이트에서는 시딩을 실제로 건너뛴다
+            if seeded is not None:
+                assert (fast.entry_time, fast.entry_price, fast.stop_price) == (
+                    seeded.entry_time,
+                    seeded.entry_price,
+                    seeded.stop_price,
+                )
+
+
+def test_other_gate_modes_still_seed_the_rsi_state() -> None:
+    """RSI를 읽는 모드에서 시딩을 건너뛰면 판정이 달라진다 — 그래서 모드로 가른다."""
+    steps = _substeps(drift=0.01)
+    times, closes = _htf_arrays(steps)
+    gated = _params().model_copy(update={"rsi_gate_mode": "extreme"})
+    seeded = _null_rsi_state(
+        start=300, substeps=steps, htf_times=times, htf_closes=closes, params=gated
+    )
+    skipped = _null_rsi_state(
+        start=300, substeps=steps, htf_times=times, htf_closes=closes, params=_params()
+    )
+    # 시딩한 쪽은 확정봉을 실제로 커밋했고, 채택 게이트 쪽은 빈 상태다.
+    assert seeded.last_close is not None
+    assert skipped.last_close is None
 
 
 def test_stop_ratios_reads_1r_from_actual_shorts() -> None:
@@ -587,6 +652,32 @@ def test_book_frame_round_trip_preserves_none(tmp_path: Path) -> None:
     assert [r.model_dump() for r in back] == [r.model_dump() for r in rows]
 
 
+def test_csv_round_trip_is_lossless_to_the_last_bit(tmp_path: Path) -> None:
+    """읽고 다시 써도 **바이트가 같아야 한다** — `--append`가 남의 행을 바꾸면 안 되니까.
+
+    pandas 기본 부동소수 파서는 마지막 자리를 바꿀 수 있다. 축을 `--append`로 이으면 확정된
+    축(WAN-284 4h)이 재실행도 없이 CSV에서 슬금슬금 달라진다 — 「기존 행을 안 건드림」이
+    텍스트 층에서 깨지는 조용한 실패다. 값 비교가 아니라 **바이트**로 고정한다.
+    """
+    rows = [_short_row(p_value=i / 21, actual_net_r=i / 7, buy_hold=-i / 3) for i in range(1, 21)]
+    first = tmp_path / "s1.csv"
+    short_to_frame(rows).to_csv(first, index=False)
+    second = tmp_path / "s2.csv"
+    short_to_frame(short_from_csv(first)).to_csv(second, index=False)
+    assert first.read_bytes() == second.read_bytes()
+
+
+def test_book_csv_round_trip_is_lossless_to_the_last_bit(tmp_path: Path) -> None:
+    rows = [
+        _book_row(scope=f"{i}h", p_return_over_mdd=i / 21, actual_mdd=i / 7) for i in range(1, 9)
+    ]
+    first = tmp_path / "b1.csv"
+    book_to_frame(rows).to_csv(first, index=False)
+    second = tmp_path / "b2.csv"
+    book_to_frame(book_from_csv(first)).to_csv(second, index=False)
+    assert first.read_bytes() == second.read_bytes()
+
+
 # --------------------------------------------------------------------------- #
 # 8. 좌표·성격 (기본값·토대 불변)
 # --------------------------------------------------------------------------- #
@@ -702,3 +793,114 @@ def test_summary_includes_the_crosscheck_section() -> None:
         [_short_row()], [_book_row()], short_csv=Path("s.csv"), book_csv=Path("b.csv")
     )
     assert "검산" in text and "WAN-282" in text
+
+
+# --------------------------------------------------------------------------- #
+# 10. 축을 이어 붙여도 표가 안 사라진다 (WAN-285)
+# --------------------------------------------------------------------------- #
+
+
+def test_cross_scope_label_names_its_member_timeframes() -> None:
+    """부분 집합이 「전부」를 사칭하지 못한다 — 라벨에 구성 TF가 박힌다(WAN-283 오염 방지)."""
+    assert cross_scope_label(("2h", "1h")) == "all:1h+2h"
+    assert cross_scope_label(("4h", "15m", "1h", "2h")) == "all:15m+1h+2h+4h"
+    # 1h,2h만 돌린 실행의 라벨은 네 TF를 담은 라벨과 **다르다** = 덮어쓰기가 아니라 별도 행.
+    assert cross_scope_label(("1h", "2h")) != cross_scope_label(WORKING_TIMEFRAMES)
+
+
+def test_is_cross_scope_accepts_old_and_new_labels() -> None:
+    assert is_cross_scope("all") and is_cross_scope("all:1h+2h")
+    assert not is_cross_scope("1h") and not is_cross_scope("15m")
+
+
+def test_cross_scope_sorts_ahead_of_timeframe_scopes() -> None:
+    assert sorted(["4h", "all:1h+2h", "15m"], key=_scope_sort_key) == ["all:1h+2h", "15m", "4h"]
+
+
+def test_summary_renders_every_scope_not_just_the_first() -> None:
+    """축을 한 TF씩 이으면 스코프가 TF마다 하나씩 는다 — 요약이 전부 내야 한다."""
+    rows = [_book_row(scope=tf) for tf in ("15m", "1h", "2h", "4h")]
+    text = build_summary_markdown(
+        [_short_row(timeframe=tf) for tf in ("15m", "1h", "2h", "4h")],
+        rows,
+        short_csv=Path("s.csv"),
+        book_csv=Path("b.csv"),
+    )
+    for tf in ("15m", "1h", "2h", "4h"):
+        assert f"### {tf}" in text
+
+
+def test_summary_renders_leave_one_out_for_every_scope() -> None:
+    rows = [
+        _book_row(scope=tf, exclude_symbol=ex) for tf in ("1h", "4h") for ex in ("", "ETH", LOO_ALL)
+    ]
+    text = build_summary_markdown(
+        [_short_row(timeframe="1h")], rows, short_csv=Path("s.csv"), book_csv=Path("b.csv")
+    )
+    loo = text.split("## 3. leave-one-out")[1].split("## 4.")[0]
+    assert "### 1h" in loo and "### 4h" in loo
+
+
+def test_axis_stats_counts_per_timeframe() -> None:
+    rows = [
+        _short_row(timeframe="4h", symbol="A/USDT:USDT"),
+        _short_row(timeframe="4h", symbol="B/USDT:USDT", p_value=0.9, p_value_per_trade=0.9),
+        _short_row(timeframe="1h", symbol="A/USDT:USDT", p_value=0.9, p_value_per_trade=0.9),
+    ]
+    stats = {s.timeframe: s for s in axis_stats(rows)}
+    assert stats["4h"].eligible == 2 and stats["4h"].significant == 1
+    assert stats["4h"].letter == "c"  # 과반 미달
+    assert stats["1h"].letter == "b" and not stats["1h"].passes
+
+
+def test_axis_stats_skips_sample_gated_cells() -> None:
+    rows = [_short_row(timeframe="2h", actual_trades=MIN_TRADES_GATE - 1)]
+    stat = axis_stats(rows)[0]
+    assert stat.cells == 1 and stat.eligible == 0 and stat.letter == "?"
+
+
+def test_verdict_names_the_axes_it_measured() -> None:
+    rows = [_short_row(timeframe=tf) for tf in ("1h", "4h")]
+    text = verdict(rows, [])
+    assert "축별" in text and "1h" in text and "4h" in text
+
+
+def test_verdict_says_all_four_axes_fail_when_none_passes() -> None:
+    """완료기준 2 — 이기는 축이 없으면 「네 작업 TF 전부 채택 근거 아님」을 명시한다."""
+    rows = [
+        _short_row(timeframe=tf, p_value=0.9, p_value_per_trade=0.9) for tf in WORKING_TIMEFRAMES
+    ]
+    text = verdict(rows, [])
+    assert "네 작업 TF 전부 채택 근거 아님" in text
+
+
+def test_verdict_flags_unmeasured_axes_instead_of_claiming_all_four() -> None:
+    rows = [_short_row(timeframe="4h", p_value=0.9, p_value_per_trade=0.9)]
+    text = verdict(rows, [])
+    assert "네 작업 TF 전부" not in text
+    assert "미측정 축" in text and "15m" in text
+
+
+def test_verdict_reports_pen_and_loo_survival_for_a_passing_axis() -> None:
+    """이기는 축이 있으면 pen_5bp·leave-one-out 생존을 함께 낸다(완료기준 2)."""
+    rows = [_short_row(timeframe="4h", symbol=f"S{i}/USDT:USDT") for i in range(3)]
+    rows += [
+        _short_row(timeframe="4h", symbol=f"S{i}/USDT:USDT", fill="pen_5bp", p_value=0.9)
+        for i in range(3)
+    ]
+    books = [
+        _book_row(scope="4h"),
+        _book_row(scope="4h", exclude_symbol="ETH"),
+        _book_row(scope="4h", exclude_symbol=LOO_ALL, actual_return_over_mdd=1.0),
+    ]
+    text = verdict(rows, books)
+    assert "이기는 축 4h" in text
+    assert "pen_5bp" in text
+    assert "1/2" in text  # LOO 두 팔 중 하나만 널을 이긴다
+    assert "채택 근거가 아니다" in text
+
+
+def test_verdict_book_sentence_covers_all_scopes() -> None:
+    books = [_book_row(scope="1h"), _book_row(scope="4h")]
+    text = verdict([_short_row()], books)
+    assert "스코프 2개" in text
