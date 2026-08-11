@@ -26,12 +26,13 @@ from dataclasses import dataclass
 
 import pandas as pd
 
+from common.timefmt import format_kst
 from config.settings import Settings
-from dashboard.health_data import OpenPositionView
 from data.models import timeframe_to_ms
+from execution.models import Position
 from paper.report import exit_reason_label
 from paper.store import PaperTradeRecord
-from strategy.models import OrderBlock, OrderBlockDirection
+from strategy.models import OrderBlock, OrderBlockDirection, SignalExitReason
 
 #: 채택 좌표의 작업 TF(WAN-182 4h 승격 · WAN-252 2h 승격). 설정이 비었을 때의 기본값이자
 #: 표시 순서의 정본이다 — 짧은 TF가 왼쪽(트레이딩뷰 토글 감각).
@@ -130,60 +131,165 @@ def _direction_text(direction: OrderBlockDirection) -> str:
     return "롱" if direction is OrderBlockDirection.BULLISH else "숏"
 
 
-def open_positions_frame(views: Sequence[OpenPositionView]) -> pd.DataFrame:
-    """차트 아래 「현재 오픈 포지션」 표.
+def short_symbol(symbol: str) -> str:
+    """표 안에서 쓰는 짧은 심볼 — `"BTC/USDT:USDT"` → `"BTC"`(목업 표기)."""
+    return symbol.partition("/")[0] or symbol
 
-    열 구성은 사용자 확정(2026-08-11): 심볼·TF · 방향 · 진입가 · **손절가** · **익절가** ·
-    미실현손익. 「손절/익절」이 아니라 「손절가/익절가」인 것은 값이 가격임을 이름이
-    밝히기 위해서다.
+
+@dataclass(frozen=True)
+class OpenPositionRow:
+    """오픈 포지션 한 건의 화면 값(현재가·미실현 손익 포함).
+
+    ⚠️ **러너 상태파일이 아니라 `open_positions` 테이블에서 만든다** — 상태파일 스냅샷
+    (`PositionSnapshot`)에는 **수량이 없어** 달러 미실현 손익을 낼 수 없다. 이슈 본문이
+    이 표의 소스를 `open_positions` 테이블로 못 박았고, 목업이 `+58.1 (+1.08%)`처럼
+    달러와 %를 함께 보여준다.
     """
-    if not views:
-        return pd.DataFrame(columns=["심볼·TF", "방향", "진입가", "손절가", "익절가", "미실현손익"])
-    return pd.DataFrame(
-        {
-            "심볼·TF": f"{v.snapshot.symbol} · {v.snapshot.timeframe}",
-            "방향": _direction_text(v.snapshot.direction),
-            "진입가": v.snapshot.entry_price,
-            "손절가": "—" if v.snapshot.stop_price is None else v.snapshot.stop_price,
-            "익절가": "—" if v.snapshot.take_profit_price is None else v.snapshot.take_profit_price,
-            "미실현손익": "—" if v.unrealized_pct is None else f"{v.unrealized_pct:+.2f}%",
-        }
-        for v in views
+
+    symbol: str
+    timeframe: str
+    direction: OrderBlockDirection
+    entry_price: float
+    stop_price: float | None
+    take_profit_price: float | None
+    quantity: float
+    current_price: float | None
+    unrealized_usd: float | None
+    unrealized_pct: float | None
+
+
+def build_open_position_row(position: Position, current_price: float | None) -> OpenPositionRow:
+    """열린 포지션 + 최신 종가 → 화면 행. 현재가가 없으면 손익 칸을 비운다."""
+    sign = 1.0 if position.direction is OrderBlockDirection.BULLISH else -1.0
+    usd: float | None = None
+    pct: float | None = None
+    if current_price is not None and position.entry_price:
+        move = sign * (current_price - position.entry_price)
+        usd = move * position.quantity
+        pct = move / position.entry_price * 100.0
+    return OpenPositionRow(
+        symbol=position.symbol,
+        timeframe=position.timeframe,
+        direction=position.direction,
+        entry_price=position.entry_price,
+        stop_price=position.stop_price,
+        take_profit_price=position.take_profit_price,
+        quantity=position.quantity,
+        current_price=current_price,
+        unrealized_usd=usd,
+        unrealized_pct=pct,
     )
 
 
-def total_unrealized_pct(views: Sequence[OpenPositionView]) -> float | None:
-    """오픈 포지션 미실현 손익률의 합(%). 하나도 못 구하면 None.
+def price_text(value: float | None) -> str:
+    """가격 표기 — BTC의 `64,690`과 XRP의 `0.6120`을 한 규칙으로 낸다. None이면 `—`."""
+    if value is None:
+        return "—"
+    if abs(value) >= 100:
+        return f"{value:,.0f}"
+    if abs(value) >= 1:
+        return f"{value:,.2f}"
+    return f"{value:,.4f}"
 
-    ⚠️ 명목 가중이 아니라 **단순 합**이다 — 칸마다 사이징이 달라 이 값이 지갑 대비
-    수익률은 아니다. 「지금 열려 있는 자리가 대략 어느 쪽인지」를 보는 눈금이다.
+
+def unrealized_text(row: OpenPositionRow) -> str:
+    """`+58.1 (+1.08%)` — 달러와 %를 함께(목업). 현재가가 없으면 `—`."""
+    if row.unrealized_pct is None:
+        return "—"
+    if row.unrealized_usd is None:
+        return f"{row.unrealized_pct:+.2f}%"
+    return f"{row.unrealized_usd:+,.1f} ({row.unrealized_pct:+.2f}%)"
+
+
+#: 오픈 포지션 표의 열(목업 확정) — 「손절/익절」이 아니라 **가격**임을 이름이 밝힌다.
+OPEN_POSITION_COLUMNS = ["심볼 · TF", "방향", "진입가", "손절가", "익절가", "미실현손익"]
+
+
+def open_positions_frame(rows: Sequence[OpenPositionRow]) -> pd.DataFrame:
+    """차트 아래 「현재 오픈 포지션」 표."""
+    if not rows:
+        return pd.DataFrame(columns=OPEN_POSITION_COLUMNS)
+    return pd.DataFrame(
+        {
+            "심볼 · TF": f"{short_symbol(r.symbol)} · {r.timeframe}",
+            "방향": _direction_text(r.direction),
+            "진입가": price_text(r.entry_price),
+            "손절가": price_text(r.stop_price),
+            "익절가": price_text(r.take_profit_price),
+            "미실현손익": unrealized_text(r),
+        }
+        for r in rows
+    )
+
+
+def total_unrealized_usd(rows: Sequence[OpenPositionRow]) -> float | None:
+    """오픈 포지션 미실현 손익의 **달러 합**. 하나도 못 구하면 None.
+
+    %와 달리 달러는 **더해도 뜻이 있다**(칸마다 사이징이 달라도 같은 지갑의 돈이다) —
+    잔고 탭의 「미실현손익」 카드가 이 값을 쓴다.
     """
-    values = [v.unrealized_pct for v in views if v.unrealized_pct is not None]
+    values = [r.unrealized_usd for r in rows if r.unrealized_usd is not None]
     return sum(values) if values else None
 
 
-def filter_reason_options(records: Sequence[PaperTradeRecord]) -> list[str]:
-    """거래 원장에 실제로 있는 청산 사유 라벨(화면 표기 그대로).
-
-    고정 목록이 아니라 **데이터에서** 만든다 — 없는 사유를 고를 수 있게 두면 필터가
-    항상 빈 표를 낼 수 있고, 새 사유가 생겼는데 목록에 없어 조용히 숨는 일도 막는다.
-    """
-    seen = {exit_reason_label(r.reason) for r in records}
-    return sorted(seen)
+#: 청산 사유 필터의 세 갈래(목업 칩) — 「전체」가 기본이다.
+REASON_FILTER_ALL = "전체"
+REASON_FILTER_OPTIONS: tuple[str, ...] = (REASON_FILTER_ALL, "익절만", "손절만")
 
 
-def filter_records_by_reason(
-    records: Sequence[PaperTradeRecord], reasons: Sequence[str]
+def filter_records_by_choice(
+    records: Sequence[PaperTradeRecord], choice: str
 ) -> list[PaperTradeRecord]:
-    """청산 사유 라벨로 거래를 좁힌다. 빈 선택은 **전부 보여준다**.
+    """청산 사유 칩(전체/익절만/손절만)으로 거래를 좁힌다.
 
-    빈 선택을 "아무것도 안 보여줌"으로 두면 사용자가 필터를 다 지웠을 때 화면이 비어
-    고장처럼 보인다 — 이 화면에서 필터는 좁히는 도구이지 끄는 스위치가 아니다.
+    라벨은 `paper.report.exit_reason_label`이 만드는 것과 **같은 문자열**을 비교한다 —
+    두 벌로 갈라지면 필터가 표에 없는 값을 골라 결과가 늘 비어 보인다.
+    모르는 선택은 「전체」로 접는다(빈 화면은 고장으로 읽힌다).
     """
-    wanted = set(reasons)
-    if not wanted:
+    if choice == "익절만":
+        wanted = exit_reason_label(SignalExitReason.TAKE_PROFIT)
+    elif choice == "손절만":
+        wanted = exit_reason_label(SignalExitReason.STOP_LOSS)
+    else:
         return list(records)
-    return [r for r in records if exit_reason_label(r.reason) in wanted]
+    return [r for r in records if exit_reason_label(r.reason) == wanted]
+
+
+#: 잔고 탭 거래 리스트의 열(목업 확정) — 전체 원장(`records_to_display_frame`, 20열)은
+#: 아래 「전체 원장」에 그대로 남고, 여기는 **읽는 표**라 8열로 줄인다.
+WALLET_TRADE_COLUMNS = [
+    "청산시각(KST)",
+    "심볼 · TF",
+    "방향",
+    "진입가",
+    "청산가",
+    "사유",
+    "손익",
+    "수익률%",
+]
+
+
+def wallet_trade_frame(records: Sequence[PaperTradeRecord]) -> pd.DataFrame:
+    """잔고 탭의 청산 거래 리스트(최근순).
+
+    시각은 KST 표시(WAN-172) · 손익은 달러(옛 %-only 행은 `—`) · 수익률은 순손익률.
+    """
+    if not records:
+        return pd.DataFrame(columns=WALLET_TRADE_COLUMNS)
+    ordered = sorted(records, key=lambda r: r.exit_time, reverse=True)
+    return pd.DataFrame(
+        {
+            "청산시각(KST)": format_kst(r.exit_time),
+            "심볼 · TF": f"{short_symbol(r.symbol)} · {r.timeframe}",
+            "방향": _direction_text(r.direction),
+            "진입가": price_text(r.entry_price),
+            "청산가": price_text(r.exit_price),
+            "사유": exit_reason_label(r.reason),
+            "손익": "—" if r.realized_pnl is None else f"{r.realized_pnl:+,.1f}",
+            "수익률%": f"{r.net_pct:+.2f}",
+        }
+        for r in ordered
+    )
 
 
 @dataclass(frozen=True)

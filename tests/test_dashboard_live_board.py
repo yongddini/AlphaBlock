@@ -10,25 +10,28 @@ from __future__ import annotations
 import pytest
 
 from config.settings import Settings
-from dashboard.health_data import OpenPositionView
 from dashboard.live_board import (
     CHART_BARS,
+    REASON_FILTER_ALL,
     RECENT_ZONE_LIMIT,
+    WALLET_TRADE_COLUMNS,
     EquityPoint,
+    OpenPositionRow,
+    build_open_position_row,
     chart_start_ms,
     chart_symbols,
     chart_timeframes,
-    filter_reason_options,
-    filter_records_by_reason,
+    filter_records_by_choice,
     legend_title,
     max_drawdown_window,
     open_positions_frame,
     recent_zones,
     symbol_label,
-    total_unrealized_pct,
+    total_unrealized_usd,
     wallet_equity_points,
+    wallet_trade_frame,
 )
-from live.runtime_state import PositionSnapshot
+from execution.models import Position
 from paper.store import PaperTradeRecord
 from strategy.models import OrderBlock, OrderBlockDirection, SignalExitReason
 
@@ -122,52 +125,85 @@ def test_recent_zones_handles_fewer_blocks_than_limit() -> None:
     assert recent_zones([_ob(confirmed=_HOUR)], limit=0) == []
 
 
-def _view(
+def _row(
     *,
     stop: float | None = 99.0,
     take_profit: float | None = 104.0,
-    unrealized: float | None = 1.5,
-) -> OpenPositionView:
-    return OpenPositionView(
-        snapshot=PositionSnapshot(
+    price: float | None = 101.5,
+    quantity: float = 2.0,
+) -> OpenPositionRow:
+    return build_open_position_row(
+        Position(
             symbol="BTC/USDT:USDT",
             timeframe="1h",
             direction=OrderBlockDirection.BULLISH,
-            entry_time=_HOUR,
+            quantity=quantity,
             entry_price=100.0,
+            entry_time=_HOUR,
             stop_price=stop,
             take_profit_price=take_profit,
         ),
-        current_price=101.5,
-        unrealized_pct=unrealized,
+        price,
     )
 
 
 def test_open_positions_columns_say_price_not_action() -> None:
     """열 이름은 「손절가」·「익절가」다(사용자 요청 2026-08-11) — 값이 가격임을 밝힌다."""
-    frame = open_positions_frame([_view()])
+    frame = open_positions_frame([_row()])
 
-    assert list(frame.columns) == ["심볼·TF", "방향", "진입가", "손절가", "익절가", "미실현손익"]
-    assert frame.iloc[0]["손절가"] == 99.0
-    assert frame.iloc[0]["미실현손익"] == "+1.50%"
+    assert list(frame.columns) == ["심볼 · TF", "방향", "진입가", "손절가", "익절가", "미실현손익"]
+    assert frame.iloc[0]["심볼 · TF"] == "BTC · 1h"  # 목업 표기(짧은 심볼)
+    assert frame.iloc[0]["손절가"] == "99.00"
     # 빈 목록도 같은 열을 낸다(화면이 열 없는 표로 무너지지 않게).
     assert list(open_positions_frame([]).columns) == list(frame.columns)
 
 
+def test_open_position_unrealized_shows_dollars_and_percent() -> None:
+    """목업의 `+58.1 (+1.08%)` — 달러가 나오려면 **수량**이 있어야 한다.
+
+    러너 상태파일 스냅샷에는 수량이 없어서 이 표는 `open_positions` 테이블에서 만든다.
+    """
+    frame = open_positions_frame([_row(quantity=2.0, price=101.5)])
+
+    # 롱 2코인 × (101.5 − 100.0) = +3.0달러 · +1.50%
+    assert frame.iloc[0]["미실현손익"] == "+3.0 (+1.50%)"
+
+
+def test_open_position_short_direction_flips_the_sign() -> None:
+    short = build_open_position_row(
+        Position(
+            symbol="XRP/USDT:USDT",
+            timeframe="1h",
+            direction=OrderBlockDirection.BEARISH,
+            quantity=100.0,
+            entry_price=0.640,
+            entry_time=_HOUR,
+            stop_price=0.660,
+            take_profit_price=0.600,
+        ),
+        0.620,
+    )
+
+    assert short.unrealized_usd == pytest.approx(2.0)
+    assert short.unrealized_pct == pytest.approx(3.125)
+    assert open_positions_frame([short]).iloc[0]["방향"] == "숏"
+    # 저가 종목은 소수 4자리로 읽힌다(BTC의 64,690과 한 규칙).
+    assert open_positions_frame([short]).iloc[0]["진입가"] == "0.6400"
+
+
 def test_open_positions_render_missing_prices_as_dash() -> None:
-    frame = open_positions_frame([_view(stop=None, take_profit=None, unrealized=None)])
+    frame = open_positions_frame([_row(stop=None, take_profit=None, price=None)])
 
     assert frame.iloc[0]["손절가"] == "—"
     assert frame.iloc[0]["익절가"] == "—"
     assert frame.iloc[0]["미실현손익"] == "—"
 
 
-def test_total_unrealized_is_none_without_prices() -> None:
-    assert total_unrealized_pct([]) is None
-    assert total_unrealized_pct([_view(unrealized=None)]) is None
-    assert total_unrealized_pct([_view(unrealized=1.0), _view(unrealized=-0.5)]) == pytest.approx(
-        0.5
-    )
+def test_total_unrealized_usd_sums_the_wallet_not_percentages() -> None:
+    """달러는 **더해도 뜻이 있다**(같은 지갑의 돈) — 잔고 탭 카드가 이 값을 쓴다."""
+    assert total_unrealized_usd([]) is None
+    assert total_unrealized_usd([_row(price=None)]) is None
+    assert total_unrealized_usd([_row(price=101.5), _row(price=99.0)]) == pytest.approx(1.0)
 
 
 def test_legend_title_matches_tradingview_style() -> None:
@@ -249,26 +285,32 @@ def test_max_drawdown_window_is_none_when_the_curve_only_rises() -> None:
     assert max_drawdown_window([]) is None
 
 
-def test_exit_reason_filter_uses_the_labels_the_table_shows() -> None:
-    """필터 옵션이 **거래 표와 같은 문자열**이어야 한다 — 두 벌이면 결과가 늘 비어 보인다."""
-    from paper.report import records_to_display_frame
-
-    records = [
-        _record(exit_time=_HOUR, realized_pnl=10.0),
-        _record(exit_time=2 * _HOUR, realized_pnl=-5.0, reason=SignalExitReason.STOP_LOSS),
-    ]
-
-    options = filter_reason_options(records)
-
-    assert options == ["손절", "익절"]
-    assert set(records_to_display_frame(records)["청산사유"]) == set(options)
-
-
-def test_exit_reason_filter_narrows_and_empty_selection_shows_everything() -> None:
-    """빈 선택은 **전부 보여준다** — 필터를 다 지웠을 때 빈 화면은 고장으로 읽힌다."""
+def test_exit_reason_chips_narrow_and_all_shows_everything() -> None:
+    """칩은 전체/익절만/손절만 세 갈래(목업) — 「전체」가 기본이자 모르는 값의 폴백이다."""
     win = _record(exit_time=_HOUR, realized_pnl=10.0)
     loss = _record(exit_time=2 * _HOUR, realized_pnl=-5.0, reason=SignalExitReason.STOP_LOSS)
 
-    assert filter_records_by_reason([win, loss], ["손절"]) == [loss]
-    assert filter_records_by_reason([win, loss], []) == [win, loss]
-    assert filter_records_by_reason([win, loss], ["익절", "손절"]) == [win, loss]
+    assert filter_records_by_choice([win, loss], "손절만") == [loss]
+    assert filter_records_by_choice([win, loss], "익절만") == [win]
+    assert filter_records_by_choice([win, loss], REASON_FILTER_ALL) == [win, loss]
+    # 모르는 선택은 「전체」로 접는다(빈 화면은 고장으로 읽힌다).
+    assert filter_records_by_choice([win, loss], "???") == [win, loss]
+
+
+def test_wallet_trade_frame_is_the_compact_mockup_table_newest_first() -> None:
+    """잔고 탭 리스트는 목업의 **8열**이고 최근순이다(전체 20열 원장은 따로 남는다)."""
+    from paper.report import records_to_display_frame
+
+    old = _record(exit_time=_HOUR, realized_pnl=10.0)
+    new = _record(exit_time=3 * _HOUR, realized_pnl=-5.0, reason=SignalExitReason.STOP_LOSS)
+
+    frame = wallet_trade_frame([old, new])
+
+    assert list(frame.columns) == WALLET_TRADE_COLUMNS
+    assert len(frame.columns) == 8
+    assert frame.iloc[0]["사유"] == "손절"  # 최근순
+    assert frame.iloc[1]["사유"] == "익절"
+    assert frame.iloc[0]["손익"] == "-5.0"
+    # 필터·표가 같은 라벨을 쓴다 — 두 벌이면 결과가 늘 비어 보인다.
+    assert set(frame["사유"]) <= set(records_to_display_frame([old, new])["청산사유"])
+    assert list(wallet_trade_frame([]).columns) == WALLET_TRADE_COLUMNS

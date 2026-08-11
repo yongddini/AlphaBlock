@@ -112,7 +112,7 @@ def funding_rows(
     return rows
 
 
-def _latest_close(store: OhlcvStore, symbol: str, timeframe: str) -> float | None:
+def latest_close(store: OhlcvStore, symbol: str, timeframe: str) -> float | None:
     """해당 시리즈 최신 봉의 종가. 없으면 None.
 
     ⚠️ **꼬리만 읽는다**(WAN-245). 예전에는 전 구간을 로드해 마지막 행을 봤는데, 6년
@@ -143,7 +143,7 @@ def build_position_views(
     """오픈 포지션에 현재가·미실현 손익을 붙여 뷰로 만든다."""
     views: list[OpenPositionView] = []
     for pos in positions:
-        price = _latest_close(store, pos.symbol, pos.timeframe)
+        price = latest_close(store, pos.symbol, pos.timeframe)
         pnl = _unrealized_pct(pos, price) if price is not None else None
         views.append(OpenPositionView(snapshot=pos, current_price=price, unrealized_pct=pnl))
     return views

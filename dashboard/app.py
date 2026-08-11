@@ -74,28 +74,26 @@ from dashboard.health import (
     RunnerStatus,
     SeriesFreshness,
 )
-from dashboard.health_data import (
-    HealthView,
-    OpenPositionView,
-    build_health_view,
-    build_position_views,
-)
+from dashboard.health_data import HealthView, OpenPositionView, build_health_view, latest_close
 from dashboard.lightweight_chart import BAND_LINE_COLOR, build_chart_html
 from dashboard.live_board import (
+    REASON_FILTER_ALL,
+    REASON_FILTER_OPTIONS,
     RECENT_ZONE_LIMIT,
     RIGHT_PAD_RATIO,
+    OpenPositionRow,
+    build_open_position_row,
     chart_start_ms,
     chart_symbols,
     chart_timeframes,
-    filter_reason_options,
-    filter_records_by_reason,
+    filter_records_by_choice,
     legend_title,
     max_drawdown_window,
     open_positions_frame,
     recent_zones,
-    timeframe_label,
-    total_unrealized_pct,
+    total_unrealized_usd,
     wallet_equity_points,
+    wallet_trade_frame,
 )
 from dashboard.live_chart import LIVE_INTERVALS, build_live_config
 from dashboard.saved_trades import (
@@ -120,7 +118,7 @@ from dashboard.trade_timeline_view import (
 )
 from data.storage import OhlcvStore, source_timeframe
 from live.order_journal import LedgerEntry, OrderJournal
-from live.runtime_state import EventRecord, RuntimeStateStore
+from live.runtime_state import EventRecord
 from live.timeline_cache import TimelineCacheStore, current_engine_label, load_cached_day
 from live.trade_timeline import (
     DayTimeline,
@@ -293,16 +291,28 @@ def _cached_detection(
 
 
 @st.cache_data(ttl=_SERIES_TTL_SECONDS, show_spinner=False)
-def _cached_open_positions(db_path: str, runtime_state_path: str) -> list[OpenPositionView]:
+def _cached_open_positions(db_path: str) -> list[OpenPositionRow]:
     """페이퍼 러너의 오픈 포지션 + 현재가 기준 미실현 손익(WAN-245 메인 탭).
 
+    소스는 **`open_positions` 테이블**이다(이슈 본문이 못 박은 소스). 러너 상태파일
+    스냅샷을 쓰면 **수량이 없어** 달러 미실현 손익을 낼 수 없다 — 목업의
+    `+58.1 (+1.08%)`가 달러와 %를 함께 요구한다.
+
     Health 탭이 쓰는 `build_health_view`는 신선도·펀딩·이벤트까지 통째로 조립하므로
-    차트 아래 표 하나 그리자고 부르기엔 무겁다. 여기서는 러너 상태파일 + 최신 종가만
-    읽는다(짧은 TTL — 러너가 포지션을 열고 닫는 주기를 따라간다).
+    표 하나 그리자고 부르기엔 무겁다. 여기서는 포지션 + 최신 종가만 읽는다(짧은 TTL —
+    러너가 포지션을 열고 닫는 주기를 따라간다).
     """
-    runtime = RuntimeStateStore(runtime_state_path).load()
+    with PaperTradeStore(db_path) as paper_store:
+        positions = [p.position for p in paper_store.load_open_positions()]
+    if not positions:
+        return []
     with OhlcvStore(db_path) as store:
-        return build_position_views(store, runtime.open_positions)
+        return [
+            build_open_position_row(
+                position, latest_close(store, position.symbol, position.timeframe)
+            )
+            for position in positions
+        ]
 
 
 # --- 차트(메인) 탭 (WAN-245) -------------------------------------------------
@@ -314,6 +324,15 @@ def _cached_open_positions(db_path: str, runtime_state_path: str) -> list[OpenPo
 # 🔑 cold load가 가벼운 이유는 캐시가 아니라 **읽는 양**이다(WAN-202 흡수) — 6년 전량을
 # 탐지·전송하던 분석 탭과 달리 최근 `CHART_BARS`봉만 읽고, 존은 최근 `RECENT_ZONE_LIMIT`개만
 # 그린다. 심볼·TF를 바꿔도 그 크기는 그대로다.
+
+
+def _zone_swatch(fill: str, line: str, *, left: int = 0) -> str:
+    """존 색 범례의 색칩 한 개(HTML) — 목업 상단 오른쪽 줄."""
+    return (
+        f"<span style='display:inline-block;width:10px;height:10px;border-radius:2px;"
+        f"background:{fill};border:1px solid {line};margin-left:{left}px;"
+        "margin-right:5px;vertical-align:-1px;'></span>"
+    )
 
 
 def _render_live_chart(settings: Settings) -> None:
@@ -332,18 +351,30 @@ def _render_chart_panel(settings: Settings) -> None:
     symbols = chart_symbols(settings)
     timeframes = chart_timeframes(settings)
 
-    head_left, head_right = st.columns([2, 3])
+    # 목업 상단 컨트롤 줄: 심볼 드롭다운 · TF 세그먼트 · 오른쪽에 존 색 범례.
+    # ⚠️ TF 라벨은 **원문 그대로**(`15m`·`1h`·`2h`·`4h`)다 — 목업의 토글이 그렇고,
+    # 한글로 바꾸면 트레이딩뷰 감각과 어긋난다. 차트 좌상단 OHLC 범례에서만 한글로
+    # 읽어 준다(`1시간`) — 거기는 문장이라 목업도 한글이다.
+    head_left, head_mid, head_right = st.columns([2, 3, 3])
     symbol = head_left.selectbox("심볼", symbols, key="live_chart_symbol")
-    timeframe = head_right.radio(
+    timeframe = head_mid.radio(
         "타임프레임",
         timeframes,
         horizontal=True,
-        format_func=timeframe_label,
         key="live_chart_timeframe",
         help=(
             "채택 좌표의 작업 TF입니다(WAN-182·WAN-252). 2h는 저장된 1h를 무손실 "
             "리샘플해 만듭니다(WAN-24)."
         ),
+    )
+    head_right.markdown(
+        f"<div style='text-align:right;padding-top:30px;font-size:12px;color:#787b86;'>"
+        f"{_zone_swatch('rgba(38,166,154,.6)', '#26a69a')}수요·활성"
+        f"{_zone_swatch('rgba(239,83,80,.6)', '#ef5350', left=12)}공급·숏"
+        f"{_zone_swatch('rgba(140,145,155,.4)', '#9aa0ac', left=12)}무효화"
+        f"<span style='margin-left:12px;color:#d1d4dc;'>최근 {RECENT_ZONE_LIMIT}개</span>"
+        "</div>",
+        unsafe_allow_html=True,
     )
 
     # ⚠️ 경계는 **물리 저장 TF**에서 읽는다 — 2h는 `ohlcv` 테이블에 행이 없어(`파생`)
@@ -410,9 +441,9 @@ def _render_chart_panel(settings: Settings) -> None:
         else f"⚪ {timeframe}은 바이낸스 kline 스트림 인터벌이 아니라 확정봉까지만 그립니다."
     )
     st.caption(
-        f"{live_note} 최근 {len(df):,}봉 · 오더블록은 **가장 최근 {RECENT_ZONE_LIMIT}개**만 "
-        "그립니다(회색 = 이미 무효화된 존 — 생성부터 무효화 봉까지만, 컬러 = 지금 살아있는 존). "
-        "휠 = 좌우 확대/축소 · 가격축 드래그 = 세로 확대/축소 · 가격축 더블클릭 = 세로 맞춤."
+        f"{live_note} 최근 {len(df):,}봉 · 무효화된 존은 생성부터 무효화 봉까지만 회색으로 "
+        "그립니다. 휠 = 좌우 확대/축소 · 가격축 드래그 = 세로 확대/축소 · 가격축 더블클릭 = "
+        "세로 맞춤."
     )
 
 
@@ -423,14 +454,14 @@ def _render_open_positions(settings: Settings) -> None:
     "오픈 포지션 없음"이 정상이다(WAN-195).
     """
     st.subheader("현재 오픈 포지션")
-    views = _cached_open_positions(settings.db_path, settings.live_runtime_state_path)
-    if not views:
+    rows = _cached_open_positions(settings.db_path)
+    if not rows:
         st.info(
             "오픈 포지션이 없습니다. 페이퍼 러너(`python -m live.runner`)가 진입하면 "
             "여기에 표시됩니다."
         )
         return
-    st.dataframe(open_positions_frame(views), use_container_width=True, hide_index=True)
+    st.dataframe(open_positions_frame(rows), use_container_width=True, hide_index=True)
     st.caption(
         "칸=(종목,TF)마다 1포지션 · 여러 칸이 한 지갑을 공유하는 레버리지 북입니다"
         "(WAN-213). 미실현손익은 최신 확정봉 종가 기준입니다."
@@ -1533,12 +1564,16 @@ def _render_balance(settings: Settings) -> None:
     initial_cap = settings.paper_equity
     balance = _wallet_balance(records, initial_equity=initial_cap)
 
-    # 1줄 (결과): 현재 잔고를 맨 앞으로 빼 "지금 얼마다"가 먼저 보이게 하고,
-    # 흩어졌던 수익 지표(수익률·손익·R)를 한 줄에 모은다(WAN-214).
-    cols = st.columns(5)
+    # 목업의 카드 5개 — 지갑 잔고 · 누적 실현손익 · 미실현손익 · MDD · 승률·거래.
+    # ⚠️ 나머지 지표(총 R·손익비·총 투입·총 리스크 등)는 **지운 게 아니라** 아래
+    # 「세부 지표」로 내렸다 — 목업이 첫 줄을 다섯 칸으로 못 박았지 정보를 버리라고 한
+    # 것은 아니다.
+    rows = _cached_open_positions(settings.db_path)
+    unrealized = total_unrealized_usd(rows)
+    cards = st.columns(5)
     if balance is None:
-        cols[0].metric(
-            "현재 잔고($)",
+        cards[0].metric(
+            "지갑 잔고",
             "재구성 불가",
             help=(
                 "달러 실현손익이 없는 옛 %-only 거래가 섞여 있어 지갑 잔고를 재구성할 수 "
@@ -1548,94 +1583,94 @@ def _render_balance(settings: Settings) -> None:
         )
     else:
         delta = None if initial_cap is None else f"{balance - initial_cap:+,.2f}"
-        cols[0].metric("현재 잔고($)", f"{balance:,.2f}", delta=delta)
-    cols[1].metric("총수익률(지갑)", f"{overall.total_return_pct:+.2f}%")
-    cols[2].metric("총 손익($)", _usd(overall.total_realized_pnl))
-    cols[3].metric("총 R", f"{overall.total_r:+.2f}")
-    cols[4].metric("거래 수", str(overall.num_trades))
+        cards[0].metric("지갑 잔고", f"{balance:,.0f}", delta=delta)
+    cards[1].metric("누적 실현손익", f"{overall.total_return_pct:+.2f}%")
+    cards[2].metric(
+        "미실현손익",
+        "—" if unrealized is None else f"{unrealized:+,.1f}",
+        help=(
+            f"열려 있는 포지션 {len(rows)}건의 미실현 손익 **달러 합**(최신 확정봉 종가 "
+            "기준). 같은 지갑의 돈이라 더해도 뜻이 있습니다."
+        ),
+    )
+    cards[3].metric("MDD (최대 낙폭)", f"−{overall.max_drawdown_pct:.2f}%")
+    cards[4].metric("승률 · 거래", f"{overall.win_rate * 100:.1f}% · {overall.num_trades}")
 
-    # 2줄 (품질·위험): 승률 · 손익비 · MDD · 총 투입 · 총 리스크(WAN-214)
     invested = overall.total_notional
     risk_total = overall.total_risk_amount
     payoff = overall.payoff_ratio
-    cols2 = st.columns(5)
-    cols2[0].metric("승률", f"{overall.win_rate * 100:.1f}%")
-    cols2[1].metric("손익비", f"{payoff:.2f}" if payoff is not None else "N/A")
-    cols2[2].metric("MDD", f"{overall.max_drawdown_pct:.2f}%")
-    cols2[3].metric("총 투입($)", "N/A" if invested is None else f"{invested:,.2f}")
-    cols2[4].metric("총 리스크($)", "N/A" if risk_total is None else f"{risk_total:,.2f}")
-
-    # 3줄: 아직 안 닫힌 자리(WAN-245) — 위 지표는 전부 **청산된** 거래의 것이라, 지금
-    # 열려 있는 포지션의 미실현 손익은 어디에도 안 잡힌다.
-    views = _cached_open_positions(settings.db_path, settings.live_runtime_state_path)
-    unrealized = total_unrealized_pct(views)
-    cols3 = st.columns(2)
-    cols3[0].metric("오픈 포지션", f"{len(views)}건")
-    cols3[1].metric(
-        "미실현손익(합)",
-        "—" if unrealized is None else f"{unrealized:+.2f}%",
-        help=(
-            "열려 있는 포지션의 미실현 손익률 **단순 합**입니다(명목 가중이 아니라 "
-            "지갑 대비 수익률이 아닙니다). 최신 확정봉 종가 기준."
-        ),
-    )
+    with st.expander("세부 지표"):
+        more = st.columns(5)
+        more[0].metric("총 손익($)", _usd(overall.total_realized_pnl))
+        more[1].metric("총 R", f"{overall.total_r:+.2f}")
+        more[2].metric("손익비", f"{payoff:.2f}" if payoff is not None else "N/A")
+        more[3].metric("총 투입($)", "N/A" if invested is None else f"{invested:,.2f}")
+        more[4].metric("총 리스크($)", "N/A" if risk_total is None else f"{risk_total:,.2f}")
 
     # 에쿼티 곡선 — "언제 얼마였나"와 "어디서 얼마나 깨졌나"(MDD 구간)를 함께 본다.
-    st.subheader("지갑 잔고 곡선")
     points = wallet_equity_points(records, initial_equity=initial_cap)
+    drawdown = max_drawdown_window(points) if points else None
+    mdd_note = (
+        f" · :red[빨강 = 최대 낙폭 구간(−{drawdown.drawdown_pct:.2f}%)]"
+        if drawdown is not None
+        else ""
+    )
+    st.caption(f"에쿼티 곡선{mdd_note}")
     if not points:
         st.caption(
             "달러 실현손익이 없는 옛 %-only 거래(WAN-207 이전)가 섞여 있어 지갑 곡선을 "
             "재구성할 수 없습니다 — 억지 %-역산은 실제 잔고와 어긋나므로 그리지 않습니다."
         )
     else:
-        drawdown = max_drawdown_window(points)
         st.plotly_chart(
             build_wallet_equity_chart(points, drawdown, theme=_current_chart_theme()),
             use_container_width=True,
         )
         if drawdown is not None:
             st.caption(
-                f"🔴 빨간 구간 = 최대 낙폭(MDD −{drawdown.drawdown_pct:.2f}%): "
-                f"{format_kst_zoned(drawdown.peak_time_ms)} 고점 "
-                f"${drawdown.peak_equity:,.2f} → {format_kst_zoned(drawdown.trough_time_ms)} 저점 "
-                f"${drawdown.trough_equity:,.2f}."
+                f"MDD −{drawdown.drawdown_pct:.2f}%: {format_kst_zoned(drawdown.peak_time_ms)} "
+                f"고점 ${drawdown.peak_equity:,.2f} → "
+                f"{format_kst_zoned(drawdown.trough_time_ms)} 저점 ${drawdown.trough_equity:,.2f}."
             )
 
-    st.subheader("시리즈별 성과")
-    # 화면은 한글 컬럼, CSV 내보내기는 데이터 축이라 영문·UTC 그대로(WAN-190/172).
-    st.dataframe(
-        performance_to_display_frame(performance), use_container_width=True, hide_index=True
+    # 청산 거래 리스트 — 목업의 8열 압축 표(읽는 표). 전체 원장(20열)은 아래 확장에
+    # 그대로 있고 CSV도 전체다.
+    choice = st.radio(
+        "청산사유",
+        REASON_FILTER_OPTIONS,
+        horizontal=True,
+        key="paper_exit_reason_filter",
+        help="표시할 거래만 좁힙니다. 위 카드·곡선은 **전체 거래** 기준 그대로입니다.",
     )
-    st.download_button(
-        "성과 요약 CSV",
-        performance_to_dataframe(performance).to_csv(index=False),
-        file_name="paper_performance.csv",
-        mime="text/csv",
+    shown = filter_records_by_choice(records, choice)
+    if choice != REASON_FILTER_ALL:
+        st.caption(f"{len(shown):,} / {len(records):,}건 표시")
+    st.dataframe(wallet_trade_frame(shown), use_container_width=True, hide_index=True)
+    st.caption(
+        "MDD = 고점 대비 최대로 깨진 폭. 시각 KST(저장·계산은 UTC 불변). "
+        "⚠️ 입금/출금·TWR은 범위 밖입니다(WAN-286) — 여기선 실현손익 기반 잔고만."
     )
 
-    st.subheader("거래 원장")
-    # 손절/익절 필터(WAN-245 확정 사양) — 저장된 거래 탭이 이미 하던 것을 페이퍼 원장에도
-    # 둔다. ⚠️ **표시 필터일 뿐** 위 성과 카드·곡선은 전체 거래 기준 그대로다(필터가 지표를
-    # 바꾸면 "지금 보는 숫자가 무엇의 것인지"가 흐려진다 — 저장된 거래 탭과 같은 규약).
-    reasons = filter_reason_options(records)
-    chosen = st.multiselect(
-        "청산 사유",
-        reasons,
-        default=reasons,
-        key="paper_exit_reason_filter",
-        help="표시할 거래만 좁힙니다. 위 성과 카드·잔고 곡선은 전체 거래 기준입니다.",
-    )
-    shown = filter_records_by_reason(records, chosen)
-    st.caption(f"{len(shown):,} / {len(records):,}건 표시")
-    st.dataframe(records_to_display_frame(shown), use_container_width=True, hide_index=True)
-    st.download_button(
-        "거래 원장 CSV",
-        records_to_dataframe(records).to_csv(index=False),
-        file_name="paper_trades.csv",
-        help="CSV는 필터와 무관하게 **전체 원장**입니다(데이터 축 — WAN-190).",
-        mime="text/csv",
-    )
+    with st.expander("전체 원장 · 시리즈별 성과 (CSV 내보내기)"):
+        st.caption("시리즈별 성과")
+        st.dataframe(
+            performance_to_display_frame(performance), use_container_width=True, hide_index=True
+        )
+        st.download_button(
+            "성과 요약 CSV",
+            performance_to_dataframe(performance).to_csv(index=False),
+            file_name="paper_performance.csv",
+            mime="text/csv",
+        )
+        st.caption("거래 원장(전체 열)")
+        st.dataframe(records_to_display_frame(shown), use_container_width=True, hide_index=True)
+        st.download_button(
+            "거래 원장 CSV",
+            records_to_dataframe(records).to_csv(index=False),
+            file_name="paper_trades.csv",
+            help="CSV는 필터와 무관하게 **전체 원장**입니다(데이터 축 — WAN-190).",
+            mime="text/csv",
+        )
 
 
 # --- 진입/미진입 사유 장부 탭 (WAN-219) --------------------------------------

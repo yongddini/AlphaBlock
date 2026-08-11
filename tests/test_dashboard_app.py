@@ -525,7 +525,8 @@ def test_main_chart_timeframe_toggle_offers_derived_2h(seeded_db_path: str) -> N
 
     assert not at.exception
     timeframe_radio = next(r for r in at.radio if r.label == "타임프레임")
-    assert list(timeframe_radio.options[:4]) == ["15분", "1시간", "2시간", "4시간"]
+    # 라벨은 목업대로 **원문 TF**다(한글이 아니다) — 한글은 차트 좌상단 OHLC 범례에서만.
+    assert list(timeframe_radio.options[:4]) == ["15m", "1h", "2h", "4h"]
 
 
 def test_main_chart_switches_timeframe_without_error(seeded_db_path: str) -> None:
@@ -534,7 +535,7 @@ def test_main_chart_switches_timeframe_without_error(seeded_db_path: str) -> Non
     at.run(timeout=60)
     assert not at.exception
 
-    next(r for r in at.radio if r.label == "타임프레임").set_value("2시간")
+    next(r for r in at.radio if r.label == "타임프레임").set_value("2h")
     at.run(timeout=60)
 
     assert not at.exception
@@ -560,6 +561,12 @@ def test_balance_tab_shows_the_wallet_equity_curve_section(seeded_db_path: str) 
     at.run(timeout=60)
 
     assert not at.exception
-    subheaders = {s.value for s in at.subheader}
-    assert "지갑 잔고 곡선" in subheaders
-    assert "오픈 포지션" in {m.label for m in at.metric}
+    # 목업의 카드 5개 + MDD 구간 캡션이 잔고 탭에 그려진다.
+    metric_labels = {m.label for m in at.metric}
+    assert {"지갑 잔고", "누적 실현손익", "미실현손익", "MDD (최대 낙폭)", "승률 · 거래"} <= (
+        metric_labels
+    )
+    assert any(c.value.startswith("에쿼티 곡선") for c in at.caption)
+    # 청산사유 칩(전체/익절만/손절만)이 목업대로 세 갈래다.
+    reason_radio = next(r for r in at.radio if r.label == "청산사유")
+    assert list(reason_radio.options) == ["전체", "익절만", "손절만"]
