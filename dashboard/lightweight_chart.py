@@ -140,6 +140,13 @@ class ChartTheme:
     #: 형성 중인 봉(라이브)은 같은 색을 옅게 — 확정봉과 구분해야 한다(WAN-147).
     bull_candle_live: str = "rgba(255, 255, 255, 0.45)"
     bear_candle_live: str = "rgba(239, 83, 80, 0.45)"
+    #: **죽은 존**(무효화·소멸로 수명이 끝난 존)의 무채색(WAN-245 사용자 확정 2026-08-11).
+    #: 색이 곧 상태다 — 회색 = 언젠가 죽은 존(생성~종료 구간만 그린다) · 컬러 = 지금
+    #: 살아있는 존(현재 봉까지 연장). 방향(수요/공급)은 죽은 뒤에는 구분하지 않는다.
+    #: 두 테마 공통값이다 — 무채색이라 배경 명도에 덜 민감하고, 상태를 말하는 색이
+    #: 테마마다 달라질 이유가 없다.
+    dead_zone_fill: str = "rgba(140, 145, 155, 0.14)"
+    dead_zone_line: str = "rgba(140, 145, 155, 0.55)"
 
     def exit_marker_colors(self) -> dict[ExitReason, str]:
         return {
@@ -346,14 +353,26 @@ def _zone_span_end(ob: OrderBlock, last_bar_ms: int) -> int:
 def _zone_boxes(
     order_blocks: Sequence[OrderBlock], last_bar_ms: int, theme: ChartTheme
 ) -> list[dict[str, object]]:
-    """존마다 `BaselineSeries` 두 점 + 스타일 정보를 담은 dict를 만든다."""
+    """존마다 `BaselineSeries` 두 점 + 스타일 정보를 담은 dict를 만든다.
+
+    **색이 곧 상태다**(WAN-245 사용자 확정 2026-08-11):
+
+    * **죽은 존**(`break_time`·`swept_time`이 있는 존)은 **생성 시점부터 통째로 회색**이고
+      그 종료 봉에서 박스가 **끝난다**(그 뒤로는 그리지 않는다). 원래 방향색을 쓰지 않는다 —
+      옛 규칙("무효화 시점 기준으로 좌: 색 / 우: 회색")은 사용자가 폐기했다.
+    * **살아있는 존**만 방향색(수요 teal / 공급 red)으로 **마지막 봉까지** 연장한다.
+    """
     boxes: list[dict[str, object]] = []
     for ob in order_blocks:
         is_bull = ob.direction is OrderBlockDirection.BULLISH
+        dead = ob.break_time is not None or ob.swept_time is not None
         faded = ob.breaker
         start = ob.start_time
         end = max(_zone_span_end(ob, last_bar_ms), start)
-        if is_bull:
+        if dead:
+            fill = theme.dead_zone_fill
+            line = theme.dead_zone_line
+        elif is_bull:
             fill = theme.bull_zone_fill_faded if faded else theme.bull_zone_fill
             line = theme.bull_zone_line
         else:
@@ -367,7 +386,9 @@ def _zone_boxes(
                 "bottom": ob.bottom,
                 "fill": fill,
                 "line": line,
-                "dashed": faded,
+                # 점선 = "지금 살아있는 존이 아니다". 무채색과 같은 것을 말하지만 색을
+                # 못 가르는 경우(축소·인쇄)에도 형태로 남는다.
+                "dashed": faded or dead,
             }
         )
     return boxes
@@ -608,12 +629,33 @@ _TEMPLATE = """
       horzLines: { color: theme.gridColor },
     },
     localization: { timeFormatter: kstCrosshairFormatter },
+    // 크로스헤어는 **Normal 고정**이다(WAN-245 사용자 결정 2026-08-11). 라이브러리
+    // 기본값은 Magnet이라 y축 라벨이 가장 가까운 캔들·밴드 값에 스냅되는데, 사용자가
+    // 원하는 것은 트레이딩뷰 기본인 "커서 자리의 실제 가격"이다. 기본값에 기대지 않고
+    // 명시해 회귀를 막는다(라이브러리 기본이 바뀌어도 화면은 그대로).
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
     rightPriceScale: { borderVisible: false },
+    // 가로·세로 **독립축**(WAN-245): 휠은 시간축만 줌하고, 세로는 가격축 드래그로만
+    // 바꾼다. 아래에서 첫 fit 뒤 autoScale을 끄는 것이 그 "독립"의 실체다 — autoScale이
+    // 켜져 있으면 좌우로 움직이기만 해도 세로가 따라 튄다.
+    handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true,
+                    vertTouchDrag: !payload.independentAxis },
+    handleScale: {
+      mouseWheel: true,
+      pinch: true,
+      axisPressedMouseMove: { time: true, price: true },
+      axisDoubleClickReset: { time: true, price: true },
+    },
     timeScale: {
       borderVisible: false,
       timeVisible: true,
       secondsVisible: false,
       tickMarkFormatter: kstTickFormatter,
+      // ⚠️ 오른쪽 여백은 `rightOffset` 옵션으로 주지 **않는다** — 실측(WAN-245)에서 그
+      // 옵션은 초기 논리 범위(`setVisibleLogicalRange`)를 통째로 넓혀 왼쪽에 큰 빈
+      // 구간을 만들었다(15m에서 의도한 1주일 대신 12일이 보이고 앞쪽 1/5이 비었다).
+      // 여백은 아래 초기 범위 계산에서 `to`를 밀어 만든다 — 같은 결과이면서 창 폭을
+      // 우리가 통제한다.
       // 과거 거래를 보고 있는데(payload.focus) 라이브로 새 봉이 들어와 화면이 최신으로
       // 끌려가면 안 된다(WAN-146 × WAN-147).
       shiftVisibleRangeOnNewBar: !payload.focus,
@@ -711,12 +753,25 @@ _TEMPLATE = """
   if (payload.band) {
     legendItems.push({ color: payload.band.color, label: payload.band.label });
   }
-  if (legendItems.length) {
+  // OHLC 범례(WAN-245 사용자 확정 2026-08-11) — 좌상단에 심볼·계약·TF 한 줄과 커서가
+  // 올라간 봉의 시/고/저/종·변동을 그린다. 커서를 벗어나면 **마지막 봉**으로 돌아온다.
+  // 표시 전용이라 `pointer-events:none`으로 차트 조작을 막지 않는다.
+  let ohlcRow = null;
+  if (legendItems.length || payload.ohlcLegend) {
     const legend = document.createElement("div");
     legend.style.cssText =
       "position:absolute;top:8px;left:8px;z-index:5;background:" + theme.legendBg + ";" +
       "padding:4px 8px;border-radius:4px;font:11px -apple-system,sans-serif;" +
       "line-height:1.6;pointer-events:none;color:" + theme.legendText + ";";
+    if (payload.ohlcLegend) {
+      const title = document.createElement("div");
+      title.style.cssText = "font-weight:600;letter-spacing:0.02em;";
+      title.textContent = payload.ohlcLegend.title;
+      legend.appendChild(title);
+      ohlcRow = document.createElement("div");
+      ohlcRow.style.cssText = "font-variant-numeric:tabular-nums;";
+      legend.appendChild(ohlcRow);
+    }
     legendItems.forEach(function (line) {
       const item = document.createElement("div");
       item.innerHTML =
@@ -728,6 +783,32 @@ _TEMPLATE = """
     });
     container.style.position = "relative";
     container.appendChild(legend);
+  }
+
+  // 가격 표기는 `_round_price_point`(WAN-192)와 같은 유효숫자 규약을 따른다 — BTC의
+  // 2자리와 DOGE의 소수 5자리를 한 함수로 낸다.
+  function fmtLegendPrice(value) {
+    const magnitude = Math.abs(value);
+    let decimals = 2;
+    if (magnitude > 0) {
+      decimals = Math.max(2, 3 - Math.floor(Math.log10(magnitude)));
+    }
+    return value.toFixed(decimals);
+  }
+  function renderOhlcLegend(bar) {
+    if (!ohlcRow || !bar) return;
+    const up = bar.close >= bar.open;
+    const color = up ? payload.ohlcLegend.upColor : payload.ohlcLegend.downColor;
+    const change = bar.close - bar.open;
+    const changePct = bar.open ? (change / bar.open) * 100 : 0;
+    const sign = change >= 0 ? "+" : "";
+    ohlcRow.innerHTML =
+      '<span style="color:' + color + '">' +
+      "시 " + fmtLegendPrice(bar.open) + "  고 " + fmtLegendPrice(bar.high) +
+      "  저 " + fmtLegendPrice(bar.low) + "  종 " + fmtLegendPrice(bar.close) +
+      "  " + sign + fmtLegendPrice(change) +
+      " (" + sign + changePct.toFixed(2) + "%)" +
+      "</span>";
   }
 
   // 볼린저 하단선(진입가 기준선) — 라이브 갱신 대상이다(WAN-147). EMA/VWMA 토글과
@@ -821,7 +902,49 @@ _TEMPLATE = """
     // 지금 그려진(setData한) 봉 기준이라 loadedFrom을 빼고 센다.
     const rendered = payload.candles.length - loadedFrom;
     const n = Math.min(payload.initialVisibleBars, rendered);
-    chart.timeScale().setVisibleLogicalRange({ from: rendered - n, to: rendered });
+    // `to`를 밀어 **오른쪽 여백**을 만든다(WAN-245) — 최신 봉·활성 존·현재가가 가격축에
+    // 딱 붙지 않는다. **봉 수가 아니라 보이는 창의 비율**인 것이 중요하다: 고정 봉 수면
+    // 15m(672봉 창)에서는 안 보이고 4h(42봉 창)에서는 화면의 1/3이 빈다. 0이면 예전과
+    // 같은 범위다(다른 화면 불변).
+    const pad = Math.round(n * (payload.rightPadRatio || 0));
+    chart.timeScale().setVisibleLogicalRange({ from: rendered - n, to: rendered + pad });
+  }
+
+  // 독립축(WAN-245): 처음 한 번만 보이는 캔들에 세로를 맞추고(fit) 그 뒤 autoScale을
+  // 끈다. 끄지 않으면 좌우 팬·줌마다 세로가 다시 잡혀 "가로만 움직였는데 세로가 튄다".
+  // 끈 뒤에도 **y축 드래그(확대/축소)와 y축 더블클릭(fit 복귀)은 그대로 동작한다**
+  // (`handleScale.axisPressedMouseMove`/`axisDoubleClickReset`).
+  //
+  // ⚠️ **끄는 시점이 중요하다.** 데이터를 넣은 직후 같은 틱에서 꺼 버리면 가격축이 아직
+  // 캔들에 맞춰지기 전이라 **엉뚱한 범위가 그대로 얼어붙어 캔들이 화면 밖으로 나간다**
+  // (실측: 빈 격자 + 가격축 라벨 없음). 그래서 한 번 **그려진 뒤**(더블 rAF = 최소 한
+  // 프레임 뒤) 끈다 — 사용자 사양의 "초기 가격 범위를 보이는 캔들에 한 번 fit해 주고
+  // (빈 세로 방지) 그 뒤 사용자가 조절"이 이 순서다.
+  if (payload.independentAxis) {
+    const priceScale = candleSeries.priceScale();
+    priceScale.applyOptions({ autoScale: true });
+    requestAnimationFrame(function () {
+      requestAnimationFrame(function () {
+        priceScale.applyOptions({ autoScale: false });
+      });
+    });
+  }
+
+  // 커서가 올라간 봉의 OHLC로 범례를 갱신하고, 차트 밖으로 나가면 마지막 봉으로 복귀.
+  function lastBar() {
+    if (liveBars.size) {
+      const times = Array.from(liveBars.keys()).sort(function (a, b) { return a - b; });
+      return liveBars.get(times[times.length - 1]);
+    }
+    return payload.candles[payload.candles.length - 1];
+  }
+  let hoveredBar = null;
+  if (ohlcRow) {
+    renderOhlcLegend(lastBar());
+    chart.subscribeCrosshairMove(function (param) {
+      hoveredBar = param && param.seriesData ? param.seriesData.get(candleSeries) : null;
+      renderOhlcLegend(hoveredBar || lastBar());
+    });
   }
 
   let loading = false;
@@ -896,6 +1019,10 @@ _TEMPLATE = """
       candleSeries.update(bar);
       lastCandleTime = barTime;
       liveBars.set(barTime, bar);
+      // 커서가 차트 밖일 때 범례는 "마지막 봉"을 보여준다 — 그 마지막 봉이 방금 움직였다.
+      // ⚠️ 커서가 **어떤 봉 위에 있으면 덮어쓰지 않는다** — 라이브 틱이 초당 여러 번 오므로
+      // 그때마다 마지막 봉으로 갈아치우면 사용자가 짚어 둔 봉의 OHLC가 계속 튄다.
+      if (ohlcRow && !hoveredBar) renderOhlcLegend(lastBar());
 
       if (bandWindow && bandSeries && !bandStale) {
         if (openMs > expectedOpenMs) {
@@ -1075,6 +1202,9 @@ def build_chart_html(
     initial_bars: int = _INITIAL_BARS,
     live: LiveChartConfig | None = None,
     focus: tuple[int, int] | None = None,
+    ohlc_legend_title: str | None = None,
+    independent_axis: bool = False,
+    right_pad_ratio: float = 0.0,
 ) -> str:
     """캔들+오더블록+RSI+익절 목표선 패널을 그리는 자족형 HTML을 만든다.
 
@@ -1102,6 +1232,16 @@ def build_chart_html(
     (WAN-146 — 거래 표에서 행을 고른 경우). 그 구간이 지연 로딩 범위 밖이면 캔들을 먼저
     더 실은 뒤 이동하므로 오래된 거래를 골라도 빈 화면이 되지 않는다. 이동은 **보는
     구간만** 바꾼다 — 거래·지표 계산에는 전혀 관여하지 않는다.
+
+    메인 라이브 차트(WAN-245)가 쓰는 세 옵션은 **기본값이 옛 동작**이라 다른 화면은
+    비트 단위로 그대로다:
+
+    * `ohlc_legend_title` — 주면 좌상단에 그 제목 줄 + 커서가 올라간 봉의 OHLC 범례를
+      그린다(커서를 벗어나면 마지막 봉). `None`이면 옛 범례(표시선·밴드)만 그린다.
+    * `independent_axis` — 켜면 첫 fit 뒤 가격축 `autoScale`을 꺼서 **휠은 가로만**,
+      세로는 y축 드래그로만 바뀌게 한다(y축 더블클릭 = fit 복귀).
+    * `right_pad_ratio` — 시간축 오른쪽 여백을 **처음 보이는 창의 비율**로 준다(0.06 =
+      6%). 봉 수가 아니라 비율인 이유는 TF마다 창의 봉 수가 10배 넘게 다르기 때문이다.
     """
     chart_theme = resolve_theme(theme)
     frame = df.sort_values("open_time").reset_index(drop=True)
@@ -1202,6 +1342,20 @@ def build_chart_html(
             "borderUp": chart_theme.bull_candle_border,
             "borderDown": chart_theme.bear_candle_border,
         },
+        "ohlcLegend": (
+            None
+            if ohlc_legend_title is None
+            else {
+                "title": ohlc_legend_title,
+                # 상승 teal / 하락 red — 사용자 확정 색(2026-08-11). 캔들 몸통색(다크에서
+                # 상승 하양)과 다른 것은 의도적이다: 범례는 "지금 오르는가"를 색으로
+                # 말하는 자리라 트레이딩뷰 OHLC 범례의 관습을 따른다.
+                "upColor": "#26a69a",
+                "downColor": "#ef5350",
+            }
+        ),
+        "independentAxis": independent_axis,
+        "rightPadRatio": float(right_pad_ratio),
         "rsiColor": chart_theme.rsi_line,
         "guideColor": chart_theme.rsi_guide,
         "theme": {

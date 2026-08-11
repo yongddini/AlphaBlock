@@ -1,13 +1,18 @@
 """통합 트레이딩 웹 대시보드 (WAN-15 · WAN-30).
 
-**라이브-우선 배치(WAN-220, 사용자 결정 2026-07-31)**: 실거래/실전 페이퍼를 매일
-들여다보는 화면이라 **라이브·운영 탭이 앞**에 온다 — 페이퍼 성과 → 진입/미진입 장부
-(체결률, WAN-217/219) → 운영 상태(Health). **백테스트 탭(분석·저장된 거래)은 뒤로
-강등**되고 **지연 로딩**된다(cold start에서 자동 로드하지 않아 첫 화면이 빠르다 —
-분석 탭 cold load ~10초를 앞단에서 없앤다, WAN-202). 지우지 않은 이유는 백테스트가
-라이브 실측과 대조하는 **잣대**이기 때문이다(약속·기대수익이 아니라 대조용).
+**차트-우선 배치(WAN-245, 사용자 결정 2026-08-04 · 목업 승인 2026-08-11)**: 첫 화면이
+**라이브 차트**다 — 트레이딩뷰처럼 차트가 앞에 오고 그 아래 지금 상태(오픈 포지션)가
+보인다. 그 뒤로 지갑(잔고·거래내역) → 진입/미진입 장부(체결률, WAN-217/219) → 거래
+타임라인 → 운영 상태(Health) 순이고, **백테스트는 「분석·거래」 한 탭으로 합쳐 맨 뒤로
+강등**되고 **지연 로딩**된다(WAN-220 원칙 유지 — 제거가 아니라 강등. 지우지 않은 이유는
+백테스트가 라이브 실측과 대조하는 **잣대**이기 때문이다: 약속·기대수익이 아니라 대조용).
 
-**페이퍼 성과 탭**: 페이퍼 러너가 적재한 거래·잔고·성과를 조회한다.
+**차트 탭(메인)**: 채택 유니버스 9종목 × 작업 TF(15m·1h·2h·4h) 중 하나를 골라 최근 봉과
+**가장 최근 오더블록 4개**만 그린다. 분석 탭 cold load ~10초(WAN-202)의 원인이던 "6년치
+재계산 + 통째 전송"이 이 화면에는 **구조적으로 없다** — 읽는 양 자체가 다르다.
+
+**잔고·거래내역 탭(구 「페이퍼 성과」)**: 페이퍼 러너가 적재한 거래·잔고·성과를 조회하고,
+지갑 에쿼티 곡선에 **MDD 구간**을 빨갛게 표시한다.
 **진입/미진입 장부 탭(WAN-217/219)**: 페이퍼 러너의 진입 깔때기(체결/미체결/스킵/거부
 사유)를 계산 없이 조회 — 체결률·미진입 사유 분포·칸별 필터.
 **운영 상태(Health) 탭**: 데이터 신선도·펀딩·러너 생존·페이퍼 포지션·최근 신호를
@@ -49,6 +54,7 @@ from dashboard.charts import (
     ZONE_CATEGORY_LABELS,
     ZoneCategory,
     build_equity_chart,
+    build_wallet_equity_chart,
     filter_zones,
 )
 from dashboard.data_access import list_series, load_ohlcv, series_bounds
@@ -68,8 +74,27 @@ from dashboard.health import (
     RunnerStatus,
     SeriesFreshness,
 )
-from dashboard.health_data import HealthView, OpenPositionView, build_health_view
+from dashboard.health_data import (
+    HealthView,
+    OpenPositionView,
+    build_health_view,
+    build_position_views,
+)
 from dashboard.lightweight_chart import BAND_LINE_COLOR, build_chart_html
+from dashboard.live_board import (
+    RECENT_ZONE_LIMIT,
+    RIGHT_PAD_RATIO,
+    chart_start_ms,
+    chart_symbols,
+    chart_timeframes,
+    legend_title,
+    max_drawdown_window,
+    open_positions_frame,
+    recent_zones,
+    timeframe_label,
+    total_unrealized_pct,
+    wallet_equity_points,
+)
 from dashboard.live_chart import LIVE_INTERVALS, build_live_config
 from dashboard.saved_trades import (
     exit_reason_options,
@@ -91,8 +116,9 @@ from dashboard.trade_timeline_view import (
     selected_row,
     timeline_frame,
 )
+from data.storage import OhlcvStore, source_timeframe
 from live.order_journal import LedgerEntry, OrderJournal
-from live.runtime_state import EventRecord
+from live.runtime_state import EventRecord, RuntimeStateStore
 from live.timeline_cache import TimelineCacheStore, current_engine_label, load_cached_day
 from live.trade_timeline import (
     DayTimeline,
@@ -264,6 +290,151 @@ def _cached_detection(
     return detection.order_blocks, detection.rendered_order_blocks
 
 
+@st.cache_data(ttl=_SERIES_TTL_SECONDS, show_spinner=False)
+def _cached_open_positions(db_path: str, runtime_state_path: str) -> list[OpenPositionView]:
+    """페이퍼 러너의 오픈 포지션 + 현재가 기준 미실현 손익(WAN-245 메인 탭).
+
+    Health 탭이 쓰는 `build_health_view`는 신선도·펀딩·이벤트까지 통째로 조립하므로
+    차트 아래 표 하나 그리자고 부르기엔 무겁다. 여기서는 러너 상태파일 + 최신 종가만
+    읽는다(짧은 TTL — 러너가 포지션을 열고 닫는 주기를 따라간다).
+    """
+    runtime = RuntimeStateStore(runtime_state_path).load()
+    with OhlcvStore(db_path) as store:
+        return build_position_views(store, runtime.open_positions)
+
+
+# --- 차트(메인) 탭 (WAN-245) -------------------------------------------------
+#
+# 대시보드 첫 화면 = 라이브 차트다(사용자 결정 2026-08-04, 목업 승인 2026-08-11). 분석
+# 탭과 성격이 정반대다: 저기는 적재된 백테스트 실행을 **대조용**으로 되짚는 화면이고,
+# 여기는 **지금 시장이 어떻게 생겼고 내 포지션이 어디에 있나**를 보는 화면이다.
+#
+# 🔑 cold load가 가벼운 이유는 캐시가 아니라 **읽는 양**이다(WAN-202 흡수) — 6년 전량을
+# 탐지·전송하던 분석 탭과 달리 최근 `CHART_BARS`봉만 읽고, 존은 최근 `RECENT_ZONE_LIMIT`개만
+# 그린다. 심볼·TF를 바꿔도 그 크기는 그대로다.
+
+
+def _render_live_chart(settings: Settings) -> None:
+    """차트(메인) 탭 = 차트 + 그 아래 오픈 포지션.
+
+    ⚠️ 두 부분은 **서로 독립**이다 — 고른 (심볼·TF)에 봉이 없어 차트를 못 그려도 오픈
+    포지션 표는 그린다(포지션은 다른 칸에 있을 수 있고, 그게 "지금 상태"를 보러 온
+    사용자가 첫 화면에서 잃으면 안 되는 정보다).
+    """
+    _render_chart_panel(settings)
+    _render_open_positions(settings)
+
+
+def _render_chart_panel(settings: Settings) -> None:
+    db_path = settings.db_path
+    symbols = chart_symbols(settings)
+    timeframes = chart_timeframes(settings)
+
+    head_left, head_right = st.columns([2, 3])
+    symbol = head_left.selectbox("심볼", symbols, key="live_chart_symbol")
+    timeframe = head_right.radio(
+        "타임프레임",
+        timeframes,
+        horizontal=True,
+        format_func=timeframe_label,
+        key="live_chart_timeframe",
+        help=(
+            "채택 좌표의 작업 TF입니다(WAN-182·WAN-252). 2h는 저장된 1h를 무손실 "
+            "리샘플해 만듭니다(WAN-24)."
+        ),
+    )
+
+    # ⚠️ 경계는 **물리 저장 TF**에서 읽는다 — 2h는 `ohlcv` 테이블에 행이 없어(`파생`)
+    # 인덱스 경로가 "없음"을 내고, 그러면 폴백이 전 구간을 통째로 리샘플한다(이 화면이
+    # 피하려는 바로 그 비용).
+    bounds = _cached_bounds(db_path, symbol, source_timeframe(timeframe))
+    if bounds is None:
+        st.warning(
+            f"`{symbol}`의 데이터가 없습니다. 수집기(`python -m data.collector`)가 채우면 "
+            "여기에 차트가 그려집니다."
+        )
+        return
+
+    last_ms = bounds[1]
+    start_ms = chart_start_ms(last_ms, timeframe)
+    df = _cached_ohlcv(db_path, symbol, timeframe, start_ms, last_ms + 1)
+    if df.empty:
+        st.warning("선택한 심볼·타임프레임의 최근 구간에 봉이 없습니다.")
+        return
+
+    # 존은 오더블록 탐지로 그린다(컨플루언스 파라미터와 무관 — WAN-59). 최근 창만 보므로
+    # 6년 탐지(~7초)가 아니라 즉시 끝난다. 채택 탐지 기본값(`OrderBlockParams()`)을 쓴다.
+    ob_params = OrderBlockParams()
+    detection_key = (
+        f"live|{symbol}|{timeframe}|{start_ms}|{last_ms}"
+        f"|{ob_params.model_dump_json()}|{_cached_revision()}"
+    )
+    order_blocks, _rendered = _cached_detection(detection_key, df, ob_params)
+    zones = recent_zones(order_blocks, limit=RECENT_ZONE_LIMIT)
+
+    # 진입 기준선(볼린저 하단)은 채택 기본값으로 그린다 — 표시선(EMA/VWMA)은 채택 규칙이
+    # 쓰지 않으므로 이 화면에서는 아예 싣지 않는다(페이로드의 절반이던 것, WAN-188).
+    conf_params = ConfluenceParams()
+    live_config = build_live_config(
+        df,
+        symbol=symbol,
+        timeframe=timeframe,
+        conf_params=conf_params,
+        band_color=BAND_LINE_COLOR,
+    )
+
+    chart_height = 620
+    st.iframe(
+        build_chart_html(
+            df,
+            zones,
+            None,
+            conf_params=conf_params,
+            visible_lines=frozenset(),
+            theme=_current_chart_theme(),
+            height=chart_height,
+            live=live_config,
+            ohlc_legend_title=legend_title(symbol, timeframe),
+            independent_axis=True,
+            right_pad_ratio=RIGHT_PAD_RATIO,
+        ),
+        height=chart_height,
+    )
+
+    live_note = (
+        "🟢 형성 중인 봉과 볼린저 하단선이 라이브로 갱신됩니다(브라우저가 바이낸스 웹소켓에 "
+        "직접 구독 · 저장하지 않음)."
+        if live_config is not None
+        else f"⚪ {timeframe}은 바이낸스 kline 스트림 인터벌이 아니라 확정봉까지만 그립니다."
+    )
+    st.caption(
+        f"{live_note} 최근 {len(df):,}봉 · 오더블록은 **가장 최근 {RECENT_ZONE_LIMIT}개**만 "
+        "그립니다(회색 = 이미 무효화된 존 — 생성부터 무효화 봉까지만, 컬러 = 지금 살아있는 존). "
+        "휠 = 좌우 확대/축소 · 가격축 드래그 = 세로 확대/축소 · 가격축 더블클릭 = 세로 맞춤."
+    )
+
+
+def _render_open_positions(settings: Settings) -> None:
+    """차트 아래 「현재 오픈 포지션」(WAN-245 완료 기준 3).
+
+    ⚠️ 페이퍼 러너가 쓰는 **서버 DB·상태파일** 기준이다 — 로컬 스냅샷을 보고 있으면
+    "오픈 포지션 없음"이 정상이다(WAN-195).
+    """
+    st.subheader("현재 오픈 포지션")
+    views = _cached_open_positions(settings.db_path, settings.live_runtime_state_path)
+    if not views:
+        st.info(
+            "오픈 포지션이 없습니다. 페이퍼 러너(`python -m live.runner`)가 진입하면 "
+            "여기에 표시됩니다."
+        )
+        return
+    st.dataframe(open_positions_frame(views), use_container_width=True, hide_index=True)
+    st.caption(
+        "칸=(종목,TF)마다 1포지션 · 여러 칸이 한 지갑을 공유하는 레버리지 북입니다"
+        "(WAN-213). 미실현손익은 최신 확정봉 종가 기준입니다."
+    )
+
+
 # --- 분석 탭 ----------------------------------------------------------------
 
 
@@ -302,7 +473,9 @@ def _current_chart_theme() -> str:
 
     `_resolve_chart_theme`를 두 번째 탭에서 다시 부르면 같은 `key`의 사이드바 위젯을
     또 만들게 되어 Streamlit이 중복 키로 죽는다. 탭마다 각자 위젯을 두면 두 탭의 테마가
-    갈라지므로, 선택은 분석 탭이 한 번만 만들고 나머지는 그 상태를 읽는다.
+    갈라지므로, 위젯은 `main()`이 **한 번만** 만들고 나머지는 그 상태를 읽는다
+    (WAN-245 이전에는 분석 탭이 만들었는데, 그 탭이 지연 로딩이라 메인 차트만 보는
+    동안에는 테마 선택이 화면에서 사라졌다).
     """
     return _chart_theme_from_choice(str(st.session_state.get("chart_theme_choice", "자동")))
 
@@ -466,7 +639,9 @@ def _render_analysis(settings: Settings) -> None:
         )
         return
 
-    chart_theme = _resolve_chart_theme()
+    # 테마 위젯은 `main()`이 한 번만 만든다(WAN-245) — 이 탭은 지연 로딩이라 여기서
+    # 만들면 메인 차트가 열려 있는 동안 사이드바에 테마 선택이 아예 없다.
+    chart_theme = _current_chart_theme()
 
     symbols = sorted({symbol for symbol, _ in series})
     with st.sidebar:
@@ -1294,7 +1469,10 @@ def _render_health(settings: Settings, *, run_every: int | None) -> None:
     _auto_refresh_fragment()
 
 
-# --- 페이퍼 성과 탭 (WAN-33) -------------------------------------------------
+# --- 잔고·거래내역 탭 (WAN-33 · WAN-245로 개편) ------------------------------
+#
+# 옛 「페이퍼 성과」 탭이다. WAN-245에서 차트가 메인으로 올라가면서 이 탭은 **지갑**을
+# 보는 자리가 됐다 — 잔고 카드 + 에쿼티 곡선(MDD 구간 강조) + 거래 원장.
 
 
 def _wallet_balance(
@@ -1319,7 +1497,7 @@ def _wallet_balance(
     return initial_equity + sum(pnl for pnl in pnls if pnl is not None)
 
 
-def _render_paper(settings: Settings) -> None:
+def _render_balance(settings: Settings) -> None:
     db_path = settings.db_path
     with PaperTradeStore(db_path) as store:
         series = store.list_series()
@@ -1384,6 +1562,43 @@ def _render_paper(settings: Settings) -> None:
     cols2[2].metric("MDD", f"{overall.max_drawdown_pct:.2f}%")
     cols2[3].metric("총 투입($)", "N/A" if invested is None else f"{invested:,.2f}")
     cols2[4].metric("총 리스크($)", "N/A" if risk_total is None else f"{risk_total:,.2f}")
+
+    # 3줄: 아직 안 닫힌 자리(WAN-245) — 위 지표는 전부 **청산된** 거래의 것이라, 지금
+    # 열려 있는 포지션의 미실현 손익은 어디에도 안 잡힌다.
+    views = _cached_open_positions(settings.db_path, settings.live_runtime_state_path)
+    unrealized = total_unrealized_pct(views)
+    cols3 = st.columns(2)
+    cols3[0].metric("오픈 포지션", f"{len(views)}건")
+    cols3[1].metric(
+        "미실현손익(합)",
+        "—" if unrealized is None else f"{unrealized:+.2f}%",
+        help=(
+            "열려 있는 포지션의 미실현 손익률 **단순 합**입니다(명목 가중이 아니라 "
+            "지갑 대비 수익률이 아닙니다). 최신 확정봉 종가 기준."
+        ),
+    )
+
+    # 에쿼티 곡선 — "언제 얼마였나"와 "어디서 얼마나 깨졌나"(MDD 구간)를 함께 본다.
+    st.subheader("지갑 잔고 곡선")
+    points = wallet_equity_points(records, initial_equity=initial_cap)
+    if not points:
+        st.caption(
+            "달러 실현손익이 없는 옛 %-only 거래(WAN-207 이전)가 섞여 있어 지갑 곡선을 "
+            "재구성할 수 없습니다 — 억지 %-역산은 실제 잔고와 어긋나므로 그리지 않습니다."
+        )
+    else:
+        drawdown = max_drawdown_window(points)
+        st.plotly_chart(
+            build_wallet_equity_chart(points, drawdown, theme=_current_chart_theme()),
+            use_container_width=True,
+        )
+        if drawdown is not None:
+            st.caption(
+                f"🔴 빨간 구간 = 최대 낙폭(MDD −{drawdown.drawdown_pct:.2f}%): "
+                f"{format_kst_zoned(drawdown.peak_time_ms)} 고점 "
+                f"${drawdown.peak_equity:,.2f} → {format_kst_zoned(drawdown.trough_time_ms)} 저점 "
+                f"${drawdown.trough_equity:,.2f}."
+            )
 
     st.subheader("시리즈별 성과")
     # 화면은 한글 컬럼, CSV 내보내기는 데이터 축이라 영문·UTC 그대로(WAN-190/172).
@@ -1549,6 +1764,20 @@ def _render_backtest_tab_lazy(
         )
 
 
+def _render_backtest_reference(settings: Settings) -> None:
+    """「분석」 + 「저장된 거래」를 **한 탭**으로 합친 대조용 화면(WAN-245).
+
+    사용자 결정(2026-08-11): 두 참고·대조 탭을 하나로 합친다 — 성과 카드 + 존이 그려진
+    차트 + 거래 리스트 + 행클릭 차트 점프 + 미체결 셋업을 한 화면에서 본다. 각 섹션의
+    내용은 예전 탭 그대로이고, **바뀐 것은 자리**다(WAN-220 강등 원칙 유지).
+    """
+    st.subheader("분석 — 존 차트 + 적재된 실행 성과")
+    _render_analysis(settings)
+    st.divider()
+    st.subheader("저장된 거래 — 거래 감사")
+    _render_saved_trades(settings)
+
+
 def main() -> None:
     st.set_page_config(page_title="AlphaBlock Dashboard", layout="wide")
     st.title("AlphaBlock — 통합 트레이딩 대시보드")
@@ -1570,40 +1799,48 @@ def main() -> None:
         )
     run_every = refresh_seconds if (auto_refresh and refresh_seconds > 0) else None
 
-    # 라이브-우선 배치(WAN-220): 라이브·운영 탭이 앞, 백테스트(참고·대조)는 뒤로 강등.
-    paper_tab, ledger_tab, timeline_tab, health_tab, analysis_tab, saved_tab = st.tabs(
+    # 차트 테마 위젯은 여기서 **한 번만** 만든다(WAN-245) — 예전에는 분석 탭이 만들었는데
+    # 그 탭이 지연 로딩이라 메인 차트만 보는 동안 테마 선택이 화면에서 사라졌다.
+    _resolve_chart_theme()
+
+    # 차트-우선 배치(WAN-245): 첫 화면이 라이브 차트고, 그 뒤로 지갑 → 운영 → 대조용
+    # 백테스트 순이다. 백테스트(분석·저장된 거래)는 **한 탭으로 합쳐** 맨 뒤에 강등되고
+    # 지연 로딩된다(WAN-220 원칙 유지 — 제거가 아니라 강등).
+    (
+        chart_tab,
+        balance_tab,
+        ledger_tab,
+        timeline_tab,
+        health_tab,
+        reference_tab,
+    ) = st.tabs(
         [
-            "페이퍼 성과",
+            "차트",
+            "잔고·거래내역",
             "진입/미진입 장부",
             "거래 타임라인",
             "운영 상태(Health)",
-            "분석 (참고·대조)",
-            "저장된 거래 (참고·대조)",
+            "분석·거래 (참고·대조)",
         ]
     )
-    with paper_tab:
-        _render_paper(settings)
+    with chart_tab:
+        _render_live_chart(settings)
+    with balance_tab:
+        _render_balance(settings)
     with ledger_tab:
         _render_funnel_ledger(settings)
     with timeline_tab:
         _render_trade_timeline(settings)
     with health_tab:
         _render_health(settings, run_every=run_every)
-    # 백테스트 탭은 지연 로딩한다 — cold start에서 무거운 분석 탭(~10초)을 자동 로드하지
-    # 않아 첫 화면(라이브·운영)이 빠르다(WAN-220 · WAN-202).
-    with analysis_tab:
+    # 백테스트 탭은 지연 로딩한다 — cold start에서 무거운 분석(~10초)을 자동 로드하지
+    # 않아 첫 화면(차트)이 빠르다(WAN-220 · WAN-202).
+    with reference_tab:
         _render_backtest_tab_lazy(
-            state_key="_backtest_analysis_loaded",
-            button_key="load_analysis_tab",
-            load_label="분석 탭 불러오기",
-            render=lambda: _render_analysis(settings),
-        )
-    with saved_tab:
-        _render_backtest_tab_lazy(
-            state_key="_backtest_saved_loaded",
-            button_key="load_saved_tab",
-            load_label="저장된 거래 탭 불러오기",
-            render=lambda: _render_saved_trades(settings),
+            state_key="_backtest_reference_loaded",
+            button_key="load_reference_tab",
+            load_label="분석·거래 탭 불러오기",
+            render=lambda: _render_backtest_reference(settings),
         )
 
 

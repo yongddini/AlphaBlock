@@ -15,6 +15,8 @@ import pandas as pd
 import plotly.graph_objects as go
 
 from backtest.models import BacktestResult
+from common.timefmt import KST
+from dashboard.live_board import DrawdownWindow, EquityPoint
 from strategy.models import OrderBlock, OrderBlockSignal
 
 
@@ -125,4 +127,89 @@ def build_equity_chart(backtest: BacktestResult, *, theme: str = "dark") -> go.F
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
     )
+    return fig
+
+
+def build_wallet_equity_chart(
+    points: Sequence[EquityPoint],
+    drawdown: DrawdownWindow | None,
+    *,
+    theme: str = "dark",
+) -> go.Figure:
+    """페이퍼 지갑(WAN-213 공유 자본) 에쿼티 곡선 + **MDD 구간 강조**(WAN-245).
+
+    사용자 요청(2026-08-11): "고점→저점 낙폭 구간을 빨간색으로 표시 + MDD −N% 라벨" —
+    숫자 카드만으로는 **어디서** 깨졌는지 알 수 없다. `drawdown`이 없으면(낙폭 없음)
+    선만 그린다.
+
+    ⚠️ 백테스트 자본곡선(`build_equity_chart`)과 **다른 자다** — 이쪽은 페이퍼 러너가
+    실제로 청산한 거래의 실현손익 누적이고, 저쪽은 백테스트 결과다. 같은 화면에 두
+    곡선을 섞지 않는다(WAN-220 경고 — 백테스트 수익률을 기대수익처럼 앞세우지 않기).
+    """
+    is_dark = theme != "light"
+    fig = go.Figure()
+    if not points:
+        fig.update_layout(template="plotly_dark" if is_dark else "plotly_white", height=320)
+        return fig
+
+    # 축 라벨은 KST다(WAN-172) — 저장·계산은 UTC epoch ms 그대로이고 **표시하는 순간에만**
+    # 시간대를 바꿔 읽는다(raw ms를 밀면 정렬·조회가 다 깨진다).
+    times = [pd.Timestamp(p.time_ms, unit="ms", tz="UTC").tz_convert(KST) for p in points]
+    equities = [p.equity for p in points]
+    fig.add_trace(
+        go.Scatter(
+            x=times,
+            y=equities,
+            mode="lines",
+            name="지갑 잔고",
+            line={"color": "#42a5f5" if is_dark else "#1e88e5", "width": 2},
+        )
+    )
+
+    if drawdown is not None:
+        peak_ts = pd.Timestamp(drawdown.peak_time_ms, unit="ms", tz="UTC").tz_convert(KST)
+        trough_ts = pd.Timestamp(drawdown.trough_time_ms, unit="ms", tz="UTC").tz_convert(KST)
+        inside = [
+            (t, e)
+            for t, e, p in zip(times, equities, points, strict=True)
+            if drawdown.peak_time_ms <= p.time_ms <= drawdown.trough_time_ms
+        ]
+        if inside:
+            fig.add_trace(
+                go.Scatter(
+                    x=[t for t, _ in inside],
+                    y=[e for _, e in inside],
+                    mode="lines",
+                    name="MDD 구간",
+                    line={"color": "#ef5350", "width": 3},
+                )
+            )
+        fig.add_vrect(
+            x0=peak_ts,
+            x1=trough_ts,
+            fillcolor="rgba(239, 83, 80, 0.14)",
+            line_width=0,
+            layer="below",
+        )
+        fig.add_annotation(
+            x=trough_ts,
+            y=drawdown.trough_equity,
+            text=f"MDD −{drawdown.drawdown_pct:.2f}%",
+            showarrow=True,
+            arrowhead=2,
+            arrowcolor="#ef5350",
+            font={"color": "#ef5350"},
+            ax=0,
+            ay=30,
+        )
+
+    fig.update_layout(
+        title="지갑 잔고(에쿼티) 곡선 · KST",
+        template="plotly_dark" if is_dark else "plotly_white",
+        height=320,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        showlegend=False,
+    )
+    fig.update_xaxes(title_text="청산 시각(KST)")
     return fig
