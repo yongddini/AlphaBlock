@@ -512,26 +512,45 @@ def build_hedge_rows(
     *,
     fill: str = "baseline",
 ) -> list[HedgeRow]:
-    """전체 스코프(all)의 구간별 하락장 헤지 분해. 곡선 재계산이 필요해 별도로 낸다."""
+    """스코프(전체 `all` + 각 TF)의 구간별 하락장 헤지 분해. 곡선 재계산이 필요해 별도로 낸다.
+
+    스코프는 `build_book_scope_rows`와 **같은 규칙**으로 정한다 — 여러 TF면 `all` + 각 TF,
+    단일 TF면 그 TF뿐(`all` 없음). 이렇게 해야 `--tf 15m --append`가 15m 곡선을 `all`
+    라벨로 조용히 덮어쓰지 못한다(WAN-283 PM 지적: 라벨은 all인데 실제론 15m인 오염 —
+    WAN-91/95/112/123/159 부류). `all`은 book.csv의 `all`과 **항상 같은 TF 집합**을 가리킨다.
+    """
+    timeframes = sorted({c.timeframe for c in long_only_cells}, key=timeframe_to_ms)
+    scopes: list[str] = ["all", *timeframes] if len(timeframes) > 1 else list(timeframes)
     rows: list[HedgeRow] = []
-    for segment in SEGMENTS:
-        lo_curve = _book_equity_curve(long_only_cells, segment)
-        ls_curve = _book_equity_curve(long_short_cells, segment)
-        lo_mdd, peak_t, trough_t = _max_drawdown_window(lo_curve)
-        ls_mdd, _lp, _lt = _max_drawdown_window(ls_curve)
-        rows.append(
-            HedgeRow(
-                scope="all",
-                fill=fill,
-                segment=segment,
-                long_only_mdd=lo_mdd,
-                long_short_mdd=ls_mdd,
-                window_start=peak_t,
-                window_end=trough_t,
-                long_only_window_return=_window_return(lo_curve, peak_t, trough_t),
-                long_short_window_return=_window_return(ls_curve, peak_t, trough_t),
-            )
+    for scope in scopes:
+        lo_cells = (
+            long_only_cells
+            if scope == "all"
+            else [c for c in long_only_cells if c.timeframe == scope]
         )
+        ls_cells = (
+            long_short_cells
+            if scope == "all"
+            else [c for c in long_short_cells if c.timeframe == scope]
+        )
+        for segment in SEGMENTS:
+            lo_curve = _book_equity_curve(lo_cells, segment)
+            ls_curve = _book_equity_curve(ls_cells, segment)
+            lo_mdd, peak_t, trough_t = _max_drawdown_window(lo_curve)
+            ls_mdd, _lp, _lt = _max_drawdown_window(ls_curve)
+            rows.append(
+                HedgeRow(
+                    scope=scope,
+                    fill=fill,
+                    segment=segment,
+                    long_only_mdd=lo_mdd,
+                    long_short_mdd=ls_mdd,
+                    window_start=peak_t,
+                    window_end=trough_t,
+                    long_only_window_return=_window_return(lo_curve, peak_t, trough_t),
+                    long_short_window_return=_window_return(ls_curve, peak_t, trough_t),
+                )
+            )
     return rows
 
 
@@ -720,16 +739,27 @@ def merge_diag(existing: Sequence[ShortDiagRow], new: Sequence[ShortDiagRow]) ->
 
 
 def merge_hedge(existing: Sequence[HedgeRow], new: Sequence[HedgeRow]) -> list[HedgeRow]:
-    # 헤지 행은 전체 스코프(all)뿐이라 같은 렌즈는 통째로 교체(새 전 구간 곡선으로 재계산)하고
-    # 다른 렌즈(예: baseline)는 보존한다.
-    new_fills = {r.fill for r in new}
-    kept = [r for r in existing if r.fill not in new_fills]
+    """(스코프, 렌즈) 키로 병합 — book/diag과 같은 규칙(WAN-283 PM 교정).
+
+    옛 구현은 렌즈만 키로 봐서 `--tf 15m --append`가 만든 `scope="all"` 15m 행이 진짜
+    `all`(1h·2h·4h) 행을 덮었다(라벨은 all인데 15m 숫자인 조용한 오염). 스코프를 키에 넣으면
+    15m은 이제 `scope="15m"`으로만 들어가 `all`을 건드리지 않는다(build_hedge_rows가 단일 TF에
+    `all`을 만들지 않으므로). 같은 (스코프, 렌즈)는 새 전 구간 곡선으로 통째 교체한다.
+    """
+    new_keys = {(r.scope, r.fill) for r in new}
+    kept = [r for r in existing if (r.scope, r.fill) not in new_keys]
     return [*kept, *new]
 
 
 # --------------------------------------------------------------------------- #
 # 렌더
 # --------------------------------------------------------------------------- #
+
+
+def _scope_sort_key(scope: str) -> int:
+    """스코프 정렬 키 — `all`은 맨 앞(−1), 나머지는 TF 크기순. `timeframe_to_ms('all')`은
+    ValueError를 내므로 여기서 가른다(헤지/북 스코프에 `all`이 섞여 있다)."""
+    return -1 if scope == "all" else timeframe_to_ms(scope)
 
 
 def _pct(value: float) -> str:
@@ -842,18 +872,21 @@ def _per_symbol_short_table(diag_rows: Sequence[ShortDiagRow], segment: str) -> 
     return lines
 
 
-def _hedge_table(hedge_rows: Sequence[HedgeRow]) -> list[str]:
-    """하락장 헤지 분해 — 렌즈를 열로 병기(WAN-283). 구간 안에서 baseline→pen_5bp."""
-    lenses = [lens for lens in LENS_ORDER if any(h.fill == lens for h in hedge_rows)] or [
-        "baseline"
-    ]
+def _hedge_table(hedge_rows: Sequence[HedgeRow], scope: str) -> list[str]:
+    """하락장 헤지 분해 — 렌즈를 열로 병기(WAN-283). 구간 안에서 baseline→pen_5bp.
+
+    `scope`로 골라내므로 `all`(= book.csv의 all)과 각 TF 헤지가 섞이지 않는다(WAN-283 PM
+    교정: `all` 라벨로 15m 숫자를 쓰지 말 것).
+    """
+    scoped = [h for h in hedge_rows if h.scope == scope]
+    lenses = [lens for lens in LENS_ORDER if any(h.fill == lens for h in scoped)] or ["baseline"]
     lines = [
         "| 구간 | 렌즈 | 롱-온리 MDD | 롱+숏 MDD | 롱-온리 창수익 | 롱+숏 창수익 |",
         "| -- | -- | --: | --: | --: | --: |",
     ]
     for segment in SEGMENTS:
         for lens in lenses:
-            r = next((h for h in hedge_rows if h.segment == segment and h.fill == lens), None)
+            r = next((h for h in scoped if h.segment == segment and h.fill == lens), None)
             if r is None:
                 continue
             lines.append(
@@ -961,14 +994,34 @@ def build_summary_markdown(
         table = _diag_table(diag_rows, tf, SEGMENT_OOS_WARM)
         if len(table) > 2:
             lines += [f"### {tf}", "", *table, ""]
+    hedge_scopes = sorted({h.scope for h in hedge_rows}, key=_scope_sort_key)
+    hedge_tfs = [s for s in hedge_scopes if s != "all"]
+    hedge_missing = [tf for tf in timeframes if tf not in hedge_scopes]
     lines += [
-        "## 4. 하락장 헤지 분해 (완료기준 4) — 전체 북(all)",
+        f"## 4. 하락장 헤지 분해 (완료기준 4) — 전체 북({main_scope})",
         "",
         "롱-온리 북의 **최악 낙폭 창**을 잡고, 그 같은 시각 창에서 롱+숏 북이 얼마나 빠졌는지 "
         "나란히 본다 — 숏이 헤지가 되면 롱+숏의 창수익이 롱-온리보다 덜 마이너스다(또는 플러스).",
         "",
-        *_hedge_table(hedge_rows),
+        f"⚠️ **`{main_scope}` 스코프는 book.csv의 같은 스코프와 동일한 TF 집합**이다(헤지 CSV의 "
+        "스코프 라벨이 북과 항상 일치한다 — WAN-283 PM 교정, 회귀 테스트로 고정). TF별 헤지는 "
+        "아래에 **자기 TF 스코프**로 병기한다.",
         "",
+        *_hedge_table(hedge_rows, main_scope),
+        "",
+    ]
+    if main_scope == "all" and hedge_tfs:
+        lines += ["### TF 스코프별 헤지", ""]
+        for tf in hedge_tfs:
+            lines += [f"#### {tf}", "", *_hedge_table(hedge_rows, tf), ""]
+    if hedge_missing:
+        lines += [
+            f"⚠️ **{', '.join(hedge_missing)} 헤지 미병기** — 헤지 분해는 곡선 재계산이 필요해 "
+            "그 TF의 셀을 다시 돌려야 한다(15m은 셀당 무거움 · WAN-203). 그 TF의 북 비교(§2)와 "
+            "격리 숏 진단(§3)은 병기돼 판정에 쓰인다. `all`은 이 TF를 포함하지 않는다.",
+            "",
+        ]
+    lines += [
         "### 종목별 숏 기여 (oos_warm · 전 TF 합)",
         "",
         "헤지가 특정 종목에 쏠리는지. ⚠️ 순%p는 복리 전 격리 값이라 방향만 읽는다.",

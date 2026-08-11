@@ -31,13 +31,17 @@ from backtest.wan282_resistance_short_mirror import (
     HedgeRow,
     ShortDiagRow,
     _book_table,
+    _hedge_table,
     _lenses_present,
     _max_drawdown_window,
     _net_r,
+    _scope_sort_key,
     _short_candidates,
     _window_return,
     book_from_csv,
     book_to_frame,
+    build_hedge_rows,
+    build_summary_markdown,
     describe_engine,
     diag_from_csv,
     diag_to_frame,
@@ -234,10 +238,16 @@ def _cand(side: PositionSide, *, trigger_time: int, reason: ExitReason) -> _Cand
     )
 
 
-def _payload(base: list[_Candidate], reentry: list[_Candidate], boundary: int) -> CellPayload:
+def _payload(
+    base: list[_Candidate],
+    reentry: list[_Candidate],
+    boundary: int,
+    *,
+    timeframe: str = "1h",
+) -> CellPayload:
     return CellPayload(
         symbol="BTC/USDT",
-        timeframe="1h",
+        timeframe=timeframe,
         boundary_ms=boundary,
         candidates={"full": tuple(base), "is": (), "oos": ()},
         funding={"full": (), "is": (), "oos": ()},
@@ -522,6 +532,109 @@ def test_merge_hedge_preserves_other_lens() -> None:
     pen = base.model_copy(update={"fill": "pen_5bp"})
     merged = merge_hedge([base], [pen])
     assert {r.fill for r in merged} == {"baseline", "pen_5bp"}
+
+
+def _hedge(scope: str, fill: str, *, lo_mdd: float, ls_mdd: float) -> HedgeRow:
+    return HedgeRow(
+        scope=scope,
+        fill=fill,
+        segment="oos_warm",
+        long_only_mdd=lo_mdd,
+        long_short_mdd=ls_mdd,
+        window_start=1,
+        window_end=2,
+        long_only_window_return=-lo_mdd,
+        long_short_window_return=-ls_mdd,
+    )
+
+
+def test_build_hedge_rows_scopes_by_timeframe_set() -> None:
+    """멀티 TF → `all` + 각 TF · 단일 TF → 그 TF뿐(`all` 없음).
+
+    WAN-283 PM 교정의 핵심: `build_hedge_rows`가 받은 TF 집합으로 스코프를 정해야
+    `--tf 15m --append`가 15m 곡선을 `all` 라벨로 만들지 않는다(book.csv의 `all`과 같은 규칙).
+    """
+    base = [_cand(PositionSide.LONG, trigger_time=10, reason=ExitReason.TAKE_PROFIT)]
+    c1h = _payload(base, [], boundary=0, timeframe="1h")
+    c4h = _payload(base, [], boundary=0, timeframe="4h")
+
+    multi = build_hedge_rows([c1h, c4h], [c1h, c4h], fill="baseline")
+    assert {r.scope for r in multi} == {"all", "1h", "4h"}
+
+    single = build_hedge_rows([c1h], [c1h], fill="baseline")
+    assert {r.scope for r in single} == {"1h"}  # 단일 TF는 `all`을 만들지 않는다
+
+
+def test_append_single_tf_hedge_does_not_overwrite_all() -> None:
+    """단일 TF(15m) 헤지 append가 진짜 `all` 헤지 행을 덮지 않는다(WAN-283 PM 회귀 고정).
+
+    옛 버그: 15m append가 `scope="all"` 15m 행을 만들고 merge가 렌즈만 키로 봐서 진짜 `all`
+    (1h·2h·4h)을 15m 숫자로 덮었다(라벨은 all인데 15m). 이제 15m은 `scope="15m"`으로만 들어간다.
+    """
+    all_rows = [
+        _hedge("all", "baseline", lo_mdd=0.1559, ls_mdd=0.2377),
+        _hedge("all", "pen_5bp", lo_mdd=0.1572, ls_mdd=0.2265),
+    ]
+    # `--tf 15m --append`가 내는 행은 이제 scope="15m"이다(all 아님).
+    tf15 = [
+        _hedge("15m", "baseline", lo_mdd=0.1508, ls_mdd=0.1798),
+        _hedge("15m", "pen_5bp", lo_mdd=0.1682, ls_mdd=0.2651),
+    ]
+    merged = merge_hedge(all_rows, tf15)
+
+    all_baseline = next(r for r in merged if r.scope == "all" and r.fill == "baseline")
+    assert all_baseline.long_short_mdd == 0.2377  # 15m(0.1798)으로 덮이지 않음
+    all_pen = next(r for r in merged if r.scope == "all" and r.fill == "pen_5bp")
+    assert all_pen.long_short_mdd == 0.2265
+    assert {(r.scope, r.fill) for r in merged} == {
+        ("all", "baseline"),
+        ("all", "pen_5bp"),
+        ("15m", "baseline"),
+        ("15m", "pen_5bp"),
+    }
+
+
+def test_hedge_table_filters_by_scope() -> None:
+    """`_hedge_table`이 스코프로 골라내 `all`과 TF 헤지가 섞이지 않는다(WAN-283 PM)."""
+    rows = [
+        _hedge("all", "baseline", lo_mdd=0.1559, ls_mdd=0.2377),
+        _hedge("15m", "baseline", lo_mdd=0.1508, ls_mdd=0.1798),
+    ]
+    all_table = "\n".join(_hedge_table(rows, "all"))
+    assert "23.77%" in all_table and "17.98%" not in all_table
+    tf_table = "\n".join(_hedge_table(rows, "15m"))
+    assert "17.98%" in tf_table and "23.77%" not in tf_table
+
+
+def test_scope_sort_key_handles_all() -> None:
+    """`all`은 맨 앞(−1)으로 정렬되고 TF는 크기순 — `timeframe_to_ms('all')` ValueError 회피."""
+    assert _scope_sort_key("all") == -1
+    assert sorted(["4h", "all", "1h", "15m"], key=_scope_sort_key) == ["all", "15m", "1h", "4h"]
+
+
+def test_summary_renders_with_all_and_tf_hedge_scopes() -> None:
+    """헤지 행에 `all`과 TF 스코프가 섞여도 요약이 예외 없이 렌더된다(WAN-283 회귀).
+
+    §4가 스코프를 `timeframe_to_ms`로 정렬하면서 `all`에 걸려 ValueError를 내던 버그를 고정한다.
+    """
+    book_rows = [
+        _book_row(ARM_LONG_ONLY, mdd=0.1559, rm=5.0),
+        _book_row(ARM_LONG_SHORT, mdd=0.2377, rm=7.0),
+    ]
+    diag_rows = [_diag("baseline")]
+    hedge_rows = [
+        _hedge("all", "baseline", lo_mdd=0.1559, ls_mdd=0.2377),
+        _hedge("1h", "baseline", lo_mdd=0.1073, ls_mdd=0.1484),
+    ]
+    md = build_summary_markdown(
+        book_rows,
+        diag_rows,
+        hedge_rows,
+        book_csv=Path("book.csv"),
+        diag_csv=Path("diag.csv"),
+    )
+    assert "23.77%" in md  # all 롱+숏 MDD가 §4에 렌더됨
+    assert "TF 스코프별 헤지" in md
 
 
 def test_old_csv_without_fill_column_loads_as_baseline(tmp_path: Path) -> None:
