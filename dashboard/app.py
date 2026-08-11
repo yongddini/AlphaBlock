@@ -47,7 +47,7 @@ import streamlit as st
 from backtest.models import BacktestConfig, BacktestMetrics, BacktestResult
 from backtest.report import COL_EXIT_REASON, trades_to_dataframe, trades_to_display_frame
 from backtest.trade_store import BacktestRunStore, RunFingerprint, RunSummary, engine_revision
-from common.timefmt import KST, format_kst_zoned
+from common.timefmt import KST, format_kst, format_kst_zoned
 from config import get_settings
 from config.settings import Settings
 from dashboard.charts import (
@@ -73,6 +73,7 @@ from dashboard.health import (
     HealthLevel,
     RunnerStatus,
     SeriesFreshness,
+    compute_runner_status,
 )
 from dashboard.health_data import HealthView, OpenPositionView, build_health_view, latest_close
 from dashboard.lightweight_chart import BAND_LINE_COLOR, build_chart_html
@@ -118,7 +119,7 @@ from dashboard.trade_timeline_view import (
 )
 from data.storage import OhlcvStore, source_timeframe
 from live.order_journal import LedgerEntry, OrderJournal
-from live.runtime_state import EventRecord
+from live.runtime_state import EventRecord, RuntimeStateStore
 from live.timeline_cache import TimelineCacheStore, current_engine_label, load_cached_day
 from live.trade_timeline import (
     DayTimeline,
@@ -324,6 +325,40 @@ def _cached_open_positions(db_path: str) -> list[OpenPositionRow]:
 # 🔑 cold load가 가벼운 이유는 캐시가 아니라 **읽는 양**이다(WAN-202 흡수) — 6년 전량을
 # 탐지·전송하던 분석 탭과 달리 최근 `CHART_BARS`봉만 읽고, 존은 최근 `RECENT_ZONE_LIMIT`개만
 # 그린다. 심볼·TF를 바꿔도 그 크기는 그대로다.
+
+
+@st.cache_data(ttl=_SERIES_TTL_SECONDS, show_spinner=False)
+def _cached_runner_status(runtime_state_path: str, poll_seconds: int, stale: float) -> RunnerStatus:
+    """상단 상태 pill용 러너 생존 판정 — 상태파일 한 번만 읽는다.
+
+    Health 탭과 **같은 판정 함수**(`compute_runner_status`)를 쓴다 — 두 벌로 갈라지면
+    같은 러너가 위에서는 생존, 아래에서는 멈춤으로 보인다.
+    """
+    runtime = RuntimeStateStore(runtime_state_path).load()
+    return compute_runner_status(
+        last_poll_ms=runtime.updated_at,
+        last_notification_ms=runtime.last_notification_at,
+        now_ms=int(time.time() * 1000),
+        poll_interval_seconds=poll_seconds,
+        stale_multiplier=stale,
+    )
+
+
+def _render_status_pill(settings: Settings) -> None:
+    """목업 상단 오른쪽의 상태 pill — `● 페이퍼 러너 · 틱 피드 · KST hh:mm`.
+
+    ⚠️ 점 색은 **실제 판정**에서 온다(Health 탭과 같은 함수) — 늘 초록인 장식 배지를
+    달면 러너가 죽어도 화면이 멀쩡해 보인다.
+    """
+    status = _cached_runner_status(
+        settings.live_runtime_state_path,
+        settings.live_poll_interval_seconds,
+        settings.health_stale_multiplier,
+    )
+    dot = {HealthLevel.OK: "🟢", HealthLevel.UNKNOWN: "⚪"}.get(status.level, "🔴")
+    feed = "틱 피드" if settings.live_tick_feed_enabled else "1분봉 폴링"
+    last = "폴링 기록 없음" if status.last_poll_ms is None else format_kst(status.last_poll_ms)
+    st.caption(f"{dot} 페이퍼 러너 · {feed} · 마지막 폴링 {last} KST")
 
 
 def _zone_swatch(fill: str, line: str, *, left: int = 0) -> str:
@@ -1834,6 +1869,7 @@ def main() -> None:
     st.title("AlphaBlock — 통합 트레이딩 대시보드")
 
     settings = get_settings()
+    _render_status_pill(settings)
 
     # 자동 새로고침 컨트롤(WAN-48). 운영 상태 탭만 주기적으로 스스로 갱신되게 한다.
     # 기본 주기는 ALPHABLOCK_DASHBOARD_REFRESH_SECONDS(0이면 기본 꺼짐). 토글로 끌 수 있다.
@@ -1867,11 +1903,11 @@ def main() -> None:
     ) = st.tabs(
         [
             "차트",
-            "잔고·거래내역",
+            "잔고 · 거래내역",
             "진입/미진입 장부",
             "거래 타임라인",
-            "운영 상태(Health)",
-            "분석·거래 (참고·대조)",
+            "Health",
+            "분석 · 거래 (참고·대조)",
         ]
     )
     with chart_tab:

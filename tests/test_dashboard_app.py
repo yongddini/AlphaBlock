@@ -570,3 +570,41 @@ def test_balance_tab_shows_the_wallet_equity_curve_section(seeded_db_path: str) 
     # 청산사유 칩(전체/익절만/손절만)이 목업대로 세 갈래다.
     reason_radio = next(r for r in at.radio if r.label == "청산사유")
     assert list(reason_radio.options) == ["전체", "익절만", "손절만"]
+
+
+def test_status_pill_reflects_the_real_runner_state_not_a_decoration(
+    seeded_db_path: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """상단 pill(목업)의 점 색은 **실제 판정**에서 온다 — 늘 초록인 장식이면 러너가
+    죽어도 화면이 멀쩡해 보인다. 상태파일이 없으면 「폴링 기록 없음」이다."""
+    monkeypatch.setenv("ALPHABLOCK_LIVE_RUNTIME_STATE_PATH", str(tmp_path / "state.json"))
+    get_settings.cache_clear()
+    at = AppTest.from_file("dashboard/app.py")
+    at.run(timeout=60)
+
+    assert not at.exception
+    pill = next(c.value for c in at.caption if "페이퍼 러너" in c.value)
+    assert "폴링 기록 없음" in pill  # 러너를 안 돌린 환경
+    assert not pill.startswith("🟢")  # 죽은/모르는 러너를 초록으로 칠하지 않는다
+    assert "틱 피드" in pill  # WAN-256 기본값(live_tick_feed_enabled=True)
+
+
+def test_tab_labels_follow_the_mockup(seeded_db_path: str) -> None:
+    """탭 이름이 목업 표기와 같다(차트 · 잔고 · 거래내역 · Health · 분석 · 거래).
+
+    ⚠️ 목업은 **4탭**인데 화면은 6탭이다 — 「진입/미진입 장부」(WAN-217/219)와 「거래
+    타임라인」(WAN-234)은 사양이 제거를 말한 적이 없어 뒤에 남겨 뒀다(개발자 판단).
+    이 테스트는 그 상태를 **명시적으로** 고정한다 — 지우기로 정해지면 여기가 먼저 깨진다.
+    """
+    at = AppTest.from_file("dashboard/app.py")
+    at.run(timeout=60)
+
+    assert not at.exception
+    assert [t.label for t in at.tabs] == [
+        "차트",
+        "잔고 · 거래내역",
+        "진입/미진입 장부",
+        "거래 타임라인",
+        "Health",
+        "분석 · 거래 (참고·대조)",
+    ]
