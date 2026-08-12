@@ -48,6 +48,7 @@ from backtest.zone_limit_backtest import (
     run_zone_limit_backtest_verbose,
     run_zone_limit_portfolio_backtest,
 )
+from config.settings import get_settings
 from data.funding import FundingRateStore
 from data.models import FundingRate
 from data.storage import OhlcvStore
@@ -124,6 +125,18 @@ LEGACY_TIMEFRAMES: tuple[str, ...] = ("1h",)
 LEGACY_YEARS: float = 3.0
 DB_PATH = "data/ohlcv.db"
 CACHE_DIR = "data/cache"
+
+
+def default_jobs() -> int:
+    """`--jobs`를 명시하지 않았을 때 쓸 병렬 워커 수(WAN-294).
+
+    `Settings.backtest_jobs`(env `ALPHABLOCK_BACKTEST_JOBS`, 기본 4)를 읽는다. 리터럴을
+    박지 않는 이유는 코어 수가 다른 리눅스 서버(WAN-174)에서 환경변수로 덮기 위해서다.
+    `--jobs`는 결과를 안 바꾸는 순수 성능 노브이므로(WAN-121: 직렬=병렬 비트 동일) 이
+    기본값을 CLI·리포트가 공유해도 측정값·재현성은 불변이다.
+    """
+    return get_settings().backtest_jobs
+
 
 _YEAR_MS = int(365.25 * 24 * 60 * 60 * 1000)
 

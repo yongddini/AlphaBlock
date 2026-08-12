@@ -164,6 +164,16 @@ class Settings(BaseSettings):
     # 보고됨), "error"=중단. 기본은 기존 리포트들을 깨지 않도록 "zero".
     backtest_funding_missing_policy: Literal["zero", "error"] = Field(default="zero")
 
+    # 백테스트 병렬 워커 기본 수(WAN-294). `backtest.run`·리포트 모듈이 `--jobs`를
+    # 명시하지 않았을 때 이 값으로 fan-out한다(`harness.default_jobs`가 읽는다). 기본 4는
+    # 애플 실리콘 M1의 성능 코어 수 — `--jobs auto`(=os.cpu_count())는 M1에서 효율 코어까지
+    # 8을 세 오버서브되므로(WAN-121 각주), 실효 상한인 성능 코어 수를 기본으로 고정한다.
+    # ⚠️ 리터럴이 아니라 설정값이라 코어 수가 다른 리눅스 서버(WAN-174)에선
+    # `ALPHABLOCK_BACKTEST_JOBS`로 덮는다. 명시적 `--jobs N`/`--jobs auto`는 이 값을 이긴다.
+    # `--jobs`는 결과를 안 바꾸는 순수 성능 노브라(WAN-121: 직렬=병렬 비트 동일) 이 기본값
+    # 변경도 측정값·재현성을 흔들지 않는다.
+    backtest_jobs: int = Field(default=4, ge=1)
+
     # 전략 규칙(WAN-23): 진입=오더블록+RSI, 익절=EMA/VWMA 선 도달, 손절=오더블록 무효화.
     # 기본값은 트레이딩뷰 설정과 일치. 개별 필드는 ALPHABLOCK_CONFLUENCE__<필드명>로 덮어쓴다.
     # 예: ALPHABLOCK_CONFLUENCE__RSI_OVERSOLD=25
