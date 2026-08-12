@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 import pandas as pd
 
@@ -59,6 +60,43 @@ def chart_window(row: TimelineRow) -> tuple[int, int] | None:
     if row.exit_ms is not None and row.exit_ms > focus:
         return focus, row.exit_ms
     return focus - _DEFAULT_HALF_WINDOW_MS, focus + _DEFAULT_HALF_WINDOW_MS
+
+
+@dataclass(frozen=True)
+class BacktestDaySummary:
+    """채택 9종목×4TF 하루 백테스트 실행의 요약 (WAN-290 완료 기준 3).
+
+    백테스트 타임라인 행은 전부 청산된 거래(`cell_timeline_trades`가 실현 거래만 낸다)라
+    「진입 건수 = 청산 건수 = 거래 수」다. 라이브 활동과 무관하게 그날 채택 엔진이 몇 개
+    셀에서 몇 건을 매매했는지를 한눈에 준다.
+    """
+
+    trades: int
+    """그날 백테스트 거래(청산) 총 건수."""
+    cells_with_trades: int
+    """거래가 1건 이상 난 (심볼, TF) 셀 수 — 표본이 어디에 몰렸나."""
+    wins: int
+    """손익률 > 0 건수(손익률이 있는 행만)."""
+    losses: int
+    """손익률 < 0 건수."""
+
+
+def backtest_day_summary(rows: Sequence[TimelineRow]) -> BacktestDaySummary:
+    """백테스트 타임라인 행들의 그날 요약 — 순수 집계(화면 없이 테스트된다).
+
+    `SOURCE_BACKTEST` 행만 센다(라이브 병기 행이 섞여 들어와도 백테 요약은 백테만 본다).
+    손익률이 `None`인 행(미청산 등)은 승/패 어디에도 안 센다 — 빈 칸을 지어내지 않는다.
+    """
+    bt = [r for r in rows if r.source == SOURCE_BACKTEST]
+    cells = {(r.symbol, r.timeframe) for r in bt}
+    wins = sum(1 for r in bt if r.pnl_pct is not None and r.pnl_pct > 0)
+    losses = sum(1 for r in bt if r.pnl_pct is not None and r.pnl_pct < 0)
+    return BacktestDaySummary(
+        trades=len(bt),
+        cells_with_trades=len(cells),
+        wins=wins,
+        losses=losses,
+    )
 
 
 def backtest_only_note(timeline: DayTimeline) -> str | None:
