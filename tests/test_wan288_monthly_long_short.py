@@ -332,12 +332,17 @@ def test_merge_book_overwrites_by_key() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_committed_long_only_1h_reproduces_wan180_monthly() -> None:
-    """완료기준 4 — 커밋된 롱-온리 1h 북 월별이 `wan180_monthly_returns.csv`와 비트 일치.
+def test_committed_long_only_1h_matches_wan180_except_new_symbol_funding() -> None:
+    """완료기준 2 — 커밋된 롱-온리 1h 북이 `wan180_monthly_returns.csv`와 **거래는 비트 일치**하되
+    신규 3종목 실 펀딩만큼 월수익률이 미세하게 다르다(WAN-291 대리 해제의 증거).
 
     두 CSV를 읽어 대조한다(엔진 재실행 없음). 롱-온리 팔은 `short_enabled=False`(= WAN-180
-    경로)와 같아야 하므로 (scope=1h, cap_only, 5.0, oos_warm) 셀이 겹친다. 산출물을 다른 북
-    구성으로 재생성하면(예: band 재진입) 이 검산이 깨져 조용한 회귀를 막는다.
+    경로)와 같은 거래 집합을 봐야 하므로 (scope=1h, cap_only, 5.0, oos_warm) 셀이 겹친다.
+    WAN-180은 신규 3종목(DOGE·LINK·LTC)에 **BTC 대리 펀딩**을 씌웠고, WAN-292 백필 후
+    WAN-291은 **실 펀딩**을 쓴다 — 그래서 `num_exits`(진입·청산 구조)는 비트 일치(펀딩은
+    거래를 더하거나 빼지 않는다)하지만, `monthly_return`·`equity_end`는 신규 3종목 롱의 실
+    펀딩 비용만큼(작게) 갈린다. 다른 북 구성으로 재생성하면(예: band 재진입) 거래 수부터
+    깨지므로 조용한 회귀를 여전히 잡는다.
     """
     import pandas as pd
 
@@ -370,9 +375,16 @@ def test_committed_long_only_1h_reproduces_wan180_monthly() -> None:
     assert len(ref) == len(mine) > 0
     merged = ref.merge(mine, on="month", suffixes=("_180", "_288"))
     assert len(merged) == len(ref)
-    assert (merged.monthly_return_180 - merged.monthly_return_288).abs().max() < 1e-9
-    assert (merged.equity_end_180 - merged.equity_end_288).abs().max() < 1e-6
+    # 거래 구조는 비트 일치 — 펀딩은 진입·청산을 더하거나 빼지 않는다.
     assert (merged.num_exits_180 - merged.num_exits_288).abs().max() == 0
+    # 월수익률은 신규 3종목 실 펀딩만큼 달라지되(대리 해제의 증거) 그 크기는 펀딩 규모로 작다.
+    return_diff = (merged.monthly_return_180 - merged.monthly_return_288).abs()
+    equity_rel_diff = (
+        merged.equity_end_180 - merged.equity_end_288
+    ).abs() / merged.equity_end_180.abs()
+    assert (return_diff > 1e-9).any(), "실 펀딩 재산출인데 wan180과 완전히 같다 — 대리가 안 꺼졌다"
+    assert return_diff.max() < 1e-2, "차이가 펀딩 규모를 넘는다 — 거래/사이징이 바뀌었을 수 있다"
+    assert equity_rel_diff.max() < 1e-2, "equity 상대차가 펀딩 규모를 넘는다"
 
 
 def test_summary_renders_key_sections() -> None:

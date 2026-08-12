@@ -55,8 +55,8 @@
 ## 재현
 
 ```
-uv run python -m backtest.wan288_monthly_long_short --tf 4h,1h,2h --jobs 6
-uv run python -m backtest.wan288_monthly_long_short --tf 15m --append --jobs 9   # 무거움
+# WAN-291: WAN-292 펀딩 백필 반영 후 4TF 전체 실 펀딩 재산출(--append 아님). 15m·6년은 무겁다.
+uv run python -m backtest.wan288_monthly_long_short --tf 15m,1h,2h,4h --jobs 4
 uv run python -m backtest.wan288_monthly_long_short --from-csv                   # 요약만
 ```
 """
@@ -92,6 +92,7 @@ from backtest.zone_limit_backtest import (
     build_result_from_trades,
     sequence_with_candidates,
 )
+from data.funding import FundingRateStore
 
 REPORTS_DIR = Path("backtest/reports")
 DEFAULT_CELL_CSV = REPORTS_DIR / "wan288_monthly_by_cell.csv"
@@ -121,10 +122,9 @@ DIR_SHORT = "short"
 #: WAN-180 채택 롱 북 OOS 월별에서 빨간 달(하락) 세 개 — 숏 수익이 이 근처에 몰리는지가 핵심.
 LONG_RED_MONTHS: frozenset[str] = frozenset({"2024-09", "2025-11", "2026-07"})
 
-#: 신규 3종목 — 이 창에서 펀딩 0행이라 순수익이 낙관적(WAN-178 백필 전, †로 표시).
-FUNDING_GAP_SYMBOLS: frozenset[str] = frozenset(
-    harness.normalize_symbol(s) for s in ("DOGEUSDT", "LINKUSDT", "LTCUSDT")
-)
+#: 펀딩 공백 = 이 창에서 심볼 자기 펀딩이 0행이라 순수익이 낙관인가(†). WAN-292 백필 전에는
+#: DOGE·LINK·LTC가 여기 걸렸으나, 지금은 하드코딩이 아니라 **실제 펀딩 데이터로 동적 판정**한다
+#: (`_dir_monthly_rows`는 셀의 실제 펀딩으로, `--from-csv`는 `_gapped_symbols`의 DB 커버리지로).
 
 
 # --------------------------------------------------------------------------- #
@@ -233,7 +233,9 @@ def _dir_monthly_rows(
         pp_sum[month] = pp_sum.get(month, 0.0) + trade.return_pct * 100.0
         counts[month] = counts.get(month, 0) + 1
     direction = DIR_LONG if side is PositionSide.LONG else DIR_SHORT
-    gap = cell.symbol in FUNDING_GAP_SYMBOLS
+    # 펀딩 공백 = 이 셀이 자기 펀딩 0행으로 계산됐는가(낙관). 하드코딩 심볼 목록이 아니라
+    # 셀이 실제로 실은 펀딩으로 판정한다 — WAN-292 백필 후 신규 3종목은 실 펀딩이라 False.
+    gap = not funding
     return [
         DirMonthlyRow(
             symbol=cell.symbol,
@@ -521,6 +523,75 @@ def _verdict_line(dir_rows: Sequence[DirMonthlyRow], book_rows: Sequence[BookMon
     )
 
 
+def _gapped_symbols(symbols: Sequence[str], *, start: str, end: str) -> frozenset[str]:
+    """이 창에서 **자기 펀딩이 0행**인 심볼 집합 — DB 커버리지로 동적 판정한다.
+
+    하드코딩 목록이 아니라 실제 `funding_rate` 테이블을 조회한다. WAN-292 백필 후
+    DOGE·LINK·LTC는 실 펀딩이 있어 빠진다(= 대리 자동 해제의 독립 증거). `--from-csv`가
+    저장된 `funding_gap` 라벨을 이 값으로 self-heal 하는 데 쓴다.
+    """
+    start_ms = parse_date_ms(start)
+    end_ms = parse_date_ms(end)
+    store = FundingRateStore(harness.DB_PATH)
+    try:
+        gapped = {
+            sym for sym in symbols if not store.get_rates(sym, start_ms=start_ms, end_ms=end_ms)
+        }
+    finally:
+        store.close()
+    return frozenset(gapped)
+
+
+def _refresh_funding_gap(
+    dir_rows: Sequence[DirMonthlyRow], *, start: str, end: str
+) -> list[DirMonthlyRow]:
+    """저장된 `funding_gap` 라벨을 실제 펀딩 커버리지로 다시 찍는다(`--from-csv` self-heal).
+
+    옛 CSV는 하드코딩 목록으로 신규 3종목을 `True`로 박아 뒀는데, WAN-292 백필 후 실 펀딩이
+    생겨 실제로는 `False`다. 라벨이 아니라 데이터로 고정한다(저장소 관행).
+    """
+    gapped = _gapped_symbols(sorted({r.symbol for r in dir_rows}), start=start, end=end)
+    return [r.model_copy(update={"funding_gap": r.symbol in gapped}) for r in dir_rows]
+
+
+def _tf_short_profit(dir_rows: Sequence[DirMonthlyRow], tf: str) -> dict[str, float]:
+    """한 TF의 월별 숏 순수익 %p 합 — TF 축 판정용."""
+    out: dict[str, float] = {}
+    for r in dir_rows:
+        if r.direction == DIR_SHORT and r.timeframe == tf:
+            out[r.month] = out.get(r.month, 0.0) + r.net_pp_sum
+    return out
+
+
+def _tf_verdict_line(
+    dir_rows: Sequence[DirMonthlyRow], book_rows: Sequence[BookMonthlyRow], tf: str = "15m"
+) -> str:
+    """이 TF 축이 집계 판정(숏 = 소수 상승 달 집중 = 하락장 베타)을 유지하는지 한 줄(완료기준 3)."""
+    profit = _tf_short_profit(dir_rows, tf)
+    positive = {m: p for m, p in profit.items() if p > 0}
+    if not positive:
+        return f"**{tf} 축 판정**: 숏이 양(+)인 달이 없어 판정 표본이 없다."
+    total = sum(positive.values())
+    ranked = sorted(positive.items(), key=lambda kv: kv[1], reverse=True)
+    top = ranked[: min(5, len(ranked))]
+    top_share = sum(p for _, p in top) / total if total else 0.0
+    btc = {r.month: r.btc_buy_hold for r in book_rows if r.arm == ARM_LONG_SHORT}
+    up_share = sum(p for m, p in positive.items() if btc.get(m, 0.0) >= 0) / total if total else 0.0
+    # 집계 판정(`_verdict_line`)과 같은 자 — 소수 달 집중도(top_share)로 유지/약화를 가른다.
+    # up/down 몫은 게이트가 아니라 맥락으로만 보고한다(경계값 흔들림 방지).
+    concentrated = top_share >= 0.50
+    tail = (
+        f"소수 달 집중(상승 달 몫 {up_share * 100:.0f}%) → 1h·2h·4h의 「숏 = 하락장 베타」 "
+        "판정을 **유지**한다"
+        if concentrated
+        else f"집중도가 낮다(상승 달 몫 {up_share * 100:.0f}%) → 그 판정을 **약화**시킨다"
+        "(더 고르게 퍼짐)"
+    )
+    return (
+        f"**{tf} 축 판정**: 상위 {len(top)}개 달이 숏 양(+)의 **{top_share * 100:.0f}%** — {tail}."
+    )
+
+
 def build_summary_markdown(
     dir_rows: Sequence[DirMonthlyRow],
     book_rows: Sequence[BookMonthlyRow],
@@ -546,6 +617,12 @@ def build_summary_markdown(
         "True(`ConfluenceParams().short_enabled == False` 유지) · cap_only 5배 · `baseline` 단독 · "
         "oos_warm 정본(WAN-166).\n"
     )
+    parts.append(
+        "> **WAN-291 재산출(2026-08-12)**: WAN-292 펀딩 백필 반영 후 **4TF(15m·1h·2h·4h) 전체를 "
+        "실 펀딩으로 다시 돌렸다**. 신규 3종목(DOGE·LINK·LTC)의 BTC 대리 펀딩이 자동 해제됐다 — "
+        "롱-온리 북의 기존 6종목은 `wan180_monthly_returns.csv`와 거래 수가 비트 일치하고 "
+        "(펀딩 불변), 신규 3종목만 실 펀딩으로 월수익률이 미세하게 달라진다(대리 해제의 증거).\n"
+    )
     if funding_note:
         parts.append(f"신규 3종목 펀딩 대리: {funding_note}\n")
 
@@ -560,6 +637,7 @@ def build_summary_markdown(
         f"3. **전체 순합(1+2)**: {_fmt_pct(net)} — 「하락장 헤지로 값을 하나」의 답.\n"
     )
     parts.append(_verdict_line(dir_rows, book_rows) + "\n")
+    parts.append(_tf_verdict_line(dir_rows, book_rows, "15m") + "\n")
 
     parts.append("## 🚨 넷팅 안 함 — 롱·숏 양방향 상충 건수\n")
     parts.append(
@@ -570,6 +648,15 @@ def build_summary_markdown(
         "상계는 실거래 계층(WAN-241/235) 소관이며 이 측정 밖이다.\n"
     )
 
+    gap_syms = sorted({_short(r.symbol) for r in dir_rows if r.funding_gap})
+    if gap_syms:
+        proxy = " — 실행이 BTC 대리로 보정(WAN-180 관행)" if funding_note else " — 대리 미적용"
+        gap_line = f"- †({', '.join(gap_syms)})는 이 창에서 펀딩 0행이라 순수익 낙관{proxy}.\n"
+    else:
+        gap_line = (
+            "- †펀딩 공백 종목 없음 — 신규 3종목(DOGE·LINK·LTC)은 WAN-292 백필로 이 창에서 "
+            "**실 펀딩**을 쓴다(BTC 대리 자동 해제 · WAN-291).\n"
+        )
     parts.append("## ⚠️ 경고 (인용 시 함께 옮길 것)\n")
     parts.append(
         "- 월별 수익률 %는 5배 북을 복리로 굴린 값이라 **실현 수익이 아니다**(WAN-213 복리 착시) "
@@ -582,7 +669,7 @@ def build_summary_markdown(
         "남나(위 세 줄).\n"
         "- **바이앤홀드는 사후(월말) 라벨** — 월초엔 그 달이 하락장일지 모른다. 실전용 장세 필터는 "
         "별도 파라미터가 붙는 다른 이슈.\n"
-        "- †(DOGE·LINK·LTC)는 펀딩 0행이라 순수익 낙관(BTC 대리로 보정, WAN-180 관행).\n"
+        f"{gap_line}"
         "- 「엣지 없음」(WAN-84/88/111/114/124/151/201/248) 불변 — 이 표는 숏 수익의 시간 분포를 "
         "보는 것이지 엣지를 뒤집는 게 아니다.\n"
     )
@@ -590,10 +677,9 @@ def build_summary_markdown(
     parts.append("## 재현\n")
     parts.append(
         "```\n"
-        "uv run python -m backtest.wan288_monthly_long_short --tf 4h,1h,2h --jobs 6\n"
-        "uv run python -m backtest.wan288_monthly_long_short --tf 15m --append "
-        "--jobs 9   # 무거움\n"
-        "uv run python -m backtest.wan288_monthly_long_short --from-csv\n"
+        "# WAN-292 펀딩 백필 반영 후 4TF 전체 실 펀딩 재산출(--append 아님). 15m·6년은 무겁다.\n"
+        "uv run python -m backtest.wan288_monthly_long_short --tf 15m,1h,2h,4h --jobs 4\n"
+        "uv run python -m backtest.wan288_monthly_long_short --from-csv   # 요약만 재생성\n"
         "```\n"
         f"원자료: `{cell_csv}`(방향 상세) · `{book_csv}`(두-팔 북).\n"
     )
@@ -629,6 +715,12 @@ def main(argv: list[str] | None = None) -> int:
         dir_rows = dir_from_csv(out_cell)
         book_rows = book_from_csv(out_book)
         print(f"[wan288] CSV 로드 — 방향 {len(dir_rows)}행 · 북 {len(book_rows)}행 (재실행 없음)")
+        # 저장된 funding_gap 라벨을 실제 펀딩 커버리지로 self-heal(WAN-292 백필 반영).
+        healed = _refresh_funding_gap(dir_rows, start=args.start, end=args.end)
+        if [r.funding_gap for r in healed] != [r.funding_gap for r in dir_rows]:
+            dir_rows = healed
+            dir_to_frame(dir_rows).to_csv(out_cell, index=False)
+            print(f"[wan288] funding_gap 라벨을 실제 커버리지로 갱신 → {out_cell}")
     else:
         symbols = tuple(s.strip() for s in str(args.symbols).split(",") if s.strip())
         timeframes = tuple(t.strip() for t in str(args.tf).split(",") if t.strip())
