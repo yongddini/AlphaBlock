@@ -14,16 +14,22 @@ import ccxt
 import pytest
 
 from data.funding import (
+    CoverageRow,
     FundingRateStore,
     backfill_funding_all,
     backfill_funding_symbol,
     cumulative_funding_cost,
     expected_funding_count,
     fetch_current_funding,
+    format_coverage_table,
     funding_cost_for_position,
     funding_coverage,
+    iso_to_ms,
+    parse_symbols_arg,
     refresh_funding,
+    run_backfill_once,
     run_funding_refresh,
+    symbol_coverage_row,
 )
 from data.models import (
     FundingRate,
@@ -497,3 +503,107 @@ def test_run_funding_refresh_disabled_returns_early(store: FundingRateStore) -> 
     asyncio.run(run_funding_refresh(settings, exchange=exchange, store=store))
     assert store.count() == 0
     assert exchange.current_calls == 0
+
+
+# --------------------------------------------------------------------------- #
+# 일회성 백필 CLI (WAN-292)
+# --------------------------------------------------------------------------- #
+
+
+def test_parse_symbols_arg_splits_and_trims() -> None:
+    assert parse_symbols_arg("DOGE/USDT:USDT, LINK/USDT:USDT ,LTC/USDT:USDT") == [
+        "DOGE/USDT:USDT",
+        "LINK/USDT:USDT",
+        "LTC/USDT:USDT",
+    ]
+    assert parse_symbols_arg(" , ,") == []
+
+
+def test_iso_to_ms_utc() -> None:
+    assert iso_to_ms("2021-07-01") == 1_625_097_600_000
+
+
+def test_run_backfill_once_fills_full_window_and_dedups(store: FundingRateStore) -> None:
+    """재개(resume)가 아니라 start_ms부터 전 구간을 채우고, 겹치는 행은 UPSERT 중복 제거."""
+    from config.settings import Settings
+
+    hist = _history(5, start=T0)
+    exchange = FakeFundingExchange(history=hist)
+    # 라이브 수집분처럼 최근 한 건만 미리 적재해 둔다(가장 마지막 정산).
+    store.upsert_rates([funding_from_ccxt_history(SYMBOL, hist[-1])])
+    assert store.count(SYMBOL) == 1
+
+    now = T0 + 5 * EIGHT_H
+    results = run_backfill_once(
+        [SYMBOL],
+        start_ms=T0,
+        exchange=exchange,
+        store=store,
+        settings=Settings(symbols=[SYMBOL]),
+        now_ms=lambda: now,
+    )
+    # start_ms(T0)부터 전 구간 → 5건 전부(저장분 다음부터가 아니라).
+    assert store.count(SYMBOL) == 5
+    assert results[SYMBOL] == 5
+    # 첫 조회 since 가 마지막 저장분 다음이 아니라 start_ms 여야 한다.
+    assert exchange.history_calls[0][0] == T0
+
+
+def test_run_backfill_once_defaults_start_from_settings(store: FundingRateStore) -> None:
+    """start_ms=None이면 설정 funding_backfill_start(ISO)부터 채운다."""
+    from config.settings import Settings
+
+    start_ms = iso_to_ms("2023-07-01")
+    exchange = FakeFundingExchange(history=_history(3, start=start_ms))
+    settings = Settings(symbols=[SYMBOL], funding_backfill_start="2023-07-01")
+    now = start_ms + 3 * EIGHT_H
+    run_backfill_once(
+        [SYMBOL],
+        start_ms=None,
+        exchange=exchange,
+        store=store,
+        settings=settings,
+        now_ms=lambda: now,
+    )
+    assert exchange.history_calls[0][0] == start_ms
+
+
+def test_symbol_coverage_row_over_collected_span(store: FundingRateStore) -> None:
+    exchange = FakeFundingExchange(history=_history(4, start=T0))
+    backfill_funding_symbol(
+        exchange, store, SYMBOL, T0, now_ms=lambda: T0 + 4 * EIGHT_H, sleeper=lambda _: None
+    )
+    row = symbol_coverage_row(store, SYMBOL)
+    assert row == CoverageRow(SYMBOL, 4, T0, T0 + 3 * EIGHT_H, 1.0)
+    # 데이터가 없으면 커버리지 0.
+    empty = symbol_coverage_row(store, "NONE/USDT:USDT")
+    assert empty == CoverageRow("NONE/USDT:USDT", 0, None, None, 0.0)
+
+
+def test_format_coverage_table_renders_rows() -> None:
+    table = format_coverage_table([CoverageRow(SYMBOL, 4, T0, T0 + 3 * EIGHT_H, 1.0)])
+    assert SYMBOL in table
+    assert "coverage" in table
+    assert "100.00%" in table
+
+
+def test_main_backfill_only_loads_and_prints(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--backfill-only 가 지정 심볼을 채우고 커버리지 표를 출력한다(네트워크 주입)."""
+    import data.funding as funding_mod
+    from config.settings import Settings
+
+    db_path = str(tmp_path / "cli.db")
+    start_ms = iso_to_ms("2023-11-14")
+    exchange = FakeFundingExchange(history=_history(3, start=start_ms))
+    settings = Settings(symbols=[SYMBOL], db_path=db_path)
+    monkeypatch.setattr(funding_mod, "get_settings", lambda: settings)
+    monkeypatch.setattr(funding_mod, "create_exchange", lambda _s=None: exchange)
+
+    funding_mod.main(["--backfill-only", "--symbols", SYMBOL, "--start", "2023-11-14"])
+
+    out = capsys.readouterr().out
+    assert SYMBOL in out
+    with FundingRateStore(db_path) as store:
+        assert store.count(SYMBOL) == 3

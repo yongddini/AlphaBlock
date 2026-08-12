@@ -9,12 +9,14 @@ WAN-6의 거래소 클라이언트·SQLite UPSERT·지수 백오프 패턴을 �
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import logging
 import math
 import sqlite3
 import time
 from collections.abc import Awaitable, Callable, Iterable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Literal, Protocol
@@ -660,11 +662,167 @@ async def run_funding_refresh(
             store.close()
 
 
-def main() -> None:
-    """CLI 엔트리포인트: `python -m data.funding`."""
+# --------------------------------------------------------------------------- #
+# 일회성 백필 (CLI · 서버 운영용, WAN-292)
+# --------------------------------------------------------------------------- #
+
+
+def parse_symbols_arg(raw: str) -> list[str]:
+    """콤마로 구분된 심볼 문자열을 목록으로 파싱한다(빈 항목·공백 무시)."""
+    return [s.strip() for s in raw.split(",") if s.strip()]
+
+
+def iso_to_ms(iso: str) -> int:
+    """ISO 날짜/시각(UTC 가정)을 epoch ms로 변환한다."""
+    return int(pd.Timestamp(iso, tz="UTC").timestamp() * 1000)
+
+
+@dataclass(frozen=True)
+class CoverageRow:
+    """심볼별 펀딩 커버리지 요약 한 줄."""
+
+    symbol: str
+    count: int
+    first_ms: int | None
+    last_ms: int | None
+    coverage: float
+
+
+def symbol_coverage_row(
+    store: FundingRateStore,
+    symbol: str,
+    *,
+    start_ms: int | None = None,
+    end_ms: int | None = None,
+) -> CoverageRow:
+    """저장된 확정 펀딩으로 심볼의 커버리지 한 줄을 만든다.
+
+    `start_ms`/`end_ms`를 둘 다 주면 그 창의 커버리지를 재고, 없으면 그 심볼이 실제로
+    가진 구간 `[first, last + interval)`에서 결측(구멍) 여부를 잰다 — 수집한 시계열이
+    8시간 간격으로 빠짐없이 이어지는지 확인하는 용도다.
+    """
+    rates = store.get_rates(symbol, start_ms=start_ms, end_ms=end_ms, include_predicted=False)
+    count = len(rates)
+    first = rates[0].funding_time if rates else None
+    last = rates[-1].funding_time if rates else None
+    if start_ms is not None and end_ms is not None:
+        cov = funding_coverage(rates, start_ms, end_ms)
+    elif first is not None and last is not None:
+        cov = funding_coverage(rates, first, last + FUNDING_INTERVAL_MS)
+    else:
+        cov = 0.0
+    return CoverageRow(symbol, count, first, last, cov)
+
+
+def _fmt_coverage_ms(ms: int | None) -> str:
+    """커버리지 표에 쓰는 UTC 시각 포매터(데이터 열이라 UTC 유지, WAN-172)."""
+    if ms is None:
+        return "-"
+    return str(pd.Timestamp(ms, unit="ms", tz="UTC").strftime("%Y-%m-%d %H:%M"))
+
+
+def format_coverage_table(rows: Iterable[CoverageRow]) -> str:
+    """커버리지 행들을 사람이 읽는 표 문자열로 만든다(UTC 표기)."""
+    header = f"{'symbol':<16}{'count':>8}  {'first (UTC)':<18}{'last (UTC)':<18}{'coverage':>10}"
+    lines = [header, "-" * len(header)]
+    for r in rows:
+        lines.append(
+            f"{r.symbol:<16}{r.count:>8}  "
+            f"{_fmt_coverage_ms(r.first_ms):<18}{_fmt_coverage_ms(r.last_ms):<18}"
+            f"{r.coverage * 100:>9.2f}%"
+        )
+    return "\n".join(lines)
+
+
+def run_backfill_once(
+    symbols: Sequence[str],
+    *,
+    start_ms: int | None,
+    until_ms: int | None = None,
+    settings: Settings | None = None,
+    exchange: FundingRateSource | None = None,
+    store: FundingRateStore | None = None,
+    limit: int = DEFAULT_LIMIT,
+    now_ms: Callable[[], int] = lambda: int(time.time() * 1000),
+) -> dict[str, int]:
+    """지정 심볼을 `start_ms`부터 **전 구간** 백필한다(재시작 재개 아님).
+
+    `backfill_funding_all`은 저장된 마지막 확정값 **다음부터** 이어받으므로 과거
+    구멍(예: 라이브 수집분보다 앞선 상장~현재 구간)을 못 메운다. 이 함수는 각 심볼을
+    `start_ms`부터 통째로 페이징하고, 겹치는 라이브 수집 행은 기본키 UPSERT로 자연히
+    중복 제거된다(WAN-292). `start_ms`가 None이면 설정 기반 시작점을 쓴다. 거래소가
+    상장 이전 `start_ms`에는 상장 시점부터 반환하므로 「상장~현재」가 그대로 채워진다.
+
+    (심볼→저장 건수) 맵을 반환한다.
+    """
+    settings = settings or get_settings()
+    if start_ms is None:
+        start_ms = _resolve_backfill_start(
+            settings, lookback_days=None, start_ms=None, now_ms=now_ms
+        )
+    owns_store = store is None
+    exchange = exchange if exchange is not None else create_exchange(settings)
+    store = store if store is not None else FundingRateStore(settings.db_path)
+    try:
+        results: dict[str, int] = {}
+        for symbol in symbols:
+            results[symbol] = backfill_funding_symbol(
+                exchange,
+                store,
+                symbol,
+                start_ms,
+                until_ms=until_ms,
+                limit=limit,
+                now_ms=now_ms,
+            )
+        return results
+    finally:
+        if owns_store:
+            store.close()
+
+
+def main(argv: Sequence[str] | None = None) -> None:
+    """CLI 엔트리포인트: `python -m data.funding`.
+
+    인자 없이 실행하면 예전과 똑같이 백필 후 지속 최신화 루프를 돈다. `--backfill-only`를
+    주면 지정 심볼(기본: 설정 수집 유니버스)을 `--start`부터 **한 번만** 전 구간 백필하고
+    커버리지 표를 출력한 뒤 종료한다(서버 운영·일회성 백필용, WAN-292).
+    """
+    parser = argparse.ArgumentParser(description="펀딩비 수집·백필")
+    parser.add_argument(
+        "--backfill-only",
+        action="store_true",
+        help="지속 최신화 루프 없이 지정 심볼을 한 번만 백필하고 종료",
+    )
+    parser.add_argument(
+        "--symbols",
+        default=None,
+        help="콤마로 구분한 심볼(기본: 설정 수집 유니버스). 예: DOGE/USDT:USDT,LINK/USDT:USDT",
+    )
+    parser.add_argument(
+        "--start",
+        default=None,
+        help="백필 시작 ISO 날짜(UTC). 상장 이전이면 거래소가 상장 시점부터 반환한다.",
+    )
+    args = parser.parse_args(argv)
+
     use_kst_logging()  # 로그 시각도 KST(WAN-172)
     logging.basicConfig(level=logging.INFO, format=kst_log_format())
-    asyncio.run(run_funding_refresh())
+
+    if not args.backfill_only:
+        # 예전과 동일: 백필 + 지속 최신화 루프.
+        asyncio.run(run_funding_refresh())
+        return
+
+    settings = get_settings()
+    symbols = parse_symbols_arg(args.symbols) if args.symbols else list(settings.symbols)
+    start_ms = iso_to_ms(args.start) if args.start else None
+    results = run_backfill_once(symbols, start_ms=start_ms, settings=settings)
+    logger.info("펀딩 백필 완료: %s", dict(results))
+
+    with FundingRateStore(settings.db_path) as store:
+        rows = [symbol_coverage_row(store, s) for s in symbols]
+    print(format_coverage_table(rows))
 
 
 if __name__ == "__main__":
