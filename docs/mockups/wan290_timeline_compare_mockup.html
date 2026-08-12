@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WAN-290 — 페이퍼 vs 백테 셋업별 대조 (목업)</title>
+<style>
+  :root{
+    /* 실제 대시보드 팔레트 기준 (dashboard/lightweight_chart.py) */
+    --bg:#131722;          /* 차트와 같은 남색 배경 — 이 톤을 카드/표까지 확장 */
+    --panel:#1a2130;       /* 카드/패널 (배경보다 살짝 밝은 남색) */
+    --panel-2:#20293b;     /* 강조 패널 */
+    --border:#2a3346;
+    --text:#d1d4dc;
+    --muted:#787b86;
+    --teal:#26a69a;        /* 롱/상승/이익 */
+    --red:#ef5350;         /* 숏/하락/손실/판정갈림 */
+    --amber:#f9a825;       /* 가격 벗어남 확인 */
+    --accent:#42a5f5;      /* 차이 막대 */
+    --bg-red:rgba(239,83,80,0.14);
+    --bg-teal:rgba(38,166,154,0.14);
+    --bg-amber:rgba(249,168,37,0.14);
+    --radius:8px;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0; background:var(--bg); color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; font-size:14px; line-height:1.5;}
+  .wrap{max-width:1000px; margin:0 auto; padding:24px 20px 48px;}
+  h1{font-size:18px; font-weight:500; margin:0 0 4px;}
+  .sub{color:var(--muted); font-size:13px; margin:0 0 20px;}
+  .cards{display:flex; gap:12px; flex-wrap:wrap; margin-bottom:16px;}
+  .card{background:var(--panel); border:0.5px solid var(--border); border-radius:var(--radius); padding:10px 14px; min-width:110px;}
+  .card.alert{background:var(--bg-red); border-color:rgba(239,83,80,0.4);}
+  .card .lab{font-size:12px; color:var(--muted);}
+  .card.alert .lab{color:var(--red);}
+  .card .num{font-size:22px; font-weight:500;}
+  .card.alert .num{color:var(--red);}
+  .card .hint{font-size:11px; color:var(--red);}
+  .chips{display:flex; gap:8px; margin-bottom:14px;}
+  .chip{font-size:13px; padding:6px 13px; border-radius:var(--radius); border:0.5px solid var(--border);
+    background:transparent; color:var(--muted); cursor:pointer;}
+  .chip.on{background:var(--panel-2); color:var(--text); border-color:#3a4560;}
+  .colhead{display:grid; grid-template-columns:1fr 1.15fr 1fr; gap:10px; padding:0 6px 8px; font-size:12px; color:var(--muted);}
+  .colhead div{text-align:center;}
+  .srow{display:grid; grid-template-columns:1fr 1.15fr 1fr; gap:10px; align-items:center;
+    padding:12px 6px; border-bottom:0.5px solid var(--border); cursor:pointer;}
+  .srow:hover{background:var(--panel);}
+  .srow.diverge{background:var(--bg-red); border-left:3px solid var(--red);}
+  .setup{grid-column:1 / -1; font-size:11px; color:var(--muted); padding:0 6px 4px;}
+  .side{background:var(--panel); border:0.5px solid var(--border); border-radius:var(--radius); padding:7px 11px;}
+  .side .st{font-size:12px; color:var(--muted);}
+  .side .pn{font-size:15px; font-weight:500;}
+  .side .px{font-size:11px; color:var(--muted);}
+  .win{color:var(--teal);} .loss{color:var(--red);}
+  .bar-wrap{position:relative; height:28px;}
+  .bar-mid{position:absolute; left:50%; top:0; bottom:0; width:1px; background:var(--border);}
+  .bar-seg{position:absolute; top:5px; height:9px; border-radius:3px;}
+  .bar-lab{position:absolute; top:16px; font-size:11px; white-space:nowrap;}
+  .tag{display:inline-block; font-size:12px; padding:3px 10px; border-radius:var(--radius);}
+  .tag.diverge{background:var(--bg-red); color:var(--red);}
+  .tag.match{color:var(--muted);}
+  .legend{display:flex; gap:18px; flex-wrap:wrap; margin-top:14px; font-size:12px; color:var(--muted);}
+  .detail{grid-column:1 / -1; margin-top:10px; background:var(--panel-2); border:0.5px solid var(--border);
+    border-radius:var(--radius); padding:10px 12px; font-size:12px;}
+  .detail table{width:100%; border-collapse:collapse;}
+  .detail td{padding:4px 8px; border-bottom:0.5px solid var(--border);}
+  .detail td.k{color:var(--muted);}
+  .note{color:var(--muted); font-size:12px; margin-top:16px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>당일 거래 대조 · 2026-08-11 (KST)</h1>
+  <p class="sub">페이퍼(라이브) vs 백테스트를 셋업당 한 줄로 · 가운데 막대 = 어느 쪽이 몇 %p 높은지</p>
+
+  <div class="cards">
+    <div class="card"><div class="lab">오늘 셋업</div><div class="num">12</div></div>
+    <div class="card"><div class="lab">일치</div><div class="num" style="color:var(--muted);">8</div></div>
+    <div class="card alert"><div class="lab">불일치 (핵심 신호)</div><div class="num">4</div>
+      <div class="hint">백테 진입·라이브 끊김 3 · 반대 1</div></div>
+  </div>
+
+  <div class="chips">
+    <button class="chip on" data-f="all">전체 12</button>
+    <button class="chip" data-f="diverge">불일치만 4</button>
+    <button class="chip" data-f="match">일치 8</button>
+  </div>
+
+  <div class="colhead"><div>페이퍼 (라이브)</div><div>차이 (페이퍼 − 백테, %p)</div><div>백테스트</div></div>
+
+  <div id="rows"></div>
+
+  <div class="legend">
+    <span><b style="color:var(--accent);">▬</b> 막대 = 높은 쪽으로 뻗음 (길수록 격차 큼)</span>
+    <span style="color:var(--red);">● 판정 갈림 = 한쪽만 진입</span>
+    <span style="color:var(--amber);">● 가격 벗어남 = 틱 오차 초과</span>
+  </div>
+
+  <p class="note">행을 누르면 예약→체결가→손절/익절→청산가 15개 컬럼이 펼쳐지고 위 차트가 그 거래 지점으로 이동합니다 (아래 SOL 1h 예시).</p>
+</div>
+
+<script>
+const rows=[
+ {sym:"SOL·1h·롱·00:13", p:{s:"청산",v:-0.66,px:"76.07"}, b:{s:"청산",v:-0.52,px:"76.05"}, diverge:false, flag:false, open:true,
+   det:[["예약(KST)","00:13:04","—"],["지정가","76.0727","76.0510"],["체결(KST)","00:13:31","00:13:00(봉)"],["체결가","76.0727","76.0510"],["손절목표","75.71","75.71"],["익절목표","76.6167","76.5980"],["청산(KST)","01:02","01:00(봉)"],["청산가","75.71","75.75"],["손익률%","−0.66%","−0.52%"]]},
+ {sym:"BTC·1h·롱·00:25", p:{s:"청산",v:-0.53,px:"64353"}, b:{s:"청산",v:-0.55,px:"64351"}, diverge:false, flag:false},
+ {sym:"SOL·15m·롱·00:21", p:{s:"거부 · 사이징 0",v:null,px:"—"}, b:{s:"청산",v:0.31,px:"75.88"}, diverge:true, flag:false},
+ {sym:"XRP·15m·롱·00:25", p:{s:"청산",v:0.22,px:"1.0207"}, b:{s:"청산",v:-0.07,px:"1.0198"}, diverge:false, flag:true},
+ {sym:"BTC·15m·롱·00:37", p:{s:"거부 · 사이징 0",v:null,px:"—"}, b:{s:"청산",v:0.44,px:"64252"}, diverge:true, flag:false},
+ {sym:"ETH·1h·롱·00:13", p:{s:"건너뜀 · 존폭",v:null,px:"—"}, b:{s:"건너뜀 · 존폭",v:null,px:"—"}, diverge:false, flag:false},
+];
+const MAX=0.5;
+const cls=v=>v>=0?"win":"loss", sgn=v=>(v>=0?"+":"")+v.toFixed(2);
+function side(o){
+  if(o.v===null) return '<div class="side"><span class="st">'+o.s+'</span></div>';
+  return '<div class="side"><span class="st">'+o.s+'</span><br>'
+    +'<span class="pn '+cls(o.v)+'">'+sgn(o.v)+'%</span> <span class="px">@'+o.px+'</span></div>';
+}
+function center(r){
+  if(r.diverge) return '<div style="text-align:center;"><span class="tag diverge">⚠ 판정 갈림</span></div>';
+  if(r.p.v===null) return '<div style="text-align:center;"><span class="tag match">둘 다 미진입 · 매칭</span></div>';
+  const d=+(r.p.v-r.b.v).toFixed(2);
+  const w=Math.min(Math.abs(d)/MAX,1)*46;
+  const seg=d>=0?('left:50%; width:'+w+'%;'):('right:50%; width:'+w+'%;');
+  const lab=d>=0?'left:52%;':'right:52%; text-align:right;';
+  const side=d>=0?'페이퍼':'백테';
+  const c=r.flag?'var(--amber)':'var(--accent)';
+  return '<div class="bar-wrap"><div class="bar-mid"></div>'
+    +'<div class="bar-seg" style="'+seg+'background:'+c+';"></div>'
+    +'<div class="bar-lab" style="'+lab+'color:'+c+';">'+(d>=0?'▲':'▼')+' '+side+' +'+Math.abs(d).toFixed(2)+'%p'+(r.flag?' · 확인':'')+'</div></div>';
+}
+function detail(r){
+  if(!r.open||!r.det) return '';
+  const body=r.det.map(x=>'<tr><td class="k">'+x[0]+'</td><td>페이퍼 '+x[1]+'</td><td>백테 '+x[2]+'</td></tr>').join('');
+  return '<div class="detail"><table>'+body+'</table></div>';
+}
+function render(f){
+  document.getElementById("rows").innerHTML=rows
+    .filter(r=>f=="all"||(f=="diverge"?r.diverge:!r.diverge))
+    .map(r=>'<div class="srow '+(r.diverge?'diverge':'')+'">'
+      +'<div class="setup">'+r.sym+'</div>'
+      +side(r.p)+center(r)+side(r.b)+detail(r)+'</div>').join('');
+}
+render("all");
+document.querySelectorAll(".chip").forEach(c=>c.onclick=()=>{
+  document.querySelectorAll(".chip").forEach(x=>x.classList.remove("on"));
+  c.classList.add("on"); render(c.dataset.f);
+});
+</script>
+</body>
+</html>

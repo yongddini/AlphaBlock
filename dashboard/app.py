@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -112,6 +113,7 @@ from dashboard.trade_table import (
     style_trade_frame,
 )
 from dashboard.trade_timeline_view import (
+    backtest_day_summary,
     backtest_only_note,
     chart_window,
     selected_row,
@@ -1154,13 +1156,165 @@ _TIMELINE_CHART_HEIGHT = 520
 #: 선택한 거래 구간의 좌우로 이만큼 더 캔들을 실어 문맥을 준다(차트 여백).
 _TIMELINE_CHART_PAD_MS = 12 * 3_600_000
 
+#: 백테스트 대조 대상 라디오(WAN-290). 「라이브 칸만」은 WAN-234 그대로, 「전부」는 임의
+#: 날짜 × 채택 9종목×4TF 온디맨드 실행이다.
+_TARGET_LIVE_CELLS = "라이브 칸만 (WAN-234)"
+_TARGET_FULL_UNIVERSE = "채택 9종목×4TF 전부 (WAN-290)"
+#: 임의 날짜 × 9×4 온디맨드 실행 결과의 세션 캐시(날짜별). 버튼으로만 채우고, 필터·선택
+#: 재실행에서 다시 돌지 않게 유지한다(WAN-239 「클릭 시에만 무거운 재계산」).
+_TIMELINE_FULL_RESULT_KEY = "timeline_full_backtest_by_day"
+
+
+@dataclass(frozen=True)
+class _FullRunResult:
+    """임의 날짜 × 9×4 온디맨드 실행 한 판의 세션 캐시 값(WAN-290).
+
+    행은 튜플(불변)로 담아 세션에 안전히 보관하고, 실행 소요·엔진 배지를 함께 둔다 —
+    필터·선택 재실행에서 다시 계산하지 않고 이 값을 그대로 다시 그린다.
+    """
+
+    rows: tuple[TimelineRow, ...]
+    elapsed: float
+    engine: str
+
+
+def _timeline_live_cell_backtest(
+    db_path: str,
+    day_key: str,
+    start_ms: int,
+    end_ms: int,
+    live_rows: list[TimelineRow],
+) -> list[TimelineRow]:
+    """「라이브 칸만」 대조 — 그날 라이브가 있던 (심볼, TF)만 재산출한다(WAN-234 그대로).
+
+    기본은 야간 크론 캐시만 읽고(WAN-239), 체크박스로만 즉시 재계산한다(무겁다). 라이브
+    예약이 없던 날은 대조 대상 셀이 없다.
+    """
+    include_bt = st.checkbox(
+        "백테스트 대조 병기 (야간 크론이 미리 계산한 캐시를 읽습니다 — WAN-239)",
+        value=False,
+        key="timeline_include_bt",
+    )
+    recompute = st.checkbox(
+        "캐시 무시하고 즉시 재계산 (그날 라이브 셀만 · 워밍업 연속 — 무겁습니다)",
+        value=False,
+        key="timeline_recompute",
+    )
+    if not include_bt:
+        return []
+
+    symbols = sorted({r.symbol for r in live_rows})
+    timeframes = sorted({r.timeframe for r in live_rows})
+    if not symbols or not timeframes:
+        st.info(
+            "이 날 라이브 예약이 없어 백테스트 대조 대상 셀이 없습니다. 라이브와 무관하게 "
+            "그날 하루치 백테를 보려면 위에서 **채택 9종목×4TF 전부**를 고르세요(WAN-290)."
+        )
+        return []
+
+    if recompute:
+        # 명시적 온디맨드 재계산(캐시 무시, 무겁다) — 사용자가 골랐을 때만(WAN-239).
+        st.caption(f"백테 대조 엔진: **{current_engine_label()}** · 즉시 재계산(캐시 무시)")
+        with st.spinner("백테스트 대조 재산출 중… (그날 라이브 셀만)"):
+            return backtest_timeline_rows(
+                day_start_ms=start_ms,
+                day_end_ms=end_ms,
+                symbols=symbols,
+                timeframes=timeframes,
+            )
+
+    # 기본: 캐시만 읽는다. 미스는 폴백하지 않고 명시한다(WAN-239 §3).
+    cache = TimelineCacheStore(db_path)
+    try:
+        cached = load_cached_day(cache, day_key=day_key, symbols=symbols, timeframes=timeframes)
+    finally:
+        cache.close()
+    st.caption(f"백테 대조 엔진: **{cached.label}**")
+    if cached.misses:
+        st.warning(
+            f"🚨 백테 대조 **아직 계산 안 됨** — {len(cached.misses)}/"
+            f"{len(symbols) * len(timeframes)}칸 캐시 미스입니다. 야간 크론이 적재하거나 "
+            "`alphablock trades --day … --persist-cache`로 미리 계산하세요. 위 "
+            "체크박스로 즉시 재계산할 수 있습니다(무겁습니다). 조회 시 자동 재계산은 "
+            "하지 않습니다."
+        )
+    return list(cached.rows)
+
+
+def _timeline_full_universe_backtest(day_key: str, start_ms: int, end_ms: int) -> list[TimelineRow]:
+    """「채택 9종목×4TF 전부」 대조 — 임의 날짜의 하루치 백테를 버튼으로 온디맨드 실행(WAN-290).
+
+    무거우므로(9×4 = 36셀 × 워밍업 연속, cold ~35초) **버튼을 눌렀을 때만** 돈다(WAN-239
+    「클릭 시에만 무거운 재계산」). 결과는 세션에 날짜별로 캐시해 필터·선택 재실행에서 다시
+    돌지 않는다. 라이브 활동과 무관하게 실행되므로 라이브가 없던 과거 날짜도 백테만으로
+    대조할 수 있다(완료 기준 1). 좌표·엔진은 인자 없는 `backtest.run`과 같다(핀 없음) —
+    `backtest_timeline_rows`가 워밍업 연속(warm)·per-cell 단일로 그날만 평가한다(완료 기준 2).
+
+    ⚠️ **직렬(jobs=1)로 돈다** — 셀마다 120일치 1분봉을 로드하므로 프로세스 풀 병렬은
+    메모리 압박으로 워커가 죽을 수 있다(M1 실측 `BrokenProcessPool`). 화면 버튼은 크래시
+    없이 도는 게 우선이라 직렬을 쓴다(전 셀 cold 실측 ~35초). 대량 격자는 CLI가 담당한다.
+    """
+    from backtest.harness import DEFAULT_SYMBOLS, DEFAULT_TIMEFRAMES
+
+    n_cells = len(DEFAULT_SYMBOLS) * len(DEFAULT_TIMEFRAMES)
+    st.caption(
+        f"채택 좌표 **9종목 × 4TF({', '.join(DEFAULT_TIMEFRAMES)}) = {n_cells}셀** · 인자 없는 "
+        "`backtest.run`과 같은 엔진·기본값 · 워밍업 연속(warm)으로 **탭이 그날인 셋업만** "
+        "평가합니다."
+    )
+    st.caption(
+        "⚠️ 백테 수익률은 기대수익이 아닙니다 — 전부 `baseline`(닿으면 체결) 낙관 렌즈 위 값이고 "
+        "이 엔진에 통계적 엣지는 확인되지 않았습니다. 페이퍼와 정확히 안 맞을 수 있습니다"
+        "(페이퍼=틱 · 백테=1분봉, 큐 우선순위 미모델 — 둘 다 상한)."
+    )
+
+    results: dict[str, _FullRunResult] = st.session_state.setdefault(_TIMELINE_FULL_RESULT_KEY, {})
+    if st.button(
+        f"▶ {day_key} 백테 실행 (9종목×4TF · 무겁습니다)",
+        key="timeline_full_run",
+        help="누른 날짜만 계산합니다. 날짜를 바꿔도 자동 실행하지 않습니다(WAN-239).",
+    ):
+        started = time.time()
+        with st.spinner(f"{day_key} 백테스트 실행 중… ({n_cells}셀 · 워밍업 연속)"):
+            rows = backtest_timeline_rows(
+                day_start_ms=start_ms,
+                day_end_ms=end_ms,
+                symbols=list(DEFAULT_SYMBOLS),
+                timeframes=list(DEFAULT_TIMEFRAMES),
+                jobs=1,
+            )
+        results[day_key] = _FullRunResult(
+            rows=tuple(rows),
+            elapsed=time.time() - started,
+            engine=current_engine_label(),
+        )
+
+    result = results.get(day_key)
+    if result is None:
+        st.info(
+            "위 **실행** 버튼을 눌러 그날 백테스트를 계산하세요. 라이브가 없던 날도 백테만으로 "
+            "대조할 수 있습니다(WAN-290)."
+        )
+        return []
+
+    rows = list(result.rows)
+    summary = backtest_day_summary(rows)
+    st.caption(
+        f"백테 대조 엔진: **{result.engine}** · 실행 {result.elapsed:.1f}초 · "
+        f"거래 {summary.trades}건({summary.cells_with_trades}셀 · 승 {summary.wins} · "
+        f"패 {summary.losses})"
+    )
+    return rows
+
 
 def _render_trade_timeline(settings: Settings) -> None:
-    """당일(KST) 거래별 타임라인 — 예약→체결가→청산가→손익, 라이브|백테스트(WAN-234).
+    """당일(KST) 거래별 타임라인 — 예약→체결가→청산가→손익, 라이브|백테스트(WAN-234/290).
 
     라이브(주문 장부 + 페이퍼 라운드트립)를 주인공으로 그리고, 백테스트 대조는 무거우니
-    (셀마다 워밍업 연속) **옵트인**이다 — 켜면 그날 라이브가 있었던 (심볼, TF) 셀만 재산출해
-    부담을 줄인다. 행을 누르면 그 거래 지점으로 차트가 이동한다(저장된 거래 탭 패턴).
+    (셀마다 워밍업 연속) **옵트인**이다. 대조 대상을 두 가지로 고른다(WAN-290):
+    「라이브 칸만」(그날 라이브가 있던 셀만 — WAN-234 그대로)과 「채택 9종목×4TF 전부」
+    (라이브 유무와 무관하게 임의 날짜의 하루치 백테를 버튼으로 온디맨드 실행). 행을 누르면
+    그 거래 지점으로 차트가 이동한다(저장된 거래 탭 패턴).
     """
     db_path = settings.db_path
     st.subheader("당일 거래별 타임라인")
@@ -1170,17 +1324,17 @@ def _render_trade_timeline(settings: Settings) -> None:
     )
 
     default_day = datetime.now(tz=KST).date()
-    col_day, col_bt = st.columns([2, 3])
-    day = col_day.date_input("날짜(KST)", value=default_day, key="timeline_day")
-    include_bt = col_bt.checkbox(
-        "백테스트 대조 병기 (야간 크론이 미리 계산한 캐시를 읽습니다 — WAN-239)",
-        value=False,
-        key="timeline_include_bt",
-    )
-    recompute = col_bt.checkbox(
-        "캐시 무시하고 즉시 재계산 (그날 라이브 셀만 · 워밍업 연속 — 무겁습니다)",
-        value=False,
-        key="timeline_recompute",
+    day = st.date_input("날짜(KST)", value=default_day, key="timeline_day")
+    target = st.radio(
+        "백테스트 대조 대상",
+        [_TARGET_LIVE_CELLS, _TARGET_FULL_UNIVERSE],
+        horizontal=True,
+        key="timeline_target",
+        help=(
+            "라이브 칸만: 그날 라이브 예약이 있던 (심볼, TF)만 대조합니다(WAN-234).  "
+            "채택 9종목×4TF 전부: 라이브 유무와 무관하게 임의 날짜의 하루치 백테를 버튼으로 "
+            "온디맨드 실행합니다(WAN-290)."
+        ),
     )
 
     start_ms, end_ms, day_key = resolve_day_window(day.isoformat())
@@ -1192,44 +1346,16 @@ def _render_trade_timeline(settings: Settings) -> None:
         store.close()
         journal.close()
 
-    backtest_rows: list[TimelineRow] = []
-    if include_bt:
-        symbols = sorted({r.symbol for r in live_rows})
-        timeframes = sorted({r.timeframe for r in live_rows})
-        if not symbols or not timeframes:
-            st.info("이 날 라이브 예약이 없어 백테스트 대조 대상 셀이 없습니다.")
-        elif recompute:
-            # 명시적 온디맨드 재계산(캐시 무시, 무겁다) — 사용자가 골랐을 때만(WAN-239).
-            st.caption(f"백테 대조 엔진: **{current_engine_label()}** · 즉시 재계산(캐시 무시)")
-            with st.spinner("백테스트 대조 재산출 중… (그날 라이브 셀만)"):
-                backtest_rows = backtest_timeline_rows(
-                    day_start_ms=start_ms,
-                    day_end_ms=end_ms,
-                    symbols=symbols,
-                    timeframes=timeframes,
-                )
-        else:
-            # 기본: 캐시만 읽는다. 미스는 폴백하지 않고 명시한다(WAN-239 §3).
-            cache = TimelineCacheStore(db_path)
-            try:
-                cached = load_cached_day(
-                    cache, day_key=day_key, symbols=symbols, timeframes=timeframes
-                )
-            finally:
-                cache.close()
-            backtest_rows = list(cached.rows)
-            st.caption(f"백테 대조 엔진: **{cached.label}**")
-            if cached.misses:
-                st.warning(
-                    f"🚨 백테 대조 **아직 계산 안 됨** — {len(cached.misses)}/"
-                    f"{len(symbols) * len(timeframes)}칸 캐시 미스입니다. 야간 크론이 적재하거나 "
-                    "`alphablock trades --day … --persist-cache`로 미리 계산하세요. 위 "
-                    "체크박스로 즉시 재계산할 수 있습니다(무겁습니다). 조회 시 자동 재계산은 "
-                    "하지 않습니다."
-                )
+    if target == _TARGET_FULL_UNIVERSE:
+        backtest_rows = _timeline_full_universe_backtest(day_key, start_ms, end_ms)
+    else:
+        backtest_rows = _timeline_live_cell_backtest(db_path, day_key, start_ms, end_ms, live_rows)
 
     timeline = DayTimeline(day_key=day_key, live=tuple(live_rows), backtest=tuple(backtest_rows))
-    note = backtest_only_note(timeline)
+    # 「백테만 있는 줄」 신호는 라이브 진입이 하나라도 있어 대조가 성립할 때만 뜻이 있다.
+    # 라이브 러너가 아예 안 돌던 과거 날짜(전부 백테만)는 이 경고가 잡음이라 숨긴다(WAN-290).
+    live_entered = any(r.status in ("진입", "청산") for r in timeline.live)
+    note = backtest_only_note(timeline) if live_entered else None
     if note is not None:
         st.warning(note)
 
