@@ -14,7 +14,8 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from backtest.harness import UNSET, MarketData, RunRow
+from backtest import harness
+from backtest.harness import UNSET, MarketData, RunRow, default_jobs
 from backtest.portfolio import PortfolioParams
 from backtest.run import (
     JOBS_AUTO,
@@ -24,6 +25,7 @@ from backtest.run import (
     build_parser,
     grid_from_args,
     iter_combos,
+    jobs_from_arg,
     main,
     options_from_args,
     parse_date_ms,
@@ -37,6 +39,7 @@ from backtest.run import (
 from backtest.sweep import timeframe_to_ms
 from backtest.synthetic import make_synthetic_ohlcv
 from backtest.zone_limit_backtest import run_zone_limit_portfolio_backtest
+from config.settings import Settings
 from data.models import Candle, FundingRate
 from data.storage import OhlcvStore
 from strategy.models import ConfluenceParams
@@ -575,10 +578,34 @@ def _parallel_options(synthetic_db: tuple[str, str]) -> RunOptions:
     return RunOptions(funding=False, db_path=db_path, cache_dir=cache_dir)
 
 
-def test_run_grid_is_serial_by_default() -> None:
-    """기본값은 직렬 — 병렬은 옵트인이다(회귀 보존)."""
-    assert build_parser().parse_args([]).jobs == "1"
-    assert parse_jobs(build_parser().parse_args([]).jobs) == 1
+def test_jobs_unspecified_is_sentinel_none() -> None:
+    """WAN-294: `--jobs` 미지정은 argparse에서 sentinel(None)이다.
+
+    None이라야 "미지정"과 명시 `--jobs 4`를 가른다 — 미지정은 설정 기본값을 따라가고
+    (서버는 env로 덮는다), 명시는 언제나 사용자 지정이 이긴다.
+    """
+    assert build_parser().parse_args([]).jobs is None
+
+
+def test_jobs_from_arg_default_follows_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """WAN-294 완료기준 1: 미지정이면 설정 기본값(backtest_jobs)으로 fan-out한다."""
+    monkeypatch.setattr(harness, "get_settings", lambda: Settings(backtest_jobs=4))
+    assert default_jobs() == 4
+    assert jobs_from_arg(None) == 4
+
+
+def test_jobs_env_override_wins(monkeypatch: pytest.MonkeyPatch) -> None:
+    """WAN-294 완료기준 2: `ALPHABLOCK_BACKTEST_JOBS`(=설정)가 미지정 기본을 덮는다."""
+    monkeypatch.setattr(harness, "get_settings", lambda: Settings(backtest_jobs=8))
+    assert jobs_from_arg(None) == 8
+
+
+def test_jobs_explicit_arg_beats_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """WAN-294 완료기준 2: 명시적 `--jobs N`/`auto`는 설정과 무관하게 이긴다."""
+    monkeypatch.setattr(harness, "get_settings", lambda: Settings(backtest_jobs=8))
+    assert jobs_from_arg("2") == 2
+    assert jobs_from_arg("auto") == JOBS_AUTO  # 명시 auto는 캡 없이 os.cpu_count()로 푼다
+    assert jobs_from_arg("1") == 1
 
 
 def test_run_grid_jobs_produces_identical_rows_to_serial(synthetic_db: tuple[str, str]) -> None:
@@ -675,7 +702,11 @@ def test_main_prints_table_by_default(
 ) -> None:
     # WAN-213: per-cell 표(return%/sharpe 열)를 재는 테스트라 단일 포지션 경로를 명시한다
     # — 인자 없는 실행의 기본값은 이제 레버리지 북(집계 행, 열이 다르다)이다.
-    assert main(["--symbol", "BTCUSDT", "--positions", "single", "--quiet"]) == 0
+    # WAN-294: 기본 TF가 4개(15m/1h/2h/4h)라 새 기본 워커 수(4)로 두면 fan-out이
+    # 별도 프로세스로 갈리는데, 이 테스트의 로더는 in-process monkeypatch(synthetic_loader)라
+    # 워커가 못 본다. 직렬을 명시해 in-process 로더를 유지한다(병렬=직렬 동일성은 synthetic_db
+    # 기반 테스트가 따로 고정한다).
+    assert main(["--symbol", "BTCUSDT", "--positions", "single", "--jobs", "1", "--quiet"]) == 0
     out = capsys.readouterr().out
     assert "return%" in out and "sharpe" in out
 

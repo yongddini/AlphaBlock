@@ -75,13 +75,17 @@ python -m backtest.run --symbol BTCUSDT --tf 15m --persist
 한 표에서 비교된다. `book`은 회계 모양이 달라(칸을 한 지갑으로 접는다) 단독으로만 쓰고,
 채택 기본값만 돈다(전략·비용 축을 주면 거부 — 라벨만 붙는 조용한 무시를 막는다).
 
-## 병렬 실행 (`--jobs`, WAN-121)
+## 병렬 실행 (`--jobs`, WAN-121/294)
 
-기본 `1`은 직렬이고, `N>1`/`auto`는 **(심볼, TF) 단위**로 `ProcessPoolExecutor`에
-fan-out한다. 병렬화는 일을 나눠 맡길 뿐 계산 로직을 건드리지 않으므로 **행의 내용도
-순서도 `--jobs` 값과 무관하게 같다** — 셀은 서로 상태를 공유하지 않고, 결과·로그는
+`--jobs`를 안 주면 설정 기본값(`ALPHABLOCK_BACKTEST_JOBS`, 기본 `4`, WAN-294)으로
+**(심볼, TF) 단위** `ProcessPoolExecutor`에 fan-out한다. 기본 4는 M1 성능 코어 수 —
+`auto`(=`os.cpu_count()`)는 M1에서 효율 코어까지 8을 세 오버서브되므로 실효 상한을 기본으로
+고정했다. 코어 수가 다른 서버(WAN-174)는 그 환경변수로 덮고, 명시적 `--jobs N`/`--jobs auto`
+(캡 없음)는 언제나 이긴다. 병렬화는 일을 나눠 맡길 뿐 계산 로직을 건드리지 않으므로 **행의
+내용도 순서도 `--jobs` 값과 무관하게 같다** — 셀은 서로 상태를 공유하지 않고, 결과·로그는
 제출 순서로 모은다. 그래서 채택 수치가 `--jobs`에 따라 흔들리지 않는다
 (`tests/test_run_cli.py`·`tests/test_run_regression_real_data.py`가 그 동일성을 고정한다).
+⚠️ 작은 격자에서는 워커 스폰 비용이 이득을 넘겨 오히려 느릴 수 있다(WAN-121 각주).
 
 ## 진입 경로
 
@@ -130,6 +134,7 @@ from backtest.harness import (
     build_config,
     build_params,
     build_row,
+    default_jobs,
     detect_order_blocks,
     eval_boundary_ms,
     fill_preset,
@@ -224,6 +229,19 @@ def parse_jobs(text: str) -> int:
     if value < 0:
         raise ValueError(f"--jobs는 0(=auto) 이상이어야 합니다: {value}")
     return value
+
+
+def jobs_from_arg(text: str | None) -> int:
+    """CLI `--jobs` 값을 워커 수로 푼다(WAN-294).
+
+    `text is None`(= `--jobs` 미지정)이면 설정 기본값(`harness.default_jobs()`, 기본 4)을
+    쓴다. 명시적으로 준 값은 `parse_jobs`로 그대로 파싱해 **사용자 지정이 이긴다** —
+    `--jobs auto`는 여전히 `os.cpu_count()`(캡 없음)로 풀린다. 미지정과 명시 `--jobs 4`를
+    가르지 않으면 "auto가 M1에서 8을 세 오버서브"라는 이 이슈의 문제가 그대로 남는다.
+    """
+    if text is None:
+        return default_jobs()
+    return parse_jobs(text)
 
 
 def resolve_jobs(jobs: int, task_count: int) -> int:
@@ -893,10 +911,11 @@ def build_parser() -> argparse.ArgumentParser:
     execution = parser.add_argument_group("실행")
     execution.add_argument(
         "--jobs",
-        default="1",
+        default=None,
         metavar="N",
         help=(
-            "(심볼, TF) 단위 병렬 워커 수(기본 1 = 직렬). auto 또는 0이면 CPU 코어 수. "
+            "(심볼, TF) 단위 병렬 워커 수. 미지정이면 설정 기본값(ALPHABLOCK_BACKTEST_JOBS, "
+            "기본 4, WAN-294). auto 또는 0이면 CPU 코어 수(캡 없음). "
             "결과는 --jobs 값과 무관하게 동일하다"
         ),
     )
@@ -1125,7 +1144,7 @@ def run_book_main(args: argparse.Namespace, book: LeverageBookParams) -> int:
 
     reentry_on, reentry_rule = _resolve_reentry(args.reentry)
     try:
-        jobs = parse_jobs(args.jobs)
+        jobs = jobs_from_arg(args.jobs)
         rows = book_cli.run_book(
             symbols,
             timeframes,
@@ -1397,7 +1416,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         grid = grid_from_args(args)
         options = options_from_args(args)
-        jobs = parse_jobs(args.jobs)
+        jobs = jobs_from_arg(args.jobs)
     except ValueError as exc:
         print(f"오류: {exc}", file=sys.stderr)
         return 2

@@ -697,7 +697,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--tf", type=str, default=",".join(DEFAULT_TIMEFRAMES))
     parser.add_argument("--start", type=str, default=DEFAULT_START)
     parser.add_argument("--end", type=str, default=DEFAULT_END)
-    parser.add_argument("--jobs", type=int, default=1, help="(심볼, TF) 단위 병렬 워커 수")
+    parser.add_argument(
+        "--jobs",
+        type=int,
+        default=harness.default_jobs(),
+        help="(심볼, TF) 단위 병렬 워커 수(미지정이면 ALPHABLOCK_BACKTEST_JOBS, 기본 4, WAN-294)",
+    )
     parser.add_argument("--no-funding-proxy", action="store_true", help="신규 종목 펀딩 대리 끔.")
     parser.add_argument("--from-csv", action="store_true", help="저장된 CSV에서 요약만 재생성.")
     parser.add_argument("--append", action="store_true", help="새 TF를 기존 CSV에 이어 붙인다.")
