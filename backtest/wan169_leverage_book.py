@@ -244,6 +244,12 @@ class _Task:
     band 재진입 대칭). False(기본)이면 `params`에 `short_enabled`를 얹지 않아 예전과 **비트
     단위로 같다**(`ConfluenceParams()` 기본값 `short_enabled=False`). 측정용 숏이지 재활성화가
     아니다 — 판정은 롱-온리 북 vs 롱+숏 북(WAN-282)이 낸다."""
+    seed: int = 0
+    """WAN-293(옵트인): 체결 **탈락** 렌즈의 추첨 시드. `fill.dropout_rate > 0`인 렌즈
+    (`drop_25`·`drop_50`·`pen_5bp_drop_50`)만 후보 생성의 `random.Random(seed)`에 흘러 들어가
+    같은 렌즈를 여러 시드로 돌려 단일 시드의 운을 배제한다(WAN-96 관행 = 시드 5개 평균). 탈락이
+    없는 렌즈(`baseline`·`pen_1bp`·`pen_5bp`)는 RNG를 만들지 않으므로 이 값과 무관하고, 기본
+    `0`은 지금까지 `run_cell`이 쓰던 값이라 **비트 단위로 같다**(WAN-264 이하 CSV 무영향)."""
 
 
 @dataclass(frozen=True)
@@ -346,7 +352,11 @@ def run_cell(task: _Task, *, log: bool = True) -> CellPayload:
         raise ValueError(f"{task.symbol} {task.timeframe}: 데이터가 없습니다(창 확인).")
     # 인자 없음 = 채택 기본값(옛 핀 물려받기 금지 — 완료기준). `fill`(WAN-264, 옵트인)을 주면
     # 체결 렌즈만 갈아끼운다 — `None`이면 `build_params(fill=BASELINE_FILL)`과 같아 비트 재현.
-    params = harness.build_params() if task.fill is None else harness.build_params(fill=task.fill)
+    params = (
+        harness.build_params()
+        if task.fill is None
+        else harness.build_params(fill=task.fill, seed=task.seed)
+    )
     if task.short_enabled:
         # WAN-282(옵트인): 베어리시 OB 숏을 후보에 같이 낸다. 끄면(기본) 이 model_copy를
         # 아예 타지 않아 예전과 비트 단위로 같다 — 롱 후보는 short_enabled와 무관하게 같은
@@ -481,6 +491,7 @@ def run_cells(
     stop_slippage_alpha: float = 0.0,
     limit_stop_nonfill: bool = False,
     short_enabled: bool = False,
+    seed: int = 0,
 ) -> list[CellPayload]:
     """전 칸을 돈다. `jobs`는 성능 노브이지 결과 축이 아니다(WAN-121).
 
@@ -506,6 +517,10 @@ def run_cells(
 
     `short_enabled`(WAN-282, 옵트인)를 켜면 후보 생성이 베어리시 OB 숏을 같이 낸다(롱 모델의
     거울) — 끄면(기본) `params`에 얹지 않아 예전과 비트 단위로 같다. 롱+숏 북 측정용이다.
+
+    `seed`(WAN-293, 옵트인)는 체결 **탈락** 렌즈의 추첨 시드다 — `fill.dropout_rate > 0`인
+    렌즈만 후보 생성 RNG에 흘러 든다. 기본 `0`은 예전 값이라 비트 단위로 같고, 탈락 없는
+    렌즈에서는 이 값이 무관하다(같은 렌즈를 시드 5개로 돌려 평균하는 WAN-96 관행에 쓴다).
     """
     tasks = [
         _Task(
@@ -520,6 +535,7 @@ def run_cells(
             stop_slippage_alpha=stop_slippage_alpha,
             limit_stop_nonfill=limit_stop_nonfill,
             short_enabled=short_enabled,
+            seed=seed,
         )
         for symbol in symbols
         for timeframe in timeframes
