@@ -309,6 +309,18 @@ def test_summary_renders_key_sections() -> None:
     assert md.index("| baseline |") < md.index("| pen_5bp |")
 
 
+def test_summary_engine_verify_line_render() -> None:
+    """검산 문장은 실행 시 실제 verify_cells 결과가 실리고, --from-csv엔 정본 안내가 나온다."""
+    rows = [
+        _row(REF_LENS, "1h", ARM_LONG_ONLY, "oos_warm"),
+        _row(REF_LENS, "1h", ARM_LONG_SHORT, "oos_warm"),
+    ]
+    md = build_summary_markdown(rows, engine_verify_line="`baseline` 렌즈: ✅ **일치** — 27칸")
+    assert "✅ **일치** — 27칸" in md
+    md_from_csv = build_summary_markdown(rows)
+    assert "실행 로그와 아래 회귀 테스트가 정본" in md_from_csv
+
+
 def test_summary_flags_gapped_symbols() -> None:
     rows = [
         _row(REF_LENS, "1h", ARM_LONG_ONLY, "oos_warm"),

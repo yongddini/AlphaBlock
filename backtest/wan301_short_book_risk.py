@@ -66,6 +66,7 @@ from backtest.wan169_leverage_book import (
     _segment_cells,
     _short,
     run_cells,
+    verify_cells,
 )
 from backtest.wan180_leverage_book_nine import apply_funding_proxy
 from backtest.wan288_monthly_long_short import (
@@ -283,8 +284,8 @@ def build_lens_rows(
     end: str = DEFAULT_END,
     jobs: int = 1,
     funding_proxy: bool = True,
-) -> tuple[list[RiskRow], dict[str, str], list[str]]:
-    """각 렌즈(탈락은 시드 평균)의 위험 행 + 펀딩 대리 노트 + 펀딩 공백 종목을 낸다.
+) -> tuple[list[RiskRow], dict[str, str], list[str], str]:
+    """각 렌즈(탈락은 시드 평균)의 위험 행 + 펀딩 대리 노트 + 펀딩 공백 종목 + 검산 문장.
 
     렌즈마다 `run_cells(fill=렌즈, seed=s, short_enabled=True)`로 후보를 다시 생성한다
     (렌즈는 후보 집합을 바꾼다, WAN-264). 차가운 절단(`is`/`oos`)은 이 표가 안 쓰므로
@@ -298,9 +299,11 @@ def build_lens_rows(
     out: list[RiskRow] = []
     notes: dict[str, str] = {}
     gapped: set[str] = set()
+    verify_line = ""
     for lens in lenses:
         fill = None if lens == REF_LENS else harness.fill_preset(lens)
         seeds = fill.seeds if fill is not None else (0,)
+        engine_check = lens == REF_LENS
         per_seed: list[list[RiskRow]] = []
         for seed in seeds:
             cells = run_cells(
@@ -313,18 +316,26 @@ def build_lens_rows(
                 fill=fill,
                 seed=seed,
                 cold_segments=False,
-                engine_check=lens == REF_LENS,
+                engine_check=engine_check,
             )
             if funding_proxy:
                 cells, note = apply_funding_proxy(cells)
                 if note:
                     notes[lens] = note
+            if engine_check:
+                # 검산(WAN-164 패턴): 격리 행 ↔ 표준 경로 비트 대조. 계산만 하고 버리면
+                # 「검산했다」가 주장으로만 남는다 — 여기서 실제로 비교하고 불일치면 죽는다.
+                line, worst = verify_cells([row for c in cells for row in c.rows])
+                print(f"[wan301] 검산({lens}): {line}", flush=True)
+                if "🚨" in line:
+                    raise RuntimeError(f"엔진 검산 실패(worst={worst}): {line}")
+                verify_line = f"`{lens}` 렌즈: {line}"
             gapped.update(_short(c.symbol) for c in cells if not c.funding[SEGMENT_FULL])
             rows = build_rows_for_cells(cells, lens=lens)
             per_seed.append(rows)
             print(f"[wan301] {lens} seed={seed}: 위험 {len(rows)}행", flush=True)
         out.extend(_average_risk(per_seed, lens, len(seeds)))
-    return out, notes, sorted(gapped)
+    return out, notes, sorted(gapped), verify_line
 
 
 # --------------------------------------------------------------------------- #
@@ -506,7 +517,7 @@ def build_summary_markdown(
     risk_csv: Path = DEFAULT_RISK_CSV,
     funding_notes: dict[str, str] | None = None,
     gapped_symbols: Sequence[str] = (),
-    engine_checked_lens: str = REF_LENS,
+    engine_verify_line: str = "",
 ) -> str:
     tf_in_all = sorted(
         {r.scope for r in rows if r.scope != "all"},
@@ -570,10 +581,16 @@ def build_summary_markdown(
     )
 
     parts.append("## 검산\n")
+    engine_line = (
+        f"- {engine_verify_line} (표준 경로 `harness.run_once` 대조는 기준 렌즈만 — 배선은 "
+        "렌즈 축과 무관, WAN-301 컴퓨트 노브 `engine_check`.)\n"
+        if engine_verify_line
+        else "- 표준 경로 검산 문장은 측정 실행 시에만 나온다(`--from-csv` 재생성엔 없음 — "
+        "실행 로그와 아래 회귀 테스트가 정본).\n"
+    )
     parts.append(
-        f"- 표준 경로 검산(`harness.run_once` 비트 대조)은 `{engine_checked_lens}` 렌즈 팔에서 "
-        "수행했다(배선은 렌즈 축과 무관 — WAN-301 컴퓨트 노브 `engine_check`).\n"
-        "- baseline·pen_5bp의 롱-온리/롱+숏 `all`·TF 스코프 행은 wan293 월별 북 CSV와 교차 "
+        engine_line
+        + "- baseline·pen_5bp의 롱-온리/롱+숏 `all`·TF 스코프 행은 wan293 월별 북 CSV와 교차 "
         "검산된다(∏(1+월수익) ≡ total_return · Σ월 청산수 ≡ 거래수 — 회귀 테스트 "
         "`test_committed_rows_cross_check_wan293`).\n"
     )
@@ -620,6 +637,7 @@ def main(argv: list[str] | None = None) -> int:
     out_md: Path = args.summary
     funding_notes: dict[str, str] = {}
     gapped: list[str] = []
+    verify_line = ""
 
     if args.from_csv:
         rows = risk_from_csv(out_csv)
@@ -632,7 +650,7 @@ def main(argv: list[str] | None = None) -> int:
         for lens in lenses:
             if lens != REF_LENS:
                 harness.fill_preset(lens)
-        rows, funding_notes, gapped = build_lens_rows(
+        rows, funding_notes, gapped, verify_line = build_lens_rows(
             symbols,
             timeframes,
             lenses=lenses,
@@ -650,7 +668,11 @@ def main(argv: list[str] | None = None) -> int:
     out_md.parent.mkdir(parents=True, exist_ok=True)
     out_md.write_text(
         build_summary_markdown(
-            rows, risk_csv=out_csv, funding_notes=funding_notes, gapped_symbols=gapped
+            rows,
+            risk_csv=out_csv,
+            funding_notes=funding_notes,
+            gapped_symbols=gapped,
+            engine_verify_line=verify_line,
         ),
         encoding="utf-8",
     )
