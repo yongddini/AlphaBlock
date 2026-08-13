@@ -60,8 +60,8 @@ def _zone() -> OrderBlock:
     )
 
 
-def _install_stub_detector(monkeypatch: pytest.MonkeyPatch) -> None:
-    result = OrderBlockResult(order_blocks=[_zone()], signals=[])
+def _install_stub_detector(monkeypatch: pytest.MonkeyPatch, zone: OrderBlock | None = None) -> None:
+    result = OrderBlockResult(order_blocks=[zone if zone is not None else _zone()], signals=[])
 
     class _Stub:
         def __init__(self, params: object = None) -> None:
@@ -106,11 +106,16 @@ def _make_rig(
     monkeypatch: pytest.MonkeyPatch,
     *,
     reentry_entry_rule: str | None = None,
+    zone: OrderBlock | None = None,
+    closes: list[float] | None = None,
+    now_ms: object = None,
 ) -> dict[str, object]:
-    _install_stub_detector(monkeypatch)
+    _install_stub_detector(monkeypatch, zone=zone)
     db = tmp_path / "ohlcv.db"
     store = OhlcvStore(db)
-    store.upsert_candles([_htf_candle(i) for i in range(_N_CLOSED)])
+    store.upsert_candles(
+        [_htf_candle(i, close=closes[i] if closes is not None else 100.0) for i in range(_N_CLOSED)]
+    )
 
     settings = Settings(db_path=str(db))
     params = ConfluenceParams(max_zone_width_atr=None)  # 합성 데이터 ATR로는 존이 걸러진다.
@@ -145,11 +150,12 @@ def _make_rig(
         lookback_bars=500,
         poll_interval_seconds=1.0,
         runtime_state=RuntimeStateStore(state_path),
-        now_ms=lambda: 999_999,
+        now_ms=now_ms if now_ms is not None else (lambda: 999_999),  # type: ignore[arg-type]
     )
     return {
         "store": store,
         "runner": runner,
+        "engine": engine,
         "executor": executor,
         "journal": journal,
         "paper_store": paper_store,
@@ -867,3 +873,110 @@ def test_circuit_breaker_alerts_once_and_clears_once(rig: dict[str, object]) -> 
     runner._check_circuit_breaker(next_day)
     runner._check_circuit_breaker(next_day + 60_000)
     assert events == ["tripped", "cleared"]
+
+
+# -- 지정가 만료의 결정적 집행 (WAN-298) --------------------------------------
+
+
+def _resting_zone() -> OrderBlock:
+    """하락 시딩에서 밴드(≈98.8)가 존 안에 앉도록 상단을 올린 존 — 탭해도 즉시 체결이
+    아닌 「예약만」 상태를 만든다(test_limit_engine의 `_rest_without_touch`와 같은 좌표)."""
+    return OrderBlock(
+        direction=OrderBlockDirection.BULLISH,
+        top=99.5,
+        bottom=90.0,
+        start_time=0,
+        confirmed_time=_H,
+        ob_volume=1.0,
+        ob_low_volume=0.5,
+        ob_high_volume=0.5,
+    )
+
+
+def test_poll_once_expires_overdue_order_when_data_stalls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """WAN-298: 수집이 멈춰 새 1분봉이 없어도 `poll_once`가 벽시계 백스톱으로 만료를 집행한다.
+
+    봉 계수 만료는 소비된 1분봉으로만 전진하므로 데이터가 멈추면 주문이 기한을 넘겨도
+    슬롯을 무기한 점유했다(DOGE 15m 47시간 — 이슈 실측). 러너가 매 폴링 벽시계로 기한을
+    검사해 만료(`cancelled_expired`)로 정리하고 슬롯을 비우는지 동작으로 고정한다.
+    """
+    now = {"ms": 999_999}
+    rig = _make_rig(
+        tmp_path,
+        monkeypatch,
+        zone=_resting_zone(),
+        closes=[130.0 - i for i in range(_N_CLOSED)],
+        now_ms=lambda: now["ms"],
+    )
+    try:
+        store: OhlcvStore = rig["store"]  # type: ignore[assignment]
+        runner: ZoneLimitPaperRunner = rig["runner"]  # type: ignore[assignment]
+        engine: ZoneLimitLiveEngine = rig["engine"]  # type: ignore[assignment]
+        journal: OrderJournal = rig["journal"]  # type: ignore[assignment]
+
+        # 탭(저가 99.4 ≤ 존 상단 99.5)하되 지정가(≈98.8)에는 닿지 않는 1분봉 → 예약만.
+        store.upsert_candles([_m1(_FORMING, low=99.4, high=101.5, close=100.0)])
+        runner.poll_once()
+        assert engine.book.pending(_SYMBOL, _TF) is not None
+
+        # 이후 새 1분봉이 전혀 없음(수집 정지) + 벽시계가 기한(24봉) + 유예를 지남.
+        deadline = _FORMING + 24 * _H
+        now["ms"] = deadline + 6 * 60_000
+        runner.poll_once()
+        assert engine.book.pending(_SYMBOL, _TF) is None
+        stats = journal.fill_stats()[0]
+        assert stats.cancelled_expired == 1
+        assert stats.pending == 0
+        # 종결 시각은 벽시계가 아니라 기한 시각이다(재현 쿼리의 wait가 기준대로 읽힌다).
+        assert journal.funnel_counts(start_ms=deadline, end_ms=deadline + 1).no_fill == 1
+    finally:
+        _close_rig(rig)
+
+
+def test_expire_stale_pending_reevaluates_overdue_on_restart(tmp_path: Path) -> None:
+    """WAN-298 재시작 재평가: 기한 초과 대기 주문은 `cancelled_expired`(종결 = 기한 시각),
+    기한 전·무기한(재진입)·기한 불명은 기존대로 `discarded_restart`로 마감한다."""
+    from live.limit_orders import PendingLimitOrder
+    from strategy.realtime_rsi import RealtimeRsi
+
+    journal = OrderJournal(tmp_path / "j.db")
+    session = journal.start_session(now_ms=0)
+
+    def place(timeframe: str, placed_ms: int, valid_bars: int | None) -> int:
+        order = PendingLimitOrder(
+            symbol=_SYMBOL,
+            timeframe=timeframe,
+            direction=OrderBlockDirection.BULLISH,
+            limit_price=100.0,
+            stop_price=90.0,
+            rsi_state=RealtimeRsi(length=3),
+            placed_ms=placed_ms,
+            limit_valid_bars=valid_bars,
+        )
+        return journal.record_placed(
+            order, session_id=session, zone_start_time=0, zone_confirmed_time=1
+        )
+
+    place("15m", 10 * 60_000, 24)  # 기한 = 예약 봉 시작(0h) + 24봉 = 6h — 초과.
+    place("1h", 46 * _H, 24)  # 기한 = 46h + 24h = 70h — 아직 전.
+    place("1h", 0, None)  # 무기한(재진입 재무장) — 기한 없음.
+
+    now = 47 * _H  # 이슈 실측(DOGE 15m ~47시간)과 같은 자리의 재시작.
+    assert zlr.expire_stale_pending(journal, now_ms=now) == 1
+    assert journal.discard_stale_pending(now_ms=now) == 2
+    assert journal.stale_pending_orders() == []
+
+    statuses = [
+        (o.timeframe, o.status) for o in journal.orders_placed_between(start_ms=0, end_ms=now + _H)
+    ]
+    assert statuses == [
+        ("1h", "discarded_restart"),  # 무기한 — placed_ms=0.
+        ("15m", "cancelled_expired"),  # 기한 초과 — placed_ms=10분.
+        ("1h", "discarded_restart"),  # 기한 전 — placed_ms=46h.
+    ]
+    # 만료 종결 시각 = 기한 시각(6h): 그 1ms 창의 funnel에 만료(no_fill)로 잡힌다.
+    deadline_15m = 24 * 15 * 60_000
+    assert journal.funnel_counts(start_ms=deadline_15m, end_ms=deadline_15m + 1).no_fill == 1
+    journal.close()

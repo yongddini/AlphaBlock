@@ -260,6 +260,53 @@ def test_expiry_after_limit_valid_bars(monkeypatch: pytest.MonkeyPatch) -> None:
     assert engine.book.pending(_SYMBOL, _TF) is None
 
 
+def test_wall_clock_backstop_expires_overdue_and_frees_slot(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """WAN-298: 서브스텝이 오지 않아도(수집 정지) 벽시계 백스톱이 만료를 집행해 슬롯을 비운다.
+
+    봉 계수(`bars_elapsed`)는 소비된 1분봉으로만 전진하므로 데이터가 멈추면 얼어붙는다 —
+    그 상태에서 `expire_overdue`가 기한(예약 봉 시작 + 24봉) + 유예를 지난 주문을
+    `cancelled_expired`로 정리하고, 이후 새 탭이 실제로 주문을 걸 수 있어야 한다(동작 고정).
+    """
+    journal = OrderJournal(tmp_path / "j.db")
+    session = journal.start_session(now_ms=0)
+    engine = _rest_without_touch(
+        monkeypatch, params=_params(limit_valid_bars=24), journal=journal, session_id=session
+    )
+    deadline = _FORMING + 24 * _H  # 예약 봉(_FORMING) 시작 + 24봉.
+
+    # 기한 직후(유예 안)에는 발동하지 않는다 — 정상 서브스텝 경로와 경합하지 않기 위해서다.
+    assert engine.expire_overdue(now_ms=deadline + 60_000) == []
+    assert engine.book.pending(_SYMBOL, _TF) is not None
+
+    # 유예를 지나면 만료 — 이벤트·장부 종결 시각은 벽시계가 아니라 **기한 시각**이다.
+    events = engine.expire_overdue(now_ms=deadline + 6 * 60_000)
+    assert [e.kind for e in events] == ["cancelled_expired"]
+    assert events[0].time_ms == deadline
+    assert engine.book.pending(_SYMBOL, _TF) is None
+    stats = journal.fill_stats()[0]
+    assert stats.cancelled_expired == 1
+    # terminal_ms == 기한 시각: 그 1ms 창의 funnel에 만료(no_fill)로 잡힌다.
+    assert journal.funnel_counts(start_ms=deadline, end_ms=deadline + 1).no_fill == 1
+
+    # 슬롯이 실제로 비었다 — 존 밖으로 나갔다 재탭하면 새 주문이 걸린다(라벨이 아니라 동작).
+    ev = engine.on_substep(_SYMBOL, _TF, time_ms=_FORMING + _H, low=100.2, high=101.0, close=100.5)
+    assert ev == []
+    ev = engine.on_substep(
+        _SYMBOL, _TF, time_ms=_FORMING + 2 * _H, low=99.4, high=101.5, close=100.0
+    )
+    assert [e.kind for e in ev] == ["placed"]
+    journal.close()
+
+
+def test_wall_clock_backstop_skips_indefinite_order(monkeypatch: pytest.MonkeyPatch) -> None:
+    """무기한 주문(`limit_valid_bars=None` — 재진입 재무장, WAN-274)은 백스톱이 건드리지 않는다."""
+    engine = _rest_without_touch(monkeypatch, params=_params(limit_valid_bars=None))
+    assert engine.expire_overdue(now_ms=_FORMING + 10_000 * _H) == []
+    assert engine.book.pending(_SYMBOL, _TF) is not None
+
+
 def test_invalidated_zone_cancels_pending(monkeypatch: pytest.MonkeyPatch) -> None:
     engine = _rest_without_touch(monkeypatch)
 

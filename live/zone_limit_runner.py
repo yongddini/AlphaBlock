@@ -36,6 +36,11 @@
 * **재시작 정책 = 버리고 새로 걸기** — 이전 세션의 대기 주문은 복원하지 않고
   `discarded_restart`로 마감한다(체결률 분모에서 제외). 죽어 있던 구간의 가격 경로를
   지어내지 않는다. 오픈 포지션은 `PaperExecutor`가 저장소에서 복구한다(기존 WAN-34 배선).
+  ⚠️ 단 **만료 기한(`limit_valid_bars`, 24봉 WAN-222)을 이미 넘긴 주문은 폐기가 아니라
+  정상 만료(`cancelled_expired`)로 먼저 정리한다**(`expire_stale_pending`, WAN-298) —
+  기한 초과 주문이 `discarded_restart`로 남으면 「아무도 안 치운 stale 주문」과 「기한 전
+  정상 대기」가 장부에서 구분되지 않는다. 가동 중에는 벽시계 백스톱
+  (`ZoneLimitLiveEngine.expire_overdue`)이 같은 기한을 매 폴링 집행한다.
 * **중단 구간은 데이터로 남는다** — 세션 행 사이의 틈이 곧 다운타임이다.
 
 페이퍼 한정: 실주문 API는 부르지 않는다(`build_execution_engine`이 `live_trading=false`에서
@@ -56,6 +61,7 @@ from data.storage import OhlcvStore
 from execution.engine import EntryIntent
 from live.executor import PaperExecutor
 from live.limit_engine import EngineEvent, ReentryEntryRule, ZoneLimitLiveEngine
+from live.limit_orders import LimitOrderStatus, expiry_deadline_ms
 from live.order_journal import SKIP_REASON_ZONE_WIDTH, OrderJournal
 from live.paper import PaperPosition
 from live.price_feed import PriceFeed
@@ -186,6 +192,13 @@ class ZoneLimitPaperRunner:
         # 경로가 이미 끝냈으므로, 여기서는 걸려 있는 주문의 체결만 더 촘촘히 잡는다.
         emitted += self._drain_ticks()
         now = self._now_ms()
+        # 벽시계 만료 백스톱(WAN-298): 수집이 멈춰 서브스텝이 오지 않아도 지정가 만료
+        # (`limit_valid_bars`, 24봉 WAN-222)를 집행해 슬롯을 비운다 — 만료 이벤트는 1분봉
+        # 경로와 같은 `_handle_events`로 기록·알림한다.
+        overdue = self._engine.expire_overdue(now_ms=now)
+        if overdue:
+            self._handle_events(overdue)
+            emitted += overdue
         self._journal.heartbeat(self._session_id, now_ms=now)
         self._check_circuit_breaker(now)
         if self._notifier is not None:
@@ -486,6 +499,33 @@ def build_series(settings: Settings) -> list[Series]:
     ]
 
 
+def expire_stale_pending(journal: OrderJournal, *, now_ms: int) -> int:
+    """기동/재시작 시 이전 세션 대기 주문을 만료 기한으로 재평가한다(WAN-298). 만료 건수 반환.
+
+    러너가 죽어 있던 구간에는 봉 계수도 벽시계 백스톱도 돌지 않으므로, 기한을 넘긴 채
+    `pending`으로 남은 주문이 재시작 폐기(`discarded_restart`)로만 쓸려 나갔다 — 그러면
+    「만료 기준 초과 + fill 없음 + discarded_restart」가 장부에 남아 정상 만료와 구분되지
+    않는다(WAN-298 재현 쿼리의 🔴 조합). 이 함수는 `discard_stale_pending` **전에** 불려
+    기한 초과분을 `cancelled_expired`로 먼저 정리한다. 종결 시각은 벽시계가 아니라 **기한
+    시각**이다(서브스텝 경로가 기록했을 시각과 같다 — `live.limit_orders.expiry_deadline_ms`
+    단일 출처). 무기한(재진입 재무장) · 열 도입 전 행은 기한을 모르므로 건드리지 않는다
+    (이후 `discard_stale_pending`이 재시작 폐기로 마감한다).
+    """
+    expired = 0
+    for row in journal.stale_pending_orders():
+        if row.limit_valid_bars is None:
+            continue  # 무기한(재진입) 또는 열 도입 전 행 — 기한 불명.
+        deadline = expiry_deadline_ms(
+            row.placed_ms, row.limit_valid_bars, timeframe_to_ms(row.timeframe)
+        )
+        if deadline <= now_ms:
+            journal.record_cancelled(
+                row.journal_id, LimitOrderStatus.CANCELLED_EXPIRED, now_ms=deadline
+            )
+            expired += 1
+    return expired
+
+
 def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
     """존-지정가 페이퍼 러너를 실행한다(`live.runner`가 기본값에서 위임하는 진입점)."""
     from common.telegram import build_telegram_client
@@ -516,7 +556,15 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
     )
     try:
         now = int(time.time() * 1000)
-        # 재시작 정책: 이전 세션의 대기 주문은 복원하지 않고 폐기로 마감한다(모듈 독스트링).
+        # 재시작 재평가(WAN-298): 이전 세션 대기 주문 중 만료 기한(24봉, WAN-222)을 이미
+        # 넘긴 것은 재시작 폐기가 아니라 정상 만료로 정리한다(종결 시각 = 기한 시각).
+        expired_stale = expire_stale_pending(journal, now_ms=now)
+        if expired_stale:
+            _logger.info(
+                "이전 세션 대기 주문 %d건 만료 처리(cancelled_expired — 기한 초과, WAN-298)",
+                expired_stale,
+            )
+        # 재시작 정책: 나머지 대기 주문은 복원하지 않고 폐기로 마감한다(모듈 독스트링).
         discarded = journal.discard_stale_pending(now_ms=now)
         if discarded:
             _logger.info("이전 세션 대기 주문 %d건 폐기(discarded_restart)", discarded)

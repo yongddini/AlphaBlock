@@ -141,6 +141,33 @@ def test_discard_stale_pending_on_restart(tmp_path: Path) -> None:
     journal.close()
 
 
+def test_stale_pending_orders_lists_pending_with_valid_bars(tmp_path: Path) -> None:
+    """WAN-298: 재시작 재평가의 원자료 — `pending` 행만, 자기 유효기간과 함께 나온다.
+
+    행이 유효기간(`limit_valid_bars`)을 스스로 알아야 재시작 시 기한을 계산할 수 있다
+    (재진입 재무장은 무기한 `None`이라 설정값으로 대신할 수 없다).
+    """
+    journal = OrderJournal(tmp_path / "j.db")
+    session = journal.start_session(now_ms=0)
+
+    def place(**kw: object) -> int:
+        return journal.record_placed(
+            _order(**kw), session_id=session, zone_start_time=0, zone_confirmed_time=1
+        )
+
+    base = place()  # 채택 기본 24봉.
+    indefinite = place(limit_valid_bars=None)  # 재진입 재무장(무기한).
+    filled = place()
+    journal.record_filled(filled, _fill())  # 체결된 행은 pending이 아니다.
+
+    rows = journal.stale_pending_orders()
+    assert [(r.journal_id, r.timeframe, r.placed_ms, r.limit_valid_bars) for r in rows] == [
+        (base, "1h", 1_000, 24),
+        (indefinite, "1h", 1_000, None),
+    ]
+    journal.close()
+
+
 def test_sessions_track_uptime_spans(tmp_path: Path) -> None:
     journal = OrderJournal(tmp_path / "j.db")
     s1 = journal.start_session(now_ms=1_000)

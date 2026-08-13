@@ -101,6 +101,7 @@ __all__ = [
     "PlacedOrder",
     "SeriesFillStats",
     "SessionSpan",
+    "StalePendingOrder",
 ]
 
 #: "스치듯 닿은 체결" 판정 문턱(bp). `pen_5bp` 민감도 렌즈(WAN-96)와 같은 5bp를 써서
@@ -194,7 +195,8 @@ CREATE TABLE IF NOT EXISTS live_limit_orders (
     entry_status         TEXT,
     entry_reject_reason  TEXT,
     entry_reject_code    TEXT,
-    skip_reason          TEXT
+    skip_reason          TEXT,
+    limit_valid_bars     INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_live_limit_orders_series
     ON live_limit_orders (symbol, timeframe);
@@ -525,6 +527,23 @@ class SessionSpan:
     last_seen_ms: int
 
 
+@dataclass(frozen=True)
+class StalePendingOrder:
+    """이전 세션이 남긴 대기 주문 한 행(재시작 재평가용, WAN-298).
+
+    러너 기동 시 이 행들을 만료 기한으로 재평가한다 — 기한을 이미 넘긴 주문은
+    `discarded_restart`(결말 없음)가 아니라 `cancelled_expired`(정상 만료)로 정리해야
+    체결률 분모와 재현 쿼리가 바로 읽힌다. `limit_valid_bars`가 NULL이면 무기한(재진입
+    재무장) 또는 열 도입 전 행이라 기한을 모른다 → 재평가 대상이 아니다.
+    """
+
+    journal_id: int
+    symbol: str
+    timeframe: str
+    placed_ms: int
+    limit_valid_bars: int | None
+
+
 class OrderJournal:
     """지정가 주문 생애·러너 가동 구간을 SQLite에 기록하는 장부(단일 작성자 = 러너)."""
 
@@ -550,14 +569,21 @@ class OrderJournal:
         existing = {
             str(row[1]) for row in self._conn.execute("PRAGMA table_info(live_limit_orders)")
         }
-        for column in (
-            "entry_status",
-            "entry_reject_reason",
-            "entry_reject_code",
-            "skip_reason",
+        for column, column_type in (
+            ("entry_status", "TEXT"),
+            ("entry_reject_reason", "TEXT"),
+            ("entry_reject_code", "TEXT"),
+            ("skip_reason", "TEXT"),
+            # WAN-298: 재시작 재평가가 「이 주문이 언제 만료됐어야 하나」를 계산하려면 행이
+            # 자기 유효기간을 알아야 한다(재진입 주문은 무기한 None이라 설정값으로 대신할 수
+            # 없다). NULL = 무기한 **또는** 열 도입 전 행 — 둘 다 기한을 모르므로 재시작
+            # 재평가 대상이 아니다(재시작 폐기로 남는다).
+            ("limit_valid_bars", "INTEGER"),
         ):
             if column not in existing:
-                self._conn.execute(f"ALTER TABLE live_limit_orders ADD COLUMN {column} TEXT")
+                self._conn.execute(
+                    f"ALTER TABLE live_limit_orders ADD COLUMN {column} {column_type}"
+                )
 
     def close(self) -> None:
         self._conn.close()
@@ -606,8 +632,8 @@ class OrderJournal:
             cur = self._conn.execute(
                 "INSERT INTO live_limit_orders (session_id, symbol, timeframe, direction,"
                 " zone_start_time, zone_confirmed_time, tap_index, placed_ms, status,"
-                " first_rested_ms, last_limit_price)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " first_rested_ms, last_limit_price, limit_valid_bars)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     session_id,
                     order.symbol,
@@ -620,6 +646,7 @@ class OrderJournal:
                     LimitOrderStatus.PENDING.value,
                     order.first_rested_ms,
                     order.last_limit_price,
+                    order.limit_valid_bars,
                 ),
             )
         row_id = cur.lastrowid
@@ -778,6 +805,29 @@ class OrderJournal:
                 "UPDATE live_limit_orders SET status = ?, terminal_ms = ? WHERE id = ?",
                 (STATUS_DISCARDED_RESTART, now_ms, journal_id),
             )
+
+    def stale_pending_orders(self) -> list[StalePendingOrder]:
+        """아직 `pending`으로 남아 있는 주문 행을 예약 시각순으로 나열한다(WAN-298).
+
+        러너 기동 시 재시작 재평가가 이 목록을 만료 기한으로 나눠 「기한 초과 → 정상 만료」
+        와 「기한 전/무기한 → 재시작 폐기」를 가른다. 조회 전용이며 상태를 바꾸지 않는다 —
+        상태 전이는 `record_cancelled`/`discard_stale_pending`이 한다.
+        """
+        rows = self._conn.execute(
+            "SELECT id, symbol, timeframe, placed_ms, limit_valid_bars FROM live_limit_orders"
+            " WHERE status = ? ORDER BY placed_ms, id",
+            (LimitOrderStatus.PENDING.value,),
+        ).fetchall()
+        return [
+            StalePendingOrder(
+                journal_id=int(r[0]),
+                symbol=str(r[1]),
+                timeframe=str(r[2]),
+                placed_ms=int(r[3]),
+                limit_valid_bars=None if r[4] is None else int(r[4]),
+            )
+            for r in rows
+        ]
 
     def discard_stale_pending(self, *, now_ms: int) -> int:
         """이전 세션이 남긴 대기 주문을 재시작 폐기로 마감한다. 폐기 건수를 반환.
