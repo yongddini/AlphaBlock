@@ -250,6 +250,20 @@ class _Task:
     같은 렌즈를 여러 시드로 돌려 단일 시드의 운을 배제한다(WAN-96 관행 = 시드 5개 평균). 탈락이
     없는 렌즈(`baseline`·`pen_1bp`·`pen_5bp`)는 RNG를 만들지 않으므로 이 값과 무관하고, 기본
     `0`은 지금까지 `run_cell`이 쓰던 값이라 **비트 단위로 같다**(WAN-264 이하 CSV 무영향)."""
+    cold_segments: bool = True
+    """WAN-301(옵트인 컴퓨트 노브): `False`면 차가운 절단 구간(`is`/`oos`)의 탐지·후보 생성을
+    **건너뛴다** — `full`·`oos_warm`만 쓰는 리포트(wan288/293/301 부류)에서 셀 비용의 큰 몫이
+    쓰지도 않는 차가운 창 재탐지였다. 건너뛴 구간은 payload의 `candidates`/`funding`/`rows`에
+    **키 자체가 없다**(빈 값으로 위장하지 않는다 — 요청하면 KeyError로 시끄럽게 죽는다,
+    WAN-95 교훈). `True`(기본)면 예전과 **비트 단위로 같다**. `full`·`oos_warm` 산출은 이
+    노브와 무관하다(같은 전체 창 후보의 경계 필터)."""
+    engine_check: bool = True
+    """WAN-301(옵트인 컴퓨트 노브): `False`면 full 구간의 표준 경로 검산(`harness.run_once`
+    재실행 — 후보 생성과 맞먹는 비용)을 생략한다. 검산은 배선이 같은 한 렌즈·시드 축에서
+    반복할 필요가 없으므로, 렌즈 격자(WAN-301)는 기준(baseline) 팔만 켜고 나머지는 끈다.
+    끄면 `CellRow.engine_*`이 `None`이라 `verify_cells`가 그 행을 건너뛴다(조용한 통과가
+    아니라 검산 대상 축소 — 요약에 어느 팔이 검산됐는지 적는다). `True`(기본)면 예전과
+    **비트 단위로 같다**."""
 
 
 @dataclass(frozen=True)
@@ -378,11 +392,10 @@ def run_cell(task: _Task, *, log: bool = True) -> CellPayload:
     boundary = harness.eval_boundary_ms(market, WARM_OOS_SEGMENT)
     assert boundary is not None  # WARM_OOS_SEGMENT는 평가 경계를 항상 가진다.
 
-    for segment_name, segment in (
-        (SEGMENT_FULL, None),
-        (SEGMENT_IS, IS_SEGMENT),
-        (SEGMENT_OOS, OOS_SEGMENT),
-    ):
+    segment_specs: list[tuple[str, Segment | None]] = [(SEGMENT_FULL, None)]
+    if task.cold_segments:
+        segment_specs.extend([(SEGMENT_IS, IS_SEGMENT), (SEGMENT_OOS, OOS_SEGMENT)])
+    for segment_name, segment in segment_specs:
         window = market if segment is None else harness.slice_market(market, segment)
         ob_result = harness.detect_order_blocks(window)
         cands, _stats = build_zone_limit_candidates(
@@ -416,7 +429,7 @@ def run_cell(task: _Task, *, log: bool = True) -> CellPayload:
         )
         engine_return: float | None = None
         engine_trades: int | None = None
-        if segment is None:
+        if segment is None and task.engine_check:
             # 검산(WAN-164 패턴): 같은 창을 표준 경로로 다시 돌려 배선 실수를 비트로 잡는다.
             outcome = harness.run_once(window, params=params, cfg=cfg, order_block_result=ob_result)
             engine_return = outcome.result.metrics.total_return
@@ -492,6 +505,8 @@ def run_cells(
     limit_stop_nonfill: bool = False,
     short_enabled: bool = False,
     seed: int = 0,
+    cold_segments: bool = True,
+    engine_check: bool = True,
 ) -> list[CellPayload]:
     """전 칸을 돈다. `jobs`는 성능 노브이지 결과 축이 아니다(WAN-121).
 
@@ -521,6 +536,11 @@ def run_cells(
     `seed`(WAN-293, 옵트인)는 체결 **탈락** 렌즈의 추첨 시드다 — `fill.dropout_rate > 0`인
     렌즈만 후보 생성 RNG에 흘러 든다. 기본 `0`은 예전 값이라 비트 단위로 같고, 탈락 없는
     렌즈에서는 이 값이 무관하다(같은 렌즈를 시드 5개로 돌려 평균하는 WAN-96 관행에 쓴다).
+
+    `cold_segments`·`engine_check`(WAN-301, 옵트인 컴퓨트 노브)는 각각 차가운 절단 구간
+    (`is`/`oos`) 생성과 full 표준 경로 검산을 끈다 — 렌즈 × 시드 격자처럼 `full`/`oos_warm`만
+    쓰는 실행에서 셀 비용을 절반 아래로 줄인다. 둘 다 기본 `True`면 예전과 비트 단위로 같다
+    (자세한 규약은 `_Task` 필드 docstring).
     """
     tasks = [
         _Task(
@@ -536,6 +556,8 @@ def run_cells(
             limit_stop_nonfill=limit_stop_nonfill,
             short_enabled=short_enabled,
             seed=seed,
+            cold_segments=cold_segments,
+            engine_check=engine_check,
         )
         for symbol in symbols
         for timeframe in timeframes
