@@ -406,6 +406,11 @@ class PlacedOrder:
     같은 축이라 라이브↔백테스트 존 대조·차트 점프의 조인 키다(WAN-234)."""
     zone_confirmed_time: int | None = None
     """존 확정 봉 시각(상위TF `open_time`). `zone_start_time`과 한 쌍의 조인 키."""
+    tap_index: int = 0
+    """이 셋업이 존의 몇 번째 탭인지(0-based). `zone_start_time`·`zone_confirmed_time`과 함께
+    페이퍼↔백테를 셋업 단위로 1:1 조인하는 키(WAN-295) — 백테 셋업 진단(`SetupDiagnostic`)의
+    동명 필드와 같은 `entry_candidate_signals`가 매긴 값이라 같은 존의 같은 탭을 가리킨다.
+    `live_limit_orders.tap_index`(NOT NULL DEFAULT 0)에서 온다."""
 
 
 @dataclass(frozen=True)
@@ -1021,7 +1026,7 @@ class OrderJournal:
             "SELECT symbol, timeframe, direction, placed_ms, status, last_limit_price,"
             " fill_ms, fill_penetration_bps, first_rested_ms, entry_status,"
             " entry_reject_reason, skip_reason, fill_price, stop_price, take_profit_price,"
-            " zone_start_time, zone_confirmed_time FROM live_limit_orders"
+            " zone_start_time, zone_confirmed_time, tap_index FROM live_limit_orders"
             " WHERE placed_ms >= ? AND placed_ms < ? ORDER BY placed_ms, id",
             (start_ms, end_ms),
         ).fetchall()
@@ -1044,6 +1049,7 @@ class OrderJournal:
                 take_profit_price=None if r[14] is None else float(r[14]),
                 zone_start_time=None if r[15] is None else int(r[15]),
                 zone_confirmed_time=None if r[16] is None else int(r[16]),
+                tap_index=0 if r[17] is None else int(r[17]),
             )
             for r in rows
         ]

@@ -106,6 +106,7 @@ from dashboard.saved_trades import (
     setups_display_frame,
     zone_limit_runs,
 )
+from dashboard.setup_compare_view import setup_compare_html
 from dashboard.trade_table import (
     engine_label_caption,
     parse_selected_rows,
@@ -122,10 +123,13 @@ from dashboard.trade_timeline_view import (
 from data.storage import OhlcvStore, source_timeframe
 from live.order_journal import LedgerEntry, OrderJournal
 from live.runtime_state import EventRecord, RuntimeStateStore
+from live.setup_compare import build_setup_comparisons
 from live.timeline_cache import TimelineCacheStore, current_engine_label, load_cached_day
 from live.trade_timeline import (
+    STATUS_BACKTEST_CLOSED,
     DayTimeline,
     TimelineRow,
+    backtest_setup_rows,
     backtest_timeline_rows,
     live_timeline_rows,
     resolve_day_window,
@@ -1276,7 +1280,9 @@ def _timeline_full_universe_backtest(day_key: str, start_ms: int, end_ms: int) -
     ):
         started = time.time()
         with st.spinner(f"{day_key} 백테스트 실행 중… ({n_cells}셀 · 워밍업 연속)"):
-            rows = backtest_timeline_rows(
+            # WAN-295: 셋업 전부(청산·미진입·미체결·건너뜀)를 낸다 — 라이브와 셋업 단위로
+            # 대칭인 대조가 가능하게. 표·요약은 「청산」 행만 추려 WAN-290과 같게 본다.
+            rows = backtest_setup_rows(
                 day_start_ms=start_ms,
                 day_end_ms=end_ms,
                 symbols=list(DEFAULT_SYMBOLS),
@@ -1298,7 +1304,8 @@ def _timeline_full_universe_backtest(day_key: str, start_ms: int, end_ms: int) -
         return []
 
     rows = list(result.rows)
-    summary = backtest_day_summary(rows)
+    # 요약은 「청산」 거래만 센다(WAN-290 의미 유지) — 미진입·미체결·건너뜀 셋업은 제외.
+    summary = backtest_day_summary([r for r in rows if r.status == STATUS_BACKTEST_CLOSED])
     st.caption(
         f"백테 대조 엔진: **{result.engine}** · 실행 {result.elapsed:.1f}초 · "
         f"거래 {summary.trades}건({summary.cells_with_trades}셀 · 승 {summary.wins} · "
@@ -1351,7 +1358,14 @@ def _render_trade_timeline(settings: Settings) -> None:
     else:
         backtest_rows = _timeline_live_cell_backtest(db_path, day_key, start_ms, end_ms, live_rows)
 
-    timeline = DayTimeline(day_key=day_key, live=tuple(live_rows), backtest=tuple(backtest_rows))
+    # WAN-295: 백테 셋업 행에는 미진입·미체결·건너뜀도 섞여 있다(라이브 대칭). 아래의 시각순
+    # 표·「백테만」 경고는 WAN-290 의미 그대로 **청산** 행만 본다(요약이 부풀지 않게).
+    closed_backtest = [r for r in backtest_rows if r.status == STATUS_BACKTEST_CLOSED]
+
+    # 셋업 단위 3열 대조(목업 정본) — 라이브·백테를 셋업으로 조인해 페이퍼|차이|백테로 본다.
+    _render_setup_compare(live_rows, backtest_rows, day_key)
+
+    timeline = DayTimeline(day_key=day_key, live=tuple(live_rows), backtest=tuple(closed_backtest))
     # 「백테만 있는 줄」 신호는 라이브 진입이 하나라도 있어 대조가 성립할 때만 뜻이 있다.
     # 라이브 러너가 아예 안 돌던 과거 날짜(전부 백테만)는 이 경고가 잡음이라 숨긴다(WAN-290).
     live_entered = any(r.status in ("진입", "청산") for r in timeline.live)
@@ -1368,6 +1382,7 @@ def _render_trade_timeline(settings: Settings) -> None:
     if row is not None:
         _render_timeline_chart(db_path, row)
 
+    st.markdown("##### 시각순 거래 표 (라이브 | 백테스트 · 청산 거래)")
     st.caption(
         "라이브 칸이 비고 **백테스트 줄만 있는 행**이 핵심 신호입니다 — 백테는 진입했는데 "
         "라이브가 어느 단계에서 끊겼는지(상태 열)로 원인을 가릅니다. 행을 누르면 위 차트가 그 "
@@ -1380,6 +1395,40 @@ def _render_trade_timeline(settings: Settings) -> None:
         on_select="rerun",
         selection_mode="single-row",
         key=_TIMELINE_TABLE_KEY,
+    )
+
+
+#: 3열 대조 iframe 높이(px). 헤더(카드·칩·범례) + 행당 높이로 잡고, 넘치면 iframe 안에서
+#: 스크롤한다(전 행이 클라이언트 필터로 살아 있다).
+_COMPARE_HEADER_PX = 250
+_COMPARE_ROW_PX = 66
+_COMPARE_MAX_PX = 1600
+
+
+def _render_setup_compare(
+    live_rows: list[TimelineRow], backtest_rows: list[TimelineRow], day_key: str
+) -> None:
+    """셋업 단위 페이퍼↔백테 3열 대조(목업 정본)를 그린다 (WAN-295).
+
+    백테 대조가 없으면(대상 셀 미계산) 그리지 않는다 — 라이브만으론 대조가 성립하지 않는다.
+    조인·집계는 순수 계층(`live.setup_compare`)이 하고, 여기서는 그 결과를 목업 HTML로
+    임베드하고 알려진 괴리(틱 vs 1분봉·낙관 렌즈)를 한 줄 경고로 얹는다.
+    """
+    if not backtest_rows:
+        return
+    result = build_setup_comparisons(live_rows, backtest_rows)
+    if result.summary.total == 0:
+        return
+
+    st.markdown("##### 셋업별 대조 (페이퍼 | 차이 | 백테)")
+    height = min(_COMPARE_HEADER_PX + _COMPARE_ROW_PX * result.summary.total, _COMPARE_MAX_PX)
+    st.iframe(setup_compare_html(result, day_key=day_key), height=height)
+    st.caption(
+        "🔴 **판정 갈림**(한쪽만 진입)이 핵심 신호입니다. 🟠 **가격 벗어남**은 진입가차가 틱 "
+        f"오차(측정 임계 {result.price_delta_threshold_bps:.1f}bp)를 넘은 경우입니다 — 가격이 "
+        "몇 bp 다른 건 정상이라 표시하지 않습니다. 페이퍼↔백테 차이는 **설계상 알려진 것**"
+        "입니다(틱 vs 1분봉 WAN-256 · 신규 3종목 펀딩 대리 · 큐 우선순위 미모델 WAN-98). 전부 "
+        "`baseline`(닿으면 체결) 낙관 렌즈 위 값입니다."
     )
 
 
