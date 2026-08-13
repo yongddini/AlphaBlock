@@ -46,7 +46,7 @@ import pandas as pd
 from backtest.sweep import timeframe_to_ms
 from backtest.wan228_reentry_census import ReentryEntryRule
 from backtest.zone_limit_backtest import IntrabarLiveLimit
-from live.limit_orders import LimitFill, LimitOrderBook, PendingLimitOrder
+from live.limit_orders import LimitFill, LimitOrderBook, LimitOrderStatus, PendingLimitOrder
 from live.order_journal import (
     SKIP_REASON_CELL_BUSY,
     SKIP_REASON_RETAP,
@@ -106,6 +106,12 @@ class _Unset(enum.Enum):
 
 
 _UNSET = _Unset.token
+
+#: 벽시계 만료 백스톱의 유예(ms, WAN-298). 정상 운영에서는 서브스텝 경로(1분봉 경계 커밋)가
+#: 기한 도달 후 「1분봉 확정 + 저장 + 폴링(기본 60초)」 안에 먼저 만료시키므로, 백스톱은 그
+#: 지연을 넉넉히 넘긴 뒤에만 발동해 정상 경로와 경합하지 않는다. 유예를 지나서도 대기 중인
+#: 주문은 데이터가 멈춰 봉 계수(`bars_elapsed`)가 얼어 있다는 뜻이다.
+_EXPIRY_GRACE_MS = 5 * 60_000
 
 
 def _zone_id(ob: OrderBlock) -> ZoneId:
@@ -389,6 +395,59 @@ class ZoneLimitLiveEngine:
         return self._apply_pending_price(
             state, symbol, timeframe, low=price, high=price, close=price, time_ms=time_ms
         )
+
+    def expire_overdue(self, *, now_ms: int) -> list[EngineEvent]:
+        """만료 기한을 넘긴 대기 주문을 벽시계로 만료시킨다(WAN-298 백스톱).
+
+        봉 계수 만료(`on_substep`의 경계 커밋)는 **소비된 1분봉**으로만 전진하므로, 수집이
+        멈추면(새 1분봉 없음 → 서브스텝 없음) 주문이 기한을 넘겨도 만료되지 않고 슬롯을
+        무기한 점유했다 — WAN-295에서 발견된 라이브↔백테 진입 괴리의 원인(DOGE 15m 47시간).
+        이 백스톱은 러너가 매 폴링에 벽시계로 기한(`expiry_deadline_ms` — 서브스텝 경로와
+        같은 시각)을 검사해, 유예(`_EXPIRY_GRACE_MS`)를 지나서도 대기 중인 주문을
+        `cancelled_expired`로 정리하고 슬롯을 비운다.
+
+        * **정상 경로와 경합하지 않는다** — 데이터가 흐르면 서브스텝 경로가 기한 도달 직후
+          (1분봉 확정 + 폴링 지연) 먼저 만료시키고, 백스톱은 유예 뒤에만 발동한다.
+        * **무기한 주문(재진입 재무장, `limit_valid_bars=None`)은 건드리지 않는다.**
+        * 장부 종결 시각은 벽시계가 아니라 **기한 시각**이다 — 주문이 유효하기를 멈춘
+          시각이고, 서브스텝 경로가 기록했을 시각과 같다(재현 쿼리의 wait가 기준대로 읽힌다).
+        * ⚠️ 뒤늦게 도착하는 과거 봉(백필)의 체결 가능성은 포기한다 — 죽어 있던 구간의 가격
+          경로를 지어내지 않는 재시작 폐기 정책과 같은 부류의 보수적 처리다.
+        """
+        events: list[EngineEvent] = []
+        for order in self.book.open_orders:
+            state = self._state(order.symbol, order.timeframe)
+            deadline = order.expiry_deadline_ms(state.htf_ms)
+            if deadline is None or now_ms < deadline + _EXPIRY_GRACE_MS:
+                continue
+            cancelled = self.book.cancel_expired(order.symbol, order.timeframe)
+            if cancelled is None:
+                continue
+            journal_id = self._take_pending_meta(state)
+            if journal_id is not None and self._journal is not None:
+                # 마지막 진행 상태(첫 걸림 시각·마지막 지정가)를 종결 전에 남긴다 — 경계
+                # 커밋(record_progress)이 못 돈 채 만료되면 걸렸던 주문이 `first_rested_ms
+                # IS NULL`로 남아 순수 미체결(no_fill)이 밴드 기각(deviation)으로 오분류된다.
+                self._journal.record_progress(journal_id, cancelled)
+                self._journal.record_cancelled(
+                    journal_id, LimitOrderStatus.CANCELLED_EXPIRED, now_ms=deadline
+                )
+            _logger.warning(
+                "%s %s: 대기 지정가가 만료 기한을 넘긴 채 남아 있어 벽시계로 만료합니다"
+                " (봉 계수가 얼어 있음 — 데이터 공급 확인 필요, WAN-298)",
+                order.symbol,
+                order.timeframe,
+            )
+            events.append(
+                EngineEvent(
+                    kind="cancelled_expired",
+                    symbol=order.symbol,
+                    timeframe=order.timeframe,
+                    time_ms=deadline,
+                    order=cancelled,
+                )
+            )
+        return events
 
     def _apply_pending_price(
         self,

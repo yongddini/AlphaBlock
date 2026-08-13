@@ -58,6 +58,17 @@ _logger = logging.getLogger(__name__)
 SeriesKey = tuple[str, str]
 
 
+def expiry_deadline_ms(placed_ms: int, limit_valid_bars: int, htf_ms: int) -> int:
+    """지정가 만료 기한(epoch ms, WAN-298) — 예약 봉 시작 + `limit_valid_bars` × 봉 길이.
+
+    서브스텝 경로의 봉 계수(`on_bar_close`의 `bars_elapsed`)와 같은 시각이다: 예약이 봉 F
+    안에서 나면 경계 넘김마다 1씩 늘어 **봉 F+N의 첫 서브스텝**(= F 시작 + N×봉)에서
+    만료된다. 이 함수는 그 시각을 데이터 없이(벽시계·재시작 재평가로) 계산한다 — 두 경로가
+    다른 기한을 쓰면 「가동 중 만료」와 「재시작 만료」가 어긋난다(단일 출처).
+    """
+    return (placed_ms // htf_ms) * htf_ms + limit_valid_bars * htf_ms
+
+
 class LimitOrderStatus(StrEnum):
     """대기 지정가 주문의 상태."""
 
@@ -278,6 +289,22 @@ class PendingLimitOrder:
         if not self.status.is_terminal:
             self.status = LimitOrderStatus.CANCELLED_INVALIDATED
 
+    def cancel_expired(self) -> None:
+        """유효기간 초과로 대기 주문을 만료 취소한다(벽시계 백스톱 경로, WAN-298).
+
+        서브스텝 경로(`on_bar_close`)와 같은 종결 상태를 쓴다 — 데이터가 멈춰 봉 계수가
+        얼지 않았다면 `bars_elapsed`가 도달했을 그 상태다.
+        """
+        if not self.status.is_terminal:
+            self.status = LimitOrderStatus.CANCELLED_EXPIRED
+
+    def expiry_deadline_ms(self, htf_ms: int) -> int | None:
+        """이 주문의 만료 기한(epoch ms). 무기한(`limit_valid_bars=None`)이거나 예약 시각을
+        모르면 None — 그런 주문은 벽시계로 만료할 수 없다(WAN-298)."""
+        if self.limit_valid_bars is None or self.placed_ms is None:
+            return None
+        return expiry_deadline_ms(self.placed_ms, self.limit_valid_bars, htf_ms)
+
 
 class LimitOrderBook:
     """심볼·타임프레임별 대기 지정가 주문 장부.
@@ -348,4 +375,17 @@ class LimitOrderBook:
         if order is None:
             return None
         order.cancel_invalidated()
+        return order
+
+    def cancel_expired(self, symbol: str, timeframe: str) -> PendingLimitOrder | None:
+        """유효기간 초과 대기 주문을 만료 취소하고 장부에서 제거한다(벽시계 백스톱, WAN-298).
+
+        취소한 주문을 반환(없으면 None). 슬롯이 즉시 비므로 같은 시리즈의 새 탭이 다시
+        주문을 걸 수 있다.
+        """
+        key = (symbol, timeframe)
+        order = self._pending.pop(key, None)
+        if order is None:
+            return None
+        order.cancel_expired()
         return order
