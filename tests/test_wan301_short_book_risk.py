@@ -249,6 +249,12 @@ def test_committed_rows_cross_check_wan293() -> None:
     wan293은 북 에쿼티를 월별로 접었고 wan301은 전체를 접었다 — 시드 평균이 없는 렌즈
     (baseline·pen_5bp)에서 ∏(1+월수익) ≡ 1+total_return, Σ월 청산수 ≡ 거래수여야 한다.
     (시드 평균 렌즈는 평균의 곱 ≠ 곱의 평균이라 대조에서 뺀다.)
+
+    ⚠️ `all` 스코프는 대조에서 뺀다 — 두 CSV의 `all`은 TF 구성이 다르다(wan301은 WAN-302가
+    4TF(15m+1h+2h+4h)를 한 실행으로 돌려 재산출했고, wan293의 `all`은 WAN-296 단일 TF
+    append 규약으로 1h+2h+4h에 머문다). 같은 라벨이지만 다른 북이라 비교하면 안 된다.
+    TF 스코프 대조가 이 사슬을 잇는다 — 15m 스코프 대조가 곧 완료기준 3(15m long_only ≡
+    채택 북 계열)의 실체다.
     """
     reports = Path("backtest/reports")
     w301 = reports / "wan301_book_risk.csv"
@@ -258,9 +264,9 @@ def test_committed_rows_cross_check_wan293() -> None:
 
     risk = pd.read_csv(w301)
     monthly = pd.read_csv(w293)
-    ours = risk[(risk.num_seeds == 1) & (risk.segment == "oos_warm")]
+    ours = risk[(risk.num_seeds == 1) & (risk.segment == "oos_warm") & (risk.scope != "all")]
     assert len(ours) > 0
-    checked = 0
+    checked_scopes: set[str] = set()
     for rec in ours.to_dict("records"):
         ref = monthly[
             (monthly.lens == rec["lens"])
@@ -268,7 +274,7 @@ def test_committed_rows_cross_check_wan293() -> None:
             & (monthly.arm == rec["arm"])
         ]
         if ref.empty:
-            continue  # wan293이 안 커버한 스코프(예: TF 집합이 다른 all)는 대조 불가.
+            continue  # wan293이 안 커버한 스코프는 대조 불가.
         growth = float((1.0 + ref.monthly_return).prod())
         assert abs(growth - (1.0 + rec["total_return"])) / max(abs(growth), 1.0) < 1e-9, (
             rec["lens"],
@@ -276,8 +282,35 @@ def test_committed_rows_cross_check_wan293() -> None:
             rec["arm"],
         )
         assert abs(float(ref.num_exits.sum()) - rec["num_trades"]) < 1e-9
-        checked += 1
-    assert checked > 0, "교차 검산된 (렌즈, 스코프, 팔)이 하나도 없다 — 좌표가 어긋났다."
+        checked_scopes.add(str(rec["scope"]))
+    # 네 TF 전부 대조돼야 한다 — 15m이 빠지면 완료기준 3이 주장으로만 남는다(WAN-302).
+    assert {"15m", "1h", "2h", "4h"} <= checked_scopes, checked_scopes
+
+
+def test_committed_csv_covers_four_tf_and_recomputed_all() -> None:
+    """WAN-302 완료기준 1을 구조로 고정 — 15m 스코프가 있고 `all`이 4TF(36칸)로 재산출됐다.
+
+    사용자 결정(2026-08-13)으로 `pen_5bp_drop_50`은 15m을 재지 않는다 — 그 렌즈는 WAN-301
+    초판(1h·2h·4h · `all`=27칸) 그대로 남고, baseline·pen_5bp만 15m 행 + `all` 36칸이다.
+    (렌즈 2 × 스코프 5 + 렌즈 1 × 스코프 4) × 팔 2 × 구간 2 = 56행.
+    """
+    path = Path("backtest/reports/wan301_book_risk.csv")
+    if not path.exists():
+        pytest.skip("리포트 CSV가 없음(측정 미실행 환경)")
+    frame = pd.read_csv(path)
+    assert sorted(frame.scope.unique()) == ["15m", "1h", "2h", "4h", "all"]
+    assert len(frame) == 56
+    measured = frame[frame.lens.isin(["baseline", "pen_5bp"])]
+    frozen = frame[frame.lens == "pen_5bp_drop_50"]
+    # baseline·pen_5bp: 15m 포함 · `all`은 9종목 × 4TF = 36칸으로 재산출됐다.
+    assert set(measured[measured.scope == "all"].num_cells) == {36}
+    assert "15m" in set(measured.scope)
+    # drop_50: 15m 없음 · `all`은 3TF 시절(27칸) 동결 — 렌즈 간 `all` 직접 비교 금지.
+    assert set(frozen[frozen.scope == "all"].num_cells) == {27}
+    assert "15m" not in set(frozen.scope)
+    assert set(frame[frame.scope != "all"].num_cells) == {9}
+    key_cols = ["lens", "scope", "arm", "segment"]
+    assert not frame.duplicated(subset=key_cols).any()
 
 
 # --------------------------------------------------------------------------- #
@@ -307,6 +340,20 @@ def test_summary_renders_key_sections() -> None:
     assert "funding_gap=False" in md  # 펀딩 공백 없음 확인 줄
     # 표 안에서 렌즈가 순서대로 나온다(판정 문장의 언급과 무관하게 표 셀 기준).
     assert md.index("| baseline |") < md.index("| pen_5bp |")
+
+
+def test_summary_flags_mixed_all_composition() -> None:
+    """렌즈 간 `all` 칸 수가 다르면(드롭 렌즈 15m 생략, WAN-302) 요약이 직접 비교를 막는다."""
+    rows = [
+        _row(REF_LENS, "all", ARM_LONG_ONLY, "oos_warm"),  # num_cells=27 (헬퍼 기본)
+        _row(REF_LENS, "all", ARM_LONG_SHORT, "oos_warm"),
+    ]
+    # 같은 칸 수면 경고가 없다.
+    assert "렌즈 간 `all` 직접 비교 금지" not in build_summary_markdown(rows)
+    mixed = rows + [RiskRow(**{**rows[0].model_dump(), "lens": "pen_5bp_drop_50", "num_cells": 36})]
+    md = build_summary_markdown(mixed)
+    assert "렌즈 간 `all` 직접 비교 금지" in md
+    assert "27칸" in md and "36칸" in md
 
 
 def test_summary_engine_verify_line_render() -> None:

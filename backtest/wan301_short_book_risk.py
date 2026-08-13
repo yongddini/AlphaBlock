@@ -23,9 +23,15 @@ scope=all·baseline)은 **월말 해상도라 얕다** — 이 모듈이 북 에
 
 ## 격자
 
-9종목 × TF(기본 4h·1h·2h — 15m은 셀당 무거우니 `--append` 후속, WAN-293→296 패턴) ×
-못 박은 6년 창 × 팔 2(long_only vs long_short) × 렌즈 3(baseline·pen_5bp·pen_5bp_drop_50,
-탈락 렌즈는 시드 5개 평균) × 구간 2(oos_warm 정본 + full) × 스코프(all + TF별).
+9종목 × TF(기본 4h·1h·2h — 15m은 셀당 무거우니 `--append` 후속, WAN-293→296 패턴 —
+🔁 그 후속은 WAN-302가 냈다) × 못 박은 6년 창 × 팔 2(long_only vs long_short) × 렌즈 3
+(baseline·pen_5bp·pen_5bp_drop_50, 탈락 렌즈는 시드 5개 평균) × 구간 2(oos_warm 정본 +
+full) × 스코프(all + TF별). ⚠️ `all`은 그 실행이 커버한 전 TF 셀의 합산 북이라 15m 단독
+append로는 재계산되지 않는다(`merge_risk` 규약) — WAN-302는 4TF를 **한 실행**으로 돌려
+15m 행을 잇고 `all`을 15m+1h+2h+4h(36칸)로 재산출했다(재실행된 1h·2h·4h 행은 기존 CSV와
+비트 일치 — 결정적 재현 확인). 단 **`pen_5bp_drop_50`은 15m을 재지 않았다**(사용자 결정
+2026-08-13: "그냥 봐도 결과 대충 예상가능") — 그 렌즈는 WAN-301 초판(`all`=1h+2h+4h ·
+27칸)으로 동결이고 요약이 렌즈 간 `all` 직접 비교를 막는 경고를 찍는다.
 
 ## ⚠️ 경고 (요약에 그대로)
 
@@ -39,9 +45,12 @@ scope=all·baseline)은 **월말 해상도라 얕다** — 이 모듈이 북 에
 ## 재현
 
 ```
-# 4h·1h·2h 3렌즈(dropout 5시드). 15m은 셀당 무거우니(WAN-203) --append로 뒤에.
+# WAN-301 초판: 4h·1h·2h 3렌즈(dropout 5시드). 15m은 셀당 무거우니(WAN-203) 후속으로.
 uv run python -m backtest.wan301_short_book_risk --tf 4h,1h,2h --jobs 4
-uv run python -m backtest.wan301_short_book_risk --tf 15m --append --jobs 4
+# WAN-302: 15m append + `all` 재산출 — all은 전 TF 셀이 필요해 4TF를 한 실행으로 돈다.
+# drop_50 렌즈는 사용자 결정(2026-08-13)으로 생략 — 그 렌즈의 15m·`all` 4TF는 미측정이다.
+uv run python -m backtest.wan301_short_book_risk --tf 15m,1h,2h,4h \\
+    --fill baseline,pen_5bp --append --jobs 4
 uv run python -m backtest.wan301_short_book_risk --from-csv                     # 요약만
 ```
 """
@@ -90,7 +99,8 @@ DEFAULT_SUMMARY = REPORTS_DIR / "wan301_book_risk_summary.md"
 DEFAULT_LENSES: tuple[str, ...] = ("baseline", "pen_5bp", "pen_5bp_drop_50")
 REF_LENS = "baseline"
 
-#: 기본 TF = 4h·1h·2h(컴퓨트 실현 가능). 15m은 셀당 무거우니(WAN-203) `--append`로 뒤에.
+#: 기본 TF = 4h·1h·2h(컴퓨트 실현 가능 · WAN-301 초판 좌표 보존). 15m을 포함한 전체
+#: 재산출은 `--tf 15m,1h,2h,4h --append`(WAN-302 — `all` 스코프 재계산에 4TF가 필요).
 DEFAULT_TIMEFRAMES: tuple[str, ...] = ("4h", "1h", "2h")
 
 #: 측정 구간 — oos_warm(정본, WAN-166) + full. 차가운 절단(is/oos)은 이 표의 질문(실전
@@ -358,6 +368,8 @@ def merge_risk(existing: Sequence[RiskRow], new: Sequence[RiskRow]) -> list[Risk
     ⚠️ `all` 스코프는 그 실행이 커버한 TF 집합의 집계라 단일 TF만 append하면 재계산 불가다 —
     새로 온 스코프만 덮어쓰고 기존 `all`은 남긴다(wan288/293 `merge_book`과 같은 규약 ·
     wan296이 같은 이유로 `all`을 1h+2h+4h로 유지했다). 요약이 `all`의 TF 구성을 명시한다.
+    🔁 그래서 WAN-302의 `all` 4TF 재산출은 append 병합이 아니라 **4TF 한 실행**으로 했다
+    (그 실행의 새 `all` 행이 여기서 옛 `all`을 키 일치로 덮어쓴다).
     """
     keyed = {(r.lens, r.scope, r.arm, r.segment): r for r in existing}
     for r in new:
@@ -550,6 +562,14 @@ def build_summary_markdown(
         f"`all` 스코프의 TF 구성: **{scope_note}** (단일 TF append는 `all`을 재계산하지 "
         "못한다 — wan296과 같은 규약).\n"
     )
+    all_cells: dict[str, int] = {r.lens: r.num_cells for r in rows if r.scope == "all"}
+    if len(set(all_cells.values())) > 1:
+        detail = " · ".join(f"`{lens}` {cells}칸" for lens, cells in sorted(all_cells.items()))
+        parts.append(
+            f"⚠️ **`all`의 칸 수가 렌즈마다 다르다**: {detail}. 칸 수가 작은 렌즈는 15m "
+            "미측정(WAN-302 사용자 결정 — `pen_5bp_drop_50` 생략)이라 그 `all`은 "
+            "1h+2h+4h 북이다. **렌즈 간 `all` 직접 비교 금지.**\n"
+        )
 
     parts.append("## 판정\n")
     parts.append(_verdict_line(rows) + "\n")
@@ -599,7 +619,9 @@ def build_summary_markdown(
     parts.append(
         "```\n"
         "uv run python -m backtest.wan301_short_book_risk --tf 4h,1h,2h --jobs 4\n"
-        "uv run python -m backtest.wan301_short_book_risk --tf 15m --append --jobs 4\n"
+        "# WAN-302: 15m append + all 재산출(4TF 한 실행 · drop_50 생략 = 사용자 결정)\n"
+        "uv run python -m backtest.wan301_short_book_risk --tf 15m,1h,2h,4h "
+        "--fill baseline,pen_5bp --append --jobs 4\n"
         "uv run python -m backtest.wan301_short_book_risk --from-csv   # 요약만 재생성\n"
         "```\n"
         f"원자료: `{risk_csv}`. cap_only={ADOPTED_MODE} 배수={ADOPTED_MULTIPLE} · "
