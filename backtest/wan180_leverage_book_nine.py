@@ -251,7 +251,11 @@ def _reprice_with_funding(
     """
     cfg = harness.build_config(payload.timeframe)
     rows: list[CellRow] = []
+    # 차가운 구간을 생성하지 않은 payload(WAN-301 `cold_segments=False`)는 존재하는 구간만
+    # 재계산한다 — 전 구간이 있으면(기본) 예전과 비트 단위로 같다.
     for segment in (SEGMENT_FULL, SEGMENT_IS, SEGMENT_OOS):
+        if segment not in payload.candidates:
+            continue
         cands = payload.candidates[segment]
         num_trades, win_rate, total_return, mdd = _isolated_metrics(
             cands, cfg, payload.timeframe, funding[segment]
