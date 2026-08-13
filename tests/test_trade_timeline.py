@@ -15,6 +15,7 @@ from __future__ import annotations
 from datetime import date
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 from backtest.report import format_time_kst
@@ -474,3 +475,163 @@ def test_backtest_cell_trades_ignore_future_bars(_real_day_window: tuple[int, in
         return (r.fill_ms, r.exit_ms, r.fill_price, r.exit_price, r.pnl_amount)
 
     assert [_key(r) for r in rows_a] == [_key(r) for r in rows_b]
+
+
+# --------------------------------------------------------------------------- #
+# 셋업 단위 백테 행 (WAN-295) — 존폭 건너뜀 · 청산 비트 동일
+# --------------------------------------------------------------------------- #
+
+
+def _htf_fixed_width(n: int = 30, base_ms: int = 1_600_000_000_000) -> pd.DataFrame:
+    """고정 폭 1h 프레임 → ATR14가 워밍업 뒤 10으로 수렴(존폭÷ATR 판정 예측 가능)."""
+    return pd.DataFrame(
+        [
+            {
+                "open_time": base_ms + i * 3_600_000,
+                "open": 100.0,
+                "high": 105.0,
+                "low": 95.0,
+                "close": 100.0,
+                "volume": 1.0,
+            }
+            for i in range(n)
+        ]
+    )
+
+
+def test_zone_width_skipped_rows_emit_symmetric_backtest_rows() -> None:
+    """존폭 필터로 안 건 셋업이 「건너뜀(존폭)」 행으로, 존 정체성을 실어 나온다(WAN-295).
+
+    ATR14=10이라 폭 5는 통과(0.5≤1.28, 행 없음), 폭 20은 기각(2.0>1.28 → 건너뜀 행). 1분봉
+    없이 htf만으로 결정되는 순수 경로라 결정적으로 고정한다.
+    """
+    from backtest.harness import MarketData, build_config, build_params
+    from live.trade_timeline import (
+        STATUS_BACKTEST_SKIP_ZONE_WIDTH,
+        _zone_width_skipped_rows,
+    )
+    from strategy.models import OrderBlock, OrderBlockResult, OrderBlockSignal
+
+    htf = _htf_fixed_width(n=30)
+    times = htf["open_time"].tolist()
+
+    def _sig(top: float, bottom: float, t: int) -> OrderBlockSignal:
+        ob = OrderBlock(
+            direction=OrderBlockDirection.BULLISH,
+            top=top,
+            bottom=bottom,
+            start_time=t,
+            confirmed_time=t,
+            ob_volume=1.0,
+            ob_low_volume=0.5,
+            ob_high_volume=1.5,
+        )
+        return OrderBlockSignal(
+            direction=OrderBlockDirection.BULLISH,
+            trigger_time=t,
+            price=(top + bottom) / 2,
+            order_block=ob,
+        )
+
+    signals = [
+        _sig(105.0, 100.0, times[16]),  # 폭 5 → 통과(행 없음).
+        _sig(120.0, 100.0, times[17]),  # 폭 20 → 건너뜀(행 있음).
+    ]
+    ob_result = OrderBlockResult(
+        order_blocks=[s.order_block for s in signals], signals=signals, retap_signals=signals
+    )
+    market = MarketData(
+        symbol=_SYMBOL,
+        timeframe=_TF,
+        htf_df=htf,
+        df_1m=pd.DataFrame(),
+        funding_rates=[],
+    )
+    rows = _zone_width_skipped_rows(
+        market,
+        ob_result,
+        build_params(),
+        build_config(_TF),
+        day_start_ms=times[10],
+        day_end_ms=times[20],
+    )
+    assert len(rows) == 1  # 폭 20만 건너뜀.
+    skip = rows[0]
+    assert skip.source == SOURCE_BACKTEST
+    assert skip.status == STATUS_BACKTEST_SKIP_ZONE_WIDTH
+    assert skip.zone_start_time == times[17] and skip.zone_confirmed_time == times[17]
+    assert skip.tap_index == 0 and skip.trigger_time == times[17]
+
+
+def test_zone_width_skipped_rows_empty_when_filter_off() -> None:
+    """존폭 필터를 끄면 건너뜀 행이 없다(넓은 존도 통과)."""
+    from backtest.harness import MarketData, build_config, build_params
+    from live.trade_timeline import _zone_width_skipped_rows
+    from strategy.models import OrderBlock, OrderBlockResult, OrderBlockSignal
+
+    htf = _htf_fixed_width(n=30)
+    times = htf["open_time"].tolist()
+    ob = OrderBlock(
+        direction=OrderBlockDirection.BULLISH,
+        top=130.0,
+        bottom=100.0,
+        start_time=times[16],
+        confirmed_time=times[16],
+        ob_volume=1.0,
+        ob_low_volume=0.5,
+        ob_high_volume=1.5,
+    )
+    sig = OrderBlockSignal(
+        direction=OrderBlockDirection.BULLISH, trigger_time=times[16], price=115.0, order_block=ob
+    )
+    ob_result = OrderBlockResult(order_blocks=[ob], signals=[sig], retap_signals=[sig])
+    market = MarketData(
+        symbol=_SYMBOL,
+        timeframe=_TF,
+        htf_df=htf,
+        df_1m=pd.DataFrame(),
+        funding_rates=[],
+    )
+    rows = _zone_width_skipped_rows(
+        market,
+        ob_result,
+        build_params(max_zone_width_atr=None),
+        build_config(_TF),
+        day_start_ms=times[10],
+        day_end_ms=times[20],
+    )
+    assert rows == []
+
+
+def test_cell_setup_timeline_closed_rows_match_cell_trades(
+    _real_day_window: tuple[int, int],
+) -> None:
+    """셋업 타임라인의 「청산」 행이 `cell_timeline_trades`와 비트 동일하다(실데이터, WAN-295).
+
+    셋업 경로는 라이브 대칭 행(미진입·미체결·건너뜀)을 더 낼 뿐, 실제 거래는 같은 엔진
+    경로(`build_zone_limit_candidates`+`sequence_with_candidates`)라 청산 행은 갈리지 않는다.
+    """
+    from backtest.harness import detect_order_blocks, load_market_data
+    from live.trade_timeline import (
+        STATUS_BACKTEST_CLOSED,
+        cell_setup_timeline,
+        cell_timeline_trades,
+    )
+
+    start_ms, end_ms = _real_day_window
+    warmup_start = start_ms - 30 * _DAY_MS
+    market = load_market_data(
+        _SYMBOL, _TF, start_ms=warmup_start, end_ms=end_ms, need_1m=True, funding=False
+    )
+    ob_result = detect_order_blocks(market)
+    trades = cell_timeline_trades(market, ob_result, day_start_ms=start_ms)
+    setups = cell_setup_timeline(market, ob_result, day_start_ms=start_ms, day_end_ms=end_ms)
+    closed = [r for r in setups if r.status == STATUS_BACKTEST_CLOSED]
+
+    def _key(r: TimelineRow) -> tuple[object, ...]:
+        return (r.fill_ms, r.exit_ms, r.fill_price, r.exit_price, r.pnl_amount, r.pnl_pct)
+
+    assert sorted(_key(r) for r in closed) == sorted(_key(r) for r in trades)
+    # 청산 행은 존 정체성을 실어 나른다(라이브 조인 키).
+    for r in closed:
+        assert r.zone_start_time is not None and r.tap_index is not None

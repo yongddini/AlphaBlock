@@ -57,14 +57,23 @@ from strategy.models import OrderBlockDirection, OrderBlockResult
 
 if TYPE_CHECKING:
     from backtest.harness import MarketData
+    from backtest.models import BacktestConfig
+    from strategy.models import ConfluenceParams
 
 __all__ = [
     "SOURCE_BACKTEST",
     "SOURCE_LIVE",
+    "STATUS_BACKTEST_CLOSED",
+    "STATUS_BACKTEST_SKIP_ZONE_WIDTH",
+    "STATUS_BACKTEST_UNFILLED",
+    "STATUS_BACKTEST_UNPLACED",
     "DayTimeline",
     "TimelineRow",
+    "backtest_setup_by_cell",
+    "backtest_setup_rows",
     "backtest_timeline_by_cell",
     "backtest_timeline_rows",
+    "cell_setup_timeline",
     "display_columns",
     "live_timeline_rows",
     "render_day_timeline",
@@ -119,6 +128,14 @@ class TimelineRow:
     zone_start_time: int | None = None
     """존 형성 봉 시각(상위TF `open_time`) — 차트 점프·라이브↔백테 조인 키(WAN-234)."""
     zone_confirmed_time: int | None = None
+    tap_index: int | None = None
+    """이 셋업이 존의 몇 번째 탭인지(0-based). `zone_start_time`·`zone_confirmed_time`과 함께
+    페이퍼↔백테를 셋업 단위로 1:1 조인하는 키의 마지막 조각이다(WAN-295). 라이브는 주문
+    장부(`live_limit_orders.tap_index`), 백테는 셋업 진단(`SetupDiagnostic.tap_index`)에서
+    온다 — 둘 다 같은 `entry_candidate_signals`가 매긴 값이라 같은 존의 같은 탭을 가리킨다."""
+    trigger_time: int | None = None
+    """탭이 발생한 상위TF 봉의 `open_time`(ms). 백테 셋업 행에만 있고(진단 조인용), 라이브
+    행은 `None`이다 — 조인은 존 정체성+`tap_index`로 하지 이 값으로 하지 않는다."""
 
     @property
     def focus_ms(self) -> int | None:
@@ -227,6 +244,7 @@ def live_timeline_rows(
                 pnl_amount=None if rec is None else rec.realized_pnl,
                 zone_start_time=order.zone_start_time,
                 zone_confirmed_time=order.zone_confirmed_time,
+                tap_index=order.tap_index,
             )
         )
     return rows
@@ -306,12 +324,236 @@ def cell_timeline_trades(
     return rows
 
 
-def _backtest_cell_trades(task: _BacktestCellTask) -> list[TimelineRow]:
-    """한 셀의 데이터를 로드·탐지해 그날 백테스트 거래 행을 낸다(워밍업 연속·미래 봉 미로드).
+# 백테 셋업 행 상태 라벨 (라이브 `_live_status`와 대칭 어휘, WAN-295). 라이브의 「진입/청산」·
+# 「거부·사이징0」·「건너뜀·존폭」·「미체결」과 셋업 단위로 짝지을 수 있게 같은 낱말을 쓴다.
+STATUS_BACKTEST_CLOSED = "청산"
+STATUS_BACKTEST_UNPLACED = "미진입(슬롯·사이징)"
+"""지정가는 체결됐으나 동시 1포지션 시퀀서/사이징(qty≤0)에 밀려 **포지션이 안 잡힌** 셋업.
+라이브의 「슬롯참」·「거부(사이징0)」에 대응하되, per-cell 단일 baseline 경로는 둘을 코드에서
+가르지 못하므로(사이징 qty는 진행 자본에 종속) 한 라벨로 병기한다."""
+STATUS_BACKTEST_UNFILLED = "미체결"
+"""지정가가 끝내 체결되지 않은 셋업(닿지 않음/만료/무효화/조건취소). 라이브 「미체결」 대칭."""
+STATUS_BACKTEST_SKIP_ZONE_WIDTH = "건너뜀(존폭)"
+"""존폭 필터(1.28)로 아예 주문을 걸지 않은 셋업. 라이브 「건너뜀(존폭)」 대칭."""
+
+#: 백테 셋업 행 내부 중복 제거 키(존 정체성 + 탭 순번 + 탭 시각). 페이퍼↔백테 **교차** 조인
+#: 키는 탭 시각을 뺀 축(`live.setup_compare`)이지만, 한 셀 안에서 청산·미체결 행이 겹치지
+#: 않게 셀 내부에서는 탭 시각까지 포함해 유일성을 보장한다.
+_BacktestSetupKey = tuple[bool, int | None, int | None, int, int]
+
+
+def cell_setup_timeline(
+    market: MarketData,
+    ob_result: OrderBlockResult,
+    *,
+    day_start_ms: int,
+    day_end_ms: int,
+) -> list[TimelineRow]:
+    """미리 로드·탐지된 한 셀의 그날 백테 **셋업 전부**를 타임라인 행으로 만든다 (WAN-295).
+
+    `cell_timeline_trades`가 실제 청산 거래만 낸다면, 이 함수는 라이브 장부와 **대칭**으로
+    그날 탭한 셋업 하나하나를 한 줄로 낸다 — 청산 / 미진입(슬롯·사이징) / 미체결 / 건너뜀
+    (존폭). 각 행에 존 정체성(`zone_start_time`·`zone_confirmed_time`·`tap_index`)과 탭 시각을
+    실어 페이퍼↔백테 셋업 단위 1:1 조인(`live.setup_compare`)이 가능하게 한다 — 체결 시각(틱
+    vs 1분봉으로 갈린다)이 아니라 존 정체성으로 짝짓는 것이 이 도구의 핵심이다(WAN-234 노트가
+    지적한 존 단위 조인 불안정성을 피한다).
+
+    셋업 탐색·체결·시퀀싱은 `run_once`(= `build_zone_limit_candidates` + `sequence_with_candidates`)
+    와 **같은 코드 경로**라 「청산」 행은 `cell_timeline_trades`와 비트 단위로 같다(회귀 테스트
+    고정). 그날 탭 필터도 `eval_from_ms=day_start_ms`와 같은 하한이다(누수 0).
+    """
+    from backtest.harness import BASELINE_FILL, build_config, build_params
+    from backtest.models import PositionSide
+    from backtest.zone_limit_backtest import (
+        SetupDiagnostic,
+        build_zone_limit_candidates,
+        sequence_with_candidates,
+    )
+
+    cfg = build_config(market.timeframe)
+    params = build_params(fill=BASELINE_FILL)
+    sink: list[SetupDiagnostic] = []
+    candidates, _stats = build_zone_limit_candidates(
+        market.htf_df,
+        market.df_1m,
+        market.timeframe,
+        params=params,
+        cfg=cfg,
+        order_block_result=ob_result,
+        setup_sink=sink,
+    )
+    # 그날 탭만 — `run_once(eval_from_ms=day_start_ms)`과 같은 하한 필터(누수 0).
+    day_candidates = [c for c in candidates if c.trigger_time >= day_start_ms]
+    day_sink = [d for d in sink if d.trigger_time >= day_start_ms]
+    # 단일 포지션 시퀀싱. 셀 로더가 펀딩을 안 싣으므로(`need_1m`·`funding=False`) rates는 빈
+    # 리스트다 — run_once 단일 경로와 같은 배선이라 거래가 비트 동일하다.
+    paired = sequence_with_candidates(day_candidates, cfg, [])
+
+    rows: list[TimelineRow] = []
+    traded_keys: set[_BacktestSetupKey] = set()
+    for cand, trade in paired:
+        ob = cand.order_block
+        zs = ob.start_time if ob is not None else None
+        zc = ob.confirmed_time if ob is not None else None
+        is_long = cand.side is PositionSide.LONG
+        traded_keys.add((is_long, zs, zc, cand.tap_index, cand.trigger_time))
+        exit_fill = trade.exits[-1]
+        rows.append(
+            TimelineRow(
+                source=SOURCE_BACKTEST,
+                symbol=market.symbol,
+                timeframe=market.timeframe,
+                is_long=is_long,
+                status=STATUS_BACKTEST_CLOSED,
+                reserve_ms=None,
+                limit_price=None,
+                fill_ms=trade.entry_time,
+                fill_price=trade.entry_price,
+                stop_price=cand.stop_price,
+                take_profit_price=None,
+                exit_ms=trade.exit_time,
+                exit_price=exit_fill.price,
+                exit_reason=exit_fill.reason.value,
+                pnl_pct=trade.return_pct * 100.0,
+                pnl_amount=trade.realized_pnl,
+                zone_start_time=zs,
+                zone_confirmed_time=zc,
+                tap_index=cand.tap_index,
+                trigger_time=cand.trigger_time,
+            )
+        )
+    # 남은 rested 셋업: 체결됐으나 슬롯참/사이징에 밀린 것(미진입) · 지정가 미체결.
+    for diag in day_sink:
+        is_long = diag.side is PositionSide.LONG
+        key: _BacktestSetupKey = (
+            is_long,
+            diag.zone_start_time,
+            diag.zone_confirmed_time,
+            diag.tap_index,
+            diag.trigger_time,
+        )
+        if key in traded_keys:
+            continue  # 이미 「청산」 행으로 냈다.
+        status = STATUS_BACKTEST_UNPLACED if diag.filled else STATUS_BACKTEST_UNFILLED
+        rows.append(
+            TimelineRow(
+                source=SOURCE_BACKTEST,
+                symbol=market.symbol,
+                timeframe=market.timeframe,
+                is_long=is_long,
+                status=status,
+                reserve_ms=diag.tap_bar_time,
+                limit_price=diag.limit_price,
+                fill_ms=None,
+                fill_price=None,
+                stop_price=diag.stop_price,
+                take_profit_price=None,
+                exit_ms=None,
+                exit_price=None,
+                exit_reason=None,
+                pnl_pct=None,
+                pnl_amount=None,
+                zone_start_time=diag.zone_start_time,
+                zone_confirmed_time=diag.zone_confirmed_time,
+                tap_index=diag.tap_index,
+                trigger_time=diag.trigger_time,
+            )
+        )
+    # 존폭 필터로 아예 주문을 안 건 셋업(라이브 「건너뜀·존폭」과 대칭).
+    rows.extend(
+        _zone_width_skipped_rows(
+            market,
+            ob_result,
+            params,
+            cfg,
+            day_start_ms=day_start_ms,
+            day_end_ms=day_end_ms,
+        )
+    )
+    return rows
+
+
+def _zone_width_skipped_rows(
+    market: MarketData,
+    ob_result: OrderBlockResult,
+    params: ConfluenceParams,
+    cfg: BacktestConfig,
+    *,
+    day_start_ms: int,
+    day_end_ms: int,
+) -> list[TimelineRow]:
+    """존폭 필터로 주문을 안 건 그날 셋업들을 「건너뜀(존폭)」 행으로 (WAN-295).
+
+    엔진과 **같은 탭 생성기·방향 게이트·직전봉 ATR·존폭 판정**을 쓴다
+    (`live.live_vs_backtest.count_taps_reservations`와 같은 규칙) — 필터가 켜진 채택 기본값
+    (1.28)에서 탭했으나 통과하지 못한 셋업만 낸다. 필터가 꺼져 있으면 빈 리스트다.
+    """
+    from backtest.zone_limit_backtest import _prepare_htf
+    from strategy.confluence import entry_candidate_signals
+    from strategy.indicators import atr
+    from strategy.models import OrderBlockDirection
+
+    if params.max_zone_width_atr is None:
+        return []
+    frame = _prepare_htf(market.htf_df)
+    if len(frame) == 0:
+        return []
+    times = [int(t) for t in frame["open_time"].astype("int64").tolist()]
+    closes = [float(v) for v in frame["close"].astype(float).tolist()]
+    time_to_pos = {t: i for i, t in enumerate(times)}
+    atr14 = [float(v) for v in atr(frame, length=params.zone_width_atr_length).tolist()]
+
+    rows: list[TimelineRow] = []
+    for signal in entry_candidate_signals(ob_result, params, times, closes, time_to_pos):
+        if signal.status != "active":
+            continue
+        if not (day_start_ms <= signal.trigger_time < day_end_ms):
+            continue
+        pos = time_to_pos.get(signal.trigger_time)
+        if pos is None:
+            continue
+        ob = signal.order_block
+        is_long = ob.direction is OrderBlockDirection.BULLISH
+        if (is_long and not cfg.allow_long) or (not is_long and not cfg.allow_short):
+            continue
+        if not is_long and not params.short_enabled:
+            continue
+        width_atr = atr14[pos - 1] if pos >= 1 else None
+        if params.zone_width_filter_passes(ob, width_atr):
+            continue  # 통과한 셋업은 sink/거래 경로가 다룬다(존폭으로 안 걸렀다).
+        rows.append(
+            TimelineRow(
+                source=SOURCE_BACKTEST,
+                symbol=market.symbol,
+                timeframe=market.timeframe,
+                is_long=is_long,
+                status=STATUS_BACKTEST_SKIP_ZONE_WIDTH,
+                reserve_ms=signal.trigger_time,
+                limit_price=None,
+                fill_ms=None,
+                fill_price=None,
+                stop_price=None,
+                take_profit_price=None,
+                exit_ms=None,
+                exit_price=None,
+                exit_reason=None,
+                pnl_pct=None,
+                pnl_amount=None,
+                zone_start_time=ob.start_time,
+                zone_confirmed_time=ob.confirmed_time,
+                tap_index=signal.tap_index,
+                trigger_time=signal.trigger_time,
+            )
+        )
+    return rows
+
+
+def _load_and_detect_cell(task: _BacktestCellTask) -> tuple[MarketData, OrderBlockResult] | None:
+    """한 셀의 데이터를 로드·탐지한다(워밍업 연속·미래 봉 미로드). 데이터 없으면 None.
 
     창은 `[그날 자정 − warmup_days, 그날 자정]`이라 미래 봉을 애초에 로드하지 않는다
-    (`live.live_vs_backtest.backtest_cell_funnel`과 같은 로딩). 데이터가 없으면 빈 리스트다
-    (대조에서 자연히 빠진다). 순수 평가는 `cell_timeline_trades`가 한다.
+    (`live.live_vs_backtest.backtest_cell_funnel`과 같은 로딩). 거래·셋업 두 경로가 이 로더를
+    공유해 같은 스냅샷·같은 탐지를 본다.
     """
     from backtest.harness import detect_order_blocks, load_market_data
     from strategy.models import OrderBlockParams
@@ -326,9 +568,31 @@ def _backtest_cell_trades(task: _BacktestCellTask) -> list[TimelineRow]:
         funding=False,
     )
     if market.htf_df.empty or market.df_1m.empty:
+        return None
+    return market, detect_order_blocks(market, OrderBlockParams())
+
+
+def _backtest_cell_trades(task: _BacktestCellTask) -> list[TimelineRow]:
+    """한 셀에서 그날 백테스트 **거래(청산)** 행. 순수 평가는 `cell_timeline_trades`가 한다."""
+    loaded = _load_and_detect_cell(task)
+    if loaded is None:
         return []
-    ob_result = detect_order_blocks(market, OrderBlockParams())
+    market, ob_result = loaded
     return cell_timeline_trades(market, ob_result, day_start_ms=task.day_start_ms)
+
+
+def _backtest_cell_setups(task: _BacktestCellTask) -> list[TimelineRow]:
+    """한 셀에서 그날 백테스트 **셋업 전부**(청산·미진입·미체결·건너뜀) 행을 낸다 (WAN-295).
+
+    순수 평가는 `cell_setup_timeline`이 한다. 라이브 장부와 셋업 단위로 대칭인 행을 낸다.
+    """
+    loaded = _load_and_detect_cell(task)
+    if loaded is None:
+        return []
+    market, ob_result = loaded
+    return cell_setup_timeline(
+        market, ob_result, day_start_ms=task.day_start_ms, day_end_ms=task.day_end_ms
+    )
 
 
 def backtest_timeline_by_cell(
@@ -390,6 +654,70 @@ def backtest_timeline_rows(
     `backtest_timeline_by_cell`을 평탄화한 것이라 두 함수가 같은 계산을 공유한다.
     """
     by_cell = backtest_timeline_by_cell(
+        day_start_ms=day_start_ms,
+        day_end_ms=day_end_ms,
+        symbols=symbols,
+        timeframes=timeframes,
+        warmup_days=warmup_days,
+        jobs=jobs,
+    )
+    rows: list[TimelineRow] = []
+    for cell_rows in by_cell.values():
+        rows.extend(cell_rows)
+    return rows
+
+
+def backtest_setup_by_cell(
+    *,
+    day_start_ms: int,
+    day_end_ms: int,
+    symbols: Sequence[str] | None = None,
+    timeframes: Sequence[str] | None = None,
+    warmup_days: int | None = None,
+    jobs: int = 1,
+) -> dict[tuple[str, str], list[TimelineRow]]:
+    """백테스트 **셋업 전부**(청산·미진입·미체결·건너뜀) 타임라인을 셀 단위로 낸다 (WAN-295).
+
+    `backtest_timeline_by_cell`과 같은 로딩·워밍업·평가 규약이되 청산 거래만이 아니라
+    라이브 장부와 대칭인 셋업 행을 낸다(`cell_setup_timeline`). 「청산」 행만 추리면
+    `backtest_timeline_by_cell`과 비트 동일하다(회귀 테스트 고정).
+    """
+    from backtest.harness import DEFAULT_SYMBOLS, DEFAULT_TIMEFRAMES
+    from live.live_vs_backtest import DEFAULT_WARMUP_DAYS
+
+    syms = list(symbols) if symbols is not None else list(DEFAULT_SYMBOLS)
+    tfs = list(timeframes) if timeframes is not None else list(DEFAULT_TIMEFRAMES)
+    warm = warmup_days if warmup_days is not None else DEFAULT_WARMUP_DAYS
+
+    tasks = [
+        _BacktestCellTask(symbol, tf, day_start_ms, day_end_ms, warm)
+        for symbol in syms
+        for tf in tfs
+    ]
+    if jobs > 1:
+        from concurrent.futures import ProcessPoolExecutor
+
+        with ProcessPoolExecutor(max_workers=jobs) as pool:
+            per_cell = list(pool.map(_backtest_cell_setups, tasks))
+    else:
+        per_cell = [_backtest_cell_setups(task) for task in tasks]
+    return {
+        (task.symbol, task.timeframe): cell_rows
+        for task, cell_rows in zip(tasks, per_cell, strict=True)
+    }
+
+
+def backtest_setup_rows(
+    *,
+    day_start_ms: int,
+    day_end_ms: int,
+    symbols: Sequence[str] | None = None,
+    timeframes: Sequence[str] | None = None,
+    warmup_days: int | None = None,
+    jobs: int = 1,
+) -> list[TimelineRow]:
+    """백테스트 셋업 전부 타임라인(그 KST 하루). `backtest_setup_by_cell`을 평탄화한다 (WAN-295)."""
+    by_cell = backtest_setup_by_cell(
         day_start_ms=day_start_ms,
         day_end_ms=day_end_ms,
         symbols=symbols,

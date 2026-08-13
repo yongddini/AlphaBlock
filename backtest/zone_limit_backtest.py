@@ -209,6 +209,16 @@ class SetupDiagnostic:
     zone_key: frozenset[int] | None = None
     """이 셋업이 속한 존의 안정적 식별자(`OrderBlockSignal.zone_key` 그대로, WAN-83).
     진단 전용이며 체결·청산 로직에는 쓰이지 않는다."""
+    zone_start_time: int | None = None
+    """근거 오더블록이 시작되는(박스 왼쪽 변) 봉의 `open_time`(ms) (`ob.start_time`, WAN-295).
+
+    `zone_confirmed_time`·`tap_index`와 함께 라이브 주문 장부(`live_limit_orders`의 동명
+    컬럼)와 **셋업 단위 1:1 조인 키**를 이룬다 — 페이퍼↔백테 대조(`live.setup_compare`)가
+    체결 시각(틱 vs 1분봉으로 갈린다)이 아니라 존 정체성으로 짝짓게 한다. 진단 전용이며
+    체결·청산 로직에는 쓰이지 않아, 채워도 후보·거래·통계는 비트 단위로 같다."""
+    zone_confirmed_time: int | None = None
+    """근거 오더블록이 확정된 봉의 `open_time`(ms) (`ob.confirmed_time`, WAN-295).
+    `zone_start_time`과 한 쌍의 조인 키다."""
 
 
 _MS_PER_DAY = 86_400_000
@@ -1090,6 +1100,11 @@ def build_zone_limit_candidates(
                     status=outcome.status,
                     tap_index=signal.tap_index,
                     zone_key=signal.zone_key,
+                    # WAN-295: 셋업 단위 라이브 조인 키. 씨앗 존(겹침 캐스케이드)이 아니라
+                    # **원본 존**의 시각을 싣는다 — 라이브 장부의 `zone_start_time`도 원본
+                    # 오더블록 기준이라 두 축이 같은 존을 가리켜야 조인이 성립한다.
+                    zone_start_time=ob.start_time,
+                    zone_confirmed_time=ob.confirmed_time,
                 )
             )
         if not is_filled or outcome.entry_time is None or outcome.entry_price is None:
