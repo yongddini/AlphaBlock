@@ -62,6 +62,13 @@ def run_signal_runner(
     """
     settings = settings or get_settings()
 
+    # 환경변수가 채택 좌표를 덮어쓰고 있으면 기동 시점에 보이게 한다(WAN-309).
+    # 값은 존중한다 — 낡은 `.env`로 BTC/1h 단독 감시가 되면서 아무도 모르는 것이 사고다.
+    from config.drift import check_coordinate_drift, render_drift_lines
+
+    for line in render_drift_lines(check_coordinate_drift(settings)):
+        _logger.warning(line)
+
     if test_message:
         telegram = None if dry_run else build_telegram_client(settings)
         if telegram is None:

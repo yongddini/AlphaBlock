@@ -66,7 +66,7 @@ def _default_backfill_lookback_days() -> dict[str, int]:
 
 
 def _default_live_signal_symbols() -> list[str]:
-    """실시간 페이퍼 러너(WAN-25)가 감시할 기본 심볼 = 수집 유니버스 9종목 전부.
+    """실시간 페이퍼 러너(WAN-25)가 감시할 기본 심볼 = 수집 유니버스 전부(WAN-307 이후 12종목).
 
     **WAN-191(사용자 결정 2026-07-25)에서 BTC 단독 → 9종목으로 확대**했다. 옛 BTC 단독은
     WAN-111 원칙("유니버스 확장은 측정·수집 대상이지 실거래 승인이 아니다") 때문에 좁게
