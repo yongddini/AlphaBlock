@@ -227,21 +227,25 @@ def test_app_renders_price_chart_and_metrics_when_data_available(seeded_db_path:
     _open_backtest_tab(at, "load_reference_tab", timeout=30)
 
     assert not at.exception
-    # 분석 탭의 백테스트 성과 지표 6종이 실제로 그려졌는지 라벨로 확인한다.
-    # 개수(len)로 단언하지 않는다: streamlit 1.59+는 모든 탭을 한 번에 렌더하므로
-    # Health/페이퍼 탭의 지표(러너 상태 등)까지 at.metric 에 섞여 개수가 환경에 따라 달라진다.
+    # 병합 화면(WAN-289)의 성과 카드 6종(목업 확정 · 한글)이 실제로 그려졌는지 라벨로
+    # 확인한다. 개수(len)로 단언하지 않는다: streamlit 1.59+는 모든 탭을 한 번에
+    # 렌더하므로 Health/페이퍼 탭의 지표(러너 상태 등)까지 at.metric 에 섞여 개수가
+    # 환경에 따라 달라진다.
     metric_labels = {m.label for m in at.metric}
     assert {
-        "Total Return",
-        "Max Drawdown",
-        "Win Rate",
-        "Profit Factor",
-        "Sharpe",
-        "Trades",
+        "총수익",
+        "MDD",
+        "승률",
+        "거래수",
+        "체결률",
+        "최종 시드",
     } <= metric_labels
+    # 옛 영문 카드(WAN-289 이전)가 라벨만 남아 있지 않다.
+    assert "Total Return" not in metric_labels
+    assert "Sharpe" not in metric_labels
     # 적재된 실행(_win_then_loss)은 거래 2건 — 조회한 값이 그대로 지표에 뜬다(WAN-199).
     metrics_by_label = {m.label: m.value for m in at.metric}
-    assert metrics_by_label["Trades"] == "2"
+    assert metrics_by_label["거래수"] == "2"
     # 분석 탭 상단 실행 설정 배지(WAN-65)가 그려진다. 지문의 `entry_mode`가 zone_limit이라
     # 배지가 자동으로 "B안(존-지정가)"로 뜬다(WAN-199 완료 기준). 기본 BacktestConfig는
     # risk_sizing=None이라 "사이징 미적용"으로 warning 색으로 강조된다.
@@ -274,6 +278,10 @@ def test_app_health_tab_renders_without_error(seeded_db_path: str) -> None:
     subheaders = [s.value for s in at.subheader]
     assert "데이터 신선도" in subheaders
     assert "실시간 러너" in subheaders
+    # 목업 카드 3종의 셋째 — DB 무결성(WAN-289 §3). doctor와 같은 판정을 캐시로 재사용.
+    assert "DB 무결성" in subheaders
+    metric_labels = {m.label for m in at.metric}
+    assert "quick_check" in metric_labels
 
 
 def test_app_auto_refresh_toggle_and_last_updated(seeded_db_path: str) -> None:
@@ -349,7 +357,7 @@ def test_saved_trades_tab_hints_how_to_persist_when_empty(seeded_db_path: str) -
 
 
 def test_saved_trades_tab_renders_stored_trades_with_fingerprint(seeded_db_path: str) -> None:
-    """WAN-106: 계산 없이 조회한 거래 표 + 실행 지문 배지 + 청산사유 필터가 그려진다."""
+    """WAN-106→289: 계산 없이 조회한 거래 표 + 실행 지문 배지 + 청산사유 칩이 그려진다."""
     _seed_backtest_run(seeded_db_path)
 
     at = AppTest.from_file("dashboard/app.py")
@@ -363,9 +371,10 @@ def test_saved_trades_tab_renders_stored_trades_with_fingerprint(seeded_db_path:
     assert any("실행 지문" in c and "B안(존-지정가)" in c for c in captions)
     radio_labels = {r.label for r in at.radio}
     assert "청산사유" in radio_labels
-    # 사용자의 원 요청("어디서 손절났는지")이 선택지로 실제로 있다.
+    # 사용자의 원 요청("어디서 손절났는지")이 선택지로 실제로 있고, 어휘는 잔고 탭과
+    # 같은 칩 3갈래다(WAN-289 — `live_board.REASON_FILTER_OPTIONS` 재사용).
     reason_radio = next(r for r in at.radio if r.label == "청산사유")
-    assert "손절" in list(reason_radio.options)
+    assert list(reason_radio.options) == ["전체", "익절만", "손절만"]
 
 
 def test_backtest_tabs_are_lazy_and_demoted_reference(seeded_db_path: str) -> None:
@@ -393,14 +402,14 @@ def test_backtest_tabs_are_lazy_and_demoted_reference(seeded_db_path: str) -> No
     assert _BACKTEST_REFERENCE_NOTE in [c.value for c in at.caption]
     assert "참고" in _BACKTEST_REFERENCE_NOTE and "대조" in _BACKTEST_REFERENCE_NOTE
 
-    # 로드 전에는 분석 탭의 백테스트 지표("Total Return")가 그려지지 않는다 → cold start 빠름.
-    # (페이퍼 탭은 "총수익률(지갑)" 한글 라벨이라 겹치지 않는다.)
-    assert "Total Return" not in {m.label for m in at.metric}
+    # 로드 전에는 병합 화면의 백테스트 카드("총수익")가 그려지지 않는다 → cold start 빠름.
+    # (잔고 탭은 "누적 실현손익" 등 다른 라벨이라 겹치지 않는다.)
+    assert "총수익" not in {m.label for m in at.metric}
 
-    # 버튼을 누르면 비로소 조회가 실행돼 지표가 뜬다.
+    # 버튼을 누르면 비로소 조회가 실행돼 카드가 뜬다.
     _open_backtest_tab(at, "load_reference_tab", timeout=30)
     assert not at.exception
-    assert "Total Return" in {m.label for m in at.metric}
+    assert "총수익" in {m.label for m in at.metric}
 
 
 def test_live_tabs_render_on_cold_start_without_loading_backtest(seeded_db_path: str) -> None:

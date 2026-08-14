@@ -8,8 +8,9 @@
 백테스트가 라이브 실측과 대조하는 **잣대**이기 때문이다: 약속·기대수익이 아니라 대조용).
 
 **차트 탭(메인)**: 채택 유니버스 9종목 × 작업 TF(15m·1h·2h·4h) 중 하나를 골라 최근 봉과
-**가장 최근 오더블록 4개**만 그린다. 분석 탭 cold load ~10초(WAN-202)의 원인이던 "6년치
-재계산 + 통째 전송"이 이 화면에는 **구조적으로 없다** — 읽는 양 자체가 다르다.
+**활성 오더블록 6개**(+ 그 구간의 죽은 존 회색, WAN-289 사용자 결정 2026-08-12)만
+그린다. 분석 탭 cold load ~10초(WAN-202)의 원인이던 "6년치 재계산 + 통째 전송"이 이
+화면에는 **구조적으로 없다** — 읽는 양 자체가 다르다.
 
 **잔고·거래내역 탭(구 「페이퍼 성과」)**: 페이퍼 러너가 적재한 거래·잔고·성과를 조회하고,
 지갑 에쿼티 곡선에 **MDD 구간**을 빨갛게 표시한다.
@@ -17,16 +18,15 @@
 사유)를 계산 없이 조회 — 체결률·미진입 사유 분포·칸별 필터.
 **운영 상태(Health) 탭**: 데이터 신선도·펀딩·러너 생존·페이퍼 포지션·최근 신호를
 한눈에 보여, 수집이 멈췄는지/러너가 살아있는지 즉시 식별한다.
-**분석 탭(참고·대조, 지연 로딩)**: 캔들+오더블록 차트 위에, 적재된 **채택 엔진(B안
-존-지정가)** 실행의 거래 마커·성과를 **조회로** 얹는다(WAN-199). 화면에서 B안 백테스트
-(1분봉 substep, 단일 조합 ~7분)를 다시 돌리지 않는다 — 손익·거래는 `backtest.run
---persist`가 넣어 둔 결과를 저장된 거래 탭과 **같은 인프라**(`BacktestRunStore`)로 읽는다.
+**분석·거래 탭(참고·대조, 지연 로딩)**: 옛 「분석」과 「저장된 거래」(WAN-106)를 **진짜
+한 화면**으로 병합했다(WAN-289 목업 정렬). 성과 카드 6종(총수익·MDD·승률·거래수·체결률·
+최종 시드) + 캔들+오더블록 차트 하나(적재된 **채택 엔진(B안 존-지정가)** 실행의 진입·청산
+마커, WAN-199) + 청산사유 칩(잔고 탭과 같은 어휘) + 거래 리스트 하나(행 클릭 → 차트 점프)
++ 미체결 셋업. 화면에서 B안 백테스트(1분봉 substep, 단일 조합 ~7분)를 다시 돌리지 않는다
+— 손익·거래는 `backtest.run --persist`가 넣어 둔 결과를 조회(`BacktestRunStore`)한다.
 차트의 존은 컨플루언스 파라미터와 무관한 오더블록 탐지(상위TF에서 수 초)로 그리고,
 기간 슬라이더는 그 **차트 뷰**만 좁힌다(성과 지표는 적재된 전체 실행 기준). 적재본이
 없으면 재계산 대신 넣는 방법을 안내한다.
-**저장된 거래 탭(WAN-106, 참고·대조, 지연 로딩)**: `backtest.run --persist`가 적재해 둔
-**채택 엔진(B안 지정가)** 거래를 계산 없이 조회한다(손절/익절 필터 · 미체결 셋업 ·
-차트 점프). 분석 탭과 같은 조회 인프라를 쓰되 존을 그리지 않는다(거래 감사 전용).
 
 로컬 실행형이며 외부 노출/인증은 범위 밖이다.
 
@@ -47,7 +47,7 @@ import streamlit as st
 
 from backtest.models import BacktestConfig, BacktestMetrics, BacktestResult
 from backtest.report import COL_EXIT_REASON, trades_to_dataframe, trades_to_display_frame
-from backtest.trade_store import BacktestRunStore, RunFingerprint, RunSummary, engine_revision
+from backtest.trade_store import BacktestRunStore, RunSummary, engine_revision
 from common.timefmt import KST, format_kst, format_kst_zoned
 from config import get_settings
 from config.settings import Settings
@@ -79,28 +79,28 @@ from dashboard.health import (
 from dashboard.health_data import HealthView, OpenPositionView, build_health_view, latest_close
 from dashboard.lightweight_chart import BAND_LINE_COLOR, build_chart_html
 from dashboard.live_board import (
+    ACTIVE_ZONE_LIMIT,
     REASON_FILTER_ALL,
     REASON_FILTER_OPTIONS,
-    RECENT_ZONE_LIMIT,
     RIGHT_PAD_RATIO,
     OpenPositionRow,
     build_open_position_row,
     chart_start_ms,
     chart_symbols,
     chart_timeframes,
+    display_zones,
     filter_records_by_choice,
     legend_title,
     max_drawdown_window,
     open_positions_frame,
-    recent_zones,
     total_unrealized_usd,
     wallet_equity_points,
     wallet_trade_frame,
+    zone_view_start_ms,
 )
 from dashboard.live_chart import LIVE_INTERVALS, build_live_config
 from dashboard.saved_trades import (
-    exit_reason_options,
-    filter_by_exit_reason,
+    filter_by_reason_chip,
     run_label,
     selected_trade_no,
     setups_display_frame,
@@ -120,6 +120,8 @@ from dashboard.trade_timeline_view import (
     selected_row,
     timeline_frame,
 )
+from data.integrity import IntegrityReport
+from data.integrity import inspect as inspect_db_integrity
 from data.storage import OhlcvStore, source_timeframe
 from live.order_journal import LedgerEntry, OrderJournal
 from live.runtime_state import EventRecord, RuntimeStateStore
@@ -329,8 +331,8 @@ def _cached_open_positions(db_path: str) -> list[OpenPositionRow]:
 # 여기는 **지금 시장이 어떻게 생겼고 내 포지션이 어디에 있나**를 보는 화면이다.
 #
 # 🔑 cold load가 가벼운 이유는 캐시가 아니라 **읽는 양**이다(WAN-202 흡수) — 6년 전량을
-# 탐지·전송하던 분석 탭과 달리 최근 `CHART_BARS`봉만 읽고, 존은 최근 `RECENT_ZONE_LIMIT`개만
-# 그린다. 심볼·TF를 바꿔도 그 크기는 그대로다.
+# 탐지·전송하던 분석 탭과 달리 최근 `CHART_BARS`봉만 읽고, 존은 활성 `ACTIVE_ZONE_LIMIT`개
+# (+ 그 구간의 죽은 존 회색, WAN-289)만 그린다. 심볼·TF를 바꿔도 그 크기는 그대로다.
 
 
 @st.cache_data(ttl=_SERIES_TTL_SECONDS, show_spinner=False)
@@ -412,8 +414,8 @@ def _render_chart_panel(settings: Settings) -> None:
         f"<div style='text-align:right;padding-top:30px;font-size:12px;color:#787b86;'>"
         f"{_zone_swatch('rgba(38,166,154,.6)', '#26a69a')}수요·활성"
         f"{_zone_swatch('rgba(239,83,80,.6)', '#ef5350', left=12)}공급·숏"
-        f"{_zone_swatch('rgba(140,145,155,.4)', '#9aa0ac', left=12)}무효화"
-        f"<span style='margin-left:12px;color:#d1d4dc;'>최근 {RECENT_ZONE_LIMIT}개</span>"
+        f"{_zone_swatch('rgba(150,158,170,.4)', '#9aa0ac', left=12)}무효화"
+        f"<span style='margin-left:12px;color:#d1d4dc;'>활성 {ACTIVE_ZONE_LIMIT}개</span>"
         "</div>",
         unsafe_allow_html=True,
     )
@@ -444,7 +446,10 @@ def _render_chart_panel(settings: Settings) -> None:
         f"|{ob_params.model_dump_json()}|{_cached_revision()}"
     )
     order_blocks, _rendered = _cached_detection(detection_key, df, ob_params)
-    zones = recent_zones(order_blocks, limit=RECENT_ZONE_LIMIT)
+    # 활성 존 6개 + 그 구간의 죽은 존(회색) — 첫 화면 창도 가장 오래된 활성 존까지
+    # 넓힌다(사용자 결정 2026-08-12, WAN-289).
+    zones = display_zones(order_blocks)
+    view_from_ms = zone_view_start_ms(zones, timeframe)
 
     # 진입 기준선(볼린저 하단)은 채택 기본값으로 그린다 — 표시선(EMA/VWMA)은 채택 규칙이
     # 쓰지 않으므로 이 화면에서는 아예 싣지 않는다(페이로드의 절반이던 것, WAN-188).
@@ -471,6 +476,7 @@ def _render_chart_panel(settings: Settings) -> None:
             ohlc_legend_title=legend_title(symbol, timeframe),
             independent_axis=True,
             right_pad_ratio=RIGHT_PAD_RATIO,
+            view_from_ms=view_from_ms,
         ),
         height=chart_height,
     )
@@ -635,6 +641,10 @@ def _render_run_config_badge(
 #: 전에 지난 실행의 선택 상태를 `st.session_state`에서 꺼내야 한다(WAN-146).
 _TRADE_TABLE_KEY = "trade_table_selection"
 
+#: 청산사유 칩 위젯 key(WAN-289 병합 화면). 표와 같은 이유로 — 칩이 차트보다 **아래**
+#: 그려지므로 선택된 거래 → 차트 점프 계산은 지난 실행의 칩 상태를 읽는다.
+_REFERENCE_REASON_KEY = "reference_exit_reason"
+
 
 def _selected_trade_rows() -> list[int]:
     """거래 표에서 선택된 행 위치. 아직 표가 없거나 선택이 없으면 빈 목록."""
@@ -642,6 +652,7 @@ def _selected_trade_rows() -> list[int]:
 
 
 def _render_trade_table(
+    frame: pd.DataFrame,
     backtest: BacktestResult,
     conf_params: ConfluenceParams,
     ob_params: OrderBlockParams,
@@ -649,17 +660,28 @@ def _render_trade_table(
 ) -> None:
     """거래 표 (WAN-146) — KST 시각·진입금액·시드 변화 + 행 선택 → 차트 점프.
 
-    표의 내용은 `trades_to_display_frame`(대시보드와 CSV 내보내기 공용)이 만들고, 여기서는
-    Streamlit 위젯으로 그리기만 한다. 매 행에서 값이 같던 엔진 라벨 6개는 표 본문에서
-    빼되 아래 expander에 원본 컬럼 전체와 함께 **보존**한다(WAN-65 — 삭제가 아니다).
+    표의 내용은 `trades_to_display_frame`(대시보드와 CSV 내보내기 공용)이 만들고
+    청산사유 칩으로 좁혀진 `frame`을 받아 여기서는 Streamlit 위젯으로 그리기만 한다.
+    매 행에서 값이 같던 엔진 라벨 6개는 표 본문에서 빼되 아래 expander에 원본 컬럼
+    전체와 함께 **보존**한다(WAN-65 — 삭제가 아니다).
     """
     st.subheader("거래 목록")
     st.caption(
         "시각은 **한국시간(KST)** 입니다(내부 계산·저장은 UTC 그대로). "
         "행을 누르면 위 차트가 그 거래의 진입~청산 구간으로 이동합니다."
     )
+    st.radio(
+        "청산사유",
+        options=REASON_FILTER_OPTIONS,
+        horizontal=True,
+        key=_REFERENCE_REASON_KEY,
+        help=(
+            "잔고 탭과 같은 세 갈래(전체/익절만/손절만)입니다. 시드(전)·시드(후)·행 "
+            "번호(#)는 좁혀도 전체 실행 기준 그대로입니다."
+        ),
+    )
     st.dataframe(
-        style_trade_frame(trades_to_display_frame(backtest)),
+        style_trade_frame(frame),
         use_container_width=True,
         hide_index=True,
         on_select="rerun",
@@ -936,18 +958,43 @@ def _render_analysis(settings: Settings) -> None:
         else None
     )
 
-    # 거래 표에서 고른 행 → 차트 이동 구간(WAN-146). 표는 차트보다 아래에 그려지므로
-    # 지난 실행의 선택 상태를 읽는다. 시점 재생 중이면(거래 마커 자체를 안 그린다) 이동도
-    # 하지 않고, 선택된 거래가 현재 기간 밖이면 빈 화면으로 뛰지 않게 무시한다.
-    focus = selected_trade_window(result, _selected_trade_rows()) if replay_ms is None else None
+    # 거래 표에서 고른 행 → 차트 이동 구간(WAN-146). 표·청산사유 칩은 차트보다 아래에
+    # 그려지므로 지난 실행의 상태를 읽고, 칩으로 좁혀진 표의 행 위치는 `#` 열을 거쳐
+    # 전체 실행 기준 거래 번호로 되돌린다(WAN-289 병합). 시점 재생 중이면(거래 마커
+    # 자체를 안 그린다) 이동도 하지 않고, 선택된 거래가 현재 기간 밖이면 빈 화면으로
+    # 뛰지 않게 무시한다.
+    reason_choice = str(st.session_state.get(_REFERENCE_REASON_KEY, REASON_FILTER_ALL))
+    trades_frame = filter_by_reason_chip(
+        trades_to_display_frame(result), reason_choice, column=COL_EXIT_REASON
+    )
+    trade_no = selected_trade_no(trades_frame, _selected_trade_rows())
+    focus = (
+        None
+        if replay_ms is not None or trade_no is None
+        else selected_trade_window(result, [trade_no - 1])
+    )
     if focus is not None and not (start_ms <= focus[0] <= end_ms):
         focus = None
 
     st.subheader(f"{symbol} · {timeframe}")
-    # 지금 보고 있는 게 어느 엔진의 거래인지 항상 드러낸다(WAN-65/95) — 저장된 거래 탭과
-    # 같은 지문 배지. 그 아래 실행 설정 배지는 지문의 `entry_mode`를 읽어 "B안(존-지정가)".
+    # 지금 보고 있는 게 어느 엔진의 거래인지 항상 드러낸다(WAN-65/95) — 저장된 거래 탭이
+    # 하던 지문 배지를 병합 화면이 이어받는다. 그 아래 실행 설정 배지는 지문의
+    # `entry_mode`를 읽어 "B안(존-지정가)".
     st.caption(f"🔒 실행 지문: {fingerprint.label()} · run_id `{summary.run_id}`")
     _render_run_config_badge(conf_params, ob_params, bt_config, result.metrics)
+
+    # 성과 카드 6종(목업 확정, WAN-289) — 차트보다 **위**다. 값은 적재된 요약(`RunSummary`)
+    # 이다: 지표의 정본은 적재된 요약이지 복원 결과가 아니다(WAN-106).
+    cards = st.columns(6)
+    cards[0].metric("총수익", f"{summary.total_return * 100:.2f}%")
+    cards[1].metric("MDD", f"{summary.max_drawdown * 100:.2f}%")
+    cards[2].metric("승률", f"{summary.win_rate * 100:.2f}%")
+    cards[3].metric("거래수", f"{summary.num_trades:,}")
+    cards[4].metric(
+        "체결률", "—" if summary.fill_rate is None else f"{summary.fill_rate * 100:.2f}%"
+    )
+    cards[5].metric("최종 시드", f"{summary.final_equity:,.0f}")
+
     chart_height = 700
     st.iframe(
         build_chart_html(
@@ -981,23 +1028,10 @@ def _render_analysis(settings: Settings) -> None:
     elif live_on:
         st.caption("⚪ 실시간 갱신 꺼짐: 시점 재생 중이거나 기간 끝을 과거로 잘라 본 화면입니다.")
 
-    metrics = result.metrics
-    cols = st.columns(6)
-    cols[0].metric("Total Return", f"{metrics.total_return * 100:.2f}%")
-    cols[1].metric("Max Drawdown", f"{metrics.max_drawdown * 100:.2f}%")
-    cols[2].metric("Win Rate", f"{metrics.win_rate * 100:.2f}%")
-    profit_factor = metrics.profit_factor
-    cols[3].metric("Profit Factor", f"{profit_factor:.2f}" if profit_factor is not None else "N/A")
-    sharpe = metrics.sharpe
-    cols[4].metric("Sharpe", f"{sharpe:.2f}" if sharpe is not None else "N/A")
-    cols[5].metric("Trades", str(metrics.num_trades))
+    _render_trade_table(trades_frame, result, conf_params, ob_params, bt_config)
 
-    st.plotly_chart(build_equity_chart(result, theme=chart_theme), use_container_width=True)
-
-    _render_trade_table(result, conf_params, ob_params, bt_config)
-
-    # 미체결 셋업 — 저장된 거래 탭과 같은 조회(WAN-106). "살 뻔했는데 못 산 자리"는
-    # 규칙 판단에 체결된 거래만큼 중요하다.
+    # 미체결 셋업 — "살 뻔했는데 못 산 자리"는 규칙 판단에 체결된 거래만큼 중요하다
+    # (WAN-106). 병합 화면(WAN-289)에서도 거래 리스트 바로 아래 한 자리다.
     unfilled = setups[~setups["filled"]] if not setups.empty else setups
     with st.expander(f"미체결 셋업 — 살 뻔했는데 못 산 자리 ({len(unfilled)}건)"):
         if setups.empty:
@@ -1008,15 +1042,18 @@ def _render_analysis(settings: Settings) -> None:
         else:
             st.dataframe(setups_display_frame(unfilled), use_container_width=True, hide_index=True)
 
+    # 자본곡선은 expander로 강등 — 목업의 한 화면(카드+차트+거래 리스트)에는 없지만
+    # 삭제가 아니라 이동이다(WAN-65 원칙). 지갑 에쿼티 곡선은 잔고 탭 소관이고 이건
+    # **백테스트 실행**의 곡선이다(참고·대조).
+    with st.expander("백테스트 자본곡선(참고·대조)"):
+        st.plotly_chart(build_equity_chart(result, theme=chart_theme), use_container_width=True)
 
-# --- 저장된 거래 탭 (WAN-106) ------------------------------------------------
+
+# --- 적재된 실행 조회 인프라 (WAN-106) ---------------------------------------
 #
-# 분석 탭과 정반대 성격이다: 저기는 화면을 열 때마다 다시 계산하고(그래서 1분봉을 못 읽어
-# A안으로 내려가 있다), 여기는 `backtest.run --persist`가 한 번 계산해 DB에 넣어 둔
-# **채택 엔진(B안 지정가)** 거래를 **계산 없이 조회**만 한다.
-
-_SAVED_TABLE_KEY = "saved_trade_table_selection"
-_SAVED_CHART_HEIGHT = 520
+# `backtest.run --persist`가 한 번 계산해 DB에 넣어 둔 **채택 엔진(B안 지정가)** 거래를
+# **계산 없이 조회**만 한다. 옛 「저장된 거래」 탭의 화면은 WAN-289에서 분석 탭과 한
+# 화면으로 병합됐고(위 `_render_analysis`), 조회 캐시·빈 화면 안내는 그대로 여기 산다.
 
 
 @st.cache_data(ttl=_SERIES_TTL_SECONDS, show_spinner=False)
@@ -1030,127 +1067,6 @@ def _cached_saved_run(db_path: str, run_id: str) -> tuple[BacktestResult, pd.Dat
     """적재된 실행 하나를 복원한다 — **조회일 뿐 백테스트가 아니다**."""
     with BacktestRunStore(db_path) as store:
         return store.load_result(run_id), store.setups_frame(run_id)
-
-
-def _saved_run_empty_hint(db_path: str) -> None:
-    st.info(
-        "적재된 백테스트 거래가 없습니다. 채택 엔진(B안 지정가) 거래를 한 번 계산해 "
-        "넣어 두면 여기서 계산 없이 조회할 수 있습니다:\n\n"
-        "```bash\n"
-        "uv run python -m backtest.run --symbol BTCUSDT --tf 15m --persist\n"
-        "```\n\n"
-        f"적재 대상 DB: `{db_path}`"
-    )
-
-
-def _render_saved_trades(settings: Settings) -> None:
-    db_path = settings.db_path
-    summaries = _cached_saved_runs(db_path)
-    if not summaries:
-        _saved_run_empty_hint(db_path)
-        return
-
-    labels = {run_label(s): s for s in summaries}
-    with st.sidebar:
-        st.header("저장된 거래")
-        chosen = st.selectbox("실행(실행 지문)", list(labels), key="saved_run_choice")
-    summary = labels[chosen]
-    fingerprint = summary.fingerprint
-
-    # 실행 지문 배지 — 지금 보고 있는 게 어느 엔진의 거래인지 항상 드러낸다(WAN-65/95).
-    # 분석 탭의 "A안(봉 마감 종가)" 배지가 하던 역할을 이 탭에서는 이 줄이 이어받는다.
-    st.subheader(f"{fingerprint.symbol} · {fingerprint.timeframe}")
-    st.caption(f"🔒 실행 지문: {fingerprint.label()} · run_id `{summary.run_id}`")
-
-    result, setups = _cached_saved_run(db_path, summary.run_id)
-    # 지표는 **적재된 요약**을 쓴다(복원 결과의 지표가 아니다) — 종가(A안) 실행은 원본
-    # 자본곡선이 봉 단위라 거래 단위로 다시 만든 곡선과 MDD가 다르다
-    # (`BacktestRunStore.load_result` 독스트링). 복원 결과는 표·차트 마커에만 쓴다.
-    cols = st.columns(6)
-    cols[0].metric("Total Return", f"{summary.total_return * 100:.2f}%")
-    cols[1].metric("Max Drawdown", f"{summary.max_drawdown * 100:.2f}%")
-    cols[2].metric("Win Rate", f"{summary.win_rate * 100:.2f}%")
-    cols[3].metric("Trades", str(summary.num_trades))
-    cols[4].metric(
-        "체결률", "—" if summary.fill_rate is None else f"{summary.fill_rate * 100:.2f}%"
-    )
-    cols[5].metric("최종 시드", f"{summary.final_equity:,.0f}")
-
-    reason = st.radio(
-        "청산사유",
-        options=exit_reason_options(),
-        horizontal=True,
-        key="saved_exit_reason",
-        help="손절만 / 익절만 골라 봅니다. 시드(전)·시드(후)는 전체 실행 기준 그대로입니다.",
-    )
-    frame = filter_by_exit_reason(trades_to_display_frame(result), reason, column=COL_EXIT_REASON)
-
-    trade_no = selected_trade_no(frame, parse_selected_rows(st.session_state.get(_SAVED_TABLE_KEY)))
-    focus = None if trade_no is None else selected_trade_window(result, [trade_no - 1])
-    _render_saved_chart(db_path, fingerprint, result, focus)
-
-    st.caption(
-        "시각은 **한국시간(KST)** 입니다(저장·계산은 UTC 그대로). "
-        "행을 누르면 위 차트가 그 거래의 진입~청산 구간으로 이동합니다."
-    )
-    st.dataframe(
-        style_trade_frame(frame),
-        use_container_width=True,
-        hide_index=True,
-        on_select="rerun",
-        selection_mode="single-row",
-        key=_SAVED_TABLE_KEY,
-    )
-
-    unfilled = setups[~setups["filled"]] if not setups.empty else setups
-    with st.expander(f"미체결 셋업 — 살 뻔했는데 못 산 자리 ({len(unfilled)}건)"):
-        if setups.empty:
-            st.caption(
-                "이 실행에는 셋업 진단이 없습니다(종가 진입·다중 포지션 경로는 미체결이라는 "
-                "개념이 없거나 진단을 내지 않습니다)."
-            )
-        else:
-            st.dataframe(setups_display_frame(unfilled), use_container_width=True, hide_index=True)
-
-
-def _render_saved_chart(
-    db_path: str,
-    fingerprint: RunFingerprint,
-    result: BacktestResult,
-    focus: tuple[int, int] | None,
-) -> None:
-    """적재된 거래의 진입·청산 마커를 캔들 위에 그린다(존은 그리지 않는다).
-
-    오더블록을 다시 탐지하면 이 탭의 약속("계산이 아니라 조회")이 깨진다 — 존 표시가
-    필요하면 분석 탭이 그 일을 한다. 여기서 필요한 건 **거래가 어디서 났는지**다.
-    """
-    candles = _cached_ohlcv(
-        db_path,
-        fingerprint.symbol,
-        fingerprint.timeframe,
-        fingerprint.start_time,
-        fingerprint.end_time,
-    )
-    if candles.empty:
-        st.warning(
-            "이 실행 창의 캔들이 DB에 없어 차트를 그릴 수 없습니다(거래 표는 그대로 조회됩니다)."
-        )
-        return
-    st.iframe(
-        build_chart_html(
-            candles,
-            [],
-            result,
-            theme=_current_chart_theme(),
-            height=_SAVED_CHART_HEIGHT,
-            focus=focus,
-        ),
-        height=_SAVED_CHART_HEIGHT,
-    )
-    if focus is not None:
-        st.caption(
-            "🔎 선택한 거래 구간을 보고 있습니다. 표에서 선택을 해제하면 전체 구간으로 돌아갑니다."
-        )
 
 
 # --- 거래 타임라인 탭 (WAN-234) ---------------------------------------------
@@ -1561,6 +1477,60 @@ def _render_runner(runner: RunnerStatus) -> None:
         st.error("러너 하트비트가 끊겼습니다 — 프로세스가 멈췄을 수 있습니다.")
 
 
+#: DB 무결성 점검 캐시 TTL(WAN-289 완료 기준 2). `PRAGMA quick_check`는 3.5GB DB에서
+#: 실측 12초라(WAN-194) **화면 로드마다 돌리면 안 된다** — Health 탭은 60초 자동 갱신
+#: fragment인데 매 갱신마다 12초씩 멈추면 탭이 못 쓰게 된다. 한 시간에 한 번이면
+#: 손상 감지 용도로 충분하다(doctor의 cron 주기 감각).
+_DB_CHECK_TTL_SECONDS = 3600
+
+
+@st.cache_data(ttl=_DB_CHECK_TTL_SECONDS, show_spinner="DB 무결성 점검 중(quick_check)…")
+def _cached_db_integrity(db_path: str) -> tuple[IntegrityReport, int]:
+    """`alphablock doctor`와 **같은 판정**(`data.integrity.inspect`)을 캐시해 재사용한다.
+
+    화면에서 새로 짜지 않는다(WAN-289 §3) — 판정 로직이 두 벌이 되면 doctor는
+    경고하는데 화면은 초록인 어긋남이 생긴다. 반환에 점검 시각(ms)을 실어 카드가
+    "언제 본 판정인지"를 밝힌다(캐시된 값이 최신인 척하지 않게).
+    """
+    return inspect_db_integrity(db_path), int(time.time() * 1000)
+
+
+def _render_db_integrity(db_path: str) -> None:
+    """Health 탭 「DB 무결성」 카드(WAN-289 §3, 목업 `● 정상 / quick_check OK · 3.5GB`)."""
+    st.subheader("DB 무결성")
+    try:
+        report, checked_at_ms = _cached_db_integrity(db_path)
+    except FileNotFoundError:
+        st.caption("DB 파일이 없습니다 — 수집(WAN-6)이 만들면 여기서 점검합니다.")
+        return
+    cols = st.columns(3)
+    cols[0].metric("상태", "🟢 정상" if report.healthy else "🔴 경고")
+    cols[1].metric("quick_check", "OK" if report.quick_check_ok else "실패")
+    cols[2].metric("DB 크기", f"{report.space.db_bytes / 1e9:.1f}GB")
+    st.caption(
+        f"마지막 점검 {format_kst_zoned(checked_at_ms)} · `alphablock doctor`와 같은 판정을 "
+        f"{_DB_CHECK_TTL_SECONDS // 60}분 캐시로 재사용합니다(quick_check가 무거워 매 로드마다 "
+        "돌리지 않습니다)."
+    )
+    if not report.healthy:
+        issues: list[str] = []
+        if not report.quick_check_ok:
+            issues.append("quick_check 실패(페이지 손상 의심)")
+        if report.recovery_artifacts:
+            names = ", ".join(t.name for t in report.recovery_artifacts)
+            issues.append(f"복구 산출물 테이블 잔존({names})")
+        if report.orphan_fills:
+            issues.append(f"처분 미기록 체결 {len(report.orphan_fills)}건")
+        if report.empty_ledgers:
+            names = ", ".join(t.name for t in report.empty_ledgers)
+            issues.append(f"빈 장부 테이블({names})")
+        st.error(
+            "doctor 판정 경고 — "
+            + " · ".join(issues)
+            + ". 상세·처방은 터미널에서 `alphablock doctor`를 실행하세요."
+        )
+
+
 def _render_repair(view: HealthView) -> None:
     st.subheader("데이터 갭 복구 (WAN-35)")
     rep = view.last_repair
@@ -1681,6 +1651,8 @@ def _render_health_body(settings: Settings) -> None:
 
     _render_collector(view.collector)
     _render_runner(view.runner)
+    # 목업 Health 카드 3종의 셋째 — 실시간 러너 · 수집기 · **DB 무결성**(WAN-289 §3).
+    _render_db_integrity(settings.db_path)
     _render_repair(view)
     _render_circuit_breaker(settings)
 
@@ -2026,17 +1998,14 @@ def _render_backtest_tab_lazy(
 
 
 def _render_backtest_reference(settings: Settings) -> None:
-    """「분석」 + 「저장된 거래」를 **한 탭**으로 합친 대조용 화면(WAN-245).
+    """「분석」 + 「저장된 거래」를 합친 **진짜 한 화면**(WAN-245 → WAN-289).
 
-    사용자 결정(2026-08-11): 두 참고·대조 탭을 하나로 합친다 — 성과 카드 + 존이 그려진
-    차트 + 거래 리스트 + 행클릭 차트 점프 + 미체결 셋업을 한 화면에서 본다. 각 섹션의
-    내용은 예전 탭 그대로이고, **바뀐 것은 자리**다(WAN-220 강등 원칙 유지).
+    WAN-245는 두 옛 탭을 한 탭 안에 **두 섹션으로 쌓아** 차트가 두 번 그려졌다.
+    WAN-289가 목업대로 병합했다 — 성과 카드 6종(총수익·MDD·승률·거래수·체결률·최종
+    시드) + 존 차트 하나(진입·청산 마커) + 청산사유 칩(잔고 탭과 같은 어휘) + 거래
+    리스트 하나(행 클릭 → 차트 점프) + 미체결 셋업. 강등 원칙(WAN-220)은 그대로다.
     """
-    st.subheader("분석 — 존 차트 + 적재된 실행 성과")
     _render_analysis(settings)
-    st.divider()
-    st.subheader("저장된 거래 — 거래 감사")
-    _render_saved_trades(settings)
 
 
 def main() -> None:

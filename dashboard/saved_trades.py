@@ -15,6 +15,7 @@ from collections.abc import Callable, Iterable
 
 import pandas as pd
 
+from backtest.models import ExitReason
 from backtest.report import COL_NO, EXIT_REASON_LABELS, format_time_kst
 from backtest.trade_store import RunSummary
 
@@ -46,6 +47,36 @@ def zone_limit_runs(
 def exit_reason_options() -> tuple[str, ...]:
     """청산사유 필터의 선택지 (`전체` + 표에 찍히는 한글 사유들)."""
     return (ALL_REASONS, *EXIT_REASON_LABELS.values())
+
+
+def reason_chip_labels(choice: str) -> tuple[str, ...] | None:
+    """잔고 탭 칩 어휘(전체/익절만/손절만) → 백테스트 거래 표의 청산사유 라벨들.
+
+    분석·거래 병합 화면(WAN-289)의 청산사유 필터는 잔고 탭과 **같은 어휘**
+    (`live_board.REASON_FILTER_OPTIONS`)를 쓴다 — 화면마다 필터 낱말이 다르면 같은
+    질문("어디서 손절났나")에 두 UI가 생긴다. 「익절만」은 부분익절을 포함하고,
+    「전체」·모르는 선택은 None(필터 없음)으로 접는다(빈 화면은 고장으로 읽힌다).
+    """
+    if choice == "익절만":
+        return (
+            EXIT_REASON_LABELS[ExitReason.TAKE_PROFIT],
+            EXIT_REASON_LABELS[ExitReason.PARTIAL_TAKE_PROFIT],
+        )
+    if choice == "손절만":
+        return (EXIT_REASON_LABELS[ExitReason.STOP_LOSS],)
+    return None
+
+
+def filter_by_reason_chip(frame: pd.DataFrame, choice: str, *, column: str) -> pd.DataFrame:
+    """청산사유 칩(전체/익절만/손절만)으로 거래 표를 좁힌다.
+
+    `filter_by_exit_reason`과 같은 주의가 적용된다 — 시드(전)/시드(후)·행 번호(`#`)는
+    전체 실행 기준 그대로다(손절만 뽑아도 "손절만 했을 때의 시드"가 되지 않는다).
+    """
+    labels = reason_chip_labels(choice)
+    if labels is None:
+        return frame
+    return frame[frame[column].isin(labels)].reset_index(drop=True)
 
 
 def filter_by_exit_reason(frame: pd.DataFrame, reason: str, *, column: str) -> pd.DataFrame:

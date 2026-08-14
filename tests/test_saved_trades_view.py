@@ -11,10 +11,13 @@ import pandas as pd
 
 from backtest.report import COL_EXIT_REASON, COL_NO, trades_to_display_frame
 from backtest.trade_store import RunFingerprint, RunSummary
+from dashboard.live_board import REASON_FILTER_ALL, REASON_FILTER_OPTIONS
 from dashboard.saved_trades import (
     ALL_REASONS,
     exit_reason_options,
     filter_by_exit_reason,
+    filter_by_reason_chip,
+    reason_chip_labels,
     run_label,
     selected_trade_no,
     setups_display_frame,
@@ -51,6 +54,26 @@ def test_exit_reason_filter_uses_the_labels_the_table_actually_shows() -> None:
     assert len(losses) == 1
     assert len(wins) == 1
     assert len(filter_by_exit_reason(frame, ALL_REASONS, column=COL_EXIT_REASON)) == 2
+
+
+def test_reason_chips_share_the_wallet_tab_vocabulary_and_really_filter() -> None:
+    """WAN-289 병합 화면: 청산사유 칩은 잔고 탭과 **같은 어휘**(전체/익절만/손절만)이고
+    그 어휘로 백테스트 표가 실제로 좁혀진다 — 낱말이 갈라지면 같은 질문에 두 UI가 생긴다.
+    """
+    frame = trades_to_display_frame(_win_then_loss())
+
+    for choice in REASON_FILTER_OPTIONS:
+        filtered = filter_by_reason_chip(frame, choice, column=COL_EXIT_REASON)
+        if choice == REASON_FILTER_ALL:
+            assert len(filtered) == 2
+        else:
+            assert len(filtered) == 1
+
+    labels = reason_chip_labels("익절만")
+    assert labels is not None and "익절" in labels and "부분익절" in labels
+    assert reason_chip_labels(REASON_FILTER_ALL) is None
+    # 모르는 선택은 「전체」로 접는다 — 빈 화면은 고장으로 읽힌다.
+    assert len(filter_by_reason_chip(frame, "이상한값", column=COL_EXIT_REASON)) == 2
 
 
 def test_filtered_row_still_points_at_the_original_trade() -> None:

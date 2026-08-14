@@ -47,7 +47,18 @@ TIMEFRAME_LABELS: dict[str, str] = {
 }
 
 #: 오버레이할 최근 오더블록 개수(사용자 결정 2026-08-11 — 숏 대비 3→4).
+#: 🔁 메인 차트의 선택 기준은 WAN-289에서 **활성 존 `ACTIVE_ZONE_LIMIT`개**로 바뀌었다
+#: (`display_zones`) — 이 상수는 활성 존이 하나도 없을 때의 폴백 개수로만 남는다.
 RECENT_ZONE_LIMIT = 4
+
+#: 메인 차트에 그릴 **활성(무효화 안 된) 존** 개수(사용자 결정 2026-08-12 — "6으로
+#: 넓게 가자"). 옛 규칙(최근 4개, 활성·죽은 존 섞어서)을 대체한다: 활성 존 6개를
+#: 고르고, 첫 화면 창을 그중 가장 오래된 존의 생성 봉까지 넓히며, 그 구간의 죽은
+#: 존은 회색으로 함께 그린다.
+ACTIVE_ZONE_LIMIT = 6
+
+#: 첫 화면 창 왼쪽 여유(봉 수) — 가장 오래된 활성 존이 화면 왼쪽 변에 딱 붙지 않게.
+ZONE_VIEW_MARGIN_BARS = 12
 
 #: 메인 차트가 로드하는 최근 봉 수. 최근 4개 존을 담을 만큼 넉넉하되 6년 전량과는
 #: 자릿수가 다르다(15m 1,200봉 ≈ 12.5일 · 4h 1,200봉 ≈ 200일).
@@ -125,6 +136,58 @@ def recent_zones(
     ranked = sorted(order_blocks, key=lambda ob: (ob.confirmed_time, ob.start_time), reverse=True)
     picked = ranked[:limit]
     return sorted(picked, key=lambda ob: (ob.confirmed_time, ob.start_time))
+
+
+def _zone_is_alive(ob: OrderBlock) -> bool:
+    """무효화(`break_time`)도 소멸(`swept_time`)도 안 된, 지금 살아있는 존인가."""
+    return ob.break_time is None and ob.swept_time is None
+
+
+def _zone_end_ms(ob: OrderBlock) -> int:
+    """죽은 존의 수명 종료 시각(무효화 또는 소멸). 살아있는 존에는 부르지 않는다."""
+    if ob.break_time is not None:
+        return ob.break_time
+    return ob.swept_time if ob.swept_time is not None else ob.start_time
+
+
+def display_zones(
+    order_blocks: Sequence[OrderBlock], *, limit: int = ACTIVE_ZONE_LIMIT
+) -> list[OrderBlock]:
+    """메인 차트에 그릴 존 = **활성 존 최신 `limit`개** + 그 구간의 죽은 존(회색).
+
+    사용자 결정(2026-08-12, WAN-289): 선택 기준을 "최근 N개(활성·죽은 섞어서)"에서
+    "활성 존 `limit`개"로 바꾸고, 창을 그중 가장 오래된 활성 존까지 넓힌다. 그 구간에
+    수명이 걸치는 죽은 존은 회색으로 **함께** 그린다(죽은 존 폐기 해석은 취소됐다).
+
+    활성 존이 하나도 없으면 옛 규칙(최근 `RECENT_ZONE_LIMIT`개)으로 폴백한다 —
+    빈 차트는 "탐지가 안 도나"로 읽히기 때문이다.
+
+    반환은 시간 오름차순(차트가 왼쪽→오른쪽으로 그리는 순서)이다. 페이로드 상한은
+    탐지 창(`CHART_BARS`봉)이 이미 잡는다 — 6년 전량이 아니라 최근 창의 존만 온다.
+    """
+    active = [ob for ob in order_blocks if _zone_is_alive(ob)]
+    if not active:
+        return recent_zones(order_blocks, limit=RECENT_ZONE_LIMIT)
+    ranked = sorted(active, key=lambda ob: (ob.confirmed_time, ob.start_time), reverse=True)
+    picked = ranked[:limit]
+    window_start = min(ob.start_time for ob in picked)
+    dead_in_window = [
+        ob for ob in order_blocks if not _zone_is_alive(ob) and _zone_end_ms(ob) >= window_start
+    ]
+    return sorted(picked + dead_in_window, key=lambda ob: (ob.confirmed_time, ob.start_time))
+
+
+def zone_view_start_ms(zones: Sequence[OrderBlock], timeframe: str) -> int | None:
+    """첫 화면 창의 왼쪽 경계(ms) = 가장 오래된 **활성** 존 생성 봉 − 여유.
+
+    `display_zones`가 고른 존 목록을 받아, 활성 존이 있으면 그 중 가장 오래된 생성
+    시각에서 `ZONE_VIEW_MARGIN_BARS`봉만큼 물러난 시각을 돌려준다(차트는 이 값으로
+    처음 보이는 창을 **넓히기만** 한다). 활성 존이 없으면 None(기본 창 유지).
+    """
+    active_starts = [ob.start_time for ob in zones if _zone_is_alive(ob)]
+    if not active_starts:
+        return None
+    return min(active_starts) - timeframe_to_ms(timeframe) * ZONE_VIEW_MARGIN_BARS
 
 
 def _direction_text(direction: OrderBlockDirection) -> str:

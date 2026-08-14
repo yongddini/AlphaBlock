@@ -11,16 +11,19 @@ import pytest
 
 from config.settings import Settings
 from dashboard.live_board import (
+    ACTIVE_ZONE_LIMIT,
     CHART_BARS,
     REASON_FILTER_ALL,
     RECENT_ZONE_LIMIT,
     WALLET_TRADE_COLUMNS,
+    ZONE_VIEW_MARGIN_BARS,
     EquityPoint,
     OpenPositionRow,
     build_open_position_row,
     chart_start_ms,
     chart_symbols,
     chart_timeframes,
+    display_zones,
     filter_records_by_choice,
     legend_title,
     max_drawdown_window,
@@ -30,6 +33,7 @@ from dashboard.live_board import (
     total_unrealized_usd,
     wallet_equity_points,
     wallet_trade_frame,
+    zone_view_start_ms,
 )
 from execution.models import Position
 from paper.store import PaperTradeRecord
@@ -39,7 +43,11 @@ _HOUR = 3_600_000
 
 
 def _ob(
-    *, confirmed: int, direction: OrderBlockDirection = OrderBlockDirection.BULLISH
+    *,
+    confirmed: int,
+    direction: OrderBlockDirection = OrderBlockDirection.BULLISH,
+    break_time: int | None = None,
+    swept_time: int | None = None,
 ) -> OrderBlock:
     return OrderBlock(
         direction=direction,
@@ -50,6 +58,8 @@ def _ob(
         ob_volume=1.0,
         ob_low_volume=0.5,
         ob_high_volume=0.5,
+        break_time=break_time,
+        swept_time=swept_time,
     )
 
 
@@ -123,6 +133,60 @@ def test_recent_zones_handles_fewer_blocks_than_limit() -> None:
     assert len(recent_zones([_ob(confirmed=_HOUR)])) == 1
     assert recent_zones([], limit=4) == []
     assert recent_zones([_ob(confirmed=_HOUR)], limit=0) == []
+
+
+def test_display_zones_picks_active_six_plus_dead_in_their_window() -> None:
+    """WAN-289 사용자 결정(2026-08-12): 선택 기준 = **활성 존 6개**.
+
+    활성 7개 + 죽은 존 2개를 주면 — 활성은 최신 6개만 남고, 그 6개의 구간과 겹치는
+    죽은 존은 회색으로 **함께** 그려지며(폐기 아님), 구간보다 먼저 끝난 죽은 존은
+    빠진다. 라벨이 아니라 동작으로 고정한다.
+    """
+    active = [_ob(confirmed=(i + 10) * _HOUR) for i in range(7)]  # start 9h..15h
+    dead_inside = _ob(confirmed=2 * _HOUR, break_time=12 * _HOUR)  # 창(>=10h)과 겹침
+    dead_before = _ob(confirmed=2 * _HOUR, break_time=3 * _HOUR)  # 창 이전에 끝남
+
+    picked = display_zones([dead_inside, dead_before, *active])
+
+    alive = [ob for ob in picked if ob.break_time is None and ob.swept_time is None]
+    assert len(alive) == ACTIVE_ZONE_LIMIT == 6
+    # 활성 7개(confirmed 10h~16h) 중 최신 6개(11h~16h)만 — 가장 오래된 10h는 잘린다.
+    assert min(ob.confirmed_time for ob in alive) == 11 * _HOUR
+    assert dead_inside in picked
+    assert dead_before not in picked
+    # 시간 오름차순(차트가 왼쪽→오른쪽으로 그리는 순서).
+    assert [ob.confirmed_time for ob in picked] == sorted(ob.confirmed_time for ob in picked)
+
+
+def test_display_zones_falls_back_to_recent_when_nothing_is_alive() -> None:
+    """활성 존이 하나도 없으면 옛 규칙(최근 4개)으로 폴백 — 빈 차트는 고장으로 읽힌다."""
+    dead = [_ob(confirmed=i * _HOUR, break_time=(i + 1) * _HOUR) for i in range(1, 7)]
+
+    picked = display_zones(dead)
+
+    assert len(picked) == RECENT_ZONE_LIMIT
+    assert [ob.confirmed_time // _HOUR for ob in picked] == [3, 4, 5, 6]
+
+
+def test_zone_view_start_extends_to_the_oldest_active_zone_with_margin() -> None:
+    """첫 화면 창 = 가장 오래된 **활성** 존 생성 봉 − 여유(`ZONE_VIEW_MARGIN_BARS`)."""
+    zones = display_zones(
+        [
+            _ob(confirmed=10 * _HOUR),
+            _ob(confirmed=20 * _HOUR),
+            _ob(confirmed=2 * _HOUR, break_time=15 * _HOUR),  # 죽은 존은 경계 계산에서 제외
+        ]
+    )
+
+    start = zone_view_start_ms(zones, "1h")
+
+    assert start == 9 * _HOUR - ZONE_VIEW_MARGIN_BARS * _HOUR  # start_time = confirmed − 1h
+
+
+def test_zone_view_start_is_none_without_active_zones() -> None:
+    dead = [_ob(confirmed=2 * _HOUR, break_time=3 * _HOUR)]
+
+    assert zone_view_start_ms(display_zones(dead), "1h") is None
 
 
 def _row(
