@@ -1,7 +1,7 @@
 """dashboard.lightweight_chart 테스트.
 
 브라우저 렌더링(픽셀) 비교는 범위 밖. HTML에 임베드된 JSON 페이로드(캔들·존
-박스·RSI·마커)의 구조와 값을 검증한다(backtest 테스트와 동일한 최소 픽스처).
+박스·마커)의 구조와 값을 검증한다(backtest 테스트와 동일한 최소 픽스처).
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ from dashboard.lightweight_chart import (
     _EMA_LINE_PALETTE,
     _INITIAL_BARS,
     _MA_LINE_WIDTH,
-    _RSI_LENGTH,
+    _PRICE_LINE_COLOR,
     BAND_LINE_COLOR,
     _exit_marker_text,
     _round_price_point,
@@ -202,15 +202,52 @@ def test_build_chart_html_no_markers_without_backtest() -> None:
     assert payload["markers"] == []
 
 
-def test_rsi_points_null_during_warmup_then_populated() -> None:
-    df = _df(30)
+def test_rsi_panel_is_gone_from_the_chart() -> None:
+    """WAN-289 사용자 결정(2026-08-13): RSI 패널 제거 — 채택 엔진이 RSI를 읽지 않는다
+    (WAN-123 게이트 폐지 · WAN-124 단락 평가). 페이로드에 RSI가 실리지 않아야 한다.
+    라벨이 아니라 동작으로 고정한다 — 패널을 "숨겼는데 계산·전송은 그대로"면 6년 15m
+    페이로드에 죽은 배열이 남는다.
+    """
+    payload = _payload(build_chart_html(_df(30), []))
 
-    payload = _payload(build_chart_html(df, []))
+    assert "rsi" not in payload
+    assert "rsiColor" not in payload
 
-    rsi_points = payload["rsi"]
-    assert len(rsi_points) == 30  # type: ignore[arg-type]
-    assert all(p is None for p in rsi_points[:_RSI_LENGTH])  # type: ignore[index]
-    assert any(p is not None for p in rsi_points[_RSI_LENGTH:])  # type: ignore[index]
+
+def test_current_price_line_is_the_mockup_orange_dashed() -> None:
+    """WAN-289 §4: 현재가 라인 = 오렌지(#ffb74d) 점선(목업). 축 라벨은 숫자 유지."""
+    payload = _payload(build_chart_html(_df(5), []))
+
+    assert payload["priceLineColor"] == _PRICE_LINE_COLOR == "#ffb74d"
+
+
+def test_projection_shade_only_when_right_pad_exists() -> None:
+    """WAN-289 §4: 오른쪽 여백 음영·경계선은 여백이 있는 화면(메인 차트)에만 —
+    여백 없는 화면에 그리면 마지막 봉 위에 경계선만 남는다."""
+    without_pad = _payload(build_chart_html(_df(5), []))
+    with_pad = _payload(build_chart_html(_df(5), [], right_pad_ratio=0.06))
+
+    assert without_pad["projection"] is None
+    projection = with_pad["projection"]
+    assert isinstance(projection, dict)
+    assert set(projection) == {"fill", "line"}
+
+
+def test_view_from_widens_the_initial_window_but_never_narrows_it() -> None:
+    """WAN-289 존 규칙: `view_from_ms`는 첫 화면 창을 활성 존까지 **넓히기만** 한다.
+
+    1h 봉 400개(기본 창 = 1주일 = 168봉)에서 300봉 전 시각을 주면 창이 300봉으로
+    넓어지고, 최근 시각(창 안)을 주면 기본 창 그대로다.
+    """
+    df = _df(400)
+
+    default_payload = _payload(build_chart_html(df, []))
+    widened = _payload(build_chart_html(df, [], view_from_ms=100 * _STEP))
+    recent = _payload(build_chart_html(df, [], view_from_ms=399 * _STEP))
+
+    assert default_payload["initialVisibleBars"] == 168
+    assert widened["initialVisibleBars"] == 300
+    assert recent["initialVisibleBars"] == 168
 
 
 def _low_price_df(n: int) -> pd.DataFrame:
@@ -398,8 +435,7 @@ def test_default_theme_is_dark() -> None:
     assert isinstance(theme, dict)
     assert theme["background"] == "#131722"
     assert theme["textColor"] == "#d1d4dc"
-    # RSI/격자/범례 색도 다크로 함께 온다 — 흰 배경이 남는 영역이 없어야 한다.
-    assert payload["rsiColor"] == "#b39ddb"
+    # 격자/범례 색도 다크로 함께 온다 — 흰 배경이 남는 영역이 없어야 한다.
     assert "70, 74, 86" in theme["gridColor"]
     assert "30, 34, 45" in theme["legendBg"]
 
@@ -411,7 +447,6 @@ def test_light_theme_overrides_all_surfaces() -> None:
     assert isinstance(theme, dict)
     assert theme["background"] == "#ffffff"
     assert theme["textColor"] == "#333333"
-    assert payload["rsiColor"] == "#7e57c2"
     assert theme["legendText"] == "#333333"
 
 
@@ -491,7 +526,7 @@ def test_ema_colors_differ_between_themes_but_keep_hue_order() -> None:
 
 
 def test_display_line_width_is_bumped() -> None:
-    """WAN-67: 표시선 굵기 상향. RSI 패인의 선은 그대로 1이다."""
+    """WAN-67: 표시선 굵기 상향."""
     html = build_chart_html(_df(5), [])
 
     assert _MA_LINE_WIDTH >= 2

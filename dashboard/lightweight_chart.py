@@ -1,4 +1,4 @@
-"""캔들 + 오더블록 + RSI 서브패널 — TradingView Lightweight Charts 임베드 (WAN-54).
+"""캔들 + 오더블록 오버레이 — TradingView Lightweight Charts 임베드 (WAN-54).
 
 `dashboard.charts`(Plotly)는 3,000개 이상의 존을 `add_shape`로 그려 줌·팬마다
 전량 재계산돼 브라우저가 멈췄고, 조작감도 트레이딩뷰와 달랐다(WAN-52). 이 모듈은
@@ -9,7 +9,7 @@ TradingView가 오픈소스로 공개한 캔들 엔진 `lightweight-charts`(Apac
 
 그 패키지는 v3/v4 시절 옵션 스키마를 감싼 래퍼라 v5의 네이티브 멀티패인
 API(`chart.addSeries(Type, opts, paneIndex)`)와 `subscribeVisibleLogicalRangeChange`
-콜백을 그대로 노출하지 않는다. RSI 패널 시간축 동기화와 좌측 끝 지연 로딩이
+콜백을 그대로 노출하지 않는다. 서브패널 시간축 동기화와 좌측 끝 지연 로딩이
 핵심 요구사항이라, 이슈에 명시된 대로("래퍼가 콜백을 막으면 직접 임베드") JS
 라이브러리(v5.2.0, `dashboard/static/`에 벤더링)를 직접 임베드한다.
 
@@ -44,11 +44,13 @@ rectangle-drawing-tool과 같은 패턴). 존이 몇 개든 시리즈 개수는 
 줌·팬마다 다시 그리는 비용은 캔버스 그리기 명령 수천 번(수 ms)뿐이라 시리즈
 누적 문제가 구조적으로 사라진다.
 
-## RSI 서브패널
+## RSI 서브패널은 제거됐다 (WAN-289 사용자 결정 2026-08-13)
 
-v5 네이티브 멀티패인(`addSeries(..., paneIndex=1)`)을 쓰면 시간축이 한 차트
-인스턴스 안에서 자동 동기화되고 크로스헤어도 패인 전체에 걸쳐 하나로 그려진다
-(WAN-52 시절의 "별도 차트 인스턴스 + 수동 이벤트 동기화"보다 단순하고 정확하다).
+RSI 게이트가 WAN-123으로 폐지돼(`rsi_gate_mode="unconditional"`) 채택 엔진의 진입
+판정에 RSI는 아무 역할이 없고, 게이트가 없으면 시뮬레이터가 RSI를 읽지도 않는다
+(`backtest/substep.py` 단락 평가, WAN-124). 순수 장식이던 서브패널을 빼 가격 차트가
+세로로 넓어졌다. **계산 코드(`strategy.indicators.rsi` · `strategy/realtime_rsi`)와
+옵트인 게이트 모드는 존치**한다 — 옛 규칙(`first_tap_free`) 재현이 가능해야 한다.
 
 ## 이 모듈이 다루지 않는 것
 
@@ -73,7 +75,6 @@ from backtest.models import BacktestResult, ExitReason, PositionSide
 from dashboard.live_chart import LIVE_BAND_JS, LiveChartConfig
 from strategy.confluence import ConfluenceStrategy
 from strategy.indicators import emas as compute_emas
-from strategy.indicators import rsi as compute_rsi
 from strategy.indicators import vwma as compute_vwma
 from strategy.models import (
     ConfluenceParams,
@@ -98,7 +99,7 @@ _BEAR_COLOR = "#ef5350"
 class ChartTheme:
     """차트 색 팔레트 한 벌(WAN-55).
 
-    배경·격자·글자·범례·오더블록 존·RSI·진입/청산 마커 색을 밝은/어두운 배경 각각에
+    배경·격자·글자·범례·오더블록 존·진입/청산 마커 색을 밝은/어두운 배경 각각에
     맞춰 뽑아 둔 것이다. 값을 상수에 흩뿌리지 않고 이 객체 하나로 모아, 렌더 함수들이
     테마만 바꿔 끼우면 되도록 한다. 다크 값은 트레이딩뷰 기본 다크에 준한다.
     """
@@ -116,8 +117,6 @@ class ChartTheme:
     #: breaker(무효화)로 전환됐던 존은 옅게 칠해 "깨졌던 것"임을 구분한다.
     bull_zone_fill_faded: str
     bear_zone_fill_faded: str
-    rsi_line: str
-    rsi_guide: str
     entry_marker: str
     exit_take_profit: str
     exit_stop_loss: str
@@ -145,8 +144,16 @@ class ChartTheme:
     #: 살아있는 존(현재 봉까지 연장). 방향(수요/공급)은 죽은 뒤에는 구분하지 않는다.
     #: 두 테마 공통값이다 — 무채색이라 배경 명도에 덜 민감하고, 상태를 말하는 색이
     #: 테마마다 달라질 이유가 없다.
-    dead_zone_fill: str = "rgba(140, 145, 155, 0.14)"
-    dead_zone_line: str = "rgba(140, 145, 155, 0.55)"
+    #: ⚠️ 알파는 WAN-289에서 상향했다(채움 0.14→0.24 · 테두리 0.55→0.85) — 어두운 남색
+    #: 배경(#131722)에서 "회색이 잘 안 보인다"는 사용자 실측 피드백(2026-08-12). 활성
+    #: 존(teal/red · 알파 0.9 실선)보다는 여전히 약하되 확실히 보이는 수준으로 잡았다.
+    dead_zone_fill: str = "rgba(150, 158, 170, 0.24)"
+    dead_zone_line: str = "rgba(160, 168, 180, 0.85)"
+    #: 오른쪽 여백(projection) 음영·경계선(WAN-289 목업 정렬). 마지막 봉 이후의 빈
+    #: 구간을 옅게 칠하고 점선 경계를 그려 "여기부터는 미래"임을 형태로 말한다.
+    #: `right_pad_ratio > 0`인 화면(메인 라이브 차트)에만 그려진다.
+    projection_fill: str = "rgba(255, 255, 255, 0.015)"
+    projection_line: str = "rgba(70, 74, 86, 0.45)"
 
     def exit_marker_colors(self) -> dict[ExitReason, str]:
         return {
@@ -198,8 +205,6 @@ _LIGHT_THEME = ChartTheme(
     bear_zone_fill="rgba(239, 83, 80, 0.20)",
     bull_zone_fill_faded="rgba(38, 166, 154, 0.09)",
     bear_zone_fill_faded="rgba(239, 83, 80, 0.09)",
-    rsi_line="#7e57c2",
-    rsi_guide="rgba(120, 120, 120, 0.55)",
     entry_marker="#1e88e5",
     exit_take_profit="#2e7d32",
     exit_stop_loss="#c62828",
@@ -214,12 +219,15 @@ _LIGHT_THEME = ChartTheme(
     bear_candle_border="#c62828",
     bull_candle_live="rgba(120, 123, 134, 0.35)",
     bear_candle_live="rgba(239, 83, 80, 0.45)",
+    # 흰 배경에서는 흰 음영이 안 보인다 — 같은 역할(옅은 미래 구간)을 하는 회색으로.
+    projection_fill="rgba(0, 0, 0, 0.02)",
+    projection_line="rgba(180, 180, 180, 0.6)",
 )
 
 #: 다크 테마: 트레이딩뷰 기본 다크에 준한다(배경 #131722, 글자 #d1d4dc, 격자
-#: rgba(70,74,86,0.4)). 밝은 테마에서 고른 진한 색(진입 파랑·청산 초록/빨강/회색·RSI
-#: 보라)은 어두운 배경에서 묻혀, 명도를 높인 값으로 분리한다. 존 채움은 어두운
-#: 배경에서 더 묻히므로 알파를 약간 올린다.
+#: rgba(70,74,86,0.4)). 밝은 테마에서 고른 진한 색(진입 파랑·청산 초록/빨강/회색)은
+#: 어두운 배경에서 묻혀, 명도를 높인 값으로 분리한다. 존 채움은 어두운 배경에서 더
+#: 묻히므로 알파를 약간 올린다.
 _DARK_THEME = ChartTheme(
     name="dark",
     background="#131722",
@@ -233,8 +241,6 @@ _DARK_THEME = ChartTheme(
     bear_zone_fill="rgba(239, 83, 80, 0.22)",
     bull_zone_fill_faded="rgba(38, 166, 154, 0.12)",
     bear_zone_fill_faded="rgba(239, 83, 80, 0.12)",
-    rsi_line="#b39ddb",
-    rsi_guide="rgba(150, 150, 150, 0.5)",
     entry_marker="#42a5f5",
     exit_take_profit="#66bb6a",
     exit_stop_loss="#ef5350",
@@ -259,15 +265,13 @@ def resolve_theme(name: str | None) -> ChartTheme:
 #: 상한. 좌측 끝으로 스크롤하면 이 크기만큼 청크가 더 붙는다(WAN-54).
 _INITIAL_BARS = 1_500
 
-_RSI_LENGTH = 14
-_RSI_OVERBOUGHT = 70.0
-_RSI_MIDLINE = 50.0
-_RSI_OVERSOLD = 30.0
-#: 캔들:RSI 패인 높이 비율 ≈ 3:1.
-_RSI_PANE_HEIGHT_RATIO = 0.25
-
-_LINE_STYLE_DOTTED = 1
 _LINE_STYLE_DASHED = 2
+
+#: 현재가(마지막 값) 라인 색 — 목업의 오렌지 점선(WAN-289). 라이브러리 기본은 마지막
+#: 봉의 방향색 실선인데, 목업은 `#ffb74d` 점선 + 태그다. 축 라벨은 목업의 「현재가」
+#: 글자 대신 **숫자를 유지**한다(개발자 판단 — 글자보다 정보량이 많고, "현재가"라는
+#: 사실은 오렌지 점선이라는 형태가 이미 말한다).
+_PRICE_LINE_COLOR = "#ffb74d"
 
 #: 가격축 선(볼린저 밴드·EMA·VWMA)의 표시 정밀도 = 유효숫자 4자리(WAN-192). 원값은
 #: 부동소수점 나눗셈 결과라 반올림 없이는 유효숫자가 15~17자리로 늘어 페이로드가 크게
@@ -316,7 +320,7 @@ _EMA_LINE_PALETTE: tuple[str, ...] = (
 )
 
 #: 표시선(EMA/VWMA) 굵기(WAN-67). 1은 캔들 위에서 잘 안 보인다는 사용자 지적이라 2로
-#: 올린다. RSI 패인의 선·가이드는 캔들과 겹치지 않으므로 1 그대로 둔다.
+#: 올린다.
 _MA_LINE_WIDTH = 2
 
 #: 볼린저 하단선 굵기(WAN-67 사용자 지시 2026-07-20: "좀 얇게"). 이동평균선보다 얇게 둬
@@ -392,13 +396,6 @@ def _zone_boxes(
             }
         )
     return boxes
-
-
-def _rsi_at(rsi_by_time: dict[int, float], time_ms: int) -> float | None:
-    value = rsi_by_time.get(time_ms)
-    if value is None or math.isnan(value):
-        return None
-    return value
 
 
 def _line_label(key: str) -> str:
@@ -672,7 +669,64 @@ _TEMPLATE = """
     borderDownColor: payload.priceColors.borderDown,
     wickUpColor: payload.priceColors.borderUp,
     wickDownColor: payload.priceColors.borderDown,
+    // 현재가 라인 = 오렌지 점선(목업, WAN-289). 축 라벨은 숫자 그대로다 — "현재가"라는
+    // 사실은 색·점선이라는 형태가 말하고, 숫자가 더 많은 정보를 준다.
+    priceLineColor: payload.priceLineColor,
+    priceLineStyle: __LINE_STYLE_DASHED__,
   }, 0);
+
+  // 오른쪽 여백(projection) 음영·경계선(WAN-289 목업 정렬) — 마지막 봉 뒤의 빈 구간을
+  // 옅게 칠하고 점선 세로 경계를 그린다. right_pad_ratio > 0인 화면(메인 차트)에서만
+  // payload.projection이 온다. 라이브 봉이 붙으면 경계도 따라간다(아래 handleKline).
+  let projectionAnchorSec = payload.candles.length
+    ? payload.candles[payload.candles.length - 1].time
+    : null;
+  if (payload.projection && projectionAnchorSec !== null) {
+    const projectionPrimitive = {
+      _chart: null,
+      _series: null,
+      attached(param) { this._chart = param.chart; this._series = param.series; },
+      detached() { this._chart = null; this._series = null; },
+      updateAllViews() {},
+      paneViews() {
+        const self = this;
+        return [{
+          renderer: () => ({
+            draw: (target) => {
+              if (!self._chart) return;
+              target.useBitmapCoordinateSpace((scope) => {
+                const timeScale = self._chart.timeScale();
+                const x = timeScale.timeToCoordinate(projectionAnchorSec);
+                if (x === null) return;
+                // 경계는 마지막 봉의 오른쪽 변 — 봉 폭의 절반만큼 민다(마지막 두 봉의
+                // 좌표 차이로 추정, 봉이 하나뿐이면 0).
+                let half = 0;
+                if (payload.candles.length >= 2) {
+                  const prev = timeScale.timeToCoordinate(
+                    payload.candles[payload.candles.length - 2].time);
+                  if (prev !== null) half = Math.abs(x - prev) / 2;
+                }
+                const ctx = scope.context;
+                const left = (x + half) * scope.horizontalPixelRatio;
+                if (left >= scope.bitmapSize.width) return;
+                ctx.fillStyle = payload.projection.fill;
+                ctx.fillRect(left, 0, scope.bitmapSize.width - left, scope.bitmapSize.height);
+                ctx.strokeStyle = payload.projection.line;
+                ctx.lineWidth = 1;
+                ctx.setLineDash([2, 3]);
+                ctx.beginPath();
+                ctx.moveTo(left, 0);
+                ctx.lineTo(left, scope.bitmapSize.height);
+                ctx.stroke();
+                ctx.setLineDash([]);
+              });
+            },
+          }),
+        }];
+      },
+    };
+    candleSeries.attachPrimitive(projectionPrimitive);
+  }
 
   class OrderBlockBoxesPrimitive {
     constructor(boxes) {
@@ -824,29 +878,6 @@ _TEMPLATE = """
     }, 0);
   }
 
-  let rsiSeries = null;
-  if (payload.rsi.some(Boolean)) {
-    rsiSeries = chart.addSeries(LightweightCharts.LineSeries, {
-      color: payload.rsiColor,
-      lineWidth: 1,
-      priceLineVisible: false,
-      lastValueVisible: true,
-    }, 1);
-    [__RSI_OVERBOUGHT__, __RSI_MIDLINE__, __RSI_OVERSOLD__].forEach(function (level, i) {
-      rsiSeries.createPriceLine({
-        price: level,
-        color: payload.guideColor,
-        lineWidth: 1,
-        lineStyle: i === 1 ? __LINE_STYLE_DASHED__ : __LINE_STYLE_DOTTED__,
-        axisLabelVisible: false,
-      });
-    });
-    const panes = chart.panes();
-    if (panes.length > 1) {
-      panes[1].setHeight(Math.round(payload.height * __RSI_PANE_HEIGHT_RATIO__));
-    }
-  }
-
   if (payload.markers.length) {
     LightweightCharts.createSeriesMarkers(candleSeries, payload.markers);
   }
@@ -872,9 +903,6 @@ _TEMPLATE = """
     loadedFrom = Math.max(0, idx);
     idx = loadedFrom;
     candleSeries.setData(payload.candles.slice(idx));
-    if (rsiSeries) {
-      rsiSeries.setData(payload.rsi.slice(idx).filter(Boolean));
-    }
     if (bandSeries) {
       bandSeries.setData(payload.band.points.slice(idx).filter(Boolean));
     }
@@ -1019,6 +1047,10 @@ _TEMPLATE = """
       candleSeries.update(bar);
       lastCandleTime = barTime;
       liveBars.set(barTime, bar);
+      // 여백 음영 경계는 "마지막 봉의 오른쪽"이다 — 라이브 봉이 붙으면 따라간다.
+      if (projectionAnchorSec !== null && barTime > projectionAnchorSec) {
+        projectionAnchorSec = barTime;
+      }
       // 커서가 차트 밖일 때 범례는 "마지막 봉"을 보여준다 — 그 마지막 봉이 방금 움직였다.
       // ⚠️ 커서가 **어떤 봉 위에 있으면 덮어쓰지 않는다** — 라이브 틱이 초당 여러 번 오므로
       // 그때마다 마지막 봉으로 갈아치우면 사용자가 짚어 둔 봉의 OHLC가 계속 튄다.
@@ -1205,8 +1237,9 @@ def build_chart_html(
     ohlc_legend_title: str | None = None,
     independent_axis: bool = False,
     right_pad_ratio: float = 0.0,
+    view_from_ms: int | None = None,
 ) -> str:
-    """캔들+오더블록+RSI+익절 목표선 패널을 그리는 자족형 HTML을 만든다.
+    """캔들+오더블록+익절 목표선 패널을 그리는 자족형 HTML을 만든다.
 
     `st.components.v1.html(build_chart_html(...), height=height)`로 임베드한다.
     반환된 HTML은 벤더링된 JS 라이브러리를 인라인 포함해 오프라인에서도 동작한다.
@@ -1220,8 +1253,9 @@ def build_chart_html(
     보여준다. `signals`는 그 텍스트를 만들던 `_exit_marker_text` 경로의 입력이라
     시그니처에 남겨 뒀지만 **지금 렌더에는 쓰이지 않는다**(WAN-59 후속에서 도입).
 
-    `theme`(`"light"`/`"dark"`, 기본 다크)는 배경·격자·존·마커·RSI 색을 결정한다 —
-    Streamlit 테마에 맞춰 호출부에서 넘긴다(WAN-55).
+    `theme`(`"light"`/`"dark"`, 기본 다크)는 배경·격자·존·마커 색을 결정한다 —
+    Streamlit 테마에 맞춰 호출부에서 넘긴다(WAN-55). ⚠️ RSI 서브패널은 WAN-289에서
+    제거됐다(모듈 독스트링 참고) — 채택 엔진이 RSI를 읽지 않는다(WAN-123/124).
 
     `conf_params.deviation_filter`가 켜져 있으면 **볼린저 하단선**(진입가 기준선)을 함께
     그린다. `live`(`dashboard.live_chart.build_live_config`)를 주면 브라우저가 바이낸스
@@ -1242,6 +1276,10 @@ def build_chart_html(
       세로는 y축 드래그로만 바뀌게 한다(y축 더블클릭 = fit 복귀).
     * `right_pad_ratio` — 시간축 오른쪽 여백을 **처음 보이는 창의 비율**로 준다(0.06 =
       6%). 봉 수가 아니라 비율인 이유는 TF마다 창의 봉 수가 10배 넘게 다르기 때문이다.
+      0보다 크면 그 여백 구간에 **음영 + 점선 경계**(projection, WAN-289 목업)도 그린다.
+    * `view_from_ms` — 주면 처음 보이는 창의 왼쪽 경계를 이 시각까지 **넓힌다**(기본
+      1주일 창보다 넓을 때만). 활성 존 전부가 첫 화면에 들어오게 하는 용도다(WAN-289
+      사용자 결정 "활성 존 6개를 넓게"). `None`이면 옛 동작 그대로다.
     """
     chart_theme = resolve_theme(theme)
     frame = df.sort_values("open_time").reset_index(drop=True)
@@ -1260,12 +1298,6 @@ def build_chart_html(
             frame["close"].tolist(),
             strict=True,
         )
-    ]
-
-    rsi_full = compute_rsi(frame, length=_RSI_LENGTH)
-    rsi_points: list[dict[str, float] | None] = [
-        None if (v is None or math.isnan(v)) else {"time": t, "value": round(v, 4)}
-        for t, v in zip(times_sec, rsi_full.tolist(), strict=True)
     ]
 
     tp_lines = _tp_line_series(frame, conf_params) if conf_params is not None else {}
@@ -1323,10 +1355,14 @@ def build_chart_html(
     markers = _entry_exit_markers(backtest, chart_theme) if backtest is not None else []
     focus_payload = _focus_range(times_ms, focus) if focus is not None else None
     initial_visible_bars = _initial_visible_bars(times_ms)
+    if view_from_ms is not None:
+        # 활성 존 전부가 첫 화면에 들어오도록 창을 **넓히기만** 한다 — 존이 최근에만
+        # 몰려 있으면 기본 1주일 창이 그대로다(좁히지 않는다).
+        span_bars = sum(1 for t in times_ms if t >= view_from_ms)
+        initial_visible_bars = max(initial_visible_bars, span_bars)
 
     payload: dict[str, object] = {
         "candles": candles,
-        "rsi": rsi_points,
         "boxes": boxes,
         "markers": markers,
         "lines": lines_payload,
@@ -1356,8 +1392,14 @@ def build_chart_html(
         ),
         "independentAxis": independent_axis,
         "rightPadRatio": float(right_pad_ratio),
-        "rsiColor": chart_theme.rsi_line,
-        "guideColor": chart_theme.rsi_guide,
+        "priceLineColor": _PRICE_LINE_COLOR,
+        # 여백 음영은 오른쪽 여백이 있는 화면(메인 차트)에만 — 다른 화면은 여백 자체가
+        # 없어 음영을 그리면 마지막 봉 위에 경계선만 남는다.
+        "projection": (
+            {"fill": chart_theme.projection_fill, "line": chart_theme.projection_line}
+            if right_pad_ratio > 0
+            else None
+        ),
         "theme": {
             "background": chart_theme.background,
             "textColor": chart_theme.text_color,
@@ -1365,7 +1407,6 @@ def build_chart_html(
             "legendBg": chart_theme.legend_bg,
             "legendText": chart_theme.legend_text,
         },
-        "height": height,
     }
     container_id = f"lwc-{uuid.uuid4().hex}"
 
@@ -1376,11 +1417,6 @@ def build_chart_html(
     html = html.replace("__LIVE_BAND_JS__", LIVE_BAND_JS)
     html = html.replace("__PAYLOAD_JSON__", json.dumps(payload, separators=(",", ":")))
     html = html.replace("__LINE_STYLE_DASHED__", str(_LINE_STYLE_DASHED))
-    html = html.replace("__LINE_STYLE_DOTTED__", str(_LINE_STYLE_DOTTED))
-    html = html.replace("__RSI_OVERBOUGHT__", str(_RSI_OVERBOUGHT))
-    html = html.replace("__RSI_MIDLINE__", str(_RSI_MIDLINE))
-    html = html.replace("__RSI_OVERSOLD__", str(_RSI_OVERSOLD))
-    html = html.replace("__RSI_PANE_HEIGHT_RATIO__", str(_RSI_PANE_HEIGHT_RATIO))
     html = html.replace("__MA_LINE_WIDTH__", str(_MA_LINE_WIDTH))
     html = html.replace("__BAND_LINE_WIDTH__", str(_BAND_LINE_WIDTH))
     return html
