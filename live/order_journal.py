@@ -829,17 +829,33 @@ class OrderJournal:
             for r in rows
         ]
 
-    def discard_stale_pending(self, *, now_ms: int) -> int:
+    def order_status(self, journal_id: int) -> str | None:
+        """장부 행의 현재 상태 원값(없으면 None) — 재시작 복원이 「이미 종결된 주문을
+        되걸지 않기」 위해 읽는다(WAN-306, 장부가 정본)."""
+        row = self._conn.execute(
+            "SELECT status FROM live_limit_orders WHERE id = ?", (journal_id,)
+        ).fetchone()
+        return None if row is None else str(row[0])
+
+    def discard_stale_pending(
+        self, *, now_ms: int, exclude_ids: frozenset[int] | set[int] = frozenset()
+    ) -> int:
         """이전 세션이 남긴 대기 주문을 재시작 폐기로 마감한다. 폐기 건수를 반환.
 
-        러너 재시작 시 대기 주문은 복원하지 않고 버린다(모듈 독스트링의 재시작 정책).
-        일반 취소와 다른 상태(`discarded_restart`)로 남겨 체결률 분모에서 빠진다.
+        🔁 WAN-306 이후 이것은 **예외 경로**다 — 정상 재시작은 상태 복원 + 따라잡기
+        재생(`ZoneLimitPaperRunner.restore_state`)이 대기 주문을 되살리고, 복원된 행은
+        `exclude_ids`로 여기서 빠진다. 폐기로 남는 것은 스냅샷 없음·따라잡기 한도 초과·
+        복원 불가 케이스뿐이다. 일반 취소와 다른 상태(`discarded_restart`)로 남겨 체결률
+        분모에서 빠진다.
         """
+        excluded = sorted(exclude_ids)
+        sql = "UPDATE live_limit_orders SET status = ?, terminal_ms = ? WHERE status = ?"
+        args: list[object] = [STATUS_DISCARDED_RESTART, now_ms, LimitOrderStatus.PENDING.value]
+        if excluded:
+            sql += f" AND id NOT IN ({','.join('?' * len(excluded))})"
+            args.extend(excluded)
         with self._lock, self._conn:
-            cur = self._conn.execute(
-                "UPDATE live_limit_orders SET status = ?, terminal_ms = ? WHERE status = ?",
-                (STATUS_DISCARDED_RESTART, now_ms, LimitOrderStatus.PENDING.value),
-            )
+            cur = self._conn.execute(sql, args)
         return cur.rowcount
 
     # -- 요약 ----------------------------------------------------------------
