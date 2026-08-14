@@ -115,6 +115,14 @@ async def run_collector(
     전 구간 스캔은 스트림 접속을 ~40초 늦춘다(WAN-187).
     """
     settings = settings or get_settings()
+
+    # 환경변수가 채택 좌표를 덮어쓰고 있으면 기동 시점에 보이게 한다(WAN-309).
+    # 값은 존중한다 — 낡은 `.env`로 9종목만 수집하면서 아무도 모르는 것이 사고다.
+    from config.drift import check_coordinate_drift, render_drift_lines
+
+    for line in render_drift_lines(check_coordinate_drift(settings)):
+        logger.warning(line)
+
     do_repair = settings.repair_on_start if repair_on_start is None else repair_on_start
     exchange = create_exchange(settings)
     store = OhlcvStore(settings.db_path)

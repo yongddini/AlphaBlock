@@ -168,6 +168,9 @@ _ENGINE_NON_SOURCE: frozenset[str] = frozenset(
         "backtest/trade_store.py",
         "backtest/report.py",
         "backtest/synthetic.py",
+        # 운영 표시 전용(WAN-309 드리프트 경고) — 설정값을 읽어 경고만 찍고 백테 수치에
+        # 실리는 값을 만들지 않는다(수정도 안 한다).
+        "config/drift.py",
         "execution/broker.py",
         "execution/engine.py",
         "execution/models.py",

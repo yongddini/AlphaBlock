@@ -334,9 +334,19 @@ def cmd_live(args: argparse.Namespace, settings: Settings) -> int:
 
 
 def cmd_status(args: argparse.Namespace, settings: Settings) -> int:
-    """`alphablock status` — 운영 상태 요약을 출력."""
+    """`alphablock status` — 운영 상태 요약을 출력.
+
+    환경변수가 채택 좌표를 덮어쓰고 있으면(WAN-309) 요약 뒤에 경고를 붙인다 —
+    일치하면 아무것도 붙지 않는다.
+    """
+    from config.drift import check_coordinate_drift, render_drift_lines
+
     view = _build_health_view(settings, include_bar_count=args.bar_count)
     print(format_status(view, configured_symbols=settings.symbols))
+    drift_lines = render_drift_lines(check_coordinate_drift(settings))
+    if drift_lines:
+        print()
+        print("\n".join(drift_lines))
     return 0
 
 
@@ -587,7 +597,17 @@ def cmd_doctor(args: argparse.Namespace, settings: Settings) -> int:
 
     읽기 전용이 기본이고, 이상이 하나라도 있으면 종료 코드 1을 낸다(cron·감시에서
     바로 쓸 수 있게). `--drop-recovery-artifacts`만 파괴적이며 명시적 옵트인이다.
+
+    DB 점검에 앞서 환경 설정 드리프트(WAN-309)를 찍는다: 환경변수가 채택 좌표와
+    다르면 경고, `.env.example`에만 있는 키는 목록 한 줄. **종료 코드에는 반영하지
+    않는다** — 좁혀서 테스트 중일 수 있는 의도된 차이라 경고이지 에러가 아니고,
+    doctor의 종료 코드는 DB 무결성 판정(`report.healthy`) 전용으로 남긴다.
     """
+    from config.drift import (
+        check_coordinate_drift,
+        env_example_only_keys,
+        render_drift_lines,
+    )
     from data.integrity import (
         SalvageableRowsPresent,
         drop_recovery_artifacts,
@@ -597,6 +617,20 @@ def cmd_doctor(args: argparse.Namespace, settings: Settings) -> int:
     )
 
     db_path = args.db if args.db is not None else settings.db_path
+
+    drift_lines = render_drift_lines(check_coordinate_drift(settings))
+    if drift_lines:
+        print("환경 설정 드리프트 (WAN-309):")
+        print("\n".join(f"  {line}" for line in drift_lines))
+        print()
+    example_only = env_example_only_keys()
+    if example_only:
+        # 키 이름만 출력한다 — 값(비밀 포함)은 절대 싣지 않는다.
+        print(
+            f"ℹ️ `.env.example`에만 있는 키 {len(example_only)}개(코드 기본값으로 동작):"
+            f" {', '.join(example_only)}"
+        )
+        print()
 
     if args.salvage_ohlcv is not None:
         # 인자 없이 `--salvage-ohlcv`만 주면 빈 리스트다 = "사라진 TF만 알아서".
