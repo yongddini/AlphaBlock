@@ -1,6 +1,6 @@
 """backtest.wan95_zone_limit_report 단위 테스트 (WAN-95, A안 비교팔 제거 후 WAN-200 §A).
 
-9종목×작업 TF×6년 실데이터 재산출은 `backtest/reports/wan95_zone_limit_recompute.csv`·
+12종목(WAN-307)×작업 TF×6년 실데이터 재산출은 `backtest/reports/wan95_zone_limit_recompute.csv`·
 `wan95_zone_limit_summary.md`(재현: `python -m backtest.wan95_zone_limit_report`)로 별도
 확인한다. 여기서는 결정적 합성 데이터로 지정가(B안) 배선(펀딩 전달·체결률 집계)과 리포트
 테이블 생성만 검증한다.

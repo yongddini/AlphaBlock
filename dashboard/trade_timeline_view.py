@@ -64,7 +64,7 @@ def chart_window(row: TimelineRow) -> tuple[int, int] | None:
 
 @dataclass(frozen=True)
 class BacktestDaySummary:
-    """채택 9종목×4TF 하루 백테스트 실행의 요약 (WAN-290 완료 기준 3).
+    """채택 12종목×4TF(WAN-307) 하루 백테스트 실행의 요약 (WAN-290 완료 기준 3).
 
     백테스트 타임라인 행은 전부 청산된 거래(`cell_timeline_trades`가 실현 거래만 낸다)라
     「진입 건수 = 청산 건수 = 거래 수」다. 라이브 활동과 무관하게 그날 채택 엔진이 몇 개

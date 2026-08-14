@@ -540,7 +540,7 @@ def run_cell(
 
 
 def run_report(
-    symbols: Sequence[str] = harness.DEFAULT_SYMBOLS,
+    symbols: Sequence[str] = harness.LEGACY_NINE_SYMBOLS,
     timeframes: Sequence[str] = harness.DEFAULT_TIMEFRAMES,
     *,
     start: str = harness.DEFAULT_START,
@@ -1086,7 +1086,7 @@ def rows_from_csv(path: Path) -> list[BufferRow]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="WAN-278 손절 버퍼 (가짜 이탈 버티기)")
-    parser.add_argument("--symbols", type=str, default=",".join(harness.DEFAULT_SYMBOLS))
+    parser.add_argument("--symbols", type=str, default=",".join(harness.LEGACY_NINE_SYMBOLS))
     parser.add_argument("--tf", type=str, default="4h", help="콤마로 여러 개(15m은 무겁다)")
     parser.add_argument("--start", type=str, default=harness.DEFAULT_START)
     parser.add_argument("--end", type=str, default=harness.DEFAULT_END)

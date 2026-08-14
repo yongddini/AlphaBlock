@@ -108,7 +108,9 @@ from strategy.models import ConfluenceParams, OrderBlockResult
 REPORTS_DIR = Path("backtest/reports")
 
 # 채택 좌표 — 9종목 × 못 박은 6년 × 15m·1h·4h (WAN-182). 핀을 쓰지 않는다.
-DEFAULT_SYMBOLS = harness.DEFAULT_SYMBOLS
+#: WAN-307이 기본 유니버스를 12종목으로 옮겼다 — 이 리포트의 결론·CSV는 9종목 좌표라
+#: 당시 값으로 명시 고정한다(고정 원칙은 `harness.LEGACY_NINE_SYMBOLS` 문서 참고).
+DEFAULT_SYMBOLS = harness.LEGACY_NINE_SYMBOLS
 DEFAULT_TIMEFRAMES = harness.DEFAULT_TIMEFRAMES
 DEFAULT_START = harness.DEFAULT_START
 DEFAULT_END = harness.DEFAULT_END

@@ -95,7 +95,9 @@ from backtest.wan154_stop_width_audit import LENS_PEN
 # --------------------------------------------------------------------------- #
 
 #: 채택 좌표(WAN-182) — 9종목 × 6년 × 작업 TF 15m·1h·4h.
-DEFAULT_SYMBOLS: tuple[str, ...] = harness.DEFAULT_SYMBOLS
+#: WAN-307이 기본 유니버스를 12종목으로 옮겼다 — 이 리포트의 결론·CSV는 9종목 좌표라
+#: 당시 값으로 명시 고정한다(고정 원칙은 `harness.LEGACY_NINE_SYMBOLS` 문서 참고).
+DEFAULT_SYMBOLS: tuple[str, ...] = harness.LEGACY_NINE_SYMBOLS
 DEFAULT_TIMEFRAMES: tuple[str, ...] = harness.DEFAULT_TIMEFRAMES
 DEFAULT_START: str = harness.DEFAULT_START
 DEFAULT_END: str = harness.DEFAULT_END

@@ -65,17 +65,21 @@ from strategy.order_blocks import OrderBlockDetector
 # 기본값 — 채택 좌표 (WAN-182 = WAN-179 결정 실행)
 # --------------------------------------------------------------------------- #
 
-#: 채택 유니버스 = 9종목 (WAN-182, 기존 6종목(WAN-111) + DOGE·LINK·LTC(WAN-175/176)).
+#: 채택 유니버스 = 12종목 (WAN-307 = 사용자 결정 2026-08-14 「12로 하자」 —
+#: WAN-182의 9종목(기존 6종목(WAN-111) + DOGE·LINK·LTC(WAN-175/176))에 **ADV 상위 3**
+#: (ADA·DOT·BCH)을 더했다). 합류 순서는 자유 파라미터가 아니라 **동결된 유동성 규칙**이다
+#: (못 박은 창의 일중 달러 거래대금 내림차순, `wan300_universe_size.CANDIDATE_SYMBOLS` 상위
+#: 3 = `universe_symbols(12)`) — WAN-304 사다리에서 잰 12-유니버스와 정확히 같은 집합.
+#: 근거는 WAN-304의 렌즈별 MDD(12종목은 baseline↔pen_5bp에 +0.1%p로 거의 안 흔들리는데
+#: 15종목은 +4.3%p 튄다)와 밀림율(12는 4.24%로 5% 포화선 아래)이다.
 #:
-#: **수집·측정 대상**일 뿐 실거래·실시간 시그널 대상이 아니다(그쪽은
-#: `settings.live_signal_symbols`, 기본 BTC 단독 — WAN-111 원칙). 순서는 「기존 → 신규」로
-#: 고정한다(wan176과 동일 — leave-one-out 표에서 신규 3종목이 어디부터인지 눈으로 갈리게).
+#: **수집·측정 대상**일 뿐 실거래 대상이 아니다(`ALPHABLOCK_LIVE_TRADING=false` 불변 —
+#: WAN-111 원칙). 순서는 「기존 → 신규」로 고정한다(wan176과 동일 — leave-one-out 표에서
+#: 합류 세대가 어디부터인지 눈으로 갈리게).
 #:
-#: ⚠️ 신규 3종목(DOGE·LINK·LTC)은 이 창에서 **펀딩 데이터가 0행**이다(WAN-178 백필 전) —
-#: 펀딩을 켠 실행에서 그대로 두면 펀딩비 0으로 성과가 부풀려진다. 채택 성과(wan95)는
-#: WAN-180과 같은 **BTC 대리 시계열**(기존 6종목 중 확정 펀딩 평균 최고 = 롱에게 가장 비싼
-#: 종목)로 보정한다. 범용 CLI(`backtest.run`)는 대리를 얹지 않으므로 신규 3종목 행의
-#: `funding_coverage`(0%)를 확인하고 읽을 것.
+#: 펀딩: 12종목 전부 **자기 확정 펀딩 데이터가 채택 창을 덮는다**(DOGE·LINK·LTC는 WAN-292
+#: 백필, ADA·DOT·BCH는 상장 초기부터 수집분 존재 — 2026-08-14 실측). WAN-180의 대리 규칙
+#: (`apply_funding_proxy`)은 존치하되 데이터가 있으면 자동 무동작이다.
 DEFAULT_SYMBOLS: tuple[str, ...] = (
     "BTC/USDT:USDT",
     "ETH/USDT:USDT",
@@ -86,6 +90,9 @@ DEFAULT_SYMBOLS: tuple[str, ...] = (
     "DOGE/USDT:USDT",
     "LINK/USDT:USDT",
     "LTC/USDT:USDT",
+    "ADA/USDT:USDT",
+    "DOT/USDT:USDT",
+    "BCH/USDT:USDT",
 )
 
 #: 작업 TF = 15m·1h·2h·4h (WAN-252 — WAN-182의 15m·1h·4h에 2h를 승격, 사용자 결정
@@ -123,6 +130,27 @@ DEFAULT_YEARS: float = 3.0
 LEGACY_SYMBOLS: tuple[str, ...] = ("BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT")
 LEGACY_TIMEFRAMES: tuple[str, ...] = ("1h",)
 LEGACY_YEARS: float = 3.0
+
+#: WAN-182~WAN-306 시절의 채택 유니버스 = 9종목. **WAN-307이 기본 좌표를 12종목으로
+#: 옮겼다** — 결론 문장을 9종목 수치(CSV·요약 md)에 박아 둔 리포트는 이 값을 **명시
+#: 고정**해 당시 좌표의 기록으로 보존한다(위 `LEGACY_SYMBOLS`(3심볼)와 같은 원칙, WAN-182
+#: 파급 패턴). 고정하지 않으면 `harness.DEFAULT_SYMBOLS`를 알리아스하던 리포트가 조용히
+#: 12종목으로 다시 돌아 본문과 어긋난다(WAN-91/95/112 부류의 조용한 실패).
+#:
+#: ⚠️ 반대로 **"지금 채택된 것"을 재는 리포트는 고정하지 않는다**(wan95 · 범용 CLI) —
+#: 기본값이 움직이면 그 수치는 낡은 것이 되어야 맞다. 고정 대상 목록은
+#: [`docs/decisions/wan307.md`](../docs/decisions/wan307.md) §파급이다.
+LEGACY_NINE_SYMBOLS: tuple[str, ...] = (
+    "BTC/USDT:USDT",
+    "ETH/USDT:USDT",
+    "SOL/USDT:USDT",
+    "BNB/USDT:USDT",
+    "XRP/USDT:USDT",
+    "TRX/USDT:USDT",
+    "DOGE/USDT:USDT",
+    "LINK/USDT:USDT",
+    "LTC/USDT:USDT",
+)
 DB_PATH = "data/ohlcv.db"
 CACHE_DIR = "data/cache"
 
