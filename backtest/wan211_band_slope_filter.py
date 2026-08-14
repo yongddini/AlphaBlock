@@ -90,7 +90,9 @@ from strategy.models import ConfluenceParams, OrderBlockParams
 # 상수 — 오늘 엔진 좌표 (핀 없음)
 # --------------------------------------------------------------------------- #
 
-DEFAULT_SYMBOLS: tuple[str, ...] = harness.DEFAULT_SYMBOLS
+#: WAN-307이 기본 유니버스를 12종목으로 옮겼다 — 이 리포트의 결론·CSV는 9종목 좌표라
+#: 당시 값으로 명시 고정한다(고정 원칙은 `harness.LEGACY_NINE_SYMBOLS` 문서 참고).
+DEFAULT_SYMBOLS: tuple[str, ...] = harness.LEGACY_NINE_SYMBOLS
 DEFAULT_TIMEFRAMES: tuple[str, ...] = harness.DEFAULT_TIMEFRAMES
 DEFAULT_START: str = harness.DEFAULT_START
 DEFAULT_END: str = harness.DEFAULT_END

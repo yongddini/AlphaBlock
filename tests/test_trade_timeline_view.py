@@ -1,11 +1,11 @@
 """날짜 지정 하루치 백테 대조 화면의 순수 계층 테스트 (WAN-290).
 
-`dashboard/trade_timeline_view.py`의 요약 집계와 `live.trade_timeline`의 「채택 9종목×4TF
+`dashboard/trade_timeline_view.py`의 요약 집계와 `live.trade_timeline`의 「채택 12종목×4TF(WAN-307)
 전부」 커버리지를 화면 없이 고정한다:
 
 - `backtest_day_summary`: 백테 행만 세고(라이브 병기 행은 무시) 손익률 `None`은 승/패 어디에도
   안 센다(빈 칸 지어내지 않음 — 완료 기준 3).
-- 「전부」 대상은 라이브 활동과 무관하게 채택 9종목×4TF = 36셀을 **전부** 돈다(완료 기준 1).
+- 「전부」 대상은 라이브 활동과 무관하게 채택 12종목×4TF = 48셀을 **전부** 돈다(완료 기준 1).
   무거운 셀 계산은 스텁으로 갈아 커버리지(어느 셀을 도는가)만 잰다.
 """
 
@@ -90,13 +90,13 @@ def test_backtest_day_summary_empty() -> None:
     )
 
 
-def test_full_universe_runs_all_9x4_cells_regardless_of_live(
+def test_full_universe_runs_all_12x4_cells_regardless_of_live(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """「채택 9종목×4TF 전부」는 라이브와 무관하게 36셀을 전부 돈다(완료 기준 1).
+    """「채택 12종목×4TF(WAN-307) 전부」는 라이브와 무관하게 48셀을 전부 돈다(완료 기준 1).
 
     화면 버튼이 `backtest_timeline_by_cell`(심볼·TF 미지정 = 채택 좌표)을 호출하는데, 그
-    좌표가 실제로 채택 9종목 × 4TF임을 스텁으로 고정한다 — 무거운 셀 계산은 갈아 끼우고
+    좌표가 실제로 채택 12종목 × 4TF임을 스텁으로 고정한다 — 무거운 셀 계산은 갈아 끼우고
     「어느 셀을 도는가」만 잰다.
     """
     from backtest.harness import DEFAULT_SYMBOLS, DEFAULT_TIMEFRAMES
@@ -115,4 +115,4 @@ def test_full_universe_runs_all_9x4_cells_regardless_of_live(
     expected = {(s, tf) for s in DEFAULT_SYMBOLS for tf in DEFAULT_TIMEFRAMES}
     assert set(seen) == expected  # 라이브 파생이 아니라 채택 좌표 전부.
     assert set(by_cell.keys()) == expected
-    assert len(expected) == 9 * 4  # 9종목 × 4TF = 36셀.
+    assert len(expected) == 12 * 4  # 12종목(WAN-307) × 4TF = 48셀.

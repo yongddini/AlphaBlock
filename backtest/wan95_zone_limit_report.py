@@ -2,8 +2,8 @@
 
 배경은 이슈 WAN-95 본문 참고. 사용자의 실매매는 **오더블록 존에 지정가를 걸어두고
 가격이 닿는 순간 체결**하는 방식이다(채택 기본값 `ConfluenceParams()` = 지정가 + 실시간
-RSI + 롱 온리). 이 모듈이 그 채택 기본값을 9종목 × 작업 TF(15m·1h·4h) × 못 박은 6년 창
-(WAN-182)에서 재산출한다.
+RSI + 롱 온리). 이 모듈이 그 채택 기본값을 채택 좌표 — 12종목(WAN-307) × 작업 TF
+15m·1h·2h·4h(WAN-252) × 못 박은 6년 창(WAN-182) — 에서 재산출한다.
 
 ⚠️ **A안(종가 시장가, `entry_mode="close"`) 비교팔은 WAN-200 §A로 제거됐다** — 이 리포트는
 이제 채택된 B안 단독 성적표다(종가 대조표·델타표 없음). B안 수치는 제거로 바뀌지 않는다
@@ -74,9 +74,20 @@ from data.storage import OhlcvStore
 from strategy.models import ConfluenceParams, OrderBlockResult
 from strategy.order_blocks import OrderBlockDetector
 
-#: 신규 3종목(WAN-182 유니버스 확장분). 이 창에서 펀딩 데이터가 0행이라(WAN-178 백필 전)
-#: 그대로 두면 펀딩비 0으로 성과가 부풀려진다 — 아래 `apply_funding_proxy`가 보정한다.
-NEW_SYMBOLS: tuple[str, ...] = ("DOGE/USDT:USDT", "LINK/USDT:USDT", "LTC/USDT:USDT")
+#: 유니버스 확장분 = 기존 6종목(WAN-111) 이후 합류한 종목 전부(WAN-182의 DOGE·LINK·LTC +
+#: WAN-307의 ADA·DOT·BCH). 확장분이 펀딩 데이터 없이 합류하면 펀딩비 0으로 성과가
+#: 부풀려지므로 아래 `apply_funding_proxy`가 보정한다 — 단 **대리의 도너 풀은 기존 6종목**
+#: 이다(WAN-180 규칙: 이 목록에 든 종목은 도너가 되지 않는다). 2026-08-14 실측으로는
+#: 6종목 전부 자기 확정 펀딩이 채택 창을 덮어(DOGE·LINK·LTC는 WAN-292 백필, ADA·DOT·BCH는
+#: 상장 초기부터 수집분) 대리는 **무동작**이다 — 안전망으로만 남는다.
+NEW_SYMBOLS: tuple[str, ...] = (
+    "DOGE/USDT:USDT",
+    "LINK/USDT:USDT",
+    "LTC/USDT:USDT",
+    "ADA/USDT:USDT",
+    "DOT/USDT:USDT",
+    "BCH/USDT:USDT",
+)
 
 #: 채택 기본값(WAN-95) — 지정가 + 실시간 RSI + 롱 온리. `ConfluenceParams()` 그 자체다.
 ZONE_LIMIT_PARAMS = ConfluenceParams()
@@ -412,6 +423,18 @@ def build_markdown(frame: pd.DataFrame, proxy_note: str = "") -> str:
         "평균 최고(= 롱에게 가장 비싼) 종목의 시계열로 **대리 계산**한다(WAN-180과 같은 "
         "규칙, 아래 각주). 근거·파급은 "
         "[`docs/decisions/wan182.md`](../../docs/decisions/wan182.md).",
+        "",
+        "> 🔁 **WAN-307(유니버스 9→12종목)로 이 표가 다시 전면 재산출됐다 — 좌표 "
+        "재-베이스라인**(사용자 결정 2026-08-14, WAN-182/252와 같은 패턴). 채택 유니버스에 "
+        "**ADV 상위 3종목(ADA·DOT·BCH)**이 합류해 12종목 × 4TF가 됐다(합류 순서는 못 박은 "
+        "창의 일중 달러 거래대금 내림차순으로 **동결된 유동성 규칙** — 자유 파라미터가 "
+        "아니다). 근거는 WAN-304 사다리(12종목은 렌즈에 MDD가 +0.1%p로 거의 안 흔들리는데 "
+        "15종목은 +4.3%p 튄다 · 밀림율 4.24% < 5% 포화선)이고 `ConfluenceParams()`는 "
+        "그대로다. ⚠️ **9종목 판과 셀 비교 금지**(기존 9종목 행도 채택 북이 아닌 per-cell "
+        "표라 값은 같지만, 표 전체의 좌표가 다르다). 펀딩은 12종목 전부 자기 확정 데이터가 "
+        "창을 덮어(DOGE·LINK·LTC는 WAN-292 백필, ADA·DOT·BCH는 상장 초기부터 수집분) "
+        "**대리 각주가 비어 있는 것이 정상**이다. 근거·파급은 "
+        "[`docs/decisions/wan307.md`](../../docs/decisions/wan307.md).",
         "",
         "> 🔁 **WAN-252(2h 작업 TF 승격)로 이 표에 2h 행이 더해졌다 — 좌표 재-베이스라인**"
         "(사용자 결정 2026-08-05, WAN-182의 4h 승격과 같은 패턴). 작업 TF가 15m·1h·4h → "

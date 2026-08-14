@@ -157,7 +157,7 @@ def load_proxied_funding(
     행은 요청 심볼만 만든다(펀딩 테이블은 작다).
     """
     store = FundingRateStore(db_path)
-    donor_candidates = tuple(s for s in harness.DEFAULT_SYMBOLS if s not in NEW_SYMBOLS)
+    donor_candidates = tuple(s for s in harness.LEGACY_NINE_SYMBOLS if s not in NEW_SYMBOLS)
     query_symbols = list(dict.fromkeys([*donor_candidates, *symbols]))
     funding_by_symbol = {
         s: store.get_rates(s, start_ms=start_ms, end_ms=end_ms, include_predicted=True)
@@ -258,7 +258,7 @@ class AuditResult:
 
 def run_audit(
     *,
-    symbols: tuple[str, ...] = harness.DEFAULT_SYMBOLS,
+    symbols: tuple[str, ...] = harness.LEGACY_NINE_SYMBOLS,
     timeframes: tuple[str, ...] = harness.DEFAULT_TIMEFRAMES,
     start: str = harness.DEFAULT_START,
     end: str = harness.DEFAULT_END,
@@ -864,7 +864,7 @@ def _load_rows(path: Path) -> list[GuardRow]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="WAN-197 손절폭 가드 × 존폭 필터 재측정")
-    parser.add_argument("--symbols", type=str, default=",".join(harness.DEFAULT_SYMBOLS))
+    parser.add_argument("--symbols", type=str, default=",".join(harness.LEGACY_NINE_SYMBOLS))
     parser.add_argument("--timeframes", type=str, default=",".join(harness.DEFAULT_TIMEFRAMES))
     parser.add_argument("--start", type=str, default=harness.DEFAULT_START)
     parser.add_argument("--end", type=str, default=harness.DEFAULT_END)

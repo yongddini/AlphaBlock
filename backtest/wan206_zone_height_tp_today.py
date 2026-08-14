@@ -353,7 +353,7 @@ def run_cell(
 
 
 def run_report(
-    symbols: Sequence[str] = harness.DEFAULT_SYMBOLS,
+    symbols: Sequence[str] = harness.LEGACY_NINE_SYMBOLS,
     timeframes: Sequence[str] = harness.DEFAULT_TIMEFRAMES,
     *,
     start: str = harness.DEFAULT_START,
@@ -865,7 +865,7 @@ def rows_from_csv(path: Path) -> list[TpRow]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--symbols", type=str, default=",".join(harness.DEFAULT_SYMBOLS))
+    parser.add_argument("--symbols", type=str, default=",".join(harness.LEGACY_NINE_SYMBOLS))
     parser.add_argument("--tf", type=str, default=",".join(harness.DEFAULT_TIMEFRAMES))
     parser.add_argument("--start", type=str, default=harness.DEFAULT_START)
     parser.add_argument("--end", type=str, default=harness.DEFAULT_END)

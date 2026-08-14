@@ -83,7 +83,7 @@ def test_timeframe_options_survive_a_narrowed_runner_config() -> None:
     narrowed = Settings(live_signal_timeframes=["1h"], live_signal_symbols=["BTC/USDT:USDT"])
 
     assert chart_timeframes(narrowed) == ["15m", "1h", "2h", "4h"]
-    assert len(chart_symbols(narrowed)) == 9
+    assert len(chart_symbols(narrowed)) == 12  # WAN-307: 채택 유니버스 12종목.
 
 
 def test_timeframe_options_append_timeframes_the_runner_watches_outside_the_grid() -> None:
@@ -96,7 +96,7 @@ def test_timeframe_options_append_timeframes_the_runner_watches_outside_the_grid
 def test_symbol_options_are_the_collection_universe() -> None:
     symbols = chart_symbols(Settings())
 
-    assert len(symbols) == 9
+    assert len(symbols) == 12  # WAN-307: 채택 유니버스 12종목.
     assert symbols[0].startswith("BTC/")
 
 

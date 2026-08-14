@@ -81,7 +81,9 @@ DEFAULT_SUMMARY = REPORTS_DIR / "wan244_capacity_cap_summary.md"
 
 #: 채택 좌표(harness 기본값 그대로 = 인자 없는 `backtest.run`) — 9종목 × 15m·1h·2h·4h ×
 #: 못 박은 6년. 옛 핀 없음.
-DEFAULT_SYMBOLS: tuple[str, ...] = harness.DEFAULT_SYMBOLS
+#: WAN-307이 기본 유니버스를 12종목으로 옮겼다 — 이 리포트의 결론·CSV는 9종목 좌표라
+#: 당시 값으로 명시 고정한다(고정 원칙은 `harness.LEGACY_NINE_SYMBOLS` 문서 참고).
+DEFAULT_SYMBOLS: tuple[str, ...] = harness.LEGACY_NINE_SYMBOLS
 DEFAULT_TIMEFRAMES: tuple[str, ...] = harness.DEFAULT_TIMEFRAMES
 DEFAULT_START: str = harness.DEFAULT_START
 DEFAULT_END: str = harness.DEFAULT_END

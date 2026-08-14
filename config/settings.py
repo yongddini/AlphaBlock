@@ -22,19 +22,22 @@ from strategy.models import ConfluenceParams
 def _default_symbols() -> list[str]:
     """수집 대상 기본 심볼 (USDT 무기한 선물).
 
-    WAN-111에서 BNB·XRP·TRX를 더해 6심볼, **WAN-182(= WAN-179 결정)에서 DOGE·LINK·LTC를
-    더해 9종목**이 됐다. **수집 대상**일 뿐 실거래 대상이 아니다(실거래는
-    `ALPHABLOCK_LIVE_TRADING=false` 불변 — 유니버스 확장은 측정·수집 대상이지 실거래
-    승인이 아니다). 실시간 페이퍼 **감시** 대상(`live_signal_symbols`)은 WAN-191(사용자
-    결정 2026-07-25)에서 옛 BTC 단독 → 이 9종목 전부로 넓혔다(여전히 페이퍼).
+    WAN-111에서 BNB·XRP·TRX를 더해 6심볼, WAN-182(= WAN-179 결정)에서 DOGE·LINK·LTC를
+    더해 9종목, **WAN-307(사용자 결정 2026-08-14)에서 ADA·DOT·BCH를 더해 12종목**이 됐다.
+    합류 순서는 못 박은 창의 일중 달러 거래대금 내림차순으로 **동결된 유동성 규칙**이다
+    (`wan300_universe_size.CANDIDATE_SYMBOLS` 상위 3 — 자유 파라미터가 아니다).
+    **수집 대상**일 뿐 실거래 대상이 아니다(실거래는 `ALPHABLOCK_LIVE_TRADING=false` 불변 —
+    유니버스 확장은 측정·수집 대상이지 실거래 승인이 아니다). 실시간 페이퍼 **감시** 대상
+    (`live_signal_symbols`)은 이 목록을 상속하므로 함께 12종목이 된다(WAN-191 설계 —
+    여전히 페이퍼).
 
     신규 심볼을 여기에 올리지 않으면 수집기가 기존 심볼만 갱신해 **신규 심볼만 낡는다** —
-    그러면 다음 격자에서 9종목이 서로 다른 창을 보게 되고, 심볼 편중을 가르려던 표에
+    그러면 다음 격자에서 12종목이 서로 다른 창을 보게 되고, 심볼 편중을 가르려던 표에
     기간 차이가 섞인다.
 
-    ⚠️ 신규 3종목(DOGE·LINK·LTC)은 **펀딩 데이터가 아직 0행**이다(WAN-178 백필 전) —
-    수집기가 앞으로의 펀딩은 쌓지만 과거분은 백필해야 한다. 그전까지 백테스트는 대리
-    (BTC 시계열, WAN-180 규칙) 또는 펀딩 미반영으로 돈다.
+    펀딩: 12종목 전부 확정 펀딩 데이터가 채택 창을 덮는다(DOGE·LINK·LTC는 WAN-292 백필,
+    ADA·DOT·BCH는 상장 초기부터 수집분 존재 — 2026-08-14 실측). WAN-180 대리 규칙은
+    존치하되 데이터가 있으면 자동 무동작이다.
     """
     return [
         "BTC/USDT:USDT",
@@ -46,6 +49,9 @@ def _default_symbols() -> list[str]:
         "DOGE/USDT:USDT",
         "LINK/USDT:USDT",
         "LTC/USDT:USDT",
+        "ADA/USDT:USDT",
+        "DOT/USDT:USDT",
+        "BCH/USDT:USDT",
     ]
 
 

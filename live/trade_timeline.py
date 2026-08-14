@@ -650,7 +650,8 @@ def backtest_timeline_rows(
 
     `live.live_vs_backtest`와 같은 워밍업·평가 규약을 유지해 라이브 셋업과 1:1로 맞춘다
     (완료 기준 4). `jobs>1`이면 (심볼, TF) 단위로 병렬. 심볼·TF를 안 주면 채택 좌표
-    (9종목 × 15m·1h·4h)를 돈다 — 무거우니 탐색 중에는 좁혀 부른다. 셀 경계를 유지한
+    (채택 유니버스 × 작업 TF, WAN-307 이후 12종목 × 4TF)를 돈다 — 무거우니 탐색 중에는
+    좁혀 부른다. 셀 경계를 유지한
     `backtest_timeline_by_cell`을 평탄화한 것이라 두 함수가 같은 계산을 공유한다.
     """
     by_cell = backtest_timeline_by_cell(

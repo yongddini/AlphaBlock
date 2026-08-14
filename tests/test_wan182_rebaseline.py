@@ -38,13 +38,16 @@ _NINE = (
 # ---------------------------------------------------------------- 채택 좌표
 
 
-def test_adopted_coordinates_are_nine_symbols_three_tfs_pinned_window() -> None:
-    """채택 좌표(WAN-179 결정): 9종목 · 작업 TF · 2020-09-15~2026-07-22.
+def test_adopted_coordinates_are_twelve_symbols_four_tfs_pinned_window() -> None:
+    """채택 좌표: 12종목 · 작업 TF 4개 · 2020-09-15~2026-07-22.
 
     ⚠️ 작업 TF는 WAN-252(2026-08-05)가 2h를 승격해 15m·1h·**2h**·4h 네 축이 됐다 —
     WAN-182 시점의 3축(15m·1h·4h)이 아니다(상세 회귀는 `test_wan252_rebaseline.py`).
+    ⚠️ 유니버스는 WAN-307(2026-08-14)이 12종목으로 확장했다 — WAN-182 시점의 9종목이
+    아니다(상세 회귀는 `test_wan307_rebaseline.py`, 9종목 스냅샷은
+    `harness.LEGACY_NINE_SYMBOLS`).
     """
-    assert harness.DEFAULT_SYMBOLS == _NINE
+    assert harness.DEFAULT_SYMBOLS == _NINE + ("ADA/USDT:USDT", "DOT/USDT:USDT", "BCH/USDT:USDT")
     assert harness.DEFAULT_TIMEFRAMES == ("15m", "1h", "2h", "4h")  # WAN-252: +2h
     assert harness.DEFAULT_START == "2020-09-15"
     assert harness.DEFAULT_END == "2026-07-22"
@@ -58,8 +61,8 @@ def test_bare_cli_actually_runs_adopted_coordinates() -> None:
     """
     args = build_parser().parse_args([])
     grid = grid_from_args(args)
-    assert len(grid.symbols) == 9
-    assert set(grid.symbols) == set(_NINE)
+    assert len(grid.symbols) == 12  # WAN-307: 9 → 12종목.
+    assert set(grid.symbols) == set(harness.DEFAULT_SYMBOLS)
     assert grid.timeframes == ("15m", "1h", "2h", "4h")  # WAN-252: +2h
 
     options = options_from_args(args)
@@ -88,20 +91,20 @@ def test_explicit_start_end_wins_over_adopted_window() -> None:
 # ------------------------------------------------------- 수집 대상 · 실거래 불변
 
 
-def test_collection_universe_is_nine_and_live_signal_expanded_to_nine() -> None:
-    """수집 유니버스 9종목 · 실시간 페이퍼 감시 대상도 9종목으로 확대(WAN-191).
+def test_collection_universe_matches_harness_and_live_signal_inherits() -> None:
+    """수집 유니버스 = harness 채택 유니버스 · 실시간 페이퍼 감시 대상은 그것을 상속.
 
     WAN-182 시점의 「실시간 시그널은 BTC 단독」은 **WAN-191(사용자 결정 2026-07-25)이
-    번복**해 9종목 × 15m·1h·4h로 넓혔다. 여전히 페이퍼이므로 WAN-111 원칙(유니버스
+    번복**해 수집 유니버스 전부로 넓혔고, WAN-307이 유니버스를 12종목으로 확장하면서
+    감시 대상도 상속으로 함께 12종목이 됐다. 여전히 페이퍼이므로 WAN-111 원칙(유니버스
     확장은 측정·수집 대상이지 실거래 승인이 아니다)과 충돌하지 않는다 —
     실거래(`ALPHABLOCK_LIVE_TRADING`)는 불변이다.
 
     감시 심볼은 수집 유니버스와 항상 일치해야 한다(갈라지면 감시 대상이 수집되지 않아
     조용히 낡은 데이터를 본다).
     """
-    assert tuple(_default_symbols()) == _NINE
+    assert tuple(_default_symbols()) == harness.DEFAULT_SYMBOLS
     assert _default_live_signal_symbols() == _default_symbols()
-    assert tuple(_default_live_signal_symbols()) == _NINE
 
 
 # ------------------------------------------------------------ 옛 리포트 핀
@@ -198,7 +201,11 @@ def test_funding_proxy_requires_confirmed_rates_for_donor_selection() -> None:
 
 
 def test_new_symbols_constant_matches_universe_expansion() -> None:
-    """`NEW_SYMBOLS` = 유니버스 확장분(9종목 − 기존 6종목)과 정확히 일치한다."""
+    """`NEW_SYMBOLS` = 유니버스 확장분(12종목 − 기존 6종목)과 정확히 일치한다.
+
+    이 등식이 지키는 것은 **대리 도너 풀**이다(WAN-180 규칙: 도너 = 기존 6종목) —
+    확장분(WAN-182 + WAN-307)이 이 목록에서 빠지면 그 종목이 도너 후보로 새어 들어간다.
+    """
     assert set(NEW_SYMBOLS) == set(harness.DEFAULT_SYMBOLS) - set(
         (
             "BTC/USDT:USDT",

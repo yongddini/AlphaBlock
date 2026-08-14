@@ -87,7 +87,9 @@ DEFAULT_SUMMARY = REPORTS_DIR / "wan267_reentry_decompose_summary.md"
 
 DEFAULT_START = harness.DEFAULT_START
 DEFAULT_END = harness.DEFAULT_END
-ALL_SYMBOLS: tuple[str, ...] = harness.DEFAULT_SYMBOLS
+#: WAN-307이 기본 유니버스를 12종목으로 옮겼다 — 이 리포트의 결론·CSV는 9종목 좌표라
+#: 당시 값으로 명시 고정한다(고정 원칙은 `harness.LEGACY_NINE_SYMBOLS` 문서 참고).
+ALL_SYMBOLS: tuple[str, ...] = harness.LEGACY_NINE_SYMBOLS
 
 #: 작업 TF = 1h·2h·4h 먼저(컴퓨트 실현 가능). 15m은 셀당 ~37분(WAN-203)이라 `--append`.
 DEFAULT_TIMEFRAMES: tuple[str, ...] = ("4h", "2h", "1h")
