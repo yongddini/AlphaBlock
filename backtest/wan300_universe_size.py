@@ -303,9 +303,15 @@ def _book_row(
     scope: str,
     segment: str,
     exclude: str = "",
+    include_reentry: bool = False,
 ) -> UniverseRow:
-    """이 유니버스·스코프·구간의 채택(cap_only 5배) 북을 돌려 성과 행을 낸다."""
-    seg_cells = _segment_cells(list(payloads), segment, exclude)
+    """이 유니버스·스코프·구간의 채택(cap_only 5배) 북을 돌려 성과 행을 낸다.
+
+    `include_reentry`(WAN-304, 옵트인)를 켜면 payload에 실린 「익절 후 존 내 재진입」
+    후보(WAN-261/269)를 base와 합쳐 북에 넣는다 — 기본(False)이면 예전과 비트 단위로
+    같다(wan300 CSV 재현).
+    """
+    seg_cells = _segment_cells(list(payloads), segment, exclude, include_reentry=include_reentry)
     base_cfg = harness.build_config(BOOK_ANNUALIZATION_TF)
     outcome = run_leverage_book(
         seg_cells,
@@ -357,8 +363,13 @@ def build_rows_for_cells(
     *,
     lens: str,
     sizes: Sequence[int] = UNIVERSE_SIZES,
+    include_reentry: bool = False,
 ) -> list[UniverseRow]:
-    """한 렌즈의 셀에서 (유니버스 × 스코프 × 구간) 북 행 전부 + LOO 행(기준 렌즈·all)을 낸다."""
+    """한 렌즈의 셀에서 (유니버스 × 스코프 × 구간) 북 행 전부 + LOO 행(기준 렌즈·all)을 낸다.
+
+    `include_reentry`(WAN-304, 옵트인) 규약은 `_book_row`와 같다 — 기본(False)이면 예전과
+    비트 단위로 같다(payload에 재진입 후보가 실려 있어도 base만 북에 들어간다).
+    """
     have = {_short(p.symbol) for p in payloads}
     timeframes = sorted({p.timeframe for p in payloads}, key=timeframe_to_ms)
     scopes: list[str] = ["all", *timeframes] if len(timeframes) > 1 else list(timeframes)
@@ -372,7 +383,14 @@ def build_rows_for_cells(
             picked = _universe_payloads(payloads, size, scope)
             for segment in MEASURED_SEGMENTS:
                 rows.append(
-                    _book_row(picked, lens=lens, universe=size, scope=scope, segment=segment)
+                    _book_row(
+                        picked,
+                        lens=lens,
+                        universe=size,
+                        scope=scope,
+                        segment=segment,
+                        include_reentry=include_reentry,
+                    )
                 )
                 if lens == REF_LENS and scope == "all":
                     # leave-one-out(완료기준 3) — 전 종목 축은 기준 렌즈·all 스코프만
@@ -387,6 +405,7 @@ def build_rows_for_cells(
                                 scope=scope,
                                 segment=segment,
                                 exclude=short,
+                                include_reentry=include_reentry,
                             )
                         )
     return rows
