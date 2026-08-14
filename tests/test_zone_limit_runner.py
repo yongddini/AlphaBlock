@@ -328,6 +328,9 @@ def test_run_zone_limit_runner_wires_reentry_rule_from_settings(
         def __init__(self, **kwargs: object) -> None:
             pass
 
+        def restore_state(self, *, now_ms: int) -> set[int]:
+            return set()  # WAN-306: 진입점이 기동 시 상태 복원을 부른다.
+
         def run(self, *, max_polls: int | None = None) -> None:
             pass
 

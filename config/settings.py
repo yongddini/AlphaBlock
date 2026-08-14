@@ -216,6 +216,11 @@ class Settings(BaseSettings):
     # 러너 운영 상태(하트비트·페이퍼 포지션·최근 신호)를 남겨 Health 대시보드(WAN-30)가
     # 읽는 파일 경로. 러너가 매 폴링마다 갱신한다.
     live_runtime_state_path: str = Field(default="data/live_runtime_state.json")
+    # 재시작 공백 따라잡기 재생 한도(시간, WAN-306). 러너가 죽어 있던 구간이 이 한도
+    # 이내면 저장된 1분봉으로 그 사이의 체결·청산·만료·재무장을 페이퍼 집행해 「끊긴 적
+    # 없는 것처럼」 잇고, 넘으면 명시적으로 초기화한다(대기 주문은 `discarded_restart`,
+    # 조용한 재구성 금지).
+    live_catchup_max_hours: float = Field(default=48.0, gt=0)
     # 데이터 신선도(수집 멈춤)를 stale로 볼 지연 배수. TF 주기 대비 이 배수를 넘으면 경고.
     health_stale_multiplier: float = Field(default=2.5, gt=0)
 

@@ -46,6 +46,7 @@ import pandas as pd
 from backtest.sweep import timeframe_to_ms
 from backtest.wan228_reentry_census import ReentryEntryRule
 from backtest.zone_limit_backtest import IntrabarLiveLimit
+from live.engine_state import PersistedPendingOrder, PersistedZoneWatch, SeriesStateSnapshot
 from live.limit_orders import LimitFill, LimitOrderBook, LimitOrderStatus, PendingLimitOrder
 from live.order_journal import (
     SKIP_REASON_CELL_BUSY,
@@ -699,6 +700,119 @@ class ZoneLimitLiveEngine:
         if order is None:
             return []
         return self._place(state, symbol, timeframe, ob, order, time_ms)
+
+    # -- 재시작 영속화 (WAN-306) ----------------------------------------------
+
+    def snapshot_series(
+        self, symbol: str, timeframe: str, *, last_htf_time: int, saved_ms: int
+    ) -> SeriesStateSnapshot | None:
+        """이 시리즈의 재시작 복원용 스냅샷을 만든다(서브스텝을 소비한 적 없으면 None).
+
+        재파생 가능한 것(존 대장·시딩·ATR)은 담지 않는다 — 복원이 저장소 창을
+        `on_htf_bars`로 다시 먹여 재구성한다(`live.engine_state` 모듈 독스트링).
+        `last_htf_time`은 러너가 마지막으로 먹인 확정 상위TF 봉 시각이다(복원 창의 앵커).
+        """
+        state = self._series.get((symbol, timeframe))
+        if state is None or state.last_substep_time is None:
+            return None
+        pending = self.book.pending(symbol, timeframe)
+        persisted_pending: PersistedPendingOrder | None = None
+        if pending is not None and state.pending_zone is not None and pending.placed_ms is not None:
+            persisted_pending = PersistedPendingOrder(
+                journal_id=pending.journal_id,
+                zone=state.pending_zone,
+                tap_index=pending.tap_index,
+                placed_ms=pending.placed_ms,
+                limit_valid_bars=pending.limit_valid_bars,
+                bars_elapsed=pending.bars_elapsed,
+                first_rested_ms=pending.first_rested_ms,
+                last_limit_price=pending.last_limit_price,
+            )
+        return SeriesStateSnapshot(
+            saved_ms=saved_ms,
+            last_substep_time=state.last_substep_time,
+            last_htf_time=last_htf_time,
+            forming_bar=state.forming_bar,
+            forming_low=state.forming_low,
+            forming_high=state.forming_high,
+            running_close=state.running_close,
+            zones=[
+                PersistedZoneWatch(
+                    zone=zid,
+                    was_inside=watch.was_inside,
+                    armed_forming_bar=watch.armed_forming_bar,
+                    skip_recorded_forming_bar=watch.skip_recorded_forming_bar,
+                )
+                for zid, watch in state.zones.items()
+            ],
+            pending=persisted_pending,
+            occupied_zone=state.occupied_zone,
+        )
+
+    def restore_series(
+        self, symbol: str, timeframe: str, snapshot: SeriesStateSnapshot
+    ) -> PendingLimitOrder | None:
+        """스냅샷의 세션 상태를 되살린다 — 반드시 스냅샷 시점 창을 `on_htf_bars`로 먹인
+        **뒤에** 불러야 한다(존 대장·시딩·ATR이 그 호출에서 재구성된다).
+
+        전이/시도 표식·형성 중 봉 누적·`occupied_zone`(재진입 재무장 상태)을 복원하고,
+        대기 주문이 있으면 탭 예약과 **같은 `_build_order`**로 재구성해 주문판에 되건다
+        (지표 상태는 재시딩 = 예약 시점 시딩 + 경계 커밋과 동일 · 생애 스칼라는 스냅샷
+        값으로 되돌린다). 복원된 주문(또는 None)을 반환한다 — 존이 대장에서 사라졌거나
+        재구성이 거부되면 주문은 복원하지 않는다(장부 행은 기존 재시작 폐기 경로로 남는다).
+        """
+        state = self._state(symbol, timeframe)
+        if not state.refreshed:
+            raise ValueError("restore_series는 on_htf_bars로 존 대장을 세운 뒤 불러야 합니다.")
+        state.forming_bar = snapshot.forming_bar
+        state.forming_low = snapshot.forming_low
+        state.forming_high = snapshot.forming_high
+        state.running_close = snapshot.running_close
+        state.last_substep_time = snapshot.last_substep_time
+        for persisted in snapshot.zones:
+            watch = state.zones.get(persisted.zone)
+            if watch is None:
+                continue  # 스냅샷 이후 대장에서 사라진 존 — 탐지 결과가 정본이다.
+            watch.was_inside = persisted.was_inside
+            watch.armed_forming_bar = persisted.armed_forming_bar
+            watch.skip_recorded_forming_bar = persisted.skip_recorded_forming_bar
+        state.occupied_zone = snapshot.occupied_zone
+        pending = snapshot.pending
+        if pending is None:
+            return None
+        watch = state.zones.get(pending.zone)
+        if watch is None:
+            _logger.warning(
+                "%s %s: 대기 주문의 존이 현재 대장에 없어 복원하지 않습니다(재시작 폐기로 남음)",
+                symbol,
+                timeframe,
+            )
+            return None
+        order = self._build_order(
+            state,
+            symbol,
+            timeframe,
+            watch.ob,
+            pending.tap_index,
+            pending.placed_ms,
+            limit_valid_bars=pending.limit_valid_bars,
+        )
+        if order is None:
+            _logger.warning(
+                "%s %s: 대기 주문을 재구성할 수 없어 복원하지 않습니다(재시작 폐기로 남음)",
+                symbol,
+                timeframe,
+            )
+            return None
+        order.bars_elapsed = pending.bars_elapsed
+        order.first_rested_ms = pending.first_rested_ms
+        order.last_limit_price = pending.last_limit_price
+        order.journal_id = pending.journal_id
+        if self.book.place(order) is None:
+            return None
+        state.pending_zone = pending.zone
+        state.pending_journal_id = pending.journal_id
+        return order
 
     def _record_skip(
         self,

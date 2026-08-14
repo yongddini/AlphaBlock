@@ -29,19 +29,32 @@
 그 대가로 체결 감지가 1분봉 확정 + 폴링 간격만큼 늦지만, 체결 시각·대기 시간은 벽시계가
 아니라 **봉 시각**으로 기록하므로 측정값은 지연과 무관하다.
 
-## 로컬 맥 운영의 한계 처리 (사용자 결정 2026-07-21)
+## 로컬 맥 운영의 한계 처리 (사용자 결정 2026-07-21 · 🔁 재시작 정책은 WAN-306이 개정)
 
 * **가동 시간 기록** — 러너 세션(시작·마지막 하트비트)을 장부에 남긴다. 체결률의 분모가
   "러너가 살아 있던 시간"임을 표에서 명시할 수 있다.
-* **재시작 정책 = 버리고 새로 걸기** — 이전 세션의 대기 주문은 복원하지 않고
-  `discarded_restart`로 마감한다(체결률 분모에서 제외). 죽어 있던 구간의 가격 경로를
-  지어내지 않는다. 오픈 포지션은 `PaperExecutor`가 저장소에서 복구한다(기존 WAN-34 배선).
-  ⚠️ 단 **만료 기한(`limit_valid_bars`, 24봉 WAN-222)을 이미 넘긴 주문은 폐기가 아니라
-  정상 만료(`cancelled_expired`)로 먼저 정리한다**(`expire_stale_pending`, WAN-298) —
-  기한 초과 주문이 `discarded_restart`로 남으면 「아무도 안 치운 stale 주문」과 「기한 전
-  정상 대기」가 장부에서 구분되지 않는다. 가동 중에는 벽시계 백스톱
+* 🔁 **재시작 정책 = 복원 + 따라잡기 (WAN-306, 사용자 결정 2026-08-14)** — 옛 「버리고
+  새로 걸기」는 재시작마다 존 기억(전이 맥락·탭 이력·대기 주문·재진입 재무장·24봉 만료
+  시계)을 리셋해 라이브↔백테 판단을 갈랐다(08-13 실사례: 재시작 직후 즉시 체결, WAN-305
+  픽스처). 이제 러너는 매 서브스텝 엔진 상태를 영속화(`live.engine_state`)하고, 기동 시
+  복원한 뒤 죽어 있던 구간의 확정 1분봉을 **순서대로 재생**해 그 사이 일어났어야 할
+  체결·청산·만료·재무장을 페이퍼로 집행한다(뒷북이 아니라 따라잡기 — 복원된 주문이 실제로
+  걸려 있었으므로 그 구간 체결은 정당하다). 오픈 포지션은 예전처럼 `PaperExecutor`가
+  저장소에서 복구한다(WAN-34).
+  ⚠️ **`discarded_restart`는 이제 예외 경로다**: 공백이 따라잡기 한도
+  (`live_catchup_max_hours`, 기본 48h)를 넘거나 스냅샷이 없거나/복원 불가일 때만 남는다
+  (조용한 재구성 금지 — 한도 초과는 명시적으로 초기화 + 로그). 만료 기한을 이미 넘긴
+  복원 불가 주문은 예전처럼 정상 만료(`cancelled_expired`)로 먼저 정리한다
+  (`expire_stale_pending`, WAN-298). 가동 중에는 벽시계 백스톱
   (`ZoneLimitLiveEngine.expire_overdue`)이 같은 기한을 매 폴링 집행한다.
 * **중단 구간은 데이터로 남는다** — 세션 행 사이의 틈이 곧 다운타임이다.
+
+## 따라잡기 재생과 창 공급 순서 (WAN-306)
+
+`poll_series`는 소비할 1분봉마다 「그 봉이 닫힌 시점에 확정돼 있던 상위TF 창」을
+`on_htf_bars`에 먼저 먹인다 — 정상 운영(폴링당 1분봉 ~1개)에서는 오늘까지의 동작과
+같고, 공백 재생처럼 여러 상위TF 봉을 한 번에 소비할 때만 창이 봉 경계마다 전진해
+연속 가동과 같은 호출 순서를 재현한다(재시작 불변 테스트가 동작으로 고정).
 
 페이퍼 한정: 실주문 API는 부르지 않는다(`build_execution_engine`이 `live_trading=false`에서
 `PaperBroker`를 보장). `ALPHABLOCK_LIVE_TRADING` 기본값 `false` 불변.
@@ -53,12 +66,15 @@ import logging
 import time
 from collections.abc import Callable
 
+import pandas as pd
+
 from backtest.sweep import timeframe_to_ms
 from common.timefmt import format_kst_zoned, kst_day_key
 from config.settings import Settings
 from data.freshness import window_gap_summary
 from data.storage import OhlcvStore
 from execution.engine import EntryIntent
+from live.engine_state import EngineStateStore, SeriesStateSnapshot
 from live.executor import PaperExecutor
 from live.limit_engine import EngineEvent, ReentryEntryRule, ZoneLimitLiveEngine
 from live.limit_orders import LimitOrderStatus, expiry_deadline_ms
@@ -75,6 +91,10 @@ _logger = logging.getLogger(__name__)
 Series = tuple[str, str]
 
 _MINUTE_MS = 60_000
+
+#: 공백 따라잡기 재생의 기본 한도(ms) — 설정 `live_catchup_max_hours`(기본 48h)가 정본이고
+#: 이 상수는 러너를 직접 조립하는 테스트/도구의 기본값이다.
+DEFAULT_CATCHUP_MAX_MS = 48 * 3_600_000
 
 
 class ZoneLimitPaperRunner:
@@ -95,6 +115,8 @@ class ZoneLimitPaperRunner:
         runtime_state: RuntimeStateStore | None = None,
         notifier: ZoneLimitNotifier | None = None,
         price_feed: PriceFeed | None = None,
+        engine_state: EngineStateStore | None = None,
+        catchup_max_ms: int = DEFAULT_CATCHUP_MAX_MS,
         sleep: Callable[[float], None] = time.sleep,
         now_ms: Callable[[], int] = lambda: int(time.time() * 1000),
     ) -> None:
@@ -108,6 +130,9 @@ class ZoneLimitPaperRunner:
         self._lookback_bars = lookback_bars
         self._poll_interval = poll_interval_seconds
         self._runtime_state = runtime_state
+        #: 재시작 영속화 저장소(WAN-306). None이면 저장/복원 없음(옛 동작 그대로).
+        self._engine_state = engine_state
+        self._catchup_max_ms = catchup_max_ms
         self._notifier = notifier
         #: 옵트인 웹소켓 틱 피드(WAN-246). None이면 확정 1분봉만 소비(예전과 비트 동일).
         self._price_feed = price_feed
@@ -125,51 +150,47 @@ class ZoneLimitPaperRunner:
     # -- 폴링 ---------------------------------------------------------------
 
     def poll_series(self, symbol: str, timeframe: str) -> list[EngineEvent]:
-        """한 시리즈를 한 번 폴링한다: 확정 상위TF 봉 반영 → 새 1분봉을 서브스텝으로 소비."""
+        """한 시리즈를 한 번 폴링한다: 확정 상위TF 봉 반영 → 새 1분봉을 서브스텝으로 소비.
+
+        상위TF 창은 1분봉마다 「그 봉이 닫힌 시점에 확정돼 있던 창」을 먹인다(WAN-306,
+        모듈 독스트링 §따라잡기) — 정상 운영(새 1분봉 ~1개)에서는 예전과 같은 한 번의
+        갱신이고, 공백 재생처럼 여러 상위TF 봉을 한 번에 소비할 때만 창이 경계마다
+        전진해 연속 가동과 같은 호출 순서를 재현한다.
+        """
         events: list[EngineEvent] = []
         htf_ms = self._store_htf_ms(timeframe)
 
         df = self._store.load(symbol, timeframe)
         if df.empty:
             return []
-        recent = df.tail(self._lookback_bars)
-        closed = recent[recent["closed"].astype(bool)]
-        if closed.empty:
+        closed_all = df[df["closed"].astype(bool)]
+        if closed_all.empty:
             return []
-        last_closed_time = int(closed["open_time"].iloc[-1])
-
-        # 지표·존을 계산하기 전에 창이 연속인지 본다 — 구멍이 있으면 볼린저·RSI가 조용히
-        # 틀린 값을 내고, 그 값이 곧 주문 가격이다(WAN-156 §3, SignalRunner와 같은 거부).
-        discontinuity = window_gap_summary(
-            [int(t) for t in closed["open_time"].tolist()], timeframe
-        )
-        if discontinuity is not None:
-            _logger.error(
-                "%s %s: %s — 평가를 건너뜁니다. `alphablock backfill`로 갭을 메우세요.",
-                symbol,
-                timeframe,
-                discontinuity,
-            )
-            return []
-
+        last_closed_time = int(closed_all["open_time"].iloc[-1])
         key = (symbol, timeframe)
-        if self._last_htf.get(key) != last_closed_time:
-            events += self._engine.on_htf_bars(symbol, timeframe, closed)
-            self._last_htf[key] = last_closed_time
 
         # 1분봉 서브스텝. 첫 관측(프라이밍)은 현재 형성 중인 상위TF 봉의 시작부터다 —
-        # 과거를 재생하면 이미 지나간 탭에 뒷북 주문을 걸게 된다(측정 오염).
+        # 과거를 재생하면 이미 지나간 탭에 뒷북 주문을 걸게 된다(측정 오염). 복원된
+        # 시리즈는 `restore_state`가 심은 커서부터 이어져 공백 구간을 따라잡는다(WAN-306).
         since = self._last_substep.get(key)
         if since is None:
             since = last_closed_time + htf_ms - _MINUTE_MS
         df_1m = self._store.load(symbol, "1m", start_ms=since + 1)
-        if df_1m.empty:
-            self._handle_events(events)
-            return events
-        if "closed" in df_1m.columns:
+        if "closed" in df_1m.columns and not df_1m.empty:
             df_1m = df_1m[df_1m["closed"].astype(bool)]
         for row in df_1m.itertuples(index=False):
             t = int(row.open_time)
+            # 이 1분봉이 닫힌 시각(t+1분)까지 확정된 상위TF 봉만 창에 담는다 — 연속
+            # 가동에서 폴링이 봤을 창과 같다(그보다 미래의 봉을 먹이면 재생이 존
+            # 대장/전이 상태를 미리 알게 돼 연속 실행과 갈라진다).
+            fed = self._feed_htf_window(
+                symbol, timeframe, closed_all, cutoff_open_time=t + _MINUTE_MS - htf_ms
+            )
+            if fed is None:
+                return events  # 창 불연속 — 이 시리즈 평가 중단(기존 거부와 같은 처리).
+            if fed:
+                self._handle_events(fed)
+                events += fed
             low, high, close = float(row.low), float(row.high), float(row.close)
             step_events = self._engine.on_substep(
                 symbol, timeframe, time_ms=t, low=low, high=high, close=close
@@ -178,6 +199,55 @@ class ZoneLimitPaperRunner:
             events += step_events
             self._check_exits(symbol, timeframe, low=low, high=high, time_ms=t)
             self._last_substep[key] = t
+            # 서브스텝마다 저장한다 — 성기게 저장하면 크래시 후 따라잡기가 이미 집행한
+            # 구간을 다시 집행해 장부·거래가 중복된다(`live.engine_state`).
+            self._save_state(symbol, timeframe)
+        # 1분봉이 상위TF 저장보다 뒤처져도 존 대장·무효화 취소는 최신 창으로 유지한다
+        # (예전의 「폴링 서두 on_htf_bars」와 같은 역할 — 창은 앞으로만 간다).
+        fed = self._feed_htf_window(symbol, timeframe, closed_all, cutoff_open_time=None)
+        if fed:
+            self._handle_events(fed)
+            events += fed
+        return events
+
+    def _feed_htf_window(
+        self,
+        symbol: str,
+        timeframe: str,
+        closed_all: pd.DataFrame,
+        *,
+        cutoff_open_time: int | None,
+    ) -> list[EngineEvent] | None:
+        """`cutoff_open_time` 이하의 확정 상위TF 봉 창을 엔진에 먹인다(None = 전체).
+
+        창은 **앞으로만** 간다 — 이미 먹인 마지막 봉보다 새 봉이 없으면 아무것도 하지
+        않는다. 창에 구멍이 있으면(볼린저·RSI가 조용히 틀린 값을 내는 조건, WAN-156 §3)
+        로그를 남기고 None을 반환해 호출부가 시리즈 평가를 중단하게 한다.
+        """
+        window = closed_all
+        if cutoff_open_time is not None:
+            window = closed_all[closed_all["open_time"] <= cutoff_open_time]
+        window = window.tail(self._lookback_bars)
+        if window.empty:
+            return []
+        last_time = int(window["open_time"].iloc[-1])
+        key = (symbol, timeframe)
+        prev = self._last_htf.get(key)
+        if prev is not None and last_time <= prev:
+            return []
+        discontinuity = window_gap_summary(
+            [int(t) for t in window["open_time"].tolist()], timeframe
+        )
+        if discontinuity is not None:
+            _logger.error(
+                "%s %s: %s — 평가를 건너뜁니다. `alphablock backfill`로 갭을 메우세요.",
+                symbol,
+                timeframe,
+                discontinuity,
+            )
+            return None
+        events = self._engine.on_htf_bars(symbol, timeframe, window)
+        self._last_htf[key] = last_time
         return events
 
     def poll_once(self) -> list[EngineEvent]:
@@ -199,6 +269,11 @@ class ZoneLimitPaperRunner:
         if overdue:
             self._handle_events(overdue)
             emitted += overdue
+        # 틱 체결·벽시계 만료는 서브스텝 밖에서 상태를 바꾼다 — 폴링 끝에 한 번 더
+        # 저장해 스냅샷이 그 변화를 놓치지 않게 한다(WAN-306).
+        if self._engine_state is not None:
+            for symbol, timeframe in self._series:
+                self._save_state(symbol, timeframe)
         self._journal.heartbeat(self._session_id, now_ms=now)
         self._check_circuit_breaker(now)
         if self._notifier is not None:
@@ -453,6 +528,128 @@ class ZoneLimitPaperRunner:
                 self._engine.on_position_exit(symbol, timeframe, reason=reason, time_ms=time_ms)
             )
 
+    # -- 재시작 영속화 (WAN-306) ----------------------------------------------
+
+    def restore_state(self, *, now_ms: int) -> set[int]:
+        """기동 시 이전 세션의 엔진 상태를 복원한다. 복원된 대기 주문의 장부 행 id 집합 반환.
+
+        시리즈마다: 스냅샷을 읽어 → 공백이 따라잡기 한도(`catchup_max_ms`)를 넘으면
+        **명시적으로 초기화**(스냅샷 삭제 + 경고 로그 — 대기 주문은 기존 재시작 폐기
+        경로로 남는다, 조용한 재구성 금지) → 아니면 스냅샷 시점의 확정 창을 엔진에 먹여
+        존 대장·시딩·ATR을 재구성한 뒤 세션 상태·대기 주문을 되살린다. 따라잡기 재생
+        자체는 첫 `poll_series`가 한다(복원된 1분봉 커서부터 이어 소비).
+
+        복원된 주문의 장부 행은 기동 시 재시작 폐기/만료 재평가에서 **제외**해야 한다 —
+        호출부(`run_zone_limit_runner`)가 반환 집합을 `expire_stale_pending`·
+        `discard_stale_pending`에 넘긴다.
+        """
+        restored: set[int] = set()
+        if self._engine_state is None:
+            return restored
+        for symbol, timeframe in self._series:
+            snap = self._engine_state.load(symbol, timeframe)
+            if snap is None:
+                continue
+            key = (symbol, timeframe)
+            gap_ms = now_ms - snap.last_substep_time
+            if gap_ms > self._catchup_max_ms:
+                _logger.warning(
+                    "%s %s: 공백 %.1f시간이 따라잡기 한도(%.1f시간)를 넘어 상태를 명시적으로"
+                    " 초기화합니다 — 대기 주문은 재시작 폐기로 남습니다(WAN-306)",
+                    symbol,
+                    timeframe,
+                    gap_ms / 3_600_000,
+                    self._catchup_max_ms / 3_600_000,
+                )
+                self._engine_state.delete(symbol, timeframe)
+                continue
+            df = self._store.load(symbol, timeframe)
+            closed_all = df[df["closed"].astype(bool)] if not df.empty else df
+            window = closed_all
+            if not closed_all.empty:
+                window = closed_all[closed_all["open_time"] <= snap.last_htf_time].tail(
+                    self._lookback_bars
+                )
+            if window.empty or int(window["open_time"].iloc[-1]) != snap.last_htf_time:
+                _logger.warning(
+                    "%s %s: 저장소에 스냅샷 시점의 확정봉이 없어 복원하지 않습니다"
+                    "(대기 주문은 재시작 폐기로 남음, WAN-306)",
+                    symbol,
+                    timeframe,
+                )
+                self._engine_state.delete(symbol, timeframe)
+                continue
+            discontinuity = window_gap_summary(
+                [int(t) for t in window["open_time"].tolist()], timeframe
+            )
+            if discontinuity is not None:
+                _logger.warning(
+                    "%s %s: 복원 창에 구멍이 있어 복원하지 않습니다(%s — 지표가 조용히"
+                    " 틀린 값을 내는 조건, WAN-156 §3)",
+                    symbol,
+                    timeframe,
+                    discontinuity,
+                )
+                self._engine_state.delete(symbol, timeframe)
+                continue
+            self._engine.on_htf_bars(symbol, timeframe, window)
+            self._last_htf[key] = snap.last_htf_time
+            snap = self._reconcile_with_journal(symbol, timeframe, snap)
+            order = self._engine.restore_series(symbol, timeframe, snap)
+            self._last_substep[key] = snap.last_substep_time
+            if order is not None and order.journal_id is not None:
+                restored.add(order.journal_id)
+            _logger.info(
+                "%s %s: 엔진 상태 복원 — 공백 %.1f분 따라잡기 재생 예정 (대기 주문 %s, WAN-306)",
+                symbol,
+                timeframe,
+                gap_ms / 60_000,
+                "복원" if order is not None else "없음",
+            )
+        return restored
+
+    def _reconcile_with_journal(
+        self, symbol: str, timeframe: str, snap: SeriesStateSnapshot
+    ) -> SeriesStateSnapshot:
+        """마지막 저장과 종료 사이에 장부가 이미 종결한 대기 주문은 되걸지 않는다.
+
+        저장은 서브스텝마다지만 장부 쓰기와 원자적이지 않다 — 그 밀리초 창에서 크래시가
+        나면 스냅샷은 「대기 중」인데 장부는 이미 체결/취소다. 장부가 정본이다: 체결이면
+        그 존을 오픈 포지션의 존(`occupied_zone`)으로 넘겨 익절 후 재진입(WAN-274)이
+        이어지게 하고(포지션 자체는 `PaperExecutor`가 저장소에서 복구한다), 취소면 그냥
+        버린다.
+        """
+        pending = snap.pending
+        if pending is None or pending.journal_id is None:
+            return snap
+        status = self._journal.order_status(pending.journal_id)
+        if status == LimitOrderStatus.PENDING.value:
+            return snap
+        update: dict[str, object] = {"pending": None}
+        if status == LimitOrderStatus.FILLED.value:
+            update["occupied_zone"] = pending.zone
+        _logger.warning(
+            "%s %s: 스냅샷의 대기 주문(장부 #%s)이 이미 %s로 종결돼 있어 되걸지 않습니다",
+            symbol,
+            timeframe,
+            pending.journal_id,
+            status,
+        )
+        return snap.model_copy(update=update)
+
+    def _save_state(self, symbol: str, timeframe: str) -> None:
+        """이 시리즈의 엔진 상태를 스냅샷으로 저장한다(복원 앵커인 확정 창이 서기 전엔 무시)."""
+        if self._engine_state is None:
+            return
+        last_htf = self._last_htf.get((symbol, timeframe))
+        if last_htf is None:
+            return
+        snap = self._engine.snapshot_series(
+            symbol, timeframe, last_htf_time=last_htf, saved_ms=self._now_ms()
+        )
+        if snap is not None:
+            self._engine_state.save(symbol, timeframe, snap)
+
     # -- 스냅샷 --------------------------------------------------------------
 
     def _paper_positions(self) -> list[PaperPosition]:
@@ -499,7 +696,9 @@ def build_series(settings: Settings) -> list[Series]:
     ]
 
 
-def expire_stale_pending(journal: OrderJournal, *, now_ms: int) -> int:
+def expire_stale_pending(
+    journal: OrderJournal, *, now_ms: int, exclude_ids: frozenset[int] | set[int] = frozenset()
+) -> int:
     """기동/재시작 시 이전 세션 대기 주문을 만료 기한으로 재평가한다(WAN-298). 만료 건수 반환.
 
     러너가 죽어 있던 구간에는 봉 계수도 벽시계 백스톱도 돌지 않으므로, 기한을 넘긴 채
@@ -510,9 +709,14 @@ def expire_stale_pending(journal: OrderJournal, *, now_ms: int) -> int:
     시각**이다(서브스텝 경로가 기록했을 시각과 같다 — `live.limit_orders.expiry_deadline_ms`
     단일 출처). 무기한(재진입 재무장) · 열 도입 전 행은 기한을 모르므로 건드리지 않는다
     (이후 `discard_stale_pending`이 재시작 폐기로 마감한다).
+
+    `exclude_ids`(WAN-306): 상태 복원으로 되살린 주문의 장부 행 — 따라잡기 재생이 봉
+    계수로 정확한 봉에서 만료시키므로 벽시계 재평가에서 뺀다.
     """
     expired = 0
     for row in journal.stale_pending_orders():
+        if row.journal_id in exclude_ids:
+            continue  # 복원된 주문(WAN-306) — 따라잡기 재생이 봉 계수로 처리한다.
         if row.limit_valid_bars is None:
             continue  # 무기한(재진입) 또는 열 도입 전 행 — 기한 불명.
         deadline = expiry_deadline_ms(
@@ -554,20 +758,11 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
         recorder=recorder,
         sizing=book_per_trade_sizing(settings.risk_sizing, book),
     )
+    # 재시작 영속화 저장소(WAN-306) — 장부와 같은 DB. 러너가 매 서브스텝 저장하고
+    # 기동 시 복원 + 공백 따라잡기 재생한다(모듈 독스트링 §재시작 정책).
+    engine_state = EngineStateStore(settings.db_path)
     try:
         now = int(time.time() * 1000)
-        # 재시작 재평가(WAN-298): 이전 세션 대기 주문 중 만료 기한(24봉, WAN-222)을 이미
-        # 넘긴 것은 재시작 폐기가 아니라 정상 만료로 정리한다(종결 시각 = 기한 시각).
-        expired_stale = expire_stale_pending(journal, now_ms=now)
-        if expired_stale:
-            _logger.info(
-                "이전 세션 대기 주문 %d건 만료 처리(cancelled_expired — 기한 초과, WAN-298)",
-                expired_stale,
-            )
-        # 재시작 정책: 나머지 대기 주문은 복원하지 않고 폐기로 마감한다(모듈 독스트링).
-        discarded = journal.discard_stale_pending(now_ms=now)
-        if discarded:
-            _logger.info("이전 세션 대기 주문 %d건 폐기(discarded_restart)", discarded)
         session_id = journal.start_session(now_ms=now)
 
         series = build_series(settings)
@@ -642,7 +837,30 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
             runtime_state=RuntimeStateStore(settings.live_runtime_state_path),
             notifier=notifier,
             price_feed=price_feed,
+            engine_state=engine_state,
+            catchup_max_ms=int(settings.live_catchup_max_hours * 3_600_000),
         )
+        # 재시작 복원(WAN-306): 이전 세션의 엔진 상태(전이 맥락·탭 표식·대기 주문·재진입
+        # 재무장)를 되살린다 — 복원된 주문은 아래 재평가/폐기에서 제외한다(따라잡기 재생이
+        # 봉 계수로 정확한 봉에서 체결/만료를 낸다).
+        restored_ids = runner.restore_state(now_ms=now)
+        if restored_ids:
+            _logger.info(
+                "이전 세션 대기 주문 %d건 복원(따라잡기 재생 대상, WAN-306)", len(restored_ids)
+            )
+        # 재시작 재평가(WAN-298): 복원되지 못한 대기 주문 중 만료 기한(24봉, WAN-222)을
+        # 이미 넘긴 것은 재시작 폐기가 아니라 정상 만료로 정리한다(종결 시각 = 기한 시각).
+        expired_stale = expire_stale_pending(journal, now_ms=now, exclude_ids=restored_ids)
+        if expired_stale:
+            _logger.info(
+                "이전 세션 대기 주문 %d건 만료 처리(cancelled_expired — 기한 초과, WAN-298)",
+                expired_stale,
+            )
+        # 복원도 만료도 아닌 나머지(스냅샷 없음·한도 초과·복원 불가)만 폐기로 마감한다 —
+        # `discarded_restart`는 이제 예외 경로다(WAN-306 완료 기준 4).
+        discarded = journal.discard_stale_pending(now_ms=now, exclude_ids=restored_ids)
+        if discarded:
+            _logger.info("이전 세션 대기 주문 %d건 폐기(discarded_restart)", discarded)
         _logger.info(
             "존-지정가 페이퍼 러너 시작(WAN-45): %d 시리즈, 폴링 %ds, 세션 #%d"
             " · 레버리지 북 %s×%.4g (WAN-171, 공유 자본)"
@@ -658,6 +876,7 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
     finally:
         if price_feed is not None:
             price_feed.close()
+        engine_state.close()
         store.close()
         journal.close()
         paper_store.close()
