@@ -214,15 +214,16 @@ class _Task:
     채택 기본값(= 0.005 = 유동성 한도 켜짐)을 물려받아 각 후보에 룩어헤드-안전 `adv_usd`를
     싣는다 — 채택 북(`book_cli.run_book`)이 이 경로로 옵트인한다. `float`이면 그 프랙션으로 켠다
     (wan244 측정)."""
-    reentry: bool = False
-    """WAN-261(옵트인): 켜면 각 구간의 base 후보에서 「익절 후 존 내 재진입」 후보
-    (WAN-228 재무장 로직)를 추가로 만들어 `CellPayload.reentry_candidates`에 싣는다. base
-    후보·격리 성과 행은 **불변**이라(재진입은 별도 dict에 담긴다) 끄면 예전과 비트 단위로
-    같다 — 재진입은 `_segment_cells(include_reentry=True)`에서만 북에 들어간다."""
-    reentry_entry_rule: ReentryEntryRule = "freeze"
-    """WAN-269(옵트인): 재진입 후보의 재무장 지정가 규칙. `"freeze"`(기본)면 첫 체결가를 얼려
-    **기존 wan261/262 북 CSV가 비트 재현**되고, `"band"`면 봉내 라이브 밴드로 재산정한다
-    (WAN-267 리더 팔). `reentry=False`면 이 값은 무의미하다(재진입을 만들지 않는다)."""
+    reentry: bool = True
+    """WAN-261에서 옵트인으로 태어나 **WAN-305가 기본 켬으로 승격**(채택 규칙 = 페이퍼와 같은
+    선상). 켜면 각 구간의 base 후보에서 「익절 후 존 내 재진입」 후보(WAN-228 재무장 로직)를
+    추가로 만들어 `CellPayload.reentry_candidates`에 싣는다. base 후보·격리 성과 행은
+    **불변**이라(재진입은 별도 dict에 담긴다) `False`로 끄면 WAN-273 이전 북과 비트 단위로
+    같다 — 옛 CSV를 결론에 박아 둔 모듈은 `reentry=False` **명시 핀**으로 고정한다(WAN-305)."""
+    reentry_entry_rule: ReentryEntryRule = "band"
+    """재진입 후보의 재무장 지정가 규칙 — 기본 `"band"`(봉내 라이브 밴드 재산정) = 채택 규칙
+    (WAN-273, WAN-305가 기본값으로 승격). `"freeze"`(첫 체결가 고정)는 옵트인으로 존치 —
+    **wan261/262 북 CSV는 freeze 명시 핀**으로 재현한다. `reentry=False`면 이 값은 무의미하다."""
     fill: harness.FillPreset | None = None
     """WAN-264(옵트인): 체결 렌즈. `None`(기본)이면 `harness.build_params()`가 채택 기본값
     (`baseline`, 관통 0bp)을 써 예전과 **비트 단위로 같다**. `pen_5bp` 등을 주면 후보 생성의
@@ -308,20 +309,23 @@ def reentry_candidates_for_window(
     params: ConfluenceParams,
     cfg: BacktestConfig,
     timeframe: str,
-    entry_rule: ReentryEntryRule = "freeze",
+    entry_rule: ReentryEntryRule = "band",
 ) -> list[_Candidate]:
     """이 창의 base 후보에서 「익절 후 존 내 재진입」 후보를 만든다(WAN-261, 옵트인).
 
-    재진입은 채택 엔진이 하지 않는 동작이라 base 후보로는 표현되지 않는다 — 그래서
-    base를 **단일 포지션으로 시퀀싱**해 실제 익절 거래를 얻은 뒤(WAN-228 census와 같은
-    규약), 익절로 닫힌 존마다 지정가를 재무장해 재진입 후보를 낸다(`reentry_candidates`,
-    WAN-228 로직 공유). 낸 후보는 청산이 확정돼 있어 북이 재시뮬 없이 배치한다. base
-    후보·격리 성과는 건드리지 않는다(별도 반환).
+    ⚠️ `entry_rule` 기본값은 채택 규칙 `"band"`다(WAN-273 = WAN-305 기본 승격) — freeze
+    시절 CSV 재현은 호출부가 명시 핀한다(현재 호출부는 전부 명시적으로 넘긴다).
 
-    `entry_rule`(WAN-269, 옵트인)은 `reentry_candidates`로 그대로 흐른다 — `"freeze"`(기본)면
-    첫 체결가를 얼려 **기존 wan261/262 북 CSV가 비트 재현**되고, `"band"`면 재무장 순간의 봉내
-    라이브 밴드로 지정가를 재산정한다(WAN-267 리더 팔을 북에 얹는 경로). base 후보 생성은 이
-    인자와 무관하므로 팔 사이에서 base는 불변이다."""
+    재진입은 base 후보 빌더가 만들지 않는 동작이라(존은 익절 후 소비) base 후보로는 표현되지
+    않는다 — 그래서 base를 **단일 포지션으로 시퀀싱**해 실제 익절 거래를 얻은 뒤(WAN-228
+    census와 같은 규약), 익절로 닫힌 존마다 지정가를 재무장해 재진입 후보를 낸다
+    (`reentry_candidates`, WAN-228 로직 공유). 낸 후보는 청산이 확정돼 있어 북이 재시뮬 없이
+    배치한다. base 후보·격리 성과는 건드리지 않는다(별도 반환).
+
+    `entry_rule`은 `reentry_candidates`로 그대로 흐른다 — `"freeze"`면 첫 체결가를 얼려
+    **기존 wan261/262 북 CSV가 비트 재현**되고(그 모듈들이 명시 핀), `"band"`(기본 = 채택)면
+    재무장 순간의 봉내 라이브 밴드로 지정가를 재산정한다(WAN-267 리더 팔 = WAN-273 채택).
+    base 후보 생성은 이 인자와 무관하므로 팔 사이에서 base는 불변이다."""
     if not candidates:
         return []
     paired = sequence_with_candidates(list(candidates), cfg, window.funding_rates)
@@ -498,8 +502,8 @@ def run_cells(
     end: str,
     jobs: int = 1,
     adv_fraction: harness.AdvCapArg = harness.LEGACY_MAX_NOTIONAL_ADV_FRACTION,
-    reentry: bool = False,
-    reentry_entry_rule: ReentryEntryRule = "freeze",
+    reentry: bool = True,
+    reentry_entry_rule: ReentryEntryRule = "band",
     fill: harness.FillPreset | None = None,
     stop_slippage_alpha: float = 0.0,
     limit_stop_nonfill: bool = False,
@@ -516,12 +520,17 @@ def run_cells(
     룩어헤드-안전 `adv_usd`를 싣는다(채택 북 `book_cli.run_book`의 옵트인 경로). `float`이면 그
     프랙션으로 켠다(wan244 측정).
 
-    `reentry`(WAN-261, 옵트인)를 켜면 각 칸의 payload에 「익절 후 존 내 재진입」 후보를
-    함께 싣는다 — base 후보·격리 성과 행은 불변이라 끄면(기본) 예전과 비트 단위로 같다.
+    ⚠️ **`reentry` 기본값은 켬(band)이다(WAN-305)** — 채택 규칙(WAN-273 재진입 · 페이퍼
+    러너 WAN-274)과 같은 선상이 「아무것도 안 하면」 나오게 한다. 각 칸의 payload에 「익절 후
+    존 내 재진입」 후보를 함께 싣는다 — base 후보·격리 성과 행은 불변이라(재진입은 별도
+    dict) `reentry=False`(명시 핀)면 WAN-273 이전 북과 비트 단위로 같다. 옛 CSV를 결론에
+    박아 둔 리포트 모듈은 반드시 `reentry=False`로 핀한다(WAN-305 §1 — wan169/180/244/276/
+    288/293/300/301 부류).
 
-    `reentry_entry_rule`(WAN-269, 옵트인)은 재진입 후보의 재무장 지정가 규칙이다 —
-    `"freeze"`(기본)면 첫 체결가 고정이라 **wan261/262 CSV가 비트 재현**되고, `"band"`면 봉내
-    라이브 밴드 재산정이다(WAN-267 리더 팔). base 후보는 이 값과 무관해 팔 사이에서 불변이다.
+    `reentry_entry_rule`은 재진입 후보의 재무장 지정가 규칙 — 기본 `"band"`(봉내 라이브 밴드
+    재산정, WAN-273 채택 = WAN-305 기본 승격). `"freeze"`(첫 체결가 고정)는 옵트인 존치 —
+    **wan261/262 CSV는 freeze 명시 핀**으로 재현한다. base 후보는 이 값과 무관해 팔 사이에서
+    불변이다.
 
     `fill`(WAN-264, 옵트인)을 주면 후보 생성의 체결 렌즈를 바꾼다 — None(기본)이면 채택
     기본값(`baseline`)이라 비트 단위로 같다. 렌즈는 후보 집합을 바꾸므로 렌즈마다 다시
@@ -596,14 +605,15 @@ def _segment_cells(
     segment: str,
     exclude_symbol: str,
     *,
-    include_reentry: bool = False,
+    include_reentry: bool = True,
 ) -> list[BookCell]:
     """이 구간의 북 입력 칸들. `oos_warm`은 full 후보를 칸별 경계로 거른다(straddle (b)).
 
-    `include_reentry`(WAN-261, 옵트인)를 켜면 각 칸의 재진입 후보(payload에 실려 있을 때만)를
-    base 후보와 **합쳐** 북에 넣는다 — 북 시퀀서가 칸당 1포지션·공유 자본·명목 상한으로
-    재탭과 재진입을 한 지갑에서 함께 배치한다. 기본(False)이면 base만 넣어 예전과 비트 단위로
-    같다(wan169 격자·book_cli 기본 경로 무영향).
+    ⚠️ **`include_reentry` 기본값은 켬이다(WAN-305)** — 채택 북(WAN-273 재진입)이 「아무것도
+    안 하면」 나오게 한다. 켜면 각 칸의 재진입 후보(payload에 실려 있을 때만)를 base 후보와
+    **합쳐** 북에 넣는다 — 북 시퀀서가 칸당 1포지션·공유 자본·명목 상한으로 재탭과 재진입을
+    한 지갑에서 함께 배치한다. payload에 재진입이 없으면(핀된 `run_cells(reentry=False)`)
+    켜져 있어도 base만 남아 비트 재현된다. `False`는 옛 CSV 재현용 **명시 핀**이다(WAN-305).
     """
     cells: list[BookCell] = []
     for payload in payloads:
@@ -692,7 +702,9 @@ def build_book_rows(payloads: Sequence[CellPayload]) -> list[BookRow]:
                 )
                 for sizing_mode in SIZING_MODES:
                     cfg = _book_config(base_cfg, sizing_mode, scope_cells)
-                    cells = _segment_cells(scoped, segment, exclude)
+                    # WAN-305 명시 핀: wan169 격자 CSV는 재진입 이전(WAN-261 옵트인 도입
+                    # 전) 북의 동결 스냅샷이다 — 기본값이 켬으로 바뀐 뒤에도 비트 재현.
+                    cells = _segment_cells(scoped, segment, exclude, include_reentry=False)
                     for multiple in MULTIPLES:
                         outcome = run_leverage_book(
                             # WAN-213 명시 핀: 이 리포트는 결합(combined)만 측정했다 —
@@ -1175,6 +1187,8 @@ def main(argv: list[str] | None = None) -> int:
             start=args.start,
             end=args.end,
             jobs=args.jobs,
+            # WAN-305 명시 핀: wan169 리포트 CSV는 재진입 이전 북의 동결 스냅샷이다.
+            reentry=False,
         )
         cell_rows = [row for p in payloads for row in p.rows]
         book_rows = build_book_rows(payloads)

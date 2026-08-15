@@ -71,7 +71,15 @@ _LIVE_ENTERED_STATUSES = ("진입", "청산")
 
 
 def setup_key(row: TimelineRow) -> SetupKey | None:
-    """행의 셋업 조인 키. 존 정체성(시작·확정)·탭 순번 중 하나라도 없으면 None(조인 불가)."""
+    """행의 셋업 조인 키. 존 정체성(시작·확정)·탭 순번 중 하나라도 없으면 None(조인 불가).
+
+    📌 **재진입 행(`is_reentry=True`)도 None이다(WAN-305)** — 재진입의 탭 순번은 안정적이지
+    않다(라이브 = 재무장 시점 탭 카운트 · 백테 = 0)라 이 키로 짝지으면 같은 존의 base 탭과
+    충돌하거나 영원히 안 맞는다. 재진입은 존 정체성 구제 조인(`_rescue_join_reentries`)이
+    짝짓는다.
+    """
+    if row.is_reentry:
+        return None
     if row.zone_start_time is None or row.zone_confirmed_time is None or row.tap_index is None:
         return None
     return (
@@ -196,19 +204,24 @@ def build_setup_comparisons(
     같은 키의 라이브·백테를 한 `SetupComparison`으로 합치고, 어느 한쪽만 있는 셋업도 그 한
     줄로 남긴다(키가 없는 행 — 존 정체성 미상 — 은 각자 유일 키로 두어 강제 조인하지 않는다).
     가격차 임계값은 두 쪽 다 체결된 셋업들의 진입가차 분포에서 낸다(`price_off_threshold_bps`).
+
+    📌 **재진입 구제 조인(WAN-305)**: 재진입 행은 탭 순번이 안정적이지 않아 정확 키로
+    짝지어지지 않는다 — 정확 조인이 끝난 뒤, 한쪽만 남은 행들을 **존 정체성**(심볼·TF·방향·
+    존 시작·확정)으로 묶어 어느 한쪽이 재진입인 짝을 시간순으로 잇는다. 이것이 없으면
+    페이퍼가 채택 규칙(WAN-273/274)대로 한 재진입 매매가 전부 🔴 「판정 갈림」으로 찍힌다
+    (2026-08-13 LTC 1h 실사례 — 이 이슈의 동기).
     """
     live_by_key: dict[SetupKey, TimelineRow] = {}
     bt_by_key: dict[SetupKey, TimelineRow] = {}
-    orphans: list[tuple[SetupKey, TimelineRow | None, TimelineRow | None]] = []
-    orphan_seq = 0
+    live_orphans: list[TimelineRow] = []
+    bt_orphans: list[TimelineRow] = []
 
     for row in live_rows:
         if row.source != SOURCE_LIVE:
             continue
         key = setup_key(row)
         if key is None:
-            orphans.append((_synthetic_key(row, orphan_seq), row, None))
-            orphan_seq += 1
+            live_orphans.append(row)
         else:
             # 같은 키가 여러 라이브 행이면 첫 진입/청산을 우선(가장 정보가 많은 줄).
             existing = live_by_key.get(key)
@@ -220,31 +233,59 @@ def build_setup_comparisons(
             continue
         key = setup_key(row)
         if key is None:
-            orphans.append((_synthetic_key(row, orphan_seq), None, row))
-            orphan_seq += 1
+            bt_orphans.append(row)
         else:
             existing = bt_by_key.get(key)
             if existing is None or (not _backtest_entered(existing) and _backtest_entered(row)):
                 bt_by_key[key] = row
 
     keys = sorted(set(live_by_key) | set(bt_by_key))
+    both_sided = [k for k in keys if k in live_by_key and k in bt_by_key]
+    one_sided = [k for k in keys if k not in live_by_key or k not in bt_by_key]
 
-    # 1단계: 두 쪽 다 체결된 셋업의 진입가차로 임계값 산출.
+    # 재진입 구제 조인 — 한쪽만 남은 행(키 없는 orphan + 키 있는 one-sided)을 존 정체성으로.
+    rescued, consumed_keys, live_orphans, bt_orphans = _rescue_join_reentries(
+        one_sided, live_by_key, bt_by_key, live_orphans, bt_orphans
+    )
+
+    # 1단계: 두 쪽 다 체결된 셋업(정확 조인 + 구제 조인)의 진입가차로 임계값 산출.
     paired_deltas: list[float] = []
-    for key in keys:
+    for key in both_sided:
         delta = _entry_delta_bps(live_by_key.get(key), bt_by_key.get(key))
+        if delta is not None:
+            paired_deltas.append(delta)
+    for live, backtest in rescued:
+        delta = _entry_delta_bps(live, backtest)
         if delta is not None:
             paired_deltas.append(delta)
     threshold = price_off_threshold_bps(paired_deltas, k=k)
 
     # 2단계: 행 조립.
     comparisons: list[SetupComparison] = []
-    for key in keys:
+    for key in both_sided:
         comparisons.append(
             _make_comparison(key, live_by_key.get(key), bt_by_key.get(key), threshold)
         )
-    for syn_key, live, backtest in orphans:
-        comparisons.append(_make_comparison(syn_key, live, backtest, threshold))
+    for key in one_sided:
+        if key in consumed_keys:
+            continue  # 구제 조인이 짝지었다.
+        comparisons.append(
+            _make_comparison(key, live_by_key.get(key), bt_by_key.get(key), threshold)
+        )
+    orphan_seq = 0
+    for live, backtest in rescued:
+        ref = live if live is not None else backtest
+        assert ref is not None
+        comparisons.append(
+            _make_comparison(_synthetic_key(ref, orphan_seq), live, backtest, threshold)
+        )
+        orphan_seq += 1
+    for row in live_orphans:
+        comparisons.append(_make_comparison(_synthetic_key(row, orphan_seq), row, None, threshold))
+        orphan_seq += 1
+    for row in bt_orphans:
+        comparisons.append(_make_comparison(_synthetic_key(row, orphan_seq), None, row, threshold))
+        orphan_seq += 1
 
     comparisons.sort(key=_comparison_sort_key)
     summary = _summarize(comparisons)
@@ -253,6 +294,96 @@ def build_setup_comparisons(
         summary=summary,
         price_delta_threshold_bps=threshold,
     )
+
+
+#: 존 정체성(구제 조인의 묶음 키): (심볼, TF, 롱?, 존 시작, 존 확정) — 탭 순번 없음.
+_ZoneIdentity = tuple[str, str, bool, int, int]
+
+
+def _zone_identity(row: TimelineRow) -> _ZoneIdentity | None:
+    if row.zone_start_time is None or row.zone_confirmed_time is None:
+        return None
+    return (row.symbol, row.timeframe, row.is_long, row.zone_start_time, row.zone_confirmed_time)
+
+
+def _row_time(row: TimelineRow) -> int:
+    return row.focus_ms if row.focus_ms is not None else 0
+
+
+def _rescue_join_reentries(
+    one_sided: Sequence[SetupKey],
+    live_by_key: dict[SetupKey, TimelineRow],
+    bt_by_key: dict[SetupKey, TimelineRow],
+    live_orphans: list[TimelineRow],
+    bt_orphans: list[TimelineRow],
+) -> tuple[
+    list[tuple[TimelineRow | None, TimelineRow | None]],
+    set[SetupKey],
+    list[TimelineRow],
+    list[TimelineRow],
+]:
+    """한쪽만 남은 행들을 존 정체성으로 묶어 **어느 한쪽이 재진입인** 짝만 시간순으로 잇는다.
+
+    재진입의 두 실측 모양을 모두 덮는다(WAN-305 §2): (1) 라이브 재무장 주문(`origin=
+    "reentry"`) ↔ 백테 재진입 행 — 양쪽 다 재진입 표기. (2) 재시작으로 재무장이 폐기된 뒤
+    새 탭으로 다시 들어간 라이브 행(옛 장부라 origin NULL·tap 키) ↔ 백테 재진입 행 —
+    백테 쪽 표기만으로 잇는다. **둘 다 재진입이 아닌 짝은 잇지 않는다**(그건 진짜 판정
+    갈림이다 — 조용히 초록불로 만들지 않는다).
+
+    반환: (구제된 짝들, 소비된 one-sided 키, 남은 라이브 orphan, 남은 백테 orphan).
+    """
+    live_pool: dict[_ZoneIdentity, list[tuple[SetupKey | None, TimelineRow]]] = {}
+    bt_pool: dict[_ZoneIdentity, list[tuple[SetupKey | None, TimelineRow]]] = {}
+
+    for key in one_sided:
+        row = live_by_key.get(key) or bt_by_key.get(key)
+        assert row is not None
+        zone = _zone_identity(row)
+        if zone is None:
+            continue
+        pool = live_pool if key in live_by_key else bt_pool
+        pool.setdefault(zone, []).append((key, row))
+    for row in live_orphans:
+        zone = _zone_identity(row)
+        if zone is not None:
+            live_pool.setdefault(zone, []).append((None, row))
+    for row in bt_orphans:
+        zone = _zone_identity(row)
+        if zone is not None:
+            bt_pool.setdefault(zone, []).append((None, row))
+
+    rescued: list[tuple[TimelineRow | None, TimelineRow | None]] = []
+    consumed_keys: set[SetupKey] = set()
+    consumed_rows: set[int] = set()
+    for zone in sorted(set(live_pool) & set(bt_pool)):
+        lives = sorted(live_pool[zone], key=lambda kr: _row_time(kr[1]))
+        bts = sorted(bt_pool[zone], key=lambda kr: _row_time(kr[1]))
+        li = bi = 0
+        while li < len(lives) and bi < len(bts):
+            l_key, l_row = lives[li]
+            b_key, b_row = bts[bi]
+            if not (l_row.is_reentry or b_row.is_reentry):
+                # 둘 다 재진입이 아니면 강제 조인하지 않는다 — 시간순으로 앞선 쪽을 넘긴다.
+                if _row_time(l_row) <= _row_time(b_row):
+                    li += 1
+                else:
+                    bi += 1
+                continue
+            rescued.append((l_row, b_row))
+            if l_key is not None:
+                consumed_keys.add(l_key)
+            else:
+                consumed_rows.add(id(l_row))
+            if b_key is not None:
+                consumed_keys.add(b_key)
+            else:
+                consumed_rows.add(id(b_row))
+            li += 1
+            bi += 1
+
+    remaining_live = [r for r in live_orphans if id(r) not in consumed_rows]
+    remaining_bt = [r for r in bt_orphans if id(r) not in consumed_rows]
+    return rescued, consumed_keys, remaining_live, remaining_bt
 
 
 def _synthetic_key(row: TimelineRow, seq: int) -> SetupKey:

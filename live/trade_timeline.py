@@ -44,6 +44,7 @@ from live.limit_orders import LimitOrderStatus
 from live.order_journal import (
     ENTRY_STATUS_ENTERED,
     ENTRY_STATUS_REJECTED,
+    ORDER_ORIGIN_REENTRY,
     SKIP_REASON_CELL_BUSY,
     SKIP_REASON_RETAP,
     SKIP_REASON_ZONE_WIDTH,
@@ -58,6 +59,7 @@ from strategy.models import OrderBlockDirection, OrderBlockResult
 if TYPE_CHECKING:
     from backtest.harness import MarketData
     from backtest.models import BacktestConfig
+    from backtest.zone_limit_backtest import _Candidate
     from strategy.models import ConfluenceParams
 
 __all__ = [
@@ -136,6 +138,11 @@ class TimelineRow:
     trigger_time: int | None = None
     """탭이 발생한 상위TF 봉의 `open_time`(ms). 백테 셋업 행에만 있고(진단 조인용), 라이브
     행은 `None`이다 — 조인은 존 정체성+`tap_index`로 하지 이 값으로 하지 않는다."""
+    is_reentry: bool | None = None
+    """이 행이 「익절 후 존 내 재진입」인가(WAN-305). 라이브는 장부 `origin` 열에서 오고
+    (`None` = 열 도입 전 행 = 판별 불가), 백테는 재진입 후보 여부에서 온다(항상 확정).
+    재진입 행은 탭 순번이 안정적이지 않아(라이브 = 재무장 시점 탭 카운트 · 백테 = 0)
+    `setup_key` 조인에서 빠지고 존 정체성 구제 조인(`live.setup_compare`)으로 짝지어진다."""
 
     @property
     def focus_ms(self) -> int | None:
@@ -245,6 +252,8 @@ def live_timeline_rows(
                 zone_start_time=order.zone_start_time,
                 zone_confirmed_time=order.zone_confirmed_time,
                 tap_index=order.tap_index,
+                # WAN-305: 장부 origin이 없는 옛 행은 None(판별 불가)으로 남긴다.
+                is_reentry=(None if order.origin is None else order.origin == ORDER_ORIGIN_REENTRY),
             )
         )
     return rows
@@ -273,6 +282,37 @@ class _BacktestCellTask:
     warmup_days: int
 
 
+def _adopted_day_reentries(
+    market: MarketData,
+    candidates: Sequence[_Candidate],
+    params: ConfluenceParams,
+    cfg: BacktestConfig,
+    *,
+    day_start_ms: int,
+) -> list[_Candidate]:
+    """워밍업 연속 창의 base 후보에서 채택 재진입(band) 후보를 만들어 그날 것만 남긴다 (WAN-305).
+
+    페이퍼 러너(WAN-274)는 익절 후 같은 존에 band 지정가를 재무장한다 — 대조 백테도 같은
+    규칙(WAN-273 채택 = `book_cli.ADOPTED_REENTRY_ENTRY_RULE`)으로 재진입 후보를 만들어야
+    페이퍼의 채택 매매가 「판정 갈림」으로 찍히지 않는다(WAN-305 §2). 후보는 북 측정과 **같은
+    함수**(`wan169.reentry_candidates_for_window` → WAN-228 `_iter_reentries`)로 만든다(로직
+    이중화 금지). 재진입의 `trigger_time`은 재무장 **체결** 시각이다 — 익절이 그날보다
+    며칠 전이어도 재무장은 무기한 대기라 그날 체결일 수 있다(2026-08-13 LTC 1h 실사례).
+    """
+    from backtest.book_cli import ADOPTED_REENTRY_ENTRY_RULE
+    from backtest.wan169_leverage_book import reentry_candidates_for_window
+
+    reentries = reentry_candidates_for_window(
+        market,
+        candidates,
+        params=params,
+        cfg=cfg,
+        timeframe=market.timeframe,
+        entry_rule=ADOPTED_REENTRY_ENTRY_RULE,
+    )
+    return [c for c in reentries if c.trigger_time >= day_start_ms]
+
+
 def cell_timeline_trades(
     market: MarketData,
     ob_result: OrderBlockResult,
@@ -281,25 +321,39 @@ def cell_timeline_trades(
 ) -> list[TimelineRow]:
     """미리 로드·탐지된 한 셀에서 그날 백테스트 거래를 타임라인 행으로 만든다.
 
-    `market`은 `[워밍업 시작, 그날 자정]`으로 잘려 있어야 한다(미래 봉 없음). `eval_from_ms`가
-    탭이 그날 자정 이후인 셋업만 평가하고, 자정에서 끝나는 데이터가 그날 이후를 못 보게 한다
+    `market`은 `[워밍업 시작, 그날 자정]`으로 잘려 있어야 한다(미래 봉 없음). 탭이 그날
+    자정 이후인 셋업만 평가하고, 자정에서 끝나는 데이터가 그날 이후를 못 보게 한다
     — 그래서 미리 로드된 입력을 받는다(회귀 테스트가 「미래 봉을 잘라도 비트 동일」을 고정,
-    `live.live_vs_backtest.cell_funnel`과 같은 규약). per-cell 단일 포지션(`run_once`) · baseline.
+    `live.live_vs_backtest.cell_funnel`과 같은 규약). per-cell 단일 포지션 · baseline.
+
+    📌 **채택 재진입(band)을 포함한다(WAN-305)** — base 셋업 탐색·시퀀싱은 `run_once`
+    (`build_zone_limit_candidates` + `sequence_with_candidates`)와 같은 코드 경로이고, 그 위에
+    페이퍼 러너와 같은 규칙의 재진입 후보(`_adopted_day_reentries`)를 합쳐 한 시퀀서에서
+    배치한다. 재진입 행은 `is_reentry=True`로 표기된다.
     """
-    from backtest.harness import BASELINE_FILL, build_config, build_params, run_once
+    from backtest.harness import BASELINE_FILL, build_config, build_params
     from backtest.models import PositionSide
+    from backtest.zone_limit_backtest import (
+        build_zone_limit_candidates,
+        sequence_with_candidates,
+    )
 
     cfg = build_config(market.timeframe)
     params = build_params(fill=BASELINE_FILL)
-    out = run_once(
-        market,
+    candidates, _stats = build_zone_limit_candidates(
+        market.htf_df,
+        market.df_1m,
+        market.timeframe,
         params=params,
         cfg=cfg,
         order_block_result=ob_result,
-        eval_from_ms=day_start_ms,
     )
+    day_candidates = [c for c in candidates if c.trigger_time >= day_start_ms]
+    reentries = _adopted_day_reentries(market, candidates, params, cfg, day_start_ms=day_start_ms)
+    reentry_ids = {id(c) for c in reentries}
+    paired = sequence_with_candidates([*day_candidates, *reentries], cfg, [])
     rows: list[TimelineRow] = []
-    for trade in out.result.trades:
+    for cand, trade in paired:
         exit_fill = trade.exits[-1]
         rows.append(
             TimelineRow(
@@ -319,6 +373,7 @@ def cell_timeline_trades(
                 exit_reason=exit_fill.reason.value,
                 pnl_pct=trade.return_pct * 100.0,
                 pnl_amount=trade.realized_pnl,
+                is_reentry=id(cand) in reentry_ids,
             )
         )
     return rows
@@ -361,6 +416,10 @@ def cell_setup_timeline(
     셋업 탐색·체결·시퀀싱은 `run_once`(= `build_zone_limit_candidates` + `sequence_with_candidates`)
     와 **같은 코드 경로**라 「청산」 행은 `cell_timeline_trades`와 비트 단위로 같다(회귀 테스트
     고정). 그날 탭 필터도 `eval_from_ms=day_start_ms`와 같은 하한이다(누수 0).
+
+    📌 **채택 재진입(band)을 포함한다(WAN-305)** — 페이퍼 러너와 같은 규칙의 재무장 후보를
+    base와 한 시퀀서에서 배치하고, 그 행은 `is_reentry=True`로 표기된다(존 정체성 구제 조인의
+    입력, `live.setup_compare`).
     """
     from backtest.harness import BASELINE_FILL, build_config, build_params
     from backtest.models import PositionSide
@@ -385,9 +444,13 @@ def cell_setup_timeline(
     # 그날 탭만 — `run_once(eval_from_ms=day_start_ms)`과 같은 하한 필터(누수 0).
     day_candidates = [c for c in candidates if c.trigger_time >= day_start_ms]
     day_sink = [d for d in sink if d.trigger_time >= day_start_ms]
+    # 채택 재진입(band, WAN-305) — 페이퍼 러너(WAN-274)와 같은 규칙의 재무장 후보를 base와
+    # 한 시퀀서에서 배치한다(재무장 체결이 그날인 것만).
+    reentries = _adopted_day_reentries(market, candidates, params, cfg, day_start_ms=day_start_ms)
+    reentry_ids = {id(c) for c in reentries}
     # 단일 포지션 시퀀싱. 셀 로더가 펀딩을 안 싣으므로(`need_1m`·`funding=False`) rates는 빈
     # 리스트다 — run_once 단일 경로와 같은 배선이라 거래가 비트 동일하다.
-    paired = sequence_with_candidates(day_candidates, cfg, [])
+    paired = sequence_with_candidates([*day_candidates, *reentries], cfg, [])
 
     rows: list[TimelineRow] = []
     traded_keys: set[_BacktestSetupKey] = set()
@@ -396,7 +459,9 @@ def cell_setup_timeline(
         zs = ob.start_time if ob is not None else None
         zc = ob.confirmed_time if ob is not None else None
         is_long = cand.side is PositionSide.LONG
-        traded_keys.add((is_long, zs, zc, cand.tap_index, cand.trigger_time))
+        is_reentry = id(cand) in reentry_ids
+        if not is_reentry:
+            traded_keys.add((is_long, zs, zc, cand.tap_index, cand.trigger_time))
         exit_fill = trade.exits[-1]
         rows.append(
             TimelineRow(
@@ -420,6 +485,7 @@ def cell_setup_timeline(
                 zone_confirmed_time=zc,
                 tap_index=cand.tap_index,
                 trigger_time=cand.trigger_time,
+                is_reentry=is_reentry,
             )
         )
     # 남은 rested 셋업: 체결됐으나 슬롯참/사이징에 밀린 것(미진입) · 지정가 미체결.
@@ -457,6 +523,7 @@ def cell_setup_timeline(
                 zone_confirmed_time=diag.zone_confirmed_time,
                 tap_index=diag.tap_index,
                 trigger_time=diag.trigger_time,
+                is_reentry=False,
             )
         )
     # 존폭 필터로 아예 주문을 안 건 셋업(라이브 「건너뜀·존폭」과 대칭).
@@ -543,6 +610,7 @@ def _zone_width_skipped_rows(
                 zone_confirmed_time=ob.confirmed_time,
                 tap_index=signal.tap_index,
                 trigger_time=signal.trigger_time,
+                is_reentry=False,
             )
         )
     return rows
@@ -771,6 +839,7 @@ COL_SOURCE = "출처"
 COL_SYMBOL = "심볼"
 COL_TF = "TF"
 COL_SIDE = "방향"
+COL_KIND = "구분"
 COL_STATUS = "상태"
 COL_RESERVE_KST = "예약(KST)"
 COL_LIMIT = "지정가"
@@ -795,6 +864,7 @@ def display_columns(*, include_utc: bool = False) -> tuple[str, ...]:
         COL_SYMBOL,
         COL_TF,
         COL_SIDE,
+        COL_KIND,
         COL_STATUS,
         COL_RESERVE_KST,
         COL_LIMIT,
@@ -839,6 +909,13 @@ def _exit_reason_label(value: str | None) -> str:
     return "—" if value is None else _EXIT_REASON_LABELS_BY_VALUE.get(value, value)
 
 
+def _kind_label(is_reentry: bool | None) -> str:
+    """구분 열(WAN-305): 재진입 재무장 / 탭 / 판별 불가(옛 장부 행 — origin NULL)."""
+    if is_reentry is None:
+        return "—"
+    return "재진입" if is_reentry else "탭"
+
+
 def timeline_to_display_frame(
     rows: Sequence[TimelineRow], *, include_utc: bool = False
 ) -> pd.DataFrame:
@@ -855,6 +932,7 @@ def timeline_to_display_frame(
             COL_SYMBOL: row.symbol,
             COL_TF: row.timeframe,
             COL_SIDE: _side_label(is_long=row.is_long),
+            COL_KIND: _kind_label(row.is_reentry),
             COL_STATUS: row.status,
             COL_RESERVE_KST: _time_kst(row.reserve_ms),
             COL_LIMIT: _price(row.limit_price),

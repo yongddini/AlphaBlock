@@ -5,7 +5,7 @@
   같은지(CTA #3).
 - 렌더가 네 단계 표와 "무엇을 의심하나"를 담는지.
 - (실데이터) 워밍업 연속 + 그날만 평가라 미래 봉을 잘라도 그날 funnel이 비트 동일(누수 0),
-  그리고 `체결 ≤ 예약 ≤ 탭`.
+  그리고 `체결 ≤ 예약` · `base 예약 ≤ 탭`(WAN-305: 재진입 재무장은 탭이 아니라 예약에만 든다).
 """
 
 from __future__ import annotations
@@ -312,11 +312,36 @@ def test_render_comparison_shows_four_stages_and_diff() -> None:
     out = render_comparison(comp)
 
     assert "탭/셋업 감지 | 12 | 12" in out  # live taps = reserved+skipped = 12.
-    assert "예약(존폭 1.28 통과) | 8 | 9 | +1" in out
+    assert "예약(존폭 1.28 통과 + 재무장) | 8 | 9 | +1" in out
+    assert "재진입 재무장 | 0 | 0 | 0" in out  # WAN-305 별도 계수 줄(탭과 이중 계수 금지).
     assert "3 (틱) | 6 (baseline) | +3" in out
     assert "진입(집행 가드 통과) | 2 | 5 | +3" in out
     assert "pen_5bp" in out and "무엇을 의심하나" in out
     assert "데이터 없어 백테스트에서 뺀 셀 1개: XRP 4h" in out
+
+
+def test_render_comparison_reentry_stage_and_tap_exclusion() -> None:
+    """재진입 재무장은 탭에서 빠지고(라이브 §3 · 백테 §2) 재무장 줄에 병기된다(WAN-305)."""
+    live = _empty_summary(reserved=8, skipped=4, filled=3, entered=2, reentry_rearmed=2)
+    bt = BacktestFunnel(
+        cells=(
+            CellFunnel(
+                "BTC/USDT:USDT",
+                "1h",
+                taps=10,
+                reservations=9,
+                fills_baseline=6,
+                fills_pen5=4,
+                entries=5,
+                reentry_setups=1,
+            ),
+        )
+    )
+    comp = DayComparison(day_key="2026-08-02", live=live, backtest=bt, live_by_cell=())
+    out = render_comparison(comp)
+    # live taps = reserved(8) + skipped(4) − reentry_rearmed(2) = 10.
+    assert "탭/셋업 감지 | 10 | 10" in out
+    assert "재진입 재무장 | 2 | 1 | -1" in out
 
 
 def test_render_by_cell_lists_both_sides() -> None:
@@ -407,6 +432,8 @@ def test_backtest_cell_funnel_monotone(_real_day_window: tuple[int, int]) -> Non
         _SYMBOL, _TF, day_start_ms=start_ms, day_end_ms=end_ms, warmup_days=30
     )
     assert cell.has_data
-    assert cell.fills_baseline <= cell.reservations <= cell.taps
+    # WAN-305 단계 정의: 재무장은 탭이 아니라 예약에만 든다 — base 예약 ≤ 탭, 체결 ≤ 예약.
+    assert cell.fills_baseline <= cell.reservations
+    assert cell.reservations - cell.reentry_setups <= cell.taps
     assert cell.entries <= cell.fills_baseline
     assert cell.fills_pen5 <= cell.fills_baseline

@@ -507,6 +507,9 @@ def build_lens_rows(
             fill=fill,
             cold_segments=False,
             engine_check=engine_check,
+            # WAN-305 명시 핀: wan300/303 CSV는 재진입 꺼진 북의 동결 기록이다(켠 판은 WAN-304
+            # = wan304_universe_reentry가 별도 모듈로 낸다).
+            reentry=False,
         )
         gapped.update(_short(c.symbol) for c in cells if not c.funding[SEGMENT_FULL])
         if funding_proxy:

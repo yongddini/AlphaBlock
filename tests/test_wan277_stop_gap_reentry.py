@@ -67,7 +67,7 @@ def test_adopted_reentry_rule_is_band() -> None:
 def test_include_reentry_adds_candidates_to_book() -> None:
     """`include_reentry=True`면 재진입 후보가 base와 합쳐져 북 셀에 들어간다."""
     payload = _payload_with_reentry("BTCUSDT")
-    off = _segment_cells([payload], harness.SEGMENT_FULL, "")
+    off = _segment_cells([payload], harness.SEGMENT_FULL, "", include_reentry=False)
     on = _segment_cells([payload], harness.SEGMENT_FULL, "", include_reentry=True)
     assert len(off[0].candidates) == 2  # base만
     assert len(on[0].candidates) == 3  # base + 재진입

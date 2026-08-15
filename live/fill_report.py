@@ -38,6 +38,8 @@ from live.order_journal import (
     ENTRY_STATUS_ENTERED,
     ENTRY_STATUS_REJECTED,
     MARGINAL_FILL_BPS,
+    ORDER_ORIGIN_REENTRY,
+    ORDER_ORIGIN_TAP,
     STATUS_DISCARDED_RESTART,
     STATUS_SKIPPED,
     OrderJournal,
@@ -200,6 +202,19 @@ def _status_label(order: PlacedOrder) -> str:
     return _STATUS_LABELS.get(order.status, order.status)
 
 
+def _origin_label(order: PlacedOrder) -> str:
+    """구분 열(WAN-305): 탭 예약 / 재진입 재무장 / 판별 불가(열 도입 전 행).
+
+    재진입(`origin == "reentry"`)은 익절 후 같은 존에 다시 건 주문(WAN-274)이라 탭이
+    아니다 — 이 열이 없으면 사후 수사가 재진입 여부에서 막힌다(WAN-305 §3의 동기).
+    """
+    if order.origin == ORDER_ORIGIN_REENTRY:
+        return "재진입"
+    if order.origin == ORDER_ORIGIN_TAP:
+        return "탭"
+    return "-"  # 열 도입 전 행 — 판별 불가(WAN-194 규약).
+
+
 def _entry_cell(order: PlacedOrder) -> str:
     """진입결과 열(WAN-194): 진입/거부(사유)/미기록 — 체결이 아니면 빈칸."""
     if order.entry_status == ENTRY_STATUS_ENTERED:
@@ -243,6 +258,9 @@ def render_day_report(journal: OrderJournal, *, start_ms: int, end_ms: int, day_
         f" 필터제외 {summary.skipped}**"
     )
     extra: list[str] = []
+    if summary.reentry_rearmed:
+        # 재무장은 탭이 아니다(WAN-305) — 예약에는 들되 별도 계수로 병기한다.
+        extra.append(f"재진입 재무장 {summary.reentry_rearmed}")
     if summary.deviation:
         extra.append(f"밴드기각 {summary.deviation}")
     if summary.pending:
@@ -266,16 +284,16 @@ def render_day_report(journal: OrderJournal, *, start_ms: int, end_ms: int, day_
         return "\n".join(lines)
 
     lines.append(
-        f"| 심볼 | TF | 방향 | 예약({KST_LABEL}) | 지정가 | 상태 | 진입결과 | 필터사유 |"
+        f"| 심볼 | TF | 방향 | 구분 | 예약({KST_LABEL}) | 지정가 | 상태 | 진입결과 | 필터사유 |"
         f" 체결({KST_LABEL}) |"
     )
-    lines.append("| -- | -- | -- | -- | --: | -- | -- | -- | -- |")
+    lines.append("| -- | -- | -- | -- | -- | --: | -- | -- | -- | -- |")
     for order in orders:
         limit = "-" if order.limit_price is None else f"{order.limit_price:.8g}"
         fill = "-" if order.fill_ms is None else format_kst(order.fill_ms)
         skip = order.skip_reason or "-"
         lines.append(
-            f"| {order.symbol} | {order.timeframe} | {order.direction} |"
+            f"| {order.symbol} | {order.timeframe} | {order.direction} | {_origin_label(order)} |"
             f" {format_kst(order.placed_ms)} | {limit} | {_status_label(order)} |"
             f" {_entry_cell(order)} | {skip} | {fill} |"
         )

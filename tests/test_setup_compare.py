@@ -210,3 +210,59 @@ def test_unfilled_backtest_does_not_count_as_entered() -> None:
     assert comp.live is not None and comp.backtest is not None
     assert comp.verdict_differs is True  # 라이브 진입 · 백테 미체결.
     assert result.summary.live_only_entered == 1
+
+
+# --------------------------------------------------------------------------- #
+# 재진입 구제 조인 (WAN-305)
+# --------------------------------------------------------------------------- #
+
+from dataclasses import replace  # noqa: E402
+
+
+def test_reentry_rescue_join_both_marked() -> None:
+    """재진입 행이 존 정체성으로 짝지어져 🔴 판정 갈림이 아니다(WAN-305 완료기준 3).
+
+    라이브 재무장(origin='reentry', tap_index = 재무장 시점 탭 카운트)과 백테 재진입
+    (tap_index 0)은 탭 순번이 달라 정확 키로는 영원히 안 맞는다 — 구제 조인이 잇는다.
+    """
+    live = replace(_live(tap_index=5), is_reentry=True)
+    bt = replace(_bt(tap_index=0), is_reentry=True)
+    result = build_setup_comparisons([live], [bt])
+    assert len(result.comparisons) == 1
+    comp = result.comparisons[0]
+    assert comp.live is live and comp.backtest is bt
+    assert not comp.verdict_differs
+    assert result.summary.diverged == 0
+
+
+def test_reentry_rescue_join_one_side_marked() -> None:
+    """재시작-재탭 모양: 라이브는 일반 탭 행(origin 미상 NULL), 백테만 재진입 — 그래도 잇는다.
+
+    2026-08-13 LTC 1h 실사례의 옛 장부 모양(재무장이 재시작으로 폐기된 뒤 새 탭으로 재진입,
+    origin 열 도입 전이라 판별 불가) — 백테 쪽 재진입 표기 하나로 존 정체성 조인이 성립한다.
+    """
+    live = _live(tap_index=2)  # is_reentry=None(옛 장부 행).
+    bt = replace(_bt(tap_index=0), is_reentry=True)
+    result = build_setup_comparisons([live], [bt])
+    assert len(result.comparisons) == 1
+    assert not result.comparisons[0].verdict_differs
+
+
+def test_non_reentry_singles_are_not_force_joined() -> None:
+    """둘 다 재진입이 아닌 한쪽짜리 행은 강제 조인하지 않는다 — 진짜 판정 갈림은 남는다."""
+    live = _live(tap_index=1)
+    bt = _bt(tap_index=2)  # 같은 존, 다른 탭 — 어느 쪽도 재진입 아님.
+    result = build_setup_comparisons([live], [bt])
+    assert len(result.comparisons) == 2
+    assert result.summary.diverged == 2
+
+
+def test_ltc_fixture_shape_base_plus_reentry() -> None:
+    """LTC 1h 픽스처 모양: base 탭#0 정확 조인 + 재진입 구제 조인 — 빨간 카드 0."""
+    live_base = _live(tap_index=0)
+    bt_base = _bt(tap_index=0)
+    live_re = replace(_live(tap_index=2, fill_ms=1_700_600_000_000), is_reentry=True)
+    bt_re = replace(_bt(tap_index=0), is_reentry=True)
+    result = build_setup_comparisons([live_base, live_re], [bt_base, bt_re])
+    assert result.summary.total == 2
+    assert result.summary.diverged == 0

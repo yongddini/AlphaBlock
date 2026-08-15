@@ -164,7 +164,8 @@ def _book_risk_row(
     cells: Sequence[CellPayload], *, lens: str, scope: str, arm: str, segment: str
 ) -> RiskRow:
     """이 팔·스코프·구간의 채택(cap_only 5배 · WAN-180 스냅샷) 북을 돌려 위험 행을 낸다."""
-    seg_cells = _segment_cells(list(cells), segment, "")
+    # WAN-305 명시 핀: wan301 판은 재진입 꺼진 북이다(payload에도 재진입이 없어 무동작 가드).
+    seg_cells = _segment_cells(list(cells), segment, "", include_reentry=False)
     base_cfg = harness.build_config(BOOK_ANNUALIZATION_TF)
     outcome = run_leverage_book(
         seg_cells,
@@ -327,6 +328,8 @@ def build_lens_rows(
                 seed=seed,
                 cold_segments=False,
                 engine_check=engine_check,
+                # WAN-305 명시 핀: wan301/302 CSV는 재진입 꺼진 북의 동결 기록이다.
+                reentry=False,
             )
             if funding_proxy:
                 cells, note = apply_funding_proxy(cells)

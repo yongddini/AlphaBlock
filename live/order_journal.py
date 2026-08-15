@@ -75,12 +75,22 @@ from execution.engine import (
 )
 from live.limit_orders import LimitFill, LimitOrderStatus, PendingLimitOrder
 
+#: 주문 출처(`origin`, WAN-305): 이 지정가가 **탭 예약**에서 왔는지 **익절 후 재진입
+#: 재무장**(WAN-274 `on_position_exit`)에서 왔는지. 재무장 주문은 탭이 아니므로 깔때기의
+#: 「탭」 단계에 세지 않는다(WAN-305 §2 — 이중 계수 금지). 옛 행은 열 도입 전이라 NULL =
+#: **판별 불가**다(WAN-194 `entry_status` NULL 규약과 같다 — `limit_valid_bars IS NULL`이
+#: 재진입의 간접 서명이지만 그 역시 열 도입 전 행과 겹쳐 확정할 수 없다).
+ORDER_ORIGIN_TAP = "tap"
+ORDER_ORIGIN_REENTRY = "reentry"
+
 #: 처분 미기록 체결의 행 모양은 `data.integrity`가 소유한다(레이어 규칙: `data`는 `live`를
 #: 임포트할 수 없어 점검 도구와 장부가 공유하려면 낮은 쪽에 둬야 한다). 여기서 재수출해
 #: 장부 사용자가 `data.integrity`를 직접 알 필요는 없게 한다.
 __all__ = [
     "ENTRY_STATUS_ENTERED",
     "ENTRY_STATUS_REJECTED",
+    "ORDER_ORIGIN_REENTRY",
+    "ORDER_ORIGIN_TAP",
     "LEDGER_REASON_DEVIATION",
     "LEDGER_REASON_ENTERED",
     "LEDGER_REASON_NO_FILL",
@@ -196,7 +206,8 @@ CREATE TABLE IF NOT EXISTS live_limit_orders (
     entry_reject_reason  TEXT,
     entry_reject_code    TEXT,
     skip_reason          TEXT,
-    limit_valid_bars     INTEGER
+    limit_valid_bars     INTEGER,
+    origin               TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_live_limit_orders_series
     ON live_limit_orders (symbol, timeframe);
@@ -412,7 +423,13 @@ class PlacedOrder:
     """이 셋업이 존의 몇 번째 탭인지(0-based). `zone_start_time`·`zone_confirmed_time`과 함께
     페이퍼↔백테를 셋업 단위로 1:1 조인하는 키(WAN-295) — 백테 셋업 진단(`SetupDiagnostic`)의
     동명 필드와 같은 `entry_candidate_signals`가 매긴 값이라 같은 존의 같은 탭을 가리킨다.
-    `live_limit_orders.tap_index`(NOT NULL DEFAULT 0)에서 온다."""
+    `live_limit_orders.tap_index`(NOT NULL DEFAULT 0)에서 온다.
+    ⚠️ **재진입 재무장 주문(`origin == "reentry"`)의 이 값은 재무장 시점의 탭 카운트**라
+    (`len(ob.tapped_times)`) 백테 재진입 후보의 `tap_index`(0)와 맞지 않는다 — 재진입 행의
+    조인은 존 정체성으로만 한다(`live.setup_compare`의 같은 존 구제 조인, WAN-305)."""
+    origin: str | None = None
+    """이 주문의 출처(WAN-305): `"tap"` = 탭 예약 · `"reentry"` = 익절 후 재진입 재무장 ·
+    `None` = 열 도입 전 행(판별 불가 — WAN-194 규약)."""
 
 
 @dataclass(frozen=True)
@@ -441,6 +458,10 @@ class DaySummary:
     entered: int
     entry_rejected: int
     entry_unrecorded: int
+    reentry_rearmed: int = 0
+    """익절 후 재진입 재무장 주문 수(`origin == "reentry"`, WAN-305). 재무장은 탭이
+    아니므로 `taps`에서 뺀다(이중 계수 금지) — 예약(`reserved`)에는 든다(실제로 주문을
+    걸었다). 옛 행(origin NULL)은 판별 불가라 0으로 세인다(과소일 수 있음을 알고 읽는다)."""
 
     @property
     def fill_rate(self) -> float | None:
@@ -459,12 +480,17 @@ class DaySummary:
 
     @property
     def taps(self) -> int:
-        """탭 = 예약(주문 걸림) + 필터제외(주문 걸기 전 걸러짐). 진입 깔때기의 최상단.
+        """탭 = 예약(주문 걸림) + 필터제외(주문 걸기 전 걸러짐) − 재진입 재무장. 깔때기 최상단.
 
         오늘 감지된 존 탭 전이 총수 — `record_placed`로 주문이 걸린 것(`reserved`)과
         `record_skipped`로 주문 걸기 전 걸러진 것(`skipped`)의 합이다. 백테스트 대조에서
-        「탭/셋업 감지」 단계의 라이브 값이다(WAN-233)."""
-        return self.reserved + self.skipped
+        「탭/셋업 감지」 단계의 라이브 값이다(WAN-233).
+
+        📌 **재진입 재무장(`origin == "reentry"`)은 탭이 아니라 뺀다**(WAN-305 §2 단계 정의)
+        — 재무장은 익절 청산이 낳은 주문이지 존 바깥→안 전이가 아니다. 재무장도 예약
+        (`reserved`)에는 들므로, 이 정의에서 `예약 ≤ 탭`은 재진입이 있는 날 성립하지 않고
+        `체결 ≤ 예약`·`탭 = base 예약 + 필터제외`가 성립한다."""
+        return self.reserved + self.skipped - self.reentry_rearmed
 
     @classmethod
     def from_orders(cls, orders: Sequence[PlacedOrder]) -> DaySummary:
@@ -478,6 +504,7 @@ class DaySummary:
         filled = no_fill = deviation = invalidated = condition_failed = 0
         pending = discarded = skipped = 0
         entered = rejected = unrecorded = 0
+        reentry_rearmed = sum(1 for o in orders if o.origin == ORDER_ORIGIN_REENTRY)
         for order in orders:
             if order.status == LimitOrderStatus.FILLED.value:
                 filled += 1
@@ -515,6 +542,7 @@ class DaySummary:
             entered=entered,
             entry_rejected=rejected,
             entry_unrecorded=unrecorded,
+            reentry_rearmed=reentry_rearmed,
         )
 
 
@@ -579,6 +607,9 @@ class OrderJournal:
             # 없다). NULL = 무기한 **또는** 열 도입 전 행 — 둘 다 기한을 모르므로 재시작
             # 재평가 대상이 아니다(재시작 폐기로 남는다).
             ("limit_valid_bars", "INTEGER"),
+            # WAN-305: 이 주문이 탭 예약인지 익절 후 재진입 재무장인지. NULL = 열 도입 전
+            # 행 = 판별 불가(WAN-194 규약) — 사후 수사가 재진입 여부에서 막히지 않게 한다.
+            ("origin", "TEXT"),
         ):
             if column not in existing:
                 self._conn.execute(
@@ -626,14 +657,20 @@ class OrderJournal:
         session_id: int,
         zone_start_time: int | None,
         zone_confirmed_time: int | None,
+        origin: str = ORDER_ORIGIN_TAP,
     ) -> int:
-        """주문 예약을 기록하고 장부 행 id를 반환한다(주문의 `journal_id`로 쓴다)."""
+        """주문 예약을 기록하고 장부 행 id를 반환한다(주문의 `journal_id`로 쓴다).
+
+        `origin`(WAN-305)은 이 주문이 탭 예약(`"tap"`, 기본)인지 익절 후 재진입 재무장
+        (`"reentry"`, `on_position_exit` 경로)인지를 남긴다 — 재진입은 탭이 아니므로
+        깔때기 「탭」 단계에서 이중 계수하지 않기 위한 1급 기록이다.
+        """
         with self._lock, self._conn:
             cur = self._conn.execute(
                 "INSERT INTO live_limit_orders (session_id, symbol, timeframe, direction,"
                 " zone_start_time, zone_confirmed_time, tap_index, placed_ms, status,"
-                " first_rested_ms, last_limit_price, limit_valid_bars)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " first_rested_ms, last_limit_price, limit_valid_bars, origin)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     session_id,
                     order.symbol,
@@ -647,6 +684,7 @@ class OrderJournal:
                     order.first_rested_ms,
                     order.last_limit_price,
                     order.limit_valid_bars,
+                    origin,
                 ),
             )
         row_id = cur.lastrowid
@@ -1092,7 +1130,7 @@ class OrderJournal:
             "SELECT symbol, timeframe, direction, placed_ms, status, last_limit_price,"
             " fill_ms, fill_penetration_bps, first_rested_ms, entry_status,"
             " entry_reject_reason, skip_reason, fill_price, stop_price, take_profit_price,"
-            " zone_start_time, zone_confirmed_time, tap_index FROM live_limit_orders"
+            " zone_start_time, zone_confirmed_time, tap_index, origin FROM live_limit_orders"
             " WHERE placed_ms >= ? AND placed_ms < ? ORDER BY placed_ms, id",
             (start_ms, end_ms),
         ).fetchall()
@@ -1116,6 +1154,7 @@ class OrderJournal:
                 zone_start_time=None if r[15] is None else int(r[15]),
                 zone_confirmed_time=None if r[16] is None else int(r[16]),
                 tap_index=0 if r[17] is None else int(r[17]),
+                origin=None if r[18] is None else str(r[18]),
             )
             for r in rows
         ]
