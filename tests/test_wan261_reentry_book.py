@@ -167,11 +167,34 @@ def _payload(*, boundary: int, base: list[_Candidate], reentry: list[_Candidate]
     )
 
 
-def test_segment_cells_default_ignores_reentry() -> None:
-    """기본(include_reentry=False)이면 base만 — 재진입이 실려 있어도 무시(비트 재현)."""
+def test_segment_cells_default_includes_reentry() -> None:
+    """기본이 재진입 포함이다(WAN-305 — 채택 규칙 = 페이퍼와 같은 선상).
+
+    🔁 WAN-261 시절 기본은 무시(base만)였으나 WAN-305가 뒤집었다 — 옛 CSV 재현은
+    `include_reentry=False` **명시 핀**으로만 한다(아래 테스트가 그 핀의 동작을 고정).
+    """
     payload = _payload(boundary=100, base=[_cand(10)], reentry=[_cand(200)])
     cells = _segment_cells([payload], SEGMENT_FULL, "")
+    assert len(cells[0].candidates) == 2  # base + 재진입(기본 = 채택 규칙).
+
+
+def test_segment_cells_pin_false_gives_base_only() -> None:
+    """`include_reentry=False` 명시 핀이면 base만 — 옛 CSV 비트 재현 경로(WAN-305)."""
+    payload = _payload(boundary=100, base=[_cand(10)], reentry=[_cand(200)])
+    cells = _segment_cells([payload], SEGMENT_FULL, "", include_reentry=False)
     assert len(cells[0].candidates) == 1  # base만.
+
+
+def test_build_book_rows_default_includes_reentry() -> None:
+    """`book_cli.build_book_rows` 기본이 재진입 포함(WAN-305) — 라벨이 아니라 거래 수로 고정."""
+    from backtest import book_cli
+    from backtest.leverage_book import LeverageBookParams
+
+    payload = _payload(boundary=100, base=[_cand(10)], reentry=[_cand(7_200_000)])
+    kw = dict(book=LeverageBookParams(), segments=[SEGMENT_FULL], start_ms=0, end_ms=0)
+    default_rows = book_cli.build_book_rows([payload], **kw)  # type: ignore[arg-type]
+    pinned = book_cli.build_book_rows([payload], include_reentry=False, **kw)  # type: ignore[arg-type]
+    assert default_rows[0].num_trades == pinned[0].num_trades + 1  # 재진입이 실제 배치된다.
 
 
 def test_segment_cells_includes_reentry_when_asked() -> None:

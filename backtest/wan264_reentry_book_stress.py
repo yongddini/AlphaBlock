@@ -364,8 +364,16 @@ def run_report(
         fill = None if lens == "baseline" else harness.fill_preset(lens)
         if log:
             print(f"[wan264] 렌즈 {lens}: 후보 생성 중(무거움) …", flush=True)
+        # WAN-305 명시 핀: wan264 CSV는 freeze 규칙(WAN-269 이전) 재진입의 동결 스냅샷이다.
         payloads = run_cells(
-            symbols, timeframes, start=start, end=end, jobs=jobs, reentry=True, fill=fill
+            symbols,
+            timeframes,
+            start=start,
+            end=end,
+            jobs=jobs,
+            reentry=True,
+            reentry_entry_rule="freeze",
+            fill=fill,
         )
         if funding_proxy:
             payloads, note = apply_funding_proxy(payloads)

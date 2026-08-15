@@ -271,7 +271,16 @@ def run_report(
     `run_cells(reentry=True)` 한 번이면 base 후보(off 팔)와 재진입 후보(on 팔)를 모두 담으므로
     팔마다 다시 돌 필요가 없다 — off는 base만, on은 base+재진입을 `_segment_cells`가 고른다.
     """
-    payloads = run_cells(symbols, timeframes, start=start, end=end, jobs=jobs, reentry=True)
+    # WAN-305 명시 핀: wan261/262 CSV는 freeze 규칙(WAN-269 이전) 재진입의 동결 스냅샷이다.
+    payloads = run_cells(
+        symbols,
+        timeframes,
+        start=start,
+        end=end,
+        jobs=jobs,
+        reentry=True,
+        reentry_entry_rule="freeze",
+    )
     if funding_proxy:
         payloads, note = apply_funding_proxy(payloads)
         if note and log:

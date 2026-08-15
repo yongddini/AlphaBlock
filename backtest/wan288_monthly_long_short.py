@@ -266,7 +266,8 @@ def _book_monthly_rows(
     WAN-180 `_monthly_rows`를 그대로 써 북 자본곡선을 UTC 달력월로 접는다 — 롱-온리 팔은
     `wan180_monthly_returns.csv`의 (scope, cap_only, 5.0, oos_warm) 행과 비트 재현돼야 한다.
     """
-    seg_cells = _segment_cells(list(cells), SEGMENT_OOS_WARM, "")
+    # WAN-305 명시 핀: wan288 판은 재진입 꺼진 북이다(payload에도 재진입이 없어 무동작 가드).
+    seg_cells = _segment_cells(list(cells), SEGMENT_OOS_WARM, "", include_reentry=False)
     base_cfg = harness.build_config(BOOK_ANNUALIZATION_TF)
     outcome = run_leverage_book(
         seg_cells,
@@ -731,8 +732,15 @@ def main(argv: list[str] | None = None) -> int:
     else:
         symbols = tuple(s.strip() for s in str(args.symbols).split(",") if s.strip())
         timeframes = tuple(t.strip() for t in str(args.tf).split(",") if t.strip())
+        # WAN-305 명시 핀: wan288/291 CSV는 재진입 꺼진 북(WAN-180 스냅샷 북)의 동결 기록이다.
         cells = run_cells(
-            symbols, timeframes, start=args.start, end=args.end, jobs=args.jobs, short_enabled=True
+            symbols,
+            timeframes,
+            start=args.start,
+            end=args.end,
+            jobs=args.jobs,
+            short_enabled=True,
+            reentry=False,
         )
         if not args.no_funding_proxy:
             cells, funding_note = apply_funding_proxy(cells)

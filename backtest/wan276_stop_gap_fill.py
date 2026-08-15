@@ -651,8 +651,9 @@ def main(argv: list[str] | None = None) -> int:
     else:
         symbols = tuple(s.strip() for s in str(args.symbols).split(",") if s.strip())
         timeframes = tuple(t.strip() for t in str(args.tf).split(",") if t.strip())
+        # WAN-305 명시 핀: wan276 CSV는 재진입 이전 북의 동결 스냅샷이다(재진입 판은 wan277).
         base_payloads = run_cells(
-            symbols, timeframes, start=args.start, end=args.end, jobs=args.jobs
+            symbols, timeframes, start=args.start, end=args.end, jobs=args.jobs, reentry=False
         )
         nonfill_payloads = run_cells(
             symbols,
@@ -661,6 +662,7 @@ def main(argv: list[str] | None = None) -> int:
             end=args.end,
             jobs=args.jobs,
             limit_stop_nonfill=True,
+            reentry=False,
         )
         funding_note = ""
         if not args.no_funding_proxy:

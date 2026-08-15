@@ -199,9 +199,16 @@ def test_book_cli_matches_wan180_aggregation_bit_for_bit() -> None:
     from backtest.wan169_leverage_book import run_cells
     from backtest.wan180_leverage_book_nine import build_rows
 
-    payloads = run_cells(_SYMBOLS, _TFS, start=_START, end=_END, jobs=1)
+    # WAN-305: wan180 aggregation은 재진입 이전 북 스냅샷으로 핀됐다 — 대조의 양쪽을
+    # 같은 base-only 좌표에 놓는다(이 테스트의 대상은 aggregation 기계의 「구성상 같음」).
+    payloads = run_cells(_SYMBOLS, _TFS, start=_START, end=_END, jobs=1, reentry=False)
     cli_row = book_cli.build_book_rows(
-        payloads, book=ADOPTED_BOOK, segments=[SEGMENT_FULL], start_ms=0, end_ms=1
+        payloads,
+        book=ADOPTED_BOOK,
+        segments=[SEGMENT_FULL],
+        start_ms=0,
+        end_ms=1,
+        include_reentry=False,
     )[0]
     book_rows, _, _ = build_rows(payloads)
     wan = next(
@@ -322,7 +329,7 @@ def test_reentry_off_reproduces_pre_wan273_book() -> None:
     from backtest.run import parse_date_ms
     from backtest.wan169_leverage_book import run_cells
 
-    base = run_cells(_SYMBOLS, _TFS, start=_START, end=_END, jobs=1)  # reentry=False 기본
+    base = run_cells(_SYMBOLS, _TFS, start=_START, end=_END, jobs=1, reentry=False)
     ref = book_cli.build_book_rows(
         base,
         book=ADOPTED_BOOK,

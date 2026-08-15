@@ -49,6 +49,8 @@ from backtest.zone_limit_backtest import IntrabarLiveLimit
 from live.engine_state import PersistedPendingOrder, PersistedZoneWatch, SeriesStateSnapshot
 from live.limit_orders import LimitFill, LimitOrderBook, LimitOrderStatus, PendingLimitOrder
 from live.order_journal import (
+    ORDER_ORIGIN_REENTRY,
+    ORDER_ORIGIN_TAP,
     SKIP_REASON_CELL_BUSY,
     SKIP_REASON_RETAP,
     SKIP_REASON_ZONE_WIDTH,
@@ -634,11 +636,14 @@ class ZoneLimitLiveEngine:
         ob: OrderBlock,
         order: PendingLimitOrder,
         time_ms: int,
+        *,
+        origin: str = ORDER_ORIGIN_TAP,
     ) -> list[EngineEvent]:
         """주문을 주문판에 걸고 존·장부 상태를 갱신해 `placed` 이벤트를 낸다.
 
         탭 예약(`_maybe_arm`)과 익절 후 재진입 재무장(`on_position_exit`, WAN-274)이 **같은**
-        이 헬퍼를 쓴다 — 두 곳이 place/journal 배선을 복제하면 갈라진다(로직 이중화 금지)."""
+        이 헬퍼를 쓴다 — 두 곳이 place/journal 배선을 복제하면 갈라진다(로직 이중화 금지).
+        `origin`(WAN-305)이 그 두 출처를 장부에 남긴다 — 재무장 경로가 `"reentry"`를 넘긴다."""
         placed = self.book.place(order)
         if placed is None:
             return []
@@ -649,6 +654,7 @@ class ZoneLimitLiveEngine:
                 session_id=self._session_id,
                 zone_start_time=ob.start_time,
                 zone_confirmed_time=ob.confirmed_time,
+                origin=origin,
             )
             state.pending_journal_id = order.journal_id
         return [
@@ -699,7 +705,9 @@ class ZoneLimitLiveEngine:
         )
         if order is None:
             return []
-        return self._place(state, symbol, timeframe, ob, order, time_ms)
+        return self._place(
+            state, symbol, timeframe, ob, order, time_ms, origin=ORDER_ORIGIN_REENTRY
+        )
 
     # -- 재시작 영속화 (WAN-306) ----------------------------------------------
 

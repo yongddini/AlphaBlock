@@ -161,18 +161,22 @@ def _reentry_prices(payload: object) -> list[float]:
     ]
 
 
-def test_run_cells_entry_rule_default_reproduces_freeze() -> None:
-    """`run_cells(reentry_entry_rule='freeze')`(기본) ≡ `run_cells()` — 재진입 후보 비트 재현."""
+def test_run_cells_entry_rule_default_reproduces_band() -> None:
+    """`run_cells()`(기본) ≡ `run_cells(reentry_entry_rule='band')` — 기본이 채택 규칙(WAN-305).
+
+    🔁 WAN-269 시절 기본은 `freeze`였으나 WAN-305가 채택 규칙(band, WAN-273)을 기본으로
+    승격했다 — freeze는 옵트인 존치(wan261/262 CSV 재현은 명시 핀).
+    """
     _require_real_data()
     kw = dict(start=_START, end=_END, jobs=1, reentry=True)
     default = run_cells(_SYMBOLS, _TFS, **kw)  # type: ignore[arg-type]
-    freeze = run_cells(_SYMBOLS, _TFS, reentry_entry_rule="freeze", **kw)  # type: ignore[arg-type]
-    assert len(default) == len(freeze)
-    for a, b in zip(default, freeze, strict=True):
+    band = run_cells(_SYMBOLS, _TFS, reentry_entry_rule="band", **kw)  # type: ignore[arg-type]
+    assert len(default) == len(band)
+    for a, b in zip(default, band, strict=True):
         # base 후보는 규칙과 무관 — 팔 사이에서 비트 동일.
         for seg in (SEGMENT_FULL, SEGMENT_OOS):
             assert len(a.candidates[seg]) == len(b.candidates[seg])
-        # 재진입 후보(freeze)도 기본 호출과 비트 동일.
+        # 재진입 후보(band)도 기본 호출과 비트 동일.
         assert _reentry_prices(a) == _reentry_prices(b)
 
 

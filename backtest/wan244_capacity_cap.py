@@ -224,7 +224,8 @@ def _run_scope_segment(
 ) -> CapRow:
     scoped = _scope_payloads(payloads, scope)
     kept = [p for p in scoped if not exclude or _short(p.symbol) != exclude]
-    cells = _segment_cells(kept, segment, "")
+    # WAN-305 명시 핀: wan244는 재진입 이전 북이다(payload에도 재진입이 없어 무동작 가드).
+    cells = _segment_cells(kept, segment, "", include_reentry=False)
     base_cfg = _base_cfg(cap_on)
     outcome = run_leverage_book(cells, base_cfg, ADOPTED_BOOK)
     result = build_result_from_trades(
@@ -568,7 +569,14 @@ def _load_payloads(
     symbols: Sequence[str], timeframes: Sequence[str], start: str, end: str, jobs: int, proxy: bool
 ) -> list[CellPayload]:
     payloads = run_cells(
-        symbols, timeframes, start=start, end=end, jobs=jobs, adv_fraction=ADV_FRACTION
+        symbols,
+        timeframes,
+        start=start,
+        end=end,
+        jobs=jobs,
+        adv_fraction=ADV_FRACTION,
+        # WAN-305 명시 핀: wan244 CSV는 재진입 이전 북의 동결 스냅샷이다.
+        reentry=False,
     )
     if proxy:
         payloads, note = apply_funding_proxy(payloads)

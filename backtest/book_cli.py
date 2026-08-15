@@ -143,7 +143,7 @@ def build_book_rows(
     segments: Sequence[str],
     start_ms: int,
     end_ms: int,
-    include_reentry: bool = False,
+    include_reentry: bool = True,
     fee_rate: float | None = None,
     maker_fee_rate: float | None = None,
     slippage: float | None = None,
@@ -153,9 +153,10 @@ def build_book_rows(
     후보 생성(무거운 연산)과 배치 회계(가벼운 연산)를 분리한다 — 검산 테스트가 이 함수에
     직접 payloads를 넘겨 실데이터 로딩 없이 배치 회계만 비트 대조할 수 있게 한다.
 
-    `include_reentry`(WAN-261, 옵트인)를 켜면 각 칸의 재진입 후보(payload에 실려 있을 때만)를
-    base 재탭 후보와 합쳐 한 지갑에서 시퀀싱한다. 기본(False)이면 base만 돌아 인자 없는
-    `backtest.run`과 비트 단위로 같다(완료기준 2).
+    ⚠️ **`include_reentry` 기본값은 켬이다(WAN-305)** — 채택 북(WAN-273 재진입 = 인자 없는
+    `backtest.run`)이 「아무것도 안 하면」 나오게 한다. 켜면 각 칸의 재진입 후보(payload에
+    실려 있을 때만)를 base 재탭 후보와 합쳐 한 지갑에서 시퀀싱한다. payload에 재진입이
+    없으면 켜져 있어도 base만 남는다. `False`는 옛 CSV 재현용 **명시 핀**이다(WAN-305).
 
     `fee_rate`·`maker_fee_rate`·`slippage`(WAN-264, 옵트인)를 주면 북 실행 cfg의 비용을
     오버라이드한다 — 비용은 후보 집합에 무관하고 시퀀싱(`_to_trade`)에서만 적용되므로

@@ -32,6 +32,13 @@
   레버리지 북(WAN-213 cap_only 5배·공유 자본)인데 라이브 페이퍼 배선(WAN-171)과 사이징
   축이 다를 수 있다. 북/사이징 차이가 진입 개수 대조를 오염시키지 않도록 백테스트 쪽은
   **per-cell 단일 포지션**(`run_once`의 단일 경로)으로 맞춰 「어느 셋업이 진입했나」만 본다.
+* 📌 **채택 재진입(band)을 포함한다(WAN-305)** — 페이퍼 러너(WAN-274)는 익절 후 같은 존에
+  재무장하므로 백테 쪽도 같은 규칙의 재진입 후보를 합쳐 센다. **단계 정의(이중 계수 금지)**:
+  재무장은 **탭이 아니다**(존 바깥→안 전이가 아니라 익절 청산이 낳은 주문) — 탭 단계는 양쪽
+  다 base 탭만 세고, 재무장은 예약·체결·진입에 들며 별도 「재진입 재무장」 줄로 병기한다.
+  따라서 재진입이 있는 날은 `예약 ≤ 탭`이 성립하지 않고 `체결 ≤ 예약`·`탭 = base 예약 +
+  필터제외`가 성립한다. ⚠️ 백테 재무장 수는 **체결된 재무장**만이다(미체결 재무장 후보는
+  엔진이 만들지 않는다) — 라이브 재무장(주문을 건 수)보다 과소일 수 있다.
 * ⚠️ **체결 단계 불일치를 「버그」로 단정 금지** — 라벨(라이브=틱 / 백테스트=baseline 상한)을
   붙여 읽는다. 3·4단계가 아니라 1·2단계가 갈리면 그때가 진짜 배선 의심이다.
 
@@ -120,9 +127,13 @@ class CellFunnel:
     timeframe: str
     taps: int
     reservations: int
+    """주문이 걸린 셋업 수 — base(존폭 통과 탭) + 재진입 재무장(WAN-305). 라이브 `reserved`
+    (재무장 포함)와 같은 정의라 나란히 읽는다."""
     fills_baseline: int
     fills_pen5: int
     entries: int
+    reentry_setups: int = 0
+    """그날 체결된 채택 재진입(band) 재무장 수(WAN-305) — 탭이 아니라 별도 계수."""
     has_data: bool = True
 
 
@@ -155,6 +166,10 @@ class BacktestFunnel:
     @property
     def entries(self) -> int:
         return sum(c.entries for c in self.with_data)
+
+    @property
+    def reentry_setups(self) -> int:
+        return sum(c.reentry_setups for c in self.with_data)
 
     @property
     def missing_cells(self) -> tuple[CellFunnel, ...]:
@@ -247,11 +262,23 @@ def cell_funnel(
 ) -> CellFunnel:
     """미리 로드·탐지된 (심볼, TF)의 백테스트 funnel을 낸다(그 KST 하루, 워밍업 연속).
 
-    `market`은 `[워밍업 시작, 그날 자정]`으로 잘려 있어야 한다(미래 봉 없음). `eval_from_ms`가
-    탭이 그날 자정 이후인 셋업만 평가하고, 자정에서 끝나는 데이터가 그날 이후를 못 보게 한다.
+    `market`은 `[워밍업 시작, 그날 자정]`으로 잘려 있어야 한다(미래 봉 없음). 탭이 그날 자정
+    이후인 셋업만 평가하고, 자정에서 끝나는 데이터가 그날 이후를 못 보게 한다.
     이 함수를 미리 로드된 입력에서 받는 것은 회귀 테스트가 「미래 봉을 잘라도 비트 동일」을
     고정할 수 있게 하기 위해서다(누수 0).
+
+    📌 **baseline 열은 채택 재진입(band)을 포함한다(WAN-305)** — 재무장 체결이 그날인 재진입
+    후보를 base와 합쳐 예약·체결·진입에 센다(탭에는 안 센다 — 모듈 독스트링의 단계 정의).
+    ⚠️ `pen_5bp` 참고 렌즈는 base 전용이다(재진입 미포함 — 렌즈별 재진입 파생은 비용 대비
+    참고 가치가 낮아 얹지 않았다. 두 열을 재진입 유무까지 맞춰 읽지 말 것).
     """
+    from backtest.zone_limit_backtest import (
+        SetupDiagnostic,
+        build_zone_limit_candidates,
+        sequence_with_candidates,
+    )
+    from live.trade_timeline import _adopted_day_reentries
+
     cfg = build_config(market.timeframe)
     params_base = build_params(fill=BASELINE_FILL)
     params_pen5 = build_params(fill=fill_preset("pen_5bp"))
@@ -259,25 +286,39 @@ def cell_funnel(
     taps, reservations = count_taps_reservations(
         ob_result, market, params_base, cfg, day_start_ms=day_start_ms, day_end_ms=day_end_ms
     )
-    out_base = run_once(
-        market, params=params_base, cfg=cfg, order_block_result=ob_result, eval_from_ms=day_start_ms
+    # baseline은 후보를 직접 만들어(base + 채택 재진입, WAN-305) 한 시퀀서에서 센다 — base
+    # 체결·거래는 `run_once(eval_from_ms=…)`와 같은 코드 경로다(그쪽도 sink 필터 + 시퀀싱).
+    sink: list[SetupDiagnostic] = []
+    candidates, _stats = build_zone_limit_candidates(
+        market.htf_df,
+        market.df_1m,
+        market.timeframe,
+        params=params_base,
+        cfg=cfg,
+        order_block_result=ob_result,
+        setup_sink=sink,
     )
+    day_sink = [d for d in sink if d.trigger_time >= day_start_ms]
+    fills_base = sum(1 for d in day_sink if d.filled)
+    day_candidates = [c for c in candidates if c.trigger_time >= day_start_ms]
+    reentries = _adopted_day_reentries(
+        market, candidates, params_base, cfg, day_start_ms=day_start_ms
+    )
+    # 재무장 후보는 체결이 확정된 것만 존재하므로 예약·체결 양쪽에 같은 수로 든다.
+    entries = len(sequence_with_candidates([*day_candidates, *reentries], cfg, []))
     out_pen5 = run_once(
         market, params=params_pen5, cfg=cfg, order_block_result=ob_result, eval_from_ms=day_start_ms
     )
-    fills_base = out_base.stats.filled if out_base.stats is not None else 0
     fills_pen5 = out_pen5.stats.filled if out_pen5.stats is not None else 0
-    # `eval_from_ms`가 후보를 탭 시각으로 걸러 낸 뒤 시퀀싱하므로, 남은 거래는 전부 그날
-    # 탭이다(진입 시각도 그날 자정 이후·다음 자정 이전). 그 수가 곧 「진입」이다.
-    entries = len(out_base.result.trades)
     return CellFunnel(
         symbol=market.symbol,
         timeframe=market.timeframe,
         taps=taps,
-        reservations=reservations,
-        fills_baseline=fills_base,
+        reservations=reservations + len(reentries),
+        fills_baseline=fills_base + len(reentries),
         fills_pen5=fills_pen5,
         entries=entries,
+        reentry_setups=len(reentries),
     )
 
 
@@ -421,8 +462,10 @@ def render_comparison(comp: DayComparison, *, by_cell: bool = False) -> str:
         "| 단계 | 라이브 | 백테스트 | 차이(BT−L) |",
         "| -- | --: | --: | --: |",
         f"| 탭/셋업 감지 | {live.taps} | {bt.taps} | {_diff(bt.taps, live.taps)} |",
-        f"| 예약(존폭 1.28 통과) | {live.reserved} | {bt.reservations} |"
+        f"| 예약(존폭 1.28 통과 + 재무장) | {live.reserved} | {bt.reservations} |"
         f" {_diff(bt.reservations, live.reserved)} |",
+        f"| └ 재진입 재무장 | {live.reentry_rearmed} | {bt.reentry_setups} |"
+        f" {_diff(bt.reentry_setups, live.reentry_rearmed)} |",
         f"| 체결 | {live.filled} (틱) | {bt.fills_baseline} (baseline) |"
         f" {_diff(bt.fills_baseline, live.filled)} |",
         f"| 진입(집행 가드 통과) | {live.entered} | {bt.entries} |"
@@ -433,6 +476,10 @@ def render_comparison(comp: DayComparison, *, by_cell: bool = False) -> str:
         " 부족의 상당 부분은 버그가 아니라 낙관 가정의 비용이다(WAN-96/124).",
         "",
         "**여기서 갈렸으면 무엇을 의심하나**",
+        "0. **재진입 재무장은 탭이 아니다**(WAN-305) — 탭 줄은 양쪽 다 base 탭만 세고,"
+        " 재무장은 예약·체결·진입에 든다(별도 줄로 병기). 백테 재무장은 체결된 것만 세므로"
+        " 라이브(주문을 건 수)보다 적을 수 있고, 라이브 재무장은 origin 열 도입(WAN-305)"
+        " 이후 기록만 센다.",
         "1. **탭** 이 갈리면 — 데이터 스냅샷·오더블록 탐지 배선(같은 캔들·같은 파라미터인데"
         " 다르면 수집 지연이나 탐지 경로 차이). 가장 깨끗한 파리티 체크다.",
         "2. **예약** 이 갈리면 — 존폭 필터(1.28)·ATR 정의·슬롯 점유 규칙. 탭은 같은데 예약이"

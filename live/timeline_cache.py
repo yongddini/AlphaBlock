@@ -88,7 +88,9 @@ __all__ = [
 #: 저장 포맷·복원 규칙의 버전. **캐시 행의 의미가 바뀌면 손으로 올린다** — 지문에 들어가므로
 #: 값을 올리면 옛 적재분과 키가 갈라져 새로 적재된다(옛 행은 남는다). `ENGINE_VERSION`은
 #: 거래 의미(엔진)를, 이 값은 캐시 표현(행 스키마·조합 규칙)을 각각 판별한다.
-TIMELINE_CACHE_VERSION = "wan239.1"
+#: wan305.1: 백테 타임라인이 채택 재진입(band)을 포함하고 행에 `is_reentry`가 실린다 —
+#: 옛 적재분(재진입 없는 판)은 지문이 갈라져 자동 미스가 된다(WAN-305).
+TIMELINE_CACHE_VERSION = "wan305.1"
 
 
 class DuplicateTimelineCacheError(RuntimeError):
@@ -303,6 +305,7 @@ CREATE TABLE IF NOT EXISTS timeline_cache_rows (
     pnl_amount         REAL,
     zone_start_time    INTEGER,
     zone_confirmed_time INTEGER,
+    is_reentry         INTEGER,
     PRIMARY KEY (run_id, row_no)
 );
 
@@ -354,6 +357,20 @@ class TimelineCacheStore:
         configure_connection(self._conn)
         with self._conn:
             self._conn.executescript(_SCHEMA)
+            self._migrate()
+
+    def _migrate(self) -> None:
+        """옛 캐시 DB에 나중에 생긴 열을 덧붙인다(`order_journal._migrate`와 같은 패턴).
+
+        `CREATE TABLE IF NOT EXISTS`는 기존 테이블에 열을 늘려 주지 않는다 — WAN-305가
+        `is_reentry`를 추가했으므로 옛 DB에서 새 INSERT가 죽지 않게 ALTER를 건다(옛 적재분
+        행은 NULL로 남지만 캐시 버전이 갈라져 어차피 로드되지 않는다).
+        """
+        existing = {
+            str(row[1]) for row in self._conn.execute("PRAGMA table_info(timeline_cache_rows)")
+        }
+        if "is_reentry" not in existing:
+            self._conn.execute("ALTER TABLE timeline_cache_rows ADD COLUMN is_reentry INTEGER")
 
     def __enter__(self) -> TimelineCacheStore:
         return self
@@ -421,7 +438,10 @@ class TimelineCacheStore:
                 ),
             )
             self._conn.executemany(
-                "INSERT INTO timeline_cache_rows VALUES (" + ", ".join("?" * 15) + ")",
+                "INSERT INTO timeline_cache_rows (run_id, row_no, symbol, timeframe, is_long,"
+                " status, fill_ms, fill_price, exit_ms, exit_price, exit_reason, pnl_pct,"
+                " pnl_amount, zone_start_time, zone_confirmed_time, is_reentry)"
+                " VALUES (" + ", ".join("?" * 16) + ")",
                 [_row_values(run_id, no, row) for no, row in enumerate(rows)],
             )
         return run_id
@@ -452,7 +472,8 @@ class TimelineCacheStore:
             row_data = self._conn.execute(
                 "SELECT symbol, timeframe, is_long, status, fill_ms, fill_price, exit_ms, "
                 "exit_price, exit_reason, pnl_pct, pnl_amount, zone_start_time, "
-                "zone_confirmed_time FROM timeline_cache_rows WHERE run_id = ? ORDER BY row_no",
+                "zone_confirmed_time, is_reentry FROM timeline_cache_rows WHERE run_id = ?"
+                " ORDER BY row_no",
                 (run_id,),
             ).fetchall()
         rows = tuple(_row_from_db(r) for r in row_data)
@@ -477,6 +498,7 @@ def _row_values(run_id: str, row_no: int, row: TimelineRow) -> tuple[object, ...
         row.pnl_amount,
         row.zone_start_time,
         row.zone_confirmed_time,
+        None if row.is_reentry is None else int(row.is_reentry),
     )
 
 
@@ -505,6 +527,7 @@ def _row_from_db(r: tuple[Any, ...]) -> TimelineRow:
         pnl_amount=None if r[10] is None else float(r[10]),
         zone_start_time=None if r[11] is None else int(r[11]),
         zone_confirmed_time=None if r[12] is None else int(r[12]),
+        is_reentry=None if r[13] is None else bool(r[13]),
     )
 
 

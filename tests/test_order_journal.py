@@ -1016,3 +1016,31 @@ def test_notifier_reason_phrases_is_the_canonical_source() -> None:
     from live.order_journal import REASON_PHRASES
 
     assert zone_limit_notifier._REASON_PHRASES is REASON_PHRASES
+
+
+def test_origin_roundtrip_and_day_summary_reentry(tmp_path: Path) -> None:
+    """`origin`(WAN-305)이 장부를 왕복하고, 재무장은 `taps`에서 빠진다(이중 계수 금지).
+
+    기본(`record_placed` 인자 생략)은 탭이고, 재진입 재무장 경로만 `"reentry"`를 넘긴다 —
+    옛 행은 열 도입 전이라 NULL(판별 불가, WAN-194 규약)로 남는다.
+    """
+    from live.order_journal import ORDER_ORIGIN_REENTRY, ORDER_ORIGIN_TAP, DaySummary
+
+    journal = OrderJournal(tmp_path / "j.db")
+    session = journal.start_session(now_ms=0)
+    journal.record_placed(_order(), session_id=session, zone_start_time=1, zone_confirmed_time=2)
+    journal.record_placed(
+        _order(),
+        session_id=session,
+        zone_start_time=1,
+        zone_confirmed_time=2,
+        origin=ORDER_ORIGIN_REENTRY,
+    )
+    orders = journal.orders_placed_between(start_ms=0, end_ms=10_000)
+    assert [o.origin for o in orders] == [ORDER_ORIGIN_TAP, ORDER_ORIGIN_REENTRY]
+
+    summary = DaySummary.from_orders(orders)
+    assert summary.reserved == 2  # 재무장도 실제로 건 주문이라 예약에 든다.
+    assert summary.reentry_rearmed == 1
+    assert summary.taps == 1  # 재무장은 탭이 아니다(WAN-305 단계 정의).
+    journal.close()

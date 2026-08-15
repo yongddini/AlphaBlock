@@ -497,7 +497,8 @@ def build_rows(
                             max_drawdown=_mean([r.max_drawdown for r in iso]),
                         )
                     )
-                    cells = _segment_cells(scoped, segment, exclude)
+                    # WAN-305 명시 핀: wan180 격자 CSV는 재진입 이전 북의 동결 스냅샷이다.
+                    cells = _segment_cells(scoped, segment, exclude, include_reentry=False)
                     for mode in MODES:
                         for multiple in MULTIPLES:
                             outcome = run_leverage_book(
@@ -1212,6 +1213,8 @@ def main(argv: list[str] | None = None) -> int:
             start=args.start,
             end=args.end,
             jobs=args.jobs,
+            # WAN-305 명시 핀: wan180 리포트 CSV는 재진입 이전 북의 동결 스냅샷이다.
+            reentry=False,
         )
         funding_note = ""
         if not args.no_funding_proxy:
