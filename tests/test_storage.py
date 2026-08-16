@@ -8,6 +8,7 @@ import tracemalloc
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 from data.gaps import find_gaps, gaps_from_boundaries
@@ -366,3 +367,86 @@ def test_gap_boundaries_memory_does_not_grow_with_series_length(store: OhlcvStor
     # 대조군이 충분히 무거워야 위 단언이 "원래 싼 연산"이 아님이 드러난다. 시각열만
     # 올려도 이만큼이고, 실제 옛 경로(pandas 9열)는 여기서 한 자릿수 더 쓴다.
     assert materialized > streamed * 20, f"대조군 {materialized}B vs 스트리밍 {streamed}B"
+
+
+# -- tail_window_start (WAN-313) ---------------------------------------------
+
+_HOUR = 3_600_000
+
+
+def _h1(open_time: int, *, closed: bool = True, symbol: str = "BTC/USDT:USDT") -> Candle:
+    return Candle(symbol, "1h", open_time, 1.0, 2.0, 0.5, 1.5, 10.0, closed)
+
+
+def _closed_tail(
+    store: OhlcvStore, timeframe: str, *, bars: int, end_ms: int | None
+) -> pd.DataFrame:
+    """러너의 창 구성(closed 필터 → cutoff → tail)을 전체 로드로 재현한 기준값."""
+    full = store.load("BTC/USDT:USDT", timeframe)
+    closed = full[full["closed"].astype(bool)]
+    if end_ms is not None:
+        closed = closed[closed["open_time"] <= end_ms]
+    return closed.tail(bars).reset_index(drop=True)
+
+
+def _bounded_tail(
+    store: OhlcvStore, timeframe: str, *, bars: int, end_ms: int | None
+) -> pd.DataFrame:
+    start = store.tail_window_start("BTC/USDT:USDT", timeframe, bars=bars, end_ms=end_ms)
+    if start is None:
+        df = store.load("BTC/USDT:USDT", timeframe)
+    else:
+        df = store.load("BTC/USDT:USDT", timeframe, start_ms=start)
+    closed = df[df["closed"].astype(bool)]
+    if end_ms is not None:
+        closed = closed[closed["open_time"] <= end_ms]
+    return closed.tail(bars).reset_index(drop=True)
+
+
+def test_tail_window_start_native_matches_full_load(store: OhlcvStore) -> None:
+    """앵커부터 로드해도 확정봉 tail 창이 전체 로드와 글자 그대로 같다(갭 포함)."""
+    # 0..9시 + [갭] + 20..49시, 마지막 봉은 미확정(형성 중).
+    times = [i * _HOUR for i in range(10)] + [i * _HOUR for i in range(20, 50)]
+    store.upsert_candles([_h1(t) for t in times])
+    store.upsert_candles([_h1(50 * _HOUR, closed=False)])
+
+    for bars in (5, 25, 100):
+        for end_ms in (None, 49 * _HOUR, 30 * _HOUR, 9 * _HOUR):
+            ref = _closed_tail(store, "1h", bars=bars, end_ms=end_ms)
+            got = _bounded_tail(store, "1h", bars=bars, end_ms=end_ms)
+            pd.testing.assert_frame_equal(got, ref, check_exact=True)
+
+
+def test_tail_window_start_native_actually_bounds(store: OhlcvStore) -> None:
+    """확정봉이 bars보다 많으면 앵커가 전체 시작보다 뒤다(전체 로드로 물러나지 않음)."""
+    store.upsert_candles([_h1(i * _HOUR) for i in range(100)])
+    start = store.tail_window_start("BTC/USDT:USDT", "1h", bars=10)
+    assert start == 90 * _HOUR
+
+
+def test_tail_window_start_no_closed_bars_returns_none(store: OhlcvStore) -> None:
+    assert store.tail_window_start("BTC/USDT:USDT", "1h", bars=10) is None
+    store.upsert_candles([_h1(0, closed=False)])
+    assert store.tail_window_start("BTC/USDT:USDT", "1h", bars=10) is None
+
+
+def test_tail_window_start_derived_matches_full_load(store: OhlcvStore) -> None:
+    """파생 2h: 결측 짝·미확정 원본이 섞여도 확정 2h tail 창이 전체 로드와 같다."""
+    # 0..19시 연속, 21시(20시 결측 → 20~22h 버킷 불완전), 24..39시 연속,
+    # 40시는 미확정(→ 40~42h 버킷 미확정), 44..59시 연속.
+    times = list(range(20)) + [21] + list(range(24, 40)) + list(range(44, 60))
+    store.upsert_candles([_h1(t * _HOUR) for t in times])
+    store.upsert_candles([_h1(40 * _HOUR, closed=False), _h1(41 * _HOUR)])
+
+    for bars in (3, 8, 50):
+        for end_ms in (None, 58 * _HOUR, 30 * _HOUR, 10 * _HOUR):
+            ref = _closed_tail(store, "2h", bars=bars, end_ms=end_ms)
+            got = _bounded_tail(store, "2h", bars=bars, end_ms=end_ms)
+            pd.testing.assert_frame_equal(got, ref, check_exact=True)
+
+
+def test_tail_window_start_derived_actually_bounds(store: OhlcvStore) -> None:
+    """파생 2h 앵커도 확정 버킷 개수로 정확히 선다(원본 행 수가 아니라)."""
+    store.upsert_candles([_h1(i * _HOUR) for i in range(40)])  # 2h 확정 버킷 0..38h → 20개
+    start = store.tail_window_start("BTC/USDT:USDT", "2h", bars=5)
+    assert start == 30 * _HOUR  # 마지막 5개 버킷: 30,32,34,36,38h

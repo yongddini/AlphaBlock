@@ -19,7 +19,7 @@ from common import timefmt
 from common.timefmt import KST
 from config import get_settings
 from config.settings import Settings
-from dashboard.health import HealthLevel
+from dashboard.health import HealthLevel, runner_cycle_budget_ms
 from dashboard.health_data import HealthView, build_health_view
 
 if TYPE_CHECKING:
@@ -156,6 +156,7 @@ def _build_health_view(settings: Settings, *, include_bar_count: bool = False) -
         collector_heartbeat_path=settings.collector_heartbeat_path,
         collector_heartbeat_interval_seconds=settings.collector_heartbeat_interval_seconds,
         repair_state_path=settings.repair_state_path,
+        cycle_budget_ms=runner_cycle_budget_ms(settings.live_signal_timeframes),
     )
 
 

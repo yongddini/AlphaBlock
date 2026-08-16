@@ -115,3 +115,40 @@ def test_exit_event_records_reason(tmp_path: Path) -> None:
     event = SignalEvent(symbol="BTC/USDT:USDT", timeframe="1h", signal=exit_sig)
     state = store.record(now_ms=3_000, open_positions=[], new_events=[event])
     assert state.recent_events[0].exit_reason is SignalExitReason.TAKE_PROFIT
+
+
+def test_touch_bumps_heartbeat_and_preserves_state(tmp_path: Path) -> None:
+    """touch(WAN-313)는 하트비트만 올리고 포지션·완주 지표를 보존하며 파일에 남긴다."""
+    path = tmp_path / "runtime.json"
+    store = RuntimeStateStore(path)
+    store.record(
+        now_ms=5_000,
+        open_positions=[_position("BTC/USDT:USDT")],
+        new_events=[],
+        cycle_completed_ms=5_000,
+        cycle_duration_ms=1_200,
+    )
+
+    store.touch(9_000)
+
+    reread = RuntimeStateStore(path).load()
+    assert reread.updated_at == 9_000
+    assert len(reread.open_positions) == 1
+    assert reread.last_cycle_completed_at == 5_000
+    assert reread.last_cycle_duration_ms == 1_200
+
+
+def test_record_preserves_cycle_metrics_when_not_given(tmp_path: Path) -> None:
+    """완주 인자 없는 record(A안 러너 등)는 이전 완주 지표를 지우지 않는다."""
+    path = tmp_path / "runtime.json"
+    store = RuntimeStateStore(path)
+    store.record(
+        now_ms=5_000,
+        open_positions=[],
+        new_events=[],
+        cycle_completed_ms=5_000,
+        cycle_duration_ms=800,
+    )
+    state = store.record(now_ms=6_000, open_positions=[], new_events=[])
+    assert state.last_cycle_completed_at == 5_000
+    assert state.last_cycle_duration_ms == 800

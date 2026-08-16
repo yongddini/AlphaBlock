@@ -90,6 +90,14 @@ def resample_ohlcv(
     open_time = work["open_time"].astype("int64")
     bucket = (open_time // tgt_ms) * tgt_ms
 
+    if factor == 2:
+        # 벡터화 빠른 경로(WAN-313) — 파생 2h가 러너의 상시 경로라 버킷당 파이썬 루프
+        # (26k 버킷 ≈ 5.7초)가 폴링 병목이었다. factor가 2일 때만 쓴다: 버킷당 원소가
+        # 2개뿐이라 모든 집계(first/last/max/min/합/all)가 연산 순서와 무관해 아래 루프와
+        # **비트 단위로 같다**. factor > 2(1m→15m 등 집계 백필)는 volume 합의 부동소수
+        # 누적 순서가 구현마다 달라질 수 있어 기존 루프를 유지한다.
+        return _resample_factor2(work, target_timeframe, bucket=bucket, src_ms=src_ms)
+
     rows: list[dict[str, object]] = []
     for (symbol, bucket_start), group in work.groupby([work["symbol"], bucket], sort=True):
         # 이 상위 봉을 구성해야 할 하위 봉들의 open_time(빠짐없이 이 순서여야 한다).
@@ -116,6 +124,56 @@ def resample_ohlcv(
         return _empty_frame()
 
     out = pd.DataFrame(rows, columns=_OUTPUT_COLUMNS)
+    out = out.sort_values("open_time").reset_index(drop=True)
+    out["closed"] = out["closed"].astype(bool)
+    out["open_datetime"] = pd.to_datetime(out["open_time"], unit="ms", utc=True)
+    return out
+
+
+def _resample_factor2(
+    work: pd.DataFrame, target_timeframe: str, *, bucket: pd.Series, src_ms: int
+) -> pd.DataFrame:
+    """factor=2 전용 벡터화 집계 — 버킷당 루프와 같은 값·같은 행 순서를 낸다(WAN-313).
+
+    완전성 판정은 루프의 `got != expected`와 같다: 원소 2개 + offset이 정확히
+    {0, src_ms}(격자 밖 시각·결측·미완 버킷은 전부 제외). `(symbol, bucket)` 정렬
+    순서로 행을 만든 뒤 루프 경로와 **같은** `sort_values("open_time")`를 적용해
+    동률 처리까지 같게 한다.
+    """
+    offset = work["open_time"].astype("int64") - bucket
+    keys = [work["symbol"], bucket]
+    grouped = work.groupby(keys, sort=True)
+    agg = pd.DataFrame(
+        {
+            "open": grouped["open"].first().astype(float),
+            "high": grouped["high"].max().astype(float),
+            "low": grouped["low"].min().astype(float),
+            "close": grouped["close"].last().astype(float),
+            "volume": grouped["volume"].sum().astype(float),
+            "closed": work["closed"].astype(bool).groupby(keys, sort=True).all(),
+            "n": grouped.size(),
+            "off_min": offset.groupby(keys, sort=True).min(),
+            "off_max": offset.groupby(keys, sort=True).max(),
+        }
+    )
+    complete = (agg["n"] == 2) & (agg["off_min"] == 0) & (agg["off_max"] == src_ms)
+    agg = agg[complete]
+    if agg.empty:
+        return _empty_frame()
+    out = pd.DataFrame(
+        {
+            "symbol": agg.index.get_level_values(0),
+            "timeframe": target_timeframe,
+            "open_time": agg.index.get_level_values(1).astype("int64"),
+            "open": agg["open"].to_numpy(),
+            "high": agg["high"].to_numpy(),
+            "low": agg["low"].to_numpy(),
+            "close": agg["close"].to_numpy(),
+            "volume": agg["volume"].to_numpy(),
+            "closed": agg["closed"].to_numpy(),
+        },
+        columns=_OUTPUT_COLUMNS,
+    )
     out = out.sort_values("open_time").reset_index(drop=True)
     out["closed"] = out["closed"].astype(bool)
     out["open_datetime"] = pd.to_datetime(out["open_time"], unit="ms", utc=True)

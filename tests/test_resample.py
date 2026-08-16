@@ -218,3 +218,90 @@ def test_store_load_2h_empty_returns_schema(store: OhlcvStore) -> None:
     out = store.load(_SYMBOL, "2h")
     assert out.empty
     assert "open_time" in out.columns and "close" in out.columns
+
+
+# -- factor=2 벡터화 빠른 경로 (WAN-313) --------------------------------------
+
+
+def _reference_loop_resample(df: pd.DataFrame, source_tf: str, target_tf: str) -> pd.DataFrame:
+    """버킷당 파이썬 루프 기준 구현(WAN-313 이전 resample_ohlcv 본문) — 빠른 경로의 자."""
+    from data.models import timeframe_to_ms
+    from data.resample import _empty_frame
+
+    src_ms = timeframe_to_ms(source_tf)
+    tgt_ms = timeframe_to_ms(target_tf)
+    factor = tgt_ms // src_ms
+    if df.empty:
+        return _empty_frame()
+    work = df.sort_values("open_time").reset_index(drop=True)
+    open_time = work["open_time"].astype("int64")
+    bucket = (open_time // tgt_ms) * tgt_ms
+    rows: list[dict[str, object]] = []
+    for (symbol, bucket_start), group in work.groupby([work["symbol"], bucket], sort=True):
+        expected = [int(bucket_start) + i * src_ms for i in range(factor)]
+        got = [int(t) for t in group["open_time"]]
+        if got != expected:
+            continue
+        rows.append(
+            {
+                "symbol": symbol,
+                "timeframe": target_tf,
+                "open_time": int(bucket_start),
+                "open": float(group["open"].iloc[0]),
+                "high": float(group["high"].max()),
+                "low": float(group["low"].min()),
+                "close": float(group["close"].iloc[-1]),
+                "volume": float(group["volume"].sum()),
+                "closed": bool(group["closed"].astype(bool).all()),
+            }
+        )
+    if not rows:
+        return _empty_frame()
+    cols = ["symbol", "timeframe", "open_time", "open", "high", "low", "close", "volume", "closed"]
+    out = pd.DataFrame(rows, columns=cols)
+    out = out.sort_values("open_time").reset_index(drop=True)
+    out["closed"] = out["closed"].astype(bool)
+    out["open_datetime"] = pd.to_datetime(out["open_time"], unit="ms", utc=True)
+    return out
+
+
+def test_factor2_fast_path_matches_loop_reference() -> None:
+    """빠른 경로가 루프 기준과 비트 단위로 같다 — 결측·미확정·격자 밖 시각 포함."""
+    candles = [
+        _c(_H00, 1.0, 2.0, 0.5, 1.5, 10.0),
+        _c(_H01, 1.5, 2.5, 1.0, 2.0, 11.0),  # 00~02h 완전·확정
+        _c(_H02, 2.0, 3.0, 1.5, 2.5, 12.0),  # 02~04h: 03시 결측 → 생성 안 됨
+        _c(_H04, 2.5, 3.5, 2.0, 3.0, 13.0),
+        _c(_H05, 3.0, 4.0, 2.5, 3.5, 14.0, closed=False),  # 04~06h 완전·미확정
+    ]
+    df = _df(candles)
+    # 격자 밖 시각(30분 어긋남) — 루프의 `got != expected`가 버리는 행.
+    off_grid = _df([_c(6 * _HOUR + 30 * 60_000, 9.0, 9.0, 9.0, 9.0, 9.0)])
+    df = pd.concat([df, off_grid], ignore_index=True)
+
+    fast = resample_ohlcv(df, "1h", "2h")
+    ref = _reference_loop_resample(df, "1h", "2h")
+    pd.testing.assert_frame_equal(fast, ref, check_exact=True)
+    assert list(fast["open_time"]) == [_H00, _H04]
+    assert list(fast["closed"]) == [True, False]
+
+
+def test_factor2_fast_path_matches_loop_reference_multi_symbol() -> None:
+    """여러 심볼이 섞여도 행 순서·값이 루프 기준과 같다."""
+    a = _df([_c(_H00, 1.0, 2.0, 0.5, 1.5, 10.0), _c(_H01, 1.5, 2.5, 1.0, 2.0, 11.0)])
+    b = a.copy()
+    b["symbol"] = "AAA/USDT:USDT"
+    df = pd.concat([a, b], ignore_index=True)
+    fast = resample_ohlcv(df, "1h", "2h")
+    ref = _reference_loop_resample(df, "1h", "2h")
+    pd.testing.assert_frame_equal(fast, ref, check_exact=True)
+    assert len(fast) == 2
+
+
+def test_factor2_fast_path_empty_result_schema() -> None:
+    """완전한 버킷이 하나도 없으면 루프 경로와 같은 빈 스키마를 낸다."""
+    df = _df([_c(_H01, 1.0, 2.0, 0.5, 1.5, 10.0)])  # 홀수시 하나 — 짝이 없다.
+    fast = resample_ohlcv(df, "1h", "2h")
+    ref = _reference_loop_resample(df, "1h", "2h")
+    pd.testing.assert_frame_equal(fast, ref, check_exact=True)
+    assert fast.empty

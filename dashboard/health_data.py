@@ -161,10 +161,13 @@ def build_health_view(
     repair_state_path: str | None = None,
     now_ms: int | None = None,
     include_bar_count: bool = False,
+    cycle_budget_ms: int | None = None,
 ) -> HealthView:
     """DB·상태파일을 읽어 완성된 `HealthView`를 조립한다.
 
     `include_bar_count`는 시리즈별 봉 수를 셀지 정한다(기본 False = 안 셈, WAN-186).
+    `cycle_budget_ms`(WAN-313)는 러너 한 바퀴 완주 예산 — 주면 하트비트만 뛰고 한
+    바퀴를 못 끝내는 상태도 STALE로 판정한다(`health.runner_cycle_budget_ms`로 유도).
     """
     now = now_ms if now_ms is not None else _now_ms()
 
@@ -200,6 +203,9 @@ def build_health_view(
         now_ms=now,
         poll_interval_seconds=poll_interval_seconds,
         stale_multiplier=stale_multiplier,
+        last_cycle_ms=runtime.last_cycle_completed_at,
+        cycle_duration_ms=runtime.last_cycle_duration_ms,
+        cycle_budget_ms=cycle_budget_ms,
     )
     overall = compute_overall(freshness, funding, runner, collector)
 

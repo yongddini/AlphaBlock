@@ -316,6 +316,109 @@ class OhlcvStore:
                 for row in self._conn.execute(_DISTINCT_TIMEFRAMES, (symbol,))
             ]
 
+    def tail_window_start(
+        self,
+        symbol: str,
+        timeframe: str,
+        *,
+        bars: int,
+        end_ms: int | None = None,
+    ) -> int | None:
+        """「`end_ms` 이하에서 시작하는 마지막 확정봉 `bars`개」가 시작하는 `open_time` (WAN-313).
+
+        상시 폴링(러너)이 매번 전체 이력을 로드하지 않도록, `load(start_ms=여기 반환값)`
+        로 잘라도 `closed` 필터 후 `open_time <= cutoff` (cutoff ≥ end_ms) →
+        `tail(bars)` 창이 **전체 로드와 글자 그대로 같아지는** 시작점을 돌려준다.
+        근사가 아니라 정확한 앵커다 — 대충 `bars × 주기`를 빼면 갭이 있는 시리즈에서
+        창 내용이 전체 로드와 달라져 갭 검사 결과까지 갈린다.
+
+        확정봉이 `bars`개 미만이면 있는 것 중 가장 오래된 시각을(= 사실상 전체 로드),
+        확정봉이 하나도 없으면 None을 반환한다(호출부는 None이면 전체 로드로 물러난다).
+
+        파생 TF(`2h`)는 원본 TF의 시각·확정 여부를 최신부터 거슬러 훑으며 「완전(구성
+        봉이 빠짐없음) + 확정(전부 closed)」 버킷을 세어 앵커를 구한다 — 리샘플 결과의
+        확정봉 정의(`data.resample`)와 같은 판정이다.
+        """
+        if timeframe in _DERIVED_TIMEFRAMES:
+            return self._tail_window_start_derived(symbol, timeframe, bars=bars, end_ms=end_ms)
+        query = (
+            "SELECT MIN(open_time) FROM (SELECT open_time FROM ohlcv"
+            " WHERE symbol = ? AND timeframe = ? AND closed = 1"
+        )
+        params: list[object] = [symbol, timeframe]
+        if end_ms is not None:
+            query += " AND open_time <= ?"
+            params.append(end_ms)
+        query += " ORDER BY open_time DESC LIMIT ?)"
+        params.append(int(bars))
+        with self._lock:
+            (value,) = self._conn.execute(query, params).fetchone()
+        return int(value) if value is not None else None
+
+    def _tail_window_start_derived(
+        self, symbol: str, timeframe: str, *, bars: int, end_ms: int | None
+    ) -> int | None:
+        """파생 TF의 `tail_window_start` — 원본 시각열을 DESC로 훑어 확정 버킷을 센다.
+
+        버킷이 리샘플에서 확정봉이 되는 조건(`resample_ohlcv`)과 같은 판정을 쓴다:
+        구성 원본 봉 `factor`개가 정확한 격자 시각에 빠짐없이 있고 전부 closed다.
+        `bars`번째 확정 버킷을 찾는 즉시 멈추므로 훑는 행 수는 대략 `bars × factor`다.
+        """
+        source_tf = _DERIVED_TIMEFRAMES[timeframe]
+        tgt_ms = timeframe_to_ms(timeframe)
+        src_ms = timeframe_to_ms(source_tf)
+        factor = tgt_ms // src_ms
+        query = "SELECT open_time, closed FROM ohlcv WHERE symbol = ? AND timeframe = ?"
+        params: list[object] = [symbol, source_tf]
+        if end_ms is not None:
+            # 파생 봉 시작 ≤ end_ms인 버킷의 원본 봉은 전부 이 상한 미만이다.
+            params.append(((end_ms // tgt_ms) + 1) * tgt_ms)
+            query += " AND open_time < ?"
+        query += " ORDER BY open_time DESC"
+        found = 0
+        oldest_complete: int | None = None
+        oldest_any: int | None = None
+        with self._lock:
+            bucket: int | None = None
+            offsets: set[int] = set()
+            all_closed = True
+            for raw_time, raw_closed in self._conn.execute(query, params):
+                open_time = int(raw_time)
+                row_bucket = (open_time // tgt_ms) * tgt_ms
+                if row_bucket != bucket:
+                    if (
+                        bucket is not None
+                        and len(offsets) == factor
+                        and all_closed
+                        and offsets == {i * src_ms for i in range(factor)}
+                    ):
+                        found += 1
+                        oldest_complete = bucket
+                        if found >= bars:
+                            return bucket
+                    bucket = row_bucket
+                    offsets = set()
+                    all_closed = True
+                offsets.add(open_time - row_bucket)
+                all_closed = all_closed and bool(raw_closed)
+                oldest_any = row_bucket
+            # 커서 소진 — 마지막(가장 오래된) 버킷을 마감한다.
+            if (
+                bucket is not None
+                and len(offsets) == factor
+                and all_closed
+                and offsets == {i * src_ms for i in range(factor)}
+            ):
+                found += 1
+                oldest_complete = bucket
+                if found >= bars:
+                    return bucket
+        if found > 0:
+            # 확정 버킷이 bars개 미만 — 있는 것 중 가장 오래된 버킷부터(= 사실상 전체).
+            return oldest_complete
+        # 확정 버킷이 하나도 없다 — 원본이 있으면 그 범위 전체(미확정 꼬리 보존), 없으면 None.
+        return oldest_any
+
     def load(
         self,
         symbol: str,

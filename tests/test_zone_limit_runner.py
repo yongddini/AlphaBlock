@@ -983,3 +983,155 @@ def test_expire_stale_pending_reevaluates_overdue_on_restart(tmp_path: Path) -> 
     deadline_15m = 24 * 15 * 60_000
     assert journal.funnel_counts(start_ms=deadline_15m, end_ms=deadline_15m + 1).no_fill == 1
     journal.close()
+
+
+# -- 창 제한 HTF 로드 (WAN-313) ----------------------------------------------
+
+
+def _make_long_history_rig(
+    base: Path, monkeypatch: pytest.MonkeyPatch, *, n_closed: int
+) -> dict[str, object]:
+    """lookback(500)보다 긴 확정 이력(600봉)을 가진 러너 — 앵커 최적화가 실제로 무는 조건."""
+    base.mkdir(parents=True, exist_ok=True)
+    db = base / "ohlcv.db"
+    store = OhlcvStore(db)
+    store.upsert_candles([_htf_candle(i) for i in range(n_closed)])
+    forming = n_closed * _H
+    store.upsert_candles(
+        [
+            _m1(forming, 94.0, 96.0, 95.0),  # 존(90~95) 탭 전이
+            _m1(forming + _M, 88.0, 95.0, 93.0),  # 지정가 터치(체결)
+        ]
+    )
+    settings = Settings(db_path=str(db))
+    params = ConfluenceParams(max_zone_width_atr=None)
+    journal = OrderJournal(db)
+    session = journal.start_session(now_ms=0)
+    paper_store = PaperTradeStore(db)
+    recorder = PaperTradeRecorder(paper_store, cost_model=settings.costs, funding_store=None)
+    executor = PaperExecutor(
+        engine=build_execution_engine(settings),
+        store=paper_store,
+        recorder=recorder,
+        sizing=settings.risk_sizing,
+    )
+    engine = ZoneLimitLiveEngine(
+        params=params,
+        journal=journal,
+        session_id=session,
+        has_position=lambda s, t: any(
+            p.symbol == s and p.timeframe == t for p in executor.open_positions
+        ),
+    )
+    runner = ZoneLimitPaperRunner(
+        store=store,
+        engine=engine,
+        journal=journal,
+        session_id=session,
+        executor=executor,
+        params=params,
+        series=[(_SYMBOL, _TF)],
+        lookback_bars=500,
+        poll_interval_seconds=1.0,
+        now_ms=lambda: 999_999_999,
+    )
+    return {
+        "store": store,
+        "runner": runner,
+        "engine": engine,
+        "journal": journal,
+        "paper_store": paper_store,
+    }
+
+
+def test_bounded_htf_load_matches_full_load_behavior(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """앵커 창 제한 로드(WAN-313)가 전체 이력 로드(옛 경로)와 같은 이벤트·상태를 낸다."""
+    _install_stub_detector(monkeypatch)
+    rig_a = _make_long_history_rig(tmp_path / "a", monkeypatch, n_closed=600)
+    rig_b = _make_long_history_rig(tmp_path / "b", monkeypatch, n_closed=600)
+    store_b = rig_b["store"]
+    # B는 앵커를 못 찾은 척 → 전체 로드(= WAN-313 이전 경로)로 강제.
+    monkeypatch.setattr(store_b, "tail_window_start", lambda *a, **k: None)
+
+    runner_a: ZoneLimitPaperRunner = rig_a["runner"]  # type: ignore[assignment]
+    runner_b: ZoneLimitPaperRunner = rig_b["runner"]  # type: ignore[assignment]
+    ev_a = runner_a.poll_once()
+    ev_b = runner_b.poll_once()
+
+    assert [(e.kind, e.symbol, e.timeframe, e.time_ms) for e in ev_a] == [
+        (e.kind, e.symbol, e.timeframe, e.time_ms) for e in ev_b
+    ]
+    assert any(e.kind == "filled" for e in ev_a)  # 빈 이벤트 동률로 통과하는 것 방지.
+    # 지표 시딩 창(밴드·RSI의 입력)이 비트 단위로 같다 — 창 내용 동일성의 직접 증거.
+    engine_a: ZoneLimitLiveEngine = rig_a["engine"]  # type: ignore[assignment]
+    engine_b: ZoneLimitLiveEngine = rig_b["engine"]  # type: ignore[assignment]
+    key = (_SYMBOL, _TF)
+    assert engine_a._series[key].seed_times == engine_b._series[key].seed_times  # noqa: SLF001
+    assert engine_a._series[key].seed_closes == engine_b._series[key].seed_closes  # noqa: SLF001
+    for rig in (rig_a, rig_b):
+        _close_rig({k: rig[k] for k in ("store", "journal", "paper_store")})
+
+
+def test_poll_series_loads_bounded_window_not_full_history(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """상위TF 로드가 실제로 앵커부터다(전체 이력이 아니라) — 라벨이 아니라 동작으로 고정."""
+    _install_stub_detector(monkeypatch)
+    rig = _make_long_history_rig(tmp_path / "spy", monkeypatch, n_closed=600)
+    store: OhlcvStore = rig["store"]  # type: ignore[assignment]
+    loads: list[tuple[str, int | None, int]] = []
+    orig_load = store.load
+
+    def spy(
+        symbol: str,
+        timeframe: str,
+        *,
+        start_ms: int | None = None,
+        end_ms: int | None = None,
+    ) -> pd.DataFrame:
+        df = orig_load(symbol, timeframe, start_ms=start_ms, end_ms=end_ms)
+        loads.append((timeframe, start_ms, len(df)))
+        return df
+
+    monkeypatch.setattr(store, "load", spy)
+    runner: ZoneLimitPaperRunner = rig["runner"]  # type: ignore[assignment]
+    runner.poll_once()
+
+    htf_loads = [entry for entry in loads if entry[0] == _TF]
+    assert htf_loads, "상위TF 로드가 한 번은 있어야 한다"
+    for _tf, start_ms, n_rows in htf_loads:
+        assert start_ms is not None, "전체 이력 로드(앵커 없음)가 남아 있다(WAN-313 회귀)"
+        assert n_rows <= 502  # lookback 500 + 여유 — 600봉 전체가 아니다.
+    _close_rig({k: rig[k] for k in ("store", "journal", "paper_store")})
+
+
+def test_poll_once_records_cycle_metrics_and_series_heartbeat(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """완주 지표(last_cycle_*)가 기록되고 하트비트가 시리즈 단위로 갱신된다(WAN-313)."""
+    clock = {"now": 1_000_000}
+
+    def now_ms() -> int:
+        clock["now"] += 1_000
+        return clock["now"]
+
+    rig = _make_rig(tmp_path, monkeypatch, now_ms=now_ms)
+    touches: list[int] = []
+    orig_touch = RuntimeStateStore.touch
+
+    def spy_touch(self: RuntimeStateStore, t: int) -> None:
+        touches.append(t)
+        orig_touch(self, t)
+
+    monkeypatch.setattr(RuntimeStateStore, "touch", spy_touch)
+    runner: ZoneLimitPaperRunner = rig["runner"]  # type: ignore[assignment]
+    runner.poll_once()
+
+    assert len(touches) == 1  # 시리즈 1개 → 시리즈마다 한 번.
+    state = RuntimeStateStore(rig["state_path"]).load()  # type: ignore[arg-type]
+    assert state.last_cycle_completed_at is not None
+    assert state.last_cycle_duration_ms is not None and state.last_cycle_duration_ms >= 0
+    assert state.updated_at is not None and state.updated_at >= state.last_cycle_completed_at
+    _close_rig(rig)

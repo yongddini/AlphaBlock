@@ -336,3 +336,25 @@ def test_health_watch_run_loops_max_checks(tmp_path: Path) -> None:
     )
     watch.run(max_checks=3)
     assert calls["n"] == 3
+
+
+def test_evaluate_alerts_cycle_stall_gets_distinct_message() -> None:
+    """하트비트는 뛰는데 한 바퀴 완주가 늦으면(WAN-313) 원인 안내가 다른 경고가 나온다."""
+    stalled = RunnerStatus(
+        ran=True,
+        last_poll_ms=0,
+        last_notification_ms=None,
+        lag_ms=30_000,
+        level=HealthLevel.STALE,
+        heartbeat_stale=False,
+        last_cycle_ms=0,
+        cycle_duration_ms=16 * _MIN,
+        cycle_lag_ms=20 * _MIN,
+        cycle_stale=True,
+    )
+    view = _view(runner=stalled)
+    (alert,) = evaluate_alerts(view)
+    assert alert.key == "runner"
+    assert "완주 지연" in alert.title
+    assert "KST" in alert.detail
+    assert "하트비트 끊김" not in alert.detail

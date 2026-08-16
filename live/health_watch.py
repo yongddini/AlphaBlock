@@ -38,7 +38,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from common.telegram import build_telegram_client
 from common.timefmt import format_kst_zoned, kst_log_format, use_kst_logging
 from config.settings import Settings, get_settings
-from dashboard.health import HealthLevel
+from dashboard.health import HealthLevel, runner_cycle_budget_ms
 from dashboard.health_data import HealthView, build_health_view
 
 _logger = logging.getLogger(__name__)
@@ -121,18 +121,37 @@ def evaluate_alerts(view: HealthView) -> list[Alert]:
             )
 
     if view.runner.ran and view.runner.level is HealthLevel.STALE:
-        lag = _fmt_lag(view.runner.lag_ms)
-        alerts.append(
-            Alert(
-                key="runner",
-                title="러너 하트비트 끊김",
-                detail=(
-                    "⚠️ *러너 하트비트 끊김*\n"
-                    f"마지막 폴링 {_fmt_at(view.runner.last_poll_ms)} (*{lag}* 전). "
-                    "시그널 러너(`alphablock live`)가 멈췄을 수 있습니다."
-                ),
+        # 완주 지연(WAN-313)은 「하트비트는 뛰는데 한 바퀴를 못 끝냄」일 때만 — 새 필드
+        # 없이 만들어진 STALE(옛 호출부)은 예전처럼 하트비트 끊김으로 안내한다.
+        if view.runner.heartbeat_stale or not view.runner.cycle_stale:
+            lag = _fmt_lag(view.runner.lag_ms)
+            alerts.append(
+                Alert(
+                    key="runner",
+                    title="러너 하트비트 끊김",
+                    detail=(
+                        "⚠️ *러너 하트비트 끊김*\n"
+                        f"마지막 폴링 {_fmt_at(view.runner.last_poll_ms)} (*{lag}* 전). "
+                        "시그널 러너(`alphablock live`)가 멈췄을 수 있습니다."
+                    ),
+                )
             )
-        )
+        else:
+            # 하트비트는 뛰는데 한 바퀴 완주가 예산을 넘겼다(WAN-313) — 프로세스 정지가
+            # 아니라 「최단 TF를 못 따라가는」 상태라 원인 안내가 다르다.
+            lag = _fmt_lag(view.runner.cycle_lag_ms)
+            alerts.append(
+                Alert(
+                    key="runner",
+                    title="러너 한 바퀴 완주 지연",
+                    detail=(
+                        "⚠️ *러너 한 바퀴 완주 지연*\n"
+                        f"마지막 완주 {_fmt_at(view.runner.last_cycle_ms)} (*{lag}* 전). "
+                        "러너는 살아 있지만 전체 시리즈 한 바퀴가 최단 TF 주기를 넘고"
+                        " 있습니다 — 시리즈 수·데이터 로드 병목을 확인하세요(WAN-313)."
+                    ),
+                )
+            )
 
     if view.collector.ran and view.collector.level is HealthLevel.STALE:
         lag = _fmt_lag(view.collector.lag_ms)
@@ -324,6 +343,7 @@ def build_view_provider(settings: Settings) -> Callable[[], HealthView]:
             stale_multiplier=settings.health_stale_multiplier,
             collector_heartbeat_path=settings.collector_heartbeat_path,
             collector_heartbeat_interval_seconds=settings.collector_heartbeat_interval_seconds,
+            cycle_budget_ms=runner_cycle_budget_ms(settings.live_signal_timeframes),
         )
 
     return provider

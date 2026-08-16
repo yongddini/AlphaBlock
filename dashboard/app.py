@@ -75,6 +75,7 @@ from dashboard.health import (
     RunnerStatus,
     SeriesFreshness,
     compute_runner_status,
+    runner_cycle_budget_ms,
 )
 from dashboard.health_data import HealthView, OpenPositionView, build_health_view, latest_close
 from dashboard.lightweight_chart import BAND_LINE_COLOR, build_chart_html
@@ -336,11 +337,14 @@ def _cached_open_positions(db_path: str) -> list[OpenPositionRow]:
 
 
 @st.cache_data(ttl=_SERIES_TTL_SECONDS, show_spinner=False)
-def _cached_runner_status(runtime_state_path: str, poll_seconds: int, stale: float) -> RunnerStatus:
+def _cached_runner_status(
+    runtime_state_path: str, poll_seconds: int, stale: float, cycle_budget_ms: int | None
+) -> RunnerStatus:
     """상단 상태 pill용 러너 생존 판정 — 상태파일 한 번만 읽는다.
 
     Health 탭과 **같은 판정 함수**(`compute_runner_status`)를 쓴다 — 두 벌로 갈라지면
-    같은 러너가 위에서는 생존, 아래에서는 멈춤으로 보인다.
+    같은 러너가 위에서는 생존, 아래에서는 멈춤으로 보인다. 완주 지표(WAN-313)도 같은
+    이유로 여기서 함께 판정한다.
     """
     runtime = RuntimeStateStore(runtime_state_path).load()
     return compute_runner_status(
@@ -349,6 +353,9 @@ def _cached_runner_status(runtime_state_path: str, poll_seconds: int, stale: flo
         now_ms=int(time.time() * 1000),
         poll_interval_seconds=poll_seconds,
         stale_multiplier=stale,
+        last_cycle_ms=runtime.last_cycle_completed_at,
+        cycle_duration_ms=runtime.last_cycle_duration_ms,
+        cycle_budget_ms=cycle_budget_ms,
     )
 
 
@@ -362,6 +369,7 @@ def _render_status_pill(settings: Settings) -> None:
         settings.live_runtime_state_path,
         settings.live_poll_interval_seconds,
         settings.health_stale_multiplier,
+        runner_cycle_budget_ms(settings.live_signal_timeframes),
     )
     dot = {HealthLevel.OK: "🟢", HealthLevel.UNKNOWN: "⚪"}.get(status.level, "🔴")
     feed = "틱 피드" if settings.live_tick_feed_enabled else "1분봉 폴링"
@@ -1469,12 +1477,23 @@ def _render_runner(runner: RunnerStatus) -> None:
     if not runner.ran:
         st.info("러너가 실행된 흔적이 없습니다(미실행). `python -m live.runner` 로 시작하세요.")
         return
-    cols = st.columns(3)
+    cols = st.columns(4)
     cols[0].metric("상태", _LEVEL_BADGE[runner.level])
     cols[1].metric("마지막 폴링", _fmt_lag(runner.lag_ms) + " 전")
     cols[2].metric("마지막 알림", _fmt_time(runner.last_notification_ms))
+    # 한 바퀴 완주 소요(WAN-313) — 하트비트와 별개의 「따라가고 있는가」 지표.
+    cols[3].metric(
+        "한 바퀴 소요",
+        "-" if runner.cycle_duration_ms is None else _fmt_lag(runner.cycle_duration_ms),
+    )
     if runner.level is HealthLevel.STALE:
-        st.error("러너 하트비트가 끊겼습니다 — 프로세스가 멈췄을 수 있습니다.")
+        if runner.cycle_stale and not runner.heartbeat_stale:
+            st.error(
+                "러너는 살아 있지만 전체 시리즈 한 바퀴가 최단 TF 주기를 넘고 있습니다"
+                " — 시리즈 수·데이터 로드 병목을 확인하세요(WAN-313)."
+            )
+        else:
+            st.error("러너 하트비트가 끊겼습니다 — 프로세스가 멈췄을 수 있습니다.")
 
 
 #: DB 무결성 점검 캐시 TTL(WAN-289 완료 기준 2). `PRAGMA quick_check`는 3.5GB DB에서
@@ -1633,6 +1652,7 @@ def _render_health_body(settings: Settings) -> None:
         collector_heartbeat_path=settings.collector_heartbeat_path,
         collector_heartbeat_interval_seconds=settings.collector_heartbeat_interval_seconds,
         repair_state_path=settings.repair_state_path,
+        cycle_budget_ms=runner_cycle_budget_ms(settings.live_signal_timeframes),
     )
 
     _render_overall_badge(view)
