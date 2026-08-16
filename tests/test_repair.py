@@ -163,10 +163,12 @@ def test_repair_isolates_errors(store: OhlcvStore) -> None:
 def test_repair_all_summarizes_series(store: OhlcvStore) -> None:
     store.upsert_candles(_candles([0, 1, 3, 4]))  # 2 누락
     exchange = FakeExchange(list(range(5)))
-    summary = repair_all(exchange, store, sleeper=lambda _: None, now_ms=lambda: T0)
+    # now는 봉들이 전부 닫힌 뒤여야 한다 — 백필은 형성 중 봉을 저장하지 않는다(WAN-314).
+    now = T0 + 5 * TF_MS
+    summary = repair_all(exchange, store, sleeper=lambda _: None, now_ms=lambda: now)
 
     assert isinstance(summary, RepairSummary)
-    assert summary.ran_at_ms == T0
+    assert summary.ran_at_ms == now
     assert summary.total_filled == 1
     assert summary.total_remaining == 0
     assert len(summary.repaired_series) == 1
@@ -293,3 +295,110 @@ def test_repair_all_records_the_window_it_looked_at(store: OhlcvStore) -> None:
     assert summary.lookback_ms == 3 * TF_MS
     # 창을 안 주면(전 구간) None이라 화면에도 창 표기가 안 붙는다.
     assert repair_all(FakeExchange([0, 1, 2]), store, sleeper=lambda _: None).lookback_ms is None
+
+
+# -- WAN-314 사고 재현 ----------------------------------------------------------
+# 2026-08-16: 수집기 기동 백필(신규 심볼 ADA·DOT·BCH 초기 수집)이 길어져 스트림 접속이
+# 늦었고, 그 사이에 확정된 15m 23:00 KST 봉(open_time 1786888800000)이 기존 9종목
+# 전부에서 빠졌다. 23:25 갭 복구는 「갭 없음(7일 창)」을 보고했다 — 이슈 §2의 질문:
+# 그것이 결함인가, 아니면 그때는 그 봉이 내부 구멍이 아니라 꼬리였는가.
+
+_TF15 = "15m"
+_TF15_MS = 900_000
+_MISSING_15M = 1_786_888_800_000  # 2026-08-16 23:00 KST — 사고의 결측 봉
+_PREV_15M = _MISSING_15M - _TF15_MS  # 22:45 KST — 당시 저장된 마지막 봉
+_NEXT_15M = _MISSING_15M + _TF15_MS  # 23:15 KST — 스트림 재개 후 첫 확정봉
+
+
+def _c15(open_times: list[int]) -> list[Candle]:
+    return [
+        Candle(
+            symbol=SYMBOL,
+            timeframe=_TF15,
+            open_time=t,
+            open=1.0,
+            high=2.0,
+            low=0.5,
+            close=1.5,
+            volume=10.0,
+        )
+        for t in open_times
+    ]
+
+
+class _Fake15mExchange:
+    """사고 창의 15m 봉을 전부 아는 가짜 거래소."""
+
+    def __init__(self, open_times: list[int]) -> None:
+        self._rows = [[float(t), 1.0, 2.0, 0.5, 1.5, 10.0] for t in sorted(open_times)]
+        self.calls = 0
+
+    def fetch_ohlcv(
+        self,
+        symbol: str,
+        timeframe: str = _TF15,
+        since: int | None = None,
+        limit: int | None = None,
+        params: dict[str, object] | None = None,
+    ) -> list[list[float]]:
+        self.calls += 1
+        rows = [r for r in self._rows if since is None or int(r[0]) >= since]
+        return [list(r) for r in rows[: limit or len(rows)]]
+
+
+def test_wan314_gap_repair_correctly_sees_no_gap_while_bar_is_still_the_tail(
+    store: OhlcvStore,
+) -> None:
+    """§2 전반부: 23:25의 「갭 없음」은 결함이 아니다 — 그때 23:00 봉은 꼬리였다.
+
+    `find_gaps`는 설계상 마지막 저장 봉 **이후**를 갭으로 세지 않는다(현재 진행 중인
+    봉/아직 안 받은 꼬리는 재시작 백필 소관, `data.gaps` 경계 처리). 사고 당시 저장된
+    마지막 봉이 22:45라 23:00은 내부 구멍이 아니었고, 갭 복구는 정상 동작한 것이다.
+    """
+    tail = [_PREV_15M - i * _TF15_MS for i in range(20)]  # …~22:45까지 연속 저장
+    store.upsert_candles(_c15(tail))
+    exchange = _Fake15mExchange(sorted(tail) + [_MISSING_15M, _NEXT_15M])
+    now = _MISSING_15M + 25 * 60_000  # 23:25 KST — 사고의 갭 복구 실행 시각
+
+    result = repair_series(
+        exchange,
+        store,
+        SYMBOL,
+        _TF15,
+        sleeper=lambda _: None,
+        now_ms=lambda: now,
+        lookback_ms=7 * 86_400_000,  # repair_on_start 기본 7일 창
+    )
+
+    assert result.gaps_found == 0
+    assert exchange.calls == 0  # 갭이 없으면 거래소를 부르지 않는다
+
+
+def test_wan314_gap_repair_catches_the_hole_once_the_tail_has_passed(
+    store: OhlcvStore,
+) -> None:
+    """§2 후반부(재현): 스트림이 재개돼 23:15 봉이 저장되면 23:00은 내부 구멍이 되고,
+    다음 갭 복구가 정확히 그 한 봉을 찾아 메운다."""
+    tail = [_PREV_15M - i * _TF15_MS for i in range(20)]
+    store.upsert_candles(_c15(tail))
+    store.upsert_candles(_c15([_NEXT_15M]))  # 스트림 재개 — 23:15 확정봉 저장
+    exchange = _Fake15mExchange(sorted(tail) + [_MISSING_15M, _NEXT_15M])
+    now = _NEXT_15M + _TF15_MS
+
+    result = repair_series(
+        exchange,
+        store,
+        SYMBOL,
+        _TF15,
+        sleeper=lambda _: None,
+        now_ms=lambda: now,
+        lookback_ms=7 * 86_400_000,
+    )
+
+    assert result.gaps_found == 1
+    assert result.bars_missing == 1
+    assert result.bars_filled == 1
+    assert result.bars_remaining == 0
+    # 정확히 사고의 그 봉이 채워졌다.
+    stored = [int(t) for t in store.load(SYMBOL, _TF15)["open_time"].tolist()]
+    assert _MISSING_15M in stored

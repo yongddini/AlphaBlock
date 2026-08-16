@@ -1596,6 +1596,36 @@ def _render_repair(view: HealthView) -> None:
         )
 
 
+def _render_data_gap_skips(view: HealthView) -> None:
+    """러너가 데이터 결측으로 건너뛴 평가 구간(WAN-314).
+
+    「기회가 없었다」와 「기회를 놓쳤다」가 성적표에서 똑같이 빈칸으로 보이는 것을
+    막는 카드다 — 결측 구간은 체결률·괴리 실측의 분모에서 빠졌음을 여기서 알 수 있다.
+    """
+    st.subheader("데이터 결측으로 건너뛴 평가 (WAN-314)")
+    if not view.data_gap_skips:
+        st.caption("결측으로 건너뛴 평가가 없습니다.")
+        return
+    frame = pd.DataFrame(
+        {
+            "심볼": s.symbol,
+            "TF": s.timeframe,
+            "결측 구간(KST)": f"{_fmt_time(s.gap_start_ms)} ~ {_fmt_time(s.gap_end_ms)}",
+            "첫 관측": _fmt_time(s.first_seen_ms),
+            "마지막 관측": _fmt_time(s.last_seen_ms),
+            "건너뛴 횟수": s.skip_count,
+            "상태": "✅ 해소" if s.resolved_ms is not None else "🔴 진행 중",
+        }
+        for s in view.data_gap_skips
+    )
+    st.dataframe(frame, use_container_width=True, hide_index=True)
+    if any(s.resolved_ms is None for s in view.data_gap_skips):
+        st.error(
+            "진행 중인 결측이 있습니다 — 그 시리즈의 평가가 멈춰 있습니다. "
+            "`uv run alphablock backfill --repair`로 구멍을 메우세요."
+        )
+
+
 def _render_circuit_breaker(settings: Settings) -> None:
     """일일 손실 서킷브레이커 상태(WAN-38): 정상/발동 · 당일 손익 · 한도.
 
@@ -1674,6 +1704,7 @@ def _render_health_body(settings: Settings) -> None:
     # 목업 Health 카드 3종의 셋째 — 실시간 러너 · 수집기 · **DB 무결성**(WAN-289 §3).
     _render_db_integrity(settings.db_path)
     _render_repair(view)
+    _render_data_gap_skips(view)
     _render_circuit_breaker(settings)
 
     st.subheader("현재 페이퍼 포지션")

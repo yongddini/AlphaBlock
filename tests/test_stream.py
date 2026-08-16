@@ -156,3 +156,48 @@ def test_consume_messages_heartbeats_every_message(store: OhlcvStore) -> None:
 
     asyncio.run(consume_messages(_aiter(messages), store, SYMBOL_MAP, heartbeat=beat))
     assert beats["n"] == 3  # 3개 메시지 모두 하트비트
+
+
+def test_stream_klines_calls_on_connect_after_connection(
+    monkeypatch: pytest.MonkeyPatch, store: OhlcvStore
+) -> None:
+    """`on_connect`는 접속 성립 **후**, 소비 시작 전에 호출된다(WAN-314).
+
+    수집기는 이 훅에서 꼬리 따라잡기 백필을 예약한다 — 접속 후여야 「접속 이후 확정 =
+    스트림」 + 「호출 이전 확정 = 따라잡기」의 합집합이 전 구간을 덮는다(접속 전에
+    돌리면 그 사이에 닫힌 봉이 다시 빠진다).
+    """
+    from websockets.exceptions import ConnectionClosed
+
+    import data.stream as stream_mod
+
+    order: list[str] = []
+
+    class _FakeWs:
+        async def recv(self) -> str:
+            order.append("recv")
+            raise ConnectionClosed(None, None)
+
+    class _FakeConnect:
+        def __init__(self, url: str) -> None:
+            self._url = url
+
+        async def __aenter__(self) -> _FakeWs:
+            order.append("connect")
+            return _FakeWs()
+
+        async def __aexit__(self, *exc: object) -> bool:
+            return False
+
+    monkeypatch.setattr(stream_mod, "connect", lambda url: _FakeConnect(url))
+
+    asyncio.run(
+        stream_mod.stream_klines(
+            store,
+            ["BTC/USDT:USDT"],
+            ["1m"],
+            on_connect=lambda: order.append("on_connect"),
+        )
+    )
+
+    assert order[:2] == ["connect", "on_connect"]

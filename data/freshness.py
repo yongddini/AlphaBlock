@@ -26,7 +26,7 @@ from collections.abc import Sequence
 from pydantic import BaseModel, ConfigDict
 
 from common.timefmt import format_kst_zoned
-from data.gaps import find_gaps
+from data.gaps import Gap, find_gaps
 from data.models import timeframe_to_ms
 
 #: `config.settings.Settings.health_stale_multiplier` 기본값과 같은 자.
@@ -175,6 +175,21 @@ def format_stale(stale: StaleSeries) -> str:
 # -- 창(window) 연속성 --------------------------------------------------------
 
 
+def format_window_gaps(gaps: Sequence[Gap]) -> str:
+    """평가 창의 내부 구멍 목록을 사람이 읽는 한 줄로(WAN-314 — `Gap` 목록에서 직접).
+
+    `window_gap_summary`와 같은 문장을 낸다 — 러너가 구멍을 **기록**(runtime state)
+    하려면 문자열이 아니라 `Gap` 값이 필요해서, 계산(`find_gaps`)과 표현을 갈랐다.
+    두 경로가 같은 포맷을 쓰므로 로그와 상태 파일이 다른 문장을 말하지 않는다.
+    """
+    missing = sum(g.missing for g in gaps)
+    first = gaps[0]
+    return (
+        f"평가 창에 구멍 {len(gaps)}개({missing}봉)"
+        f" — 첫 구멍 open_time {first.start_ms}~{first.end_ms}"
+    )
+
+
 def window_gap_summary(timestamps: Sequence[int], timeframe: str) -> str | None:
     """평가 창에 내부 구멍이 있으면 사람이 읽는 요약을, 없으면 None을 반환한다.
 
@@ -190,9 +205,4 @@ def window_gap_summary(timestamps: Sequence[int], timeframe: str) -> str | None:
     gaps = find_gaps(timestamps, timeframe)
     if not gaps:
         return None
-    missing = sum(g.missing for g in gaps)
-    first = gaps[0]
-    return (
-        f"평가 창에 구멍 {len(gaps)}개({missing}봉)"
-        f" — 첫 구멍 open_time {first.start_ms}~{first.end_ms}"
-    )
+    return format_window_gaps(gaps)

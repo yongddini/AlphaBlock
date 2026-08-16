@@ -27,7 +27,13 @@ from data.funding import FundingRateStore
 from data.models import timeframe_to_ms
 from data.repair import RepairStateStore, RepairSummary
 from data.storage import OhlcvStore, source_timeframe
-from live.runtime_state import EventRecord, PositionSnapshot, RunnerRuntimeState, RuntimeStateStore
+from live.runtime_state import (
+    DataGapSkip,
+    EventRecord,
+    PositionSnapshot,
+    RunnerRuntimeState,
+    RuntimeStateStore,
+)
 from strategy.models import OrderBlockDirection
 
 
@@ -60,6 +66,8 @@ class HealthView(BaseModel):
     recent_events: list[EventRecord]
     last_repair: RepairSummary | None = None
     """마지막 갭 복구 요약(WAN-35). 복구를 한 번도 안 돌렸으면 None."""
+    data_gap_skips: list[DataGapSkip] = []
+    """러너가 데이터 결측으로 건너뛴 평가 구간(WAN-314). 해소된 기록도 남는다."""
 
 
 def series_freshness_rows(
@@ -223,4 +231,5 @@ def build_health_view(
         positions=positions,
         recent_events=list(reversed(runtime.recent_events)),
         last_repair=last_repair,
+        data_gap_skips=runtime.data_gap_skips,
     )

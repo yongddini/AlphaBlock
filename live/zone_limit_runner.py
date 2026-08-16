@@ -71,7 +71,8 @@ import pandas as pd
 from backtest.sweep import timeframe_to_ms
 from common.timefmt import format_kst_zoned, kst_day_key
 from config.settings import Settings
-from data.freshness import window_gap_summary
+from data.freshness import format_window_gaps, window_gap_summary
+from data.gaps import Gap, find_gaps
 from data.storage import OhlcvStore
 from execution.engine import EntryIntent
 from live.engine_state import EngineStateStore, SeriesStateSnapshot
@@ -81,7 +82,7 @@ from live.limit_orders import LimitOrderStatus, expiry_deadline_ms
 from live.order_journal import SKIP_REASON_ZONE_WIDTH, OrderJournal
 from live.paper import PaperPosition
 from live.price_feed import PriceFeed
-from live.runtime_state import PendingOrderSnapshot, RuntimeStateStore
+from live.runtime_state import DataGapSkip, PendingOrderSnapshot, RuntimeStateStore
 from live.zone_limit_notifier import ZoneLimitNotifier
 from strategy.models import ConfluenceParams, OrderBlockDirection, SignalExitReason
 
@@ -146,6 +147,13 @@ class ZoneLimitPaperRunner:
         self._last_htf: dict[Series, int] = {}
         #: 시리즈별 마지막으로 소비한 1분봉 시각(그 이후만 새로 읽는다).
         self._last_substep: dict[Series, int] = {}
+        #: 시리즈별 결측 건너뜀 기록(WAN-314) — 상태 파일에서 이어받아 재시작을 넘어
+        #: 보존한다(해소된 기록도 남는다: 나중에 성적을 읽을 때 그 구간의 빈칸이
+        #: 「기회 없음」이 아니라 「데이터 결측」이었음을 알 수 있어야 한다).
+        self._gap_skips: dict[Series, DataGapSkip] = {}
+        if runtime_state is not None:
+            for skip in runtime_state.load().data_gap_skips:
+                self._gap_skips[(skip.symbol, skip.timeframe)] = skip
 
     # -- 폴링 ---------------------------------------------------------------
 
@@ -259,20 +267,55 @@ class ZoneLimitPaperRunner:
         prev = self._last_htf.get(key)
         if prev is not None and last_time <= prev:
             return []
-        discontinuity = window_gap_summary(
-            [int(t) for t in window["open_time"].tolist()], timeframe
-        )
-        if discontinuity is not None:
+        gaps = find_gaps([int(t) for t in window["open_time"].tolist()], timeframe)
+        if gaps:
+            summary = format_window_gaps(gaps)
             _logger.error(
                 "%s %s: %s — 평가를 건너뜁니다. `alphablock backfill`로 갭을 메우세요.",
                 symbol,
                 timeframe,
-                discontinuity,
+                summary,
             )
+            # 건너뜀을 상태로도 남긴다(WAN-314) — ERROR 로그 한 줄만으로는 나중에
+            # 성적표에서 이 공백이 보이지 않는다.
+            self._note_gap_skip(symbol, timeframe, gaps, summary)
             return None
+        self._resolve_gap_skip(key)
         events = self._engine.on_htf_bars(symbol, timeframe, window)
         self._last_htf[key] = last_time
         return events
+
+    def _note_gap_skip(self, symbol: str, timeframe: str, gaps: list[Gap], summary: str) -> None:
+        """결측 건너뜀을 기록한다 — 같은 구멍이면 횟수·마지막 관측만 갱신(WAN-314)."""
+        key: Series = (symbol, timeframe)
+        now = self._now_ms()
+        prev = self._gap_skips.get(key)
+        first = gaps[0]
+        if prev is not None and prev.resolved_ms is None and prev.gap_start_ms == first.start_ms:
+            self._gap_skips[key] = prev.model_copy(
+                update={
+                    "summary": summary,
+                    "gap_end_ms": first.end_ms,
+                    "last_seen_ms": now,
+                    "skip_count": prev.skip_count + 1,
+                }
+            )
+            return
+        self._gap_skips[key] = DataGapSkip(
+            symbol=symbol,
+            timeframe=timeframe,
+            summary=summary,
+            gap_start_ms=first.start_ms,
+            gap_end_ms=first.end_ms,
+            first_seen_ms=now,
+            last_seen_ms=now,
+        )
+
+    def _resolve_gap_skip(self, key: Series) -> None:
+        """구멍이 사라져 평가가 재개되면 기록을 해소로 표시한다(지우지 않는다)."""
+        prev = self._gap_skips.get(key)
+        if prev is not None and prev.resolved_ms is None:
+            self._gap_skips[key] = prev.model_copy(update={"resolved_ms": self._now_ms()})
 
     def poll_once(self) -> list[EngineEvent]:
         """모든 시리즈를 한 번씩 폴링하고 하트비트·상태 스냅샷을 남긴다."""
@@ -320,6 +363,10 @@ class ZoneLimitPaperRunner:
                 # 최단 TF 주기 예산과 비교한다.
                 cycle_completed_ms=now,
                 cycle_duration_ms=max(0, now - cycle_started),
+                # 결측 건너뜀 기록(WAN-314) — 로그 밖(상태 파일·Health 탭)에서도 보인다.
+                data_gap_skips=sorted(
+                    self._gap_skips.values(), key=lambda s: (s.symbol, s.timeframe)
+                ),
             )
         return emitted
 

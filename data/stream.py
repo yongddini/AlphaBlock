@@ -148,6 +148,7 @@ async def stream_klines(
     on_candle: Callable[[Candle], None] | None = None,
     heartbeat: Callable[[], None] | None = None,
     idle_timeout_seconds: float | None = None,
+    on_connect: Callable[[], None] | None = None,
 ) -> None:
     """선물 kline 결합 스트림에 접속해 확정봉을 계속 저장한다.
 
@@ -158,12 +159,21 @@ async def stream_klines(
     `idle_timeout_seconds`가 주어지면 수신에 유휴 워치독을 걸어(`guard_idle`), 그 시간
     안에 메시지가 안 오면 `StreamStalled`를 던진다(WAN-173) — `ConnectionClosed`를
     못 받는 half-open 소켓 stall을 예외로 바꿔 상위 재접속 루프가 잡게 한다.
+
+    `on_connect`(WAN-314)는 **웹소켓 접속이 성립한 직후, 첫 메시지 소비 전에** 한 번
+    호출된다. 수집기는 여기서 꼬리 따라잡기 백필을 예약한다 — 스트림은 접속 이후에
+    닫힌 봉만 주므로, 접속 전에 닫힌 봉(기동 백필~접속 사이 · 재접속 공백)은 이
+    훅에서 REST로 메워야 구멍이 안 남는다. 접속 **후**에 호출되는 것이 핵심이다:
+    「접속 이후 확정 = 스트림」 + 「호출 시각 이전 확정 = 따라잡기」의 합집합이 전
+    구간을 덮는다(접속 전에 돌리면 그 사이에 닫힌 봉이 다시 빠진다).
     """
     url = ws_base + build_stream_path(symbols, timeframes)
     symbol_map = build_symbol_map(symbols)
     logger.info("웹소켓 접속: %d 심볼 × %d 타임프레임", len(symbols), len(timeframes))
 
     async with connect(url) as ws:
+        if on_connect is not None:
+            on_connect()
         messages: AsyncIterator[str | bytes] = _recv_stream(ws)
         if idle_timeout_seconds is not None:
             messages = guard_idle(messages, idle_timeout_seconds=idle_timeout_seconds)

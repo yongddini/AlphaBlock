@@ -1135,3 +1135,99 @@ def test_poll_once_records_cycle_metrics_and_series_heartbeat(
     assert state.last_cycle_duration_ms is not None and state.last_cycle_duration_ms >= 0
     assert state.updated_at is not None and state.updated_at >= state.last_cycle_completed_at
     _close_rig(rig)
+
+
+# -- 데이터 결측 건너뜀 관측성 (WAN-314) ---------------------------------------
+
+
+def test_gap_skip_is_recorded_in_runtime_state_and_resolved_after_repair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """평가 창의 구멍으로 건너뛴 평가가 상태 파일에 남고, 구멍이 메워지면 해소로 표시된다.
+
+    2026-08-16 사고에서 건너뜀은 ERROR 로그 한 줄뿐이라 나중에 성적을 읽을 때
+    「기회가 없었다」와 「기회를 놓쳤다」가 똑같이 빈칸으로 보였다 — 이제 로그 밖
+    (`live_runtime_state` → Health 탭)에서도 보인다.
+    """
+    import sqlite3
+
+    d = _make_rig(tmp_path, monkeypatch)
+    try:
+        store: OhlcvStore = d["store"]  # type: ignore[assignment]
+        runner: ZoneLimitPaperRunner = d["runner"]  # type: ignore[assignment]
+        state_path: Path = d["state_path"]  # type: ignore[assignment]
+
+        # 상위TF 봉 하나를 지워 내부 구멍을 만든다(수집 결측 재현).
+        hole_open = 10 * _H
+        conn = sqlite3.connect(tmp_path / "ohlcv.db")
+        conn.execute(
+            "DELETE FROM ohlcv WHERE symbol = ? AND timeframe = ? AND open_time = ?",
+            (_SYMBOL, _TF, hole_open),
+        )
+        conn.commit()
+        conn.close()
+
+        runner.poll_once()
+        state = RuntimeStateStore(state_path).load()
+        assert len(state.data_gap_skips) == 1
+        skip = state.data_gap_skips[0]
+        assert (skip.symbol, skip.timeframe) == (_SYMBOL, _TF)
+        assert skip.gap_start_ms == hole_open
+        assert skip.gap_end_ms == hole_open
+        assert skip.resolved_ms is None
+        assert skip.skip_count == 1
+
+        # 같은 구멍으로 또 건너뛰면 횟수만 는다(새 기록이 생기지 않는다).
+        runner.poll_once()
+        state = RuntimeStateStore(state_path).load()
+        assert len(state.data_gap_skips) == 1
+        assert state.data_gap_skips[0].skip_count == 2
+
+        # 구멍이 메워지면(갭 복구) 기록은 지워지지 않고 「해소」로 남는다.
+        store.upsert_candles([_htf_candle(10)])
+        runner.poll_once()
+        state = RuntimeStateStore(state_path).load()
+        assert len(state.data_gap_skips) == 1
+        assert state.data_gap_skips[0].resolved_ms is not None
+    finally:
+        _close_rig(d)
+
+
+def test_gap_skip_record_survives_runner_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """건너뜀 기록은 재시작을 넘어 보존된다 — 새 러너가 상태 파일에서 이어받는다.
+
+    이어받지 않으면 새 러너의 첫 record가 빈 목록으로 통째로 교체해 기록이 사라진다
+    (그 구간의 성적 빈칸이 다시 설명 불가가 된다).
+    """
+    import sqlite3
+
+    d = _make_rig(tmp_path, monkeypatch)
+    try:
+        runner: ZoneLimitPaperRunner = d["runner"]  # type: ignore[assignment]
+        conn = sqlite3.connect(tmp_path / "ohlcv.db")
+        conn.execute(
+            "DELETE FROM ohlcv WHERE symbol = ? AND timeframe = ? AND open_time = ?",
+            (_SYMBOL, _TF, 10 * _H),
+        )
+        conn.commit()
+        conn.close()
+        runner.poll_once()  # 건너뜀 기록 생성
+    finally:
+        _close_rig(d)
+
+    # 구멍을 메운 뒤 「재시작」 — 같은 상태 파일로 새 러너를 만든다.
+    d2 = _make_rig(tmp_path, monkeypatch)
+    try:
+        store2: OhlcvStore = d2["store"]  # type: ignore[assignment]
+        runner2: ZoneLimitPaperRunner = d2["runner"]  # type: ignore[assignment]
+        state_path: Path = d2["state_path"]  # type: ignore[assignment]
+        store2.upsert_candles([_htf_candle(10)])
+
+        runner2.poll_once()
+        state = RuntimeStateStore(state_path).load()
+        assert len(state.data_gap_skips) == 1  # 이어받았고
+        assert state.data_gap_skips[0].resolved_ms is not None  # 해소로 닫혔다
+    finally:
+        _close_rig(d2)
