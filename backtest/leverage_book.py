@@ -174,7 +174,20 @@ class BookStats:
     max_open_notional_ratio: float = 0.0
     """`열린 명목 합 / 공유 자본`의 최댓값 — 상한(기본 leverage × N)을 실제로 얼마나 썼나."""
     max_concurrent_risk_ratio: float = 0.0
-    """동시 리스크 합 / 공유 자본의 최댓값. 거래당 N%가 몇 %까지 겹쳤는가."""
+    """동시 리스크 합 / 공유 자본의 최댓값. 거래당 N%가 몇 %까지 겹쳤는가.
+
+    ⚠️ **주문을 낼 때 「계획한」 리스크**다 — 손절 한 번 = 정확히 1R(존 무효화 경계에서
+    그 값 그대로 체결)이라는 가정 위 값이라, 손절 체결 보수화 축(WAN-276 α · WAN-312 k)에
+    **설계상 불변**이다. 실제로 물릴 수 있는 비율은 아래 `max_effective_concurrent_risk_ratio`.
+    """
+    max_effective_concurrent_risk_ratio: float = 0.0
+    """**실효** 동시 리스크 = (동시 리스크 합 × `stress_risk_multiple`) / 공유 자본의 최댓값
+    (WAN-312).
+
+    「손절 한 번이 계획 1R이 아니라 k·R이면 지금 열려 있는 칸들이 자본의 몇 %를 깰 수 있나」
+    다. `stress_risk_multiple=1.0`(기본)이면 계획값과 **정확히 같아** 예전 CSV가 비트
+    재현되고, k>1이면 계획값과 벌어진 폭이 곧 「cap_only 5배의 안전 논리가 기대고 있던
+    가정의 크기」다(WAN-213 근거 열의 스트레스)."""
     placed: int = 0
     """실제로 배치된(거래가 된) 후보 수."""
     clamped_entries: int = 0
@@ -331,6 +344,7 @@ def run_leverage_book(
     book: LeverageBookParams,
     *,
     eval_from_ms: int | None = None,
+    stress_risk_multiple: float = 1.0,
 ) -> BookOutcome:
     """칸별 후보를 하나의 공통 시간축에서 공유 자본으로 배치한다.
 
@@ -344,9 +358,22 @@ def run_leverage_book(
     않는다. 호출부는 후보를 **전체 창에서 연속으로** 만들어 넘겨야 한다(존 재고·지표가
     데워진 상태 — `run_zone_limit_backtest_verbose(eval_from_ms=...)`와 같은 규약).
 
+    `stress_risk_multiple`(WAN-312, 옵트인 스트레스 노브)은 **최악 가정에서 한 포지션이
+    잃는 크기**를 계획 1R의 k배로 본다 — 열린 포지션이 전부 손절까지 갔을 때의 손실이
+    `k × Σrisk`라고 보고 청산 검사와 `max_effective_concurrent_risk_ratio`를 낸다. 계획
+    리스크(`max_concurrent_risk_ratio`)는 **손대지 않아** 둘의 벌어짐이 표에서 읽힌다.
+    `1.0`(기본)이면 `Σrisk × 1.0 == Σrisk`라 예전과 **비트 단위로 같다**. 이 노브는 손절
+    **체결가**를 바꾸지 않는다 — 실현 손익 쪽은 후보 변환(`wan312.apply_stop_multiple`)이
+    담당하고, 이 노브는 「아직 안 났지만 날 수 있는 손실」의 자 하나만 바꾼다.
+
     반환 거래 목록은 **배치(진입 시각) 순**이다 — 자본곡선은 청산 시각 순으로 다시
     정렬해 만든다(`build_result_from_trades`가 그렇게 한다).
     """
+    if stress_risk_multiple < 1.0:
+        raise ValueError(
+            "stress_risk_multiple은 1.0 이상이어야 합니다(계획 1R보다 유리한 손절 체결은 "
+            f"이 스트레스 축이 아닙니다): {stress_risk_multiple} (WAN-312)."
+        )
     _validate_cells(cells)
     eff_cfg = apply_book_leverage(cfg, book)
     # cap-only(WAN-180 팔 B)는 북 상한만 N배다 — 거래당 사이징(크기·천장)은 원본 1배
@@ -456,7 +483,7 @@ def run_leverage_book(
                 realized_pnl=trade.realized_pnl,
             )
         )
-        _observe(stats, cand.entry_time, cash, open_by_cell, book)
+        _observe(stats, cand.entry_time, cash, open_by_cell, book, stress_risk_multiple)
 
     close_due(_MAX_TIME)
     return BookOutcome(trades=trades, stats=stats, effective_config=eff_cfg)
@@ -468,6 +495,7 @@ def _observe(
     cash: float,
     open_by_cell: dict[CellKey, _OpenBookPosition],
     book: LeverageBookParams,
+    stress_risk_multiple: float = 1.0,
 ) -> None:
     """진입 직후의 북 상태를 계측하고 최악 가정 청산을 검사한다(WAN-103 결정 4 재사용).
 
@@ -475,6 +503,10 @@ def _observe(
     순간 청산되므로 손절 거리가 최대 역행폭이다 — 실제 가격 경로를 몰라도 참인 상한이다.
     이 이벤트가 있다고 백테스트 자본이 실제로 전멸했다는 뜻은 **아니지만**, 그 배수는
     구조적으로 마진콜 사거리 안에 있다는 신호다(발생 건수가 판정 열).
+
+    ⚠️ 그 「손절 거리가 최대 역행폭」은 **손절 한 번 = 정확히 1R 체결**이라는 가정이다 —
+    `stress_risk_multiple=k`(WAN-312)를 주면 한 포지션의 최악 손실을 `k × risk_amount`로
+    보고 같은 검사를 다시 한다(계획 리스크 열은 불변, 실효 리스크 열이 따로 나온다).
     """
     concurrency = len(open_by_cell)
     if concurrency > stats.peak_concurrency:
@@ -483,11 +515,16 @@ def _observe(
 
     open_notional = sum(p.notional for p in open_by_cell.values())
     total_risk = sum(p.risk_amount for p in open_by_cell.values())
+    # k=1.0이면 `× 1.0`이 항등이라 아래 두 열·청산 검사가 전부 예전 값과 비트 일치한다.
+    effective_risk = total_risk * stress_risk_multiple
     if cash > 0:
         stats.max_open_notional_ratio = max(stats.max_open_notional_ratio, open_notional / cash)
         stats.max_concurrent_risk_ratio = max(stats.max_concurrent_risk_ratio, total_risk / cash)
+        stats.max_effective_concurrent_risk_ratio = max(
+            stats.max_effective_concurrent_risk_ratio, effective_risk / cash
+        )
 
-    worst_equity = cash - total_risk
+    worst_equity = cash - effective_risk
     maintenance = open_notional * book.maintenance_margin_rate
     if worst_equity <= maintenance:
         stats.liquidations.append(
