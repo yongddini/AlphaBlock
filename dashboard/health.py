@@ -78,6 +78,16 @@ class RunnerStatus(BaseModel):
     last_notification_ms: int | None
     lag_ms: int | None
     level: HealthLevel
+    heartbeat_stale: bool = False
+    """하트비트 자체가 끊겼는지(프로세스 정지 의심, WAN-313)."""
+    last_cycle_ms: int | None = None
+    """마지막으로 전체 시리즈 한 바퀴를 완주한 시각(WAN-313). 러너가 안 남기면 None."""
+    cycle_duration_ms: int | None = None
+    """그 완주에 걸린 시간(WAN-313)."""
+    cycle_lag_ms: int | None = None
+    """마지막 완주 이후 경과(WAN-313). 판정에 안 쓰였으면 None."""
+    cycle_stale: bool = False
+    """살아는 있는데 한 바퀴 완주가 예산(최단 TF 주기)을 넘겼는지(WAN-313)."""
 
 
 class CollectorStatus(BaseModel):
@@ -181,6 +191,17 @@ def compute_funding_status(
     return out
 
 
+def runner_cycle_budget_ms(timeframes: Sequence[str]) -> int | None:
+    """러너 한 바퀴 완주 예산(ms) = 감시 TF 중 가장 짧은 주기(WAN-313).
+
+    한 바퀴가 최단 TF 주기를 넘기면 새 탭 발견이 그 TF의 봉 하나만큼 늦는다 — 그게
+    「따라간다」의 정의라 예산도 여기서 유도한다(새 자유 파라미터를 만들지 않는다).
+    지원하지 않는 TF는 건너뛰고, 아는 TF가 없으면 None(완주 판정 없음).
+    """
+    intervals = [i for tf in timeframes if (i := _interval_ms(tf)) is not None]
+    return min(intervals) if intervals else None
+
+
 def compute_runner_status(
     *,
     last_poll_ms: int | None,
@@ -188,20 +209,45 @@ def compute_runner_status(
     now_ms: int,
     poll_interval_seconds: float,
     stale_multiplier: float,
+    last_cycle_ms: int | None = None,
+    cycle_duration_ms: int | None = None,
+    cycle_budget_ms: int | None = None,
 ) -> RunnerStatus:
-    """러너 하트비트로 생존 상태를 판정한다.
+    """러너 하트비트 + 완주 지표로 생존 상태를 판정한다(WAN-313).
 
-    하트비트가 없으면 미실행(UNKNOWN). 있으면 폴링 간격의 `stale_multiplier`배를
-    넘겨 갱신이 없을 때 멈춤(STALE).
+    * **하트비트**: 없으면 미실행(UNKNOWN). 폴링 간격의 `stale_multiplier`배를 넘겨
+      갱신이 없으면 멈춤(STALE). 하트비트는 시리즈 단위로 갱신되므로(WAN-313) 이
+      문턱은 시리즈 수와 무관하게 유효하다.
+    * **완주**(`cycle_budget_ms`를 준 경우): 마지막 한 바퀴 완주 이후 경과가
+      `max(stale_multiplier × 폴링 간격, 예산)`을 넘으면 STALE — 하트비트만 뛰고
+      한 바퀴를 못 끝내는 상태가 초록불이 되지 않게 한다. 완주 기록이 아직 없으면
+      (기동 직후·따라잡기 재생 중) 하트비트가 살아 있는 한 판정하지 않는다.
     """
     interval_ms = int(poll_interval_seconds * 1000)
     lag, level = classify_lag(last_poll_ms, now_ms, interval_ms, stale_multiplier)
+    heartbeat_stale = level is HealthLevel.STALE
+    cycle_lag: int | None = None
+    cycle_stale = False
+    if (
+        cycle_budget_ms is not None
+        and last_cycle_ms is not None
+        and level is not HealthLevel.UNKNOWN
+    ):
+        cycle_lag = now_ms - last_cycle_ms
+        if cycle_lag > max(stale_multiplier * interval_ms, float(cycle_budget_ms)):
+            cycle_stale = True
+            level = HealthLevel.STALE
     return RunnerStatus(
         ran=last_poll_ms is not None,
         last_poll_ms=last_poll_ms,
         last_notification_ms=last_notification_ms,
         lag_ms=lag,
         level=level,
+        heartbeat_stale=heartbeat_stale,
+        last_cycle_ms=last_cycle_ms,
+        cycle_duration_ms=cycle_duration_ms,
+        cycle_lag_ms=cycle_lag,
+        cycle_stale=cycle_stale,
     )
 
 

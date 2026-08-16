@@ -159,20 +159,20 @@ class ZoneLimitPaperRunner:
         """
         events: list[EngineEvent] = []
         htf_ms = self._store_htf_ms(timeframe)
+        key = (symbol, timeframe)
+        since = self._last_substep.get(key)
 
-        df = self._store.load(symbol, timeframe)
+        df = self._load_htf_tail(symbol, timeframe, since=since, htf_ms=htf_ms)
         if df.empty:
             return []
         closed_all = df[df["closed"].astype(bool)]
         if closed_all.empty:
             return []
         last_closed_time = int(closed_all["open_time"].iloc[-1])
-        key = (symbol, timeframe)
 
         # 1분봉 서브스텝. 첫 관측(프라이밍)은 현재 형성 중인 상위TF 봉의 시작부터다 —
         # 과거를 재생하면 이미 지나간 탭에 뒷북 주문을 걸게 된다(측정 오염). 복원된
         # 시리즈는 `restore_state`가 심은 커서부터 이어져 공백 구간을 따라잡는다(WAN-306).
-        since = self._last_substep.get(key)
         if since is None:
             since = last_closed_time + htf_ms - _MINUTE_MS
         df_1m = self._store.load(symbol, "1m", start_ms=since + 1)
@@ -209,6 +209,30 @@ class ZoneLimitPaperRunner:
             self._handle_events(fed)
             events += fed
         return events
+
+    def _load_htf_tail(
+        self, symbol: str, timeframe: str, *, since: int | None, htf_ms: int
+    ) -> pd.DataFrame:
+        """이번 폴링이 실제로 쓸 확정봉 꼬리만 로드한다(WAN-313 — 전체 이력 로드 금지).
+
+        예전에는 매 폴링 `store.load(symbol, timeframe)`로 6년 전체를 읽었다 — 15m
+        21만 행, 파생 2h는 1h 전체 로드 + 리샘플까지 얹혀 48시리즈 한 바퀴가 15분봉
+        주기를 넘겼다(시리즈당 실측은 wan313.md §0). 창은 `_feed_htf_window`가
+        `closed` 필터 → `open_time <= cutoff` → `tail(lookback)`로 만들므로, 이번
+        폴링의 **가장 이른 cutoff** 이하에서 확정봉 `lookback`개를 덮는 정확한
+        앵커(`tail_window_start`)부터 로드하면 창 내용이 전체 로드와 글자 그대로 같다.
+
+        가장 이른 cutoff: 프라이밍(since=None)은 최신 확정봉 이후만 보므로 상한이
+        필요 없고, 이어 소비하는 경우 첫 1분봉 t는 `since + 1` 이상이라 cutoff
+        (= t + 1분 − htf_ms)가 `since + 1 + 1분 − htf_ms`보다 이를 수 없다.
+        """
+        end_ms = None if since is None else since + 1 + _MINUTE_MS - htf_ms
+        start = self._store.tail_window_start(
+            symbol, timeframe, bars=self._lookback_bars, end_ms=end_ms
+        )
+        if start is None:
+            return self._store.load(symbol, timeframe)
+        return self._store.load(symbol, timeframe, start_ms=start)
 
     def _feed_htf_window(
         self,
@@ -252,12 +276,18 @@ class ZoneLimitPaperRunner:
 
     def poll_once(self) -> list[EngineEvent]:
         """모든 시리즈를 한 번씩 폴링하고 하트비트·상태 스냅샷을 남긴다."""
+        cycle_started = self._now_ms()
         emitted: list[EngineEvent] = []
         for symbol, timeframe in self._series:
             try:
                 emitted += self.poll_series(symbol, timeframe)
             except Exception:  # noqa: BLE001 — 한 시리즈 오류가 루프 전체를 멈추지 않도록.
                 _logger.exception("시리즈 폴링 실패: %s %s", symbol, timeframe)
+            # 시리즈 단위 생존 신호(WAN-313) — 하트비트가 「한 바퀴 완주」에 묶여 있으면
+            # 시리즈 수가 늘 때마다 간격이 길어져 「멈춤」 판정이 상시 오작동한다. 완주
+            # 여부는 아래 record의 별도 지표(last_cycle_completed_at)가 담당한다.
+            if self._runtime_state is not None:
+                self._runtime_state.touch(self._now_ms())
         # 웹소켓 틱으로 대기 주문 체결을 앞당긴다(WAN-246, 옵트인). 예약은 위 1분봉
         # 경로가 이미 끝냈으므로, 여기서는 걸려 있는 주문의 체결만 더 촘촘히 잡는다.
         emitted += self._drain_ticks()
@@ -285,6 +315,11 @@ class ZoneLimitPaperRunner:
                 open_positions=self._paper_positions(),
                 new_events=[],
                 pending_orders=self._pending_snapshots(),
+                # 완주 지표(WAN-313): 하트비트만으로는 「돌고는 있는데 한 바퀴를 못
+                # 끝내는」 상태가 초록불이 된다 — 완주 시각·소요를 따로 남겨 Health가
+                # 최단 TF 주기 예산과 비교한다.
+                cycle_completed_ms=now,
+                cycle_duration_ms=max(0, now - cycle_started),
             )
         return emitted
 
@@ -563,7 +598,15 @@ class ZoneLimitPaperRunner:
                 )
                 self._engine_state.delete(symbol, timeframe)
                 continue
-            df = self._store.load(symbol, timeframe)
+            # 복원 창도 꼬리만 로드한다(WAN-313) — 앵커는 스냅샷 시점(end_ms) 기준이라
+            # 아래 `<= last_htf_time` 필터 + tail(lookback)이 전체 로드와 같은 창을 낸다.
+            start = self._store.tail_window_start(
+                symbol, timeframe, bars=self._lookback_bars, end_ms=snap.last_htf_time
+            )
+            if start is None:
+                df = self._store.load(symbol, timeframe)
+            else:
+                df = self._store.load(symbol, timeframe, start_ms=start)
             closed_all = df[df["closed"].astype(bool)] if not df.empty else df
             window = closed_all
             if not closed_all.empty:

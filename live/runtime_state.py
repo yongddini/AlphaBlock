@@ -105,8 +105,14 @@ class EventRecord(BaseModel):
 class RunnerRuntimeState(BaseModel):
     """러너 운영 상태 스냅샷(파일로 직렬화되는 최상위 모델)."""
 
-    #: 마지막으로 상태를 기록한 벽시계 시각(ms). 하트비트/마지막 폴링 시각.
+    #: 마지막으로 상태를 기록한 벽시계 시각(ms). 하트비트 — WAN-313부터 시리즈 단위로
+    #: 갱신되므로 「살아 있음」의 신호이지 「한 바퀴 완주」의 신호가 아니다.
     updated_at: int | None = None
+    #: 마지막으로 전체 시리즈 한 바퀴를 완주한 벽시계 시각(ms, WAN-313). 하트비트만으로는
+    #: 「돌고는 있는데 한 바퀴를 못 끝내는」 상태가 초록불이 되므로 별도 지표로 남긴다.
+    last_cycle_completed_at: int | None = None
+    #: 그 완주에 걸린 시간(ms, WAN-313).
+    last_cycle_duration_ms: int | None = None
     #: 마지막으로 새 신호 알림이 나온 벽시계 시각(ms). 한 번도 없으면 None.
     last_notification_at: int | None = None
     #: 현재 오픈 중인 페이퍼 포지션.
@@ -144,6 +150,15 @@ class RuntimeStateStore:
         self._state = self._read()
         return self._state
 
+    def touch(self, now_ms: int) -> None:
+        """하트비트(`updated_at`)만 갱신·저장한다(WAN-313 — 시리즈 단위 생존 신호).
+
+        나머지 상태(포지션·대기 주문·이력·완주 지표)는 그대로 보존한다 — 한 바퀴가
+        길어도 「살아 있음」이 폴링 간격 수준의 해상도로 보이게 하는 가벼운 신호다.
+        """
+        self._state = self._state.model_copy(update={"updated_at": now_ms})
+        self._flush()
+
     def record(
         self,
         *,
@@ -151,6 +166,8 @@ class RuntimeStateStore:
         open_positions: list[PaperPosition],
         new_events: list[SignalEvent],
         pending_orders: list[PendingOrderSnapshot] | None = None,
+        cycle_completed_ms: int | None = None,
+        cycle_duration_ms: int | None = None,
     ) -> RunnerRuntimeState:
         """이번 폴링 결과를 반영해 상태를 갱신·저장하고 반환한다.
 
@@ -158,6 +175,8 @@ class RuntimeStateStore:
         - `new_events`가 있으면 이력에 누적(상한 초과분은 오래된 것부터 버림)하고
           `last_notification_at`을 갱신한다.
         - 현재 오픈 포지션·대기 주문(WAN-45)을 스냅샷으로 통째로 교체한다.
+        - `cycle_completed_ms`/`cycle_duration_ms`(WAN-313)를 주면 완주 지표를 갱신하고,
+          주지 않으면 이전 값을 보존한다(A안 러너 등 완주 개념이 없는 호출부 호환).
         """
         events = list(self._state.recent_events)
         events.extend(EventRecord.from_event(e) for e in new_events)
@@ -170,6 +189,16 @@ class RuntimeStateStore:
             open_positions=[PositionSnapshot.from_position(p) for p in open_positions],
             pending_orders=list(pending_orders) if pending_orders is not None else [],
             recent_events=events,
+            last_cycle_completed_at=(
+                cycle_completed_ms
+                if cycle_completed_ms is not None
+                else self._state.last_cycle_completed_at
+            ),
+            last_cycle_duration_ms=(
+                cycle_duration_ms
+                if cycle_duration_ms is not None
+                else self._state.last_cycle_duration_ms
+            ),
         )
         self._flush()
         return self._state

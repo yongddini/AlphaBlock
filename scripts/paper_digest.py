@@ -94,7 +94,7 @@ def resolve_window(
 def _runner_status_line(settings: Settings) -> str | None:
     """거래 0건 다이제스트에 붙일 러너 상태 한 줄(조립 실패 시 None)."""
     try:
-        from dashboard.health import HealthLevel
+        from dashboard.health import HealthLevel, runner_cycle_budget_ms
         from dashboard.health_data import build_health_view
 
         view = build_health_view(
@@ -104,6 +104,7 @@ def _runner_status_line(settings: Settings) -> str | None:
             stale_multiplier=settings.health_stale_multiplier,
             collector_heartbeat_path=settings.collector_heartbeat_path,
             collector_heartbeat_interval_seconds=settings.collector_heartbeat_interval_seconds,
+            cycle_budget_ms=runner_cycle_budget_ms(settings.live_signal_timeframes),
         )
     except Exception:  # noqa: BLE001 — 상태 조립 실패가 다이제스트를 막지 않도록.
         _logger.debug("러너 상태 조립 실패 — 상태 줄 생략", exc_info=True)
