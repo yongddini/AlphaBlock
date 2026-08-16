@@ -105,6 +105,15 @@ def backfill_symbol(
 
     `progress`가 주어지면 매 페이지 저장 후 `(total, last_open_ms, end)`로 호출된다.
     장시간(수십만 봉) 실행의 진행률 로깅에 쓴다(테스트에서 주입 가능).
+
+    ⚠️ **형성 중 봉은 저장하지 않는다(WAN-314).** ccxt `fetch_ohlcv`는 아직 닫히지
+    않은 현재 봉도 돌려주는데, 이 경로는 모든 행을 `closed=True`로 저장한다
+    (`candle_from_ccxt` 기본값). 스트림이 살아 있으면 봉 확정 이벤트가 덮어써 자가
+    치유되지만, 확정 순간 스트림이 죽어 있으면 **부분 봉이 확정 라벨을 달고 영구히
+    남는다** — 2026-08-16 사고에서 15m 22:45 봉이 그렇게 남았다(구멍은 보이는데
+    부분 봉은 어떤 점검에도 안 보인다). 그래서 `open_time + tf <= now`인, 이미 닫힌
+    봉만 저장한다. 닫힌 봉만 저장하면 형성 중 봉의 몫은 스트림(확정 이벤트) 또는
+    다음 꼬리 백필이 정확한 값으로 채운다.
     """
     tf_ms = timeframe_to_ms(timeframe)
     end = until_ms if until_ms is not None else now_ms()
@@ -125,8 +134,11 @@ def backfill_symbol(
         if not batch:
             break
 
-        # 종료 시점 이후의 봉은 제외(미래/미확정 봉 방지).
-        rows: Sequence[list[float]] = [r for r in batch if int(r[0]) < end]
+        # 종료 시점 이후의 봉과 아직 닫히지 않은 봉은 제외(미래/미확정 봉 방지, WAN-314).
+        closed_by = now_ms()
+        rows: Sequence[list[float]] = [
+            r for r in batch if int(r[0]) < end and int(r[0]) + tf_ms <= closed_by
+        ]
         candles: list[Candle] = [candle_from_ccxt(symbol, timeframe, r) for r in rows]
         total += store.upsert_candles(candles)
 

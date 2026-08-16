@@ -6,7 +6,7 @@ from pathlib import Path
 
 from live.notifier import SignalEvent
 from live.paper import PaperPosition
-from live.runtime_state import PositionSnapshot, RuntimeStateStore
+from live.runtime_state import DataGapSkip, PositionSnapshot, RuntimeStateStore
 from strategy.confluence import ConfluenceSignal, IndicatorSnapshot, SignalKind
 from strategy.models import OrderBlockDirection, SignalExitReason
 
@@ -152,3 +152,55 @@ def test_record_preserves_cycle_metrics_when_not_given(tmp_path: Path) -> None:
     state = store.record(now_ms=6_000, open_positions=[], new_events=[])
     assert state.last_cycle_completed_at == 5_000
     assert state.last_cycle_duration_ms == 800
+
+
+def _gap_skip(*, resolved_ms: int | None = None) -> DataGapSkip:
+    return DataGapSkip(
+        symbol="ETH/USDT:USDT",
+        timeframe="15m",
+        summary="평가 창에 구멍 1개(1봉) — 첫 구멍 open_time 1786888800000~1786888800000",
+        gap_start_ms=1_786_888_800_000,
+        gap_end_ms=1_786_888_800_000,
+        first_seen_ms=1_786_889_000_000,
+        last_seen_ms=1_786_889_900_000,
+        skip_count=3,
+        resolved_ms=resolved_ms,
+    )
+
+
+def test_record_persists_data_gap_skips(tmp_path: Path) -> None:
+    """결측 건너뜀 기록(WAN-314)이 상태 파일로 왕복한다 — 로그 밖에서도 보인다."""
+    path = tmp_path / "runtime.json"
+    store = RuntimeStateStore(path)
+    store.record(
+        now_ms=5_000,
+        open_positions=[],
+        new_events=[],
+        data_gap_skips=[_gap_skip()],
+    )
+
+    reread = RuntimeStateStore(path).load()
+    assert len(reread.data_gap_skips) == 1
+    skip = reread.data_gap_skips[0]
+    assert skip.gap_start_ms == 1_786_888_800_000
+    assert skip.skip_count == 3
+    assert skip.resolved_ms is None
+
+
+def test_record_preserves_data_gap_skips_when_not_given(tmp_path: Path) -> None:
+    """결측 인자 없는 record는 이전 기록을 지우지 않는다(추적 없는 호출부 호환)."""
+    path = tmp_path / "runtime.json"
+    store = RuntimeStateStore(path)
+    store.record(now_ms=5_000, open_positions=[], new_events=[], data_gap_skips=[_gap_skip()])
+
+    state = store.record(now_ms=6_000, open_positions=[], new_events=[])
+    assert len(state.data_gap_skips) == 1
+
+    # 명시적으로 주면 통째로 교체된다(해소 표기 갱신 경로).
+    state = store.record(
+        now_ms=7_000,
+        open_positions=[],
+        new_events=[],
+        data_gap_skips=[_gap_skip(resolved_ms=7_000)],
+    )
+    assert state.data_gap_skips[0].resolved_ms == 7_000

@@ -180,3 +180,43 @@ def test_build_health_view_bar_count_is_opt_in(tmp_path: Path) -> None:
     counted_view = build_health_view(db_path, include_bar_count=True, **kwargs)  # type: ignore[arg-type]
     assert counted_view.freshness[0].bar_count == 5
     assert counted_view.freshness[0].level is HealthLevel.OK
+
+
+def test_build_health_view_carries_data_gap_skips(tmp_path: Path) -> None:
+    """러너의 결측 건너뜀 기록(WAN-314)이 Health 뷰까지 흐른다 — 화면에서 보인다."""
+    from live.runtime_state import DataGapSkip
+
+    db_path = str(tmp_path / "ohlcv.db")
+    _seed(db_path, last_open_time=_NOW)
+
+    state_path = tmp_path / "runtime.json"
+    RuntimeStateStore(state_path).record(
+        now_ms=_NOW,
+        open_positions=[],
+        new_events=[],
+        data_gap_skips=[
+            DataGapSkip(
+                symbol="ETH/USDT:USDT",
+                timeframe="15m",
+                summary="평가 창에 구멍 1개(1봉) — 첫 구멍 open_time 1786888800000~1786888800000",
+                gap_start_ms=1_786_888_800_000,
+                gap_end_ms=1_786_888_800_000,
+                first_seen_ms=_NOW - _HOUR,
+                last_seen_ms=_NOW,
+                skip_count=4,
+            )
+        ],
+    )
+
+    view = build_health_view(
+        db_path,
+        runtime_state_path=str(state_path),
+        poll_interval_seconds=60,
+        stale_multiplier=2.5,
+        now_ms=_NOW,
+    )
+
+    assert len(view.data_gap_skips) == 1
+    skip = view.data_gap_skips[0]
+    assert skip.symbol == "ETH/USDT:USDT"
+    assert skip.resolved_ms is None

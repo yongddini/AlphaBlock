@@ -75,6 +75,37 @@ class PendingOrderSnapshot(BaseModel):
     tap_index: int = 0
 
 
+class DataGapSkip(BaseModel):
+    """데이터 결측으로 건너뛴 평가 구간 한 건 (WAN-314).
+
+    러너는 평가 창에 구멍이 있으면 그 시리즈의 평가를 통째로 건너뛴다(설계상 옳다 —
+    없는 봉으로 볼린저·RSI를 계산하면 조용히 틀린 지정가가 나온다, WAN-156 §3). 문제는
+    그 건너뜀이 ERROR 로그 한 줄뿐이라, 나중에 성적을 읽을 때 「기회가 없었다」와
+    「기회를 놓쳤다」가 똑같이 빈칸으로 보였다는 것이다(2026-08-16 사고). 이 레코드가
+    그 공백을 상태 파일·Health 탭에 남긴다 — 결측 구간의 체결률·괴리 빈칸은 전략이
+    아니라 데이터 문제였음을 성적표가 스스로 말하게 한다.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    symbol: str
+    timeframe: str
+    summary: str
+    """사람이 읽는 요약(로그와 같은 문장, `data.freshness.format_window_gaps`)."""
+    gap_start_ms: int
+    """첫 구멍의 첫 누락 봉 open_time(포함)."""
+    gap_end_ms: int
+    """첫 구멍의 마지막 누락 봉 open_time(포함)."""
+    first_seen_ms: int
+    """이 구멍으로 평가를 처음 건너뛴 벽시계 시각."""
+    last_seen_ms: int
+    """가장 최근에 건너뛴 벽시계 시각."""
+    skip_count: int = 1
+    """건너뛴 평가 횟수."""
+    resolved_ms: int | None = None
+    """구멍이 해소돼(갭 복구 등) 평가가 재개된 시각. 진행 중이면 None."""
+
+
 class EventRecord(BaseModel):
     """최근 신호/알림 이력 한 건."""
 
@@ -121,6 +152,8 @@ class RunnerRuntimeState(BaseModel):
     pending_orders: list[PendingOrderSnapshot] = Field(default_factory=list)
     #: 최근 신호 이력(오래된→최신 순). `DEFAULT_MAX_EVENTS`로 상한.
     recent_events: list[EventRecord] = Field(default_factory=list)
+    #: 데이터 결측으로 건너뛴 평가 구간(WAN-314). 시리즈당 최신 1건(해소분 포함).
+    data_gap_skips: list[DataGapSkip] = Field(default_factory=list)
 
 
 class RuntimeStateStore:
@@ -168,6 +201,7 @@ class RuntimeStateStore:
         pending_orders: list[PendingOrderSnapshot] | None = None,
         cycle_completed_ms: int | None = None,
         cycle_duration_ms: int | None = None,
+        data_gap_skips: list[DataGapSkip] | None = None,
     ) -> RunnerRuntimeState:
         """이번 폴링 결과를 반영해 상태를 갱신·저장하고 반환한다.
 
@@ -177,6 +211,8 @@ class RuntimeStateStore:
         - 현재 오픈 포지션·대기 주문(WAN-45)을 스냅샷으로 통째로 교체한다.
         - `cycle_completed_ms`/`cycle_duration_ms`(WAN-313)를 주면 완주 지표를 갱신하고,
           주지 않으면 이전 값을 보존한다(A안 러너 등 완주 개념이 없는 호출부 호환).
+        - `data_gap_skips`(WAN-314)를 주면 결측 건너뜀 기록을 통째로 교체하고, 주지
+          않으면 이전 값을 보존한다(결측 추적이 없는 호출부가 기록을 지우지 않도록).
         """
         events = list(self._state.recent_events)
         events.extend(EventRecord.from_event(e) for e in new_events)
@@ -198,6 +234,9 @@ class RuntimeStateStore:
                 cycle_duration_ms
                 if cycle_duration_ms is not None
                 else self._state.last_cycle_duration_ms
+            ),
+            data_gap_skips=(
+                list(data_gap_skips) if data_gap_skips is not None else self._state.data_gap_skips
             ),
         )
         self._flush()

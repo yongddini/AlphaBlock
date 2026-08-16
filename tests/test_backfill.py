@@ -129,6 +129,33 @@ def test_backfill_raises_after_max_retries(store: OhlcvStore) -> None:
         )
 
 
+def test_backfill_skips_forming_bar(store: OhlcvStore) -> None:
+    """형성 중 봉은 저장하지 않는다(WAN-314).
+
+    ccxt REST는 아직 닫히지 않은 현재 봉도 돌려주는데, 이 경로는 모든 행을
+    `closed=True`로 저장한다. 확정 순간 스트림이 죽어 있으면 부분 봉이 확정 라벨을
+    달고 영구히 남는다(2026-08-16 사고의 15m 22:45 봉) — 닫힌 봉만 저장해야 한다.
+    """
+    exchange = FakeExchange(_make_candles(10))
+    now = T0 + 9 * TF_MS + 30_000  # 봉 9(open T0+9TF)는 아직 형성 중(닫힘 = T0+10TF)
+    total = backfill_symbol(
+        exchange, store, "BTC/USDT:USDT", "1m", T0, limit=1000, now_ms=lambda: now
+    )
+    assert total == 9  # 닫힌 봉 0~8만
+    assert store.last_open_time("BTC/USDT:USDT", "1m") == T0 + 8 * TF_MS
+
+
+def test_backfill_stores_the_same_bar_once_it_has_closed(store: OhlcvStore) -> None:
+    """같은 봉이라도 닫힌 뒤에 요청하면 저장된다 — 제외는 「미확정」 판정이지 봉 자체가 아니다."""
+    exchange = FakeExchange(_make_candles(10))
+    now = T0 + 10 * TF_MS  # 봉 9까지 전부 닫힘
+    total = backfill_symbol(
+        exchange, store, "BTC/USDT:USDT", "1m", T0, limit=1000, now_ms=lambda: now
+    )
+    assert total == 10
+    assert store.last_open_time("BTC/USDT:USDT", "1m") == T0 + 9 * TF_MS
+
+
 def test_backfill_all_resumes_from_last(store: OhlcvStore) -> None:
     """저장된 마지막 봉이 있으면 그 다음부터 수집한다(재시작 복구)."""
     # 최근 5개 봉을 미리 저장.

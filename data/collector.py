@@ -15,7 +15,7 @@ from common.heartbeat import HeartbeatStore
 from common.telegram import build_telegram_client
 from common.timefmt import kst_log_format, use_kst_logging
 from config.settings import Settings, get_settings
-from data.backfill import backfill_all
+from data.backfill import FetchOHLCV, backfill_all
 from data.exchange import create_exchange
 from data.funding import (
     FundingRateSource,
@@ -59,6 +59,67 @@ def _build_recovery_notifier(settings: Settings) -> Callable[[RecoveryEvent], No
             logger.exception("복구 이벤트 텔레그램 전송 실패(무시하고 계속)")
 
     return _notify
+
+
+class TailCatchup:
+    """웹소켓 접속 직후 꼬리 따라잡기 백필 (WAN-314).
+
+    스트림은 **접속 이후에 닫힌 봉만** 준다(`k.x` 확정 이벤트). 그래서 기동 백필이
+    끝나고 스트림이 붙기까지의 구간(신규 심볼 초기 백필이 길면 수십 분 — 2026-08-16
+    사고에서 9종목 15m 23:00 KST 봉이 이렇게 빠졌다)과 재접속 공백에 닫힌 봉은
+    **아무도 다시 요청하지 않아 영구 구멍**이 됐다. 기동 갭 복구(`repair_on_start`)도
+    못 잡는다 — 그 시점엔 아직 꼬리라 내부 갭이 아니기 때문이다(`data.gaps` 경계 처리).
+
+    이 클래스는 `stream_klines`의 `on_connect` 훅에서 매 (재)접속마다 꼬리 백필을
+    **백그라운드 태스크로** 예약한다. 접속 후에 돌므로 「접속 이후 확정 = 스트림」과
+    「따라잡기 호출 이전 확정 = REST」의 합집합이 전 구간을 덮고, 저장소는 락으로
+    직렬화돼(`OhlcvStore`, 백필 스레드 + 스트림 루프) 동시 접근이 안전하다. 밀린 봉이
+    없으면 시리즈당 요청 1건(빈 손)으로 끝난다. 실패해도 스트림은 죽이지 않는다.
+    """
+
+    def __init__(
+        self,
+        exchange: FetchOHLCV,
+        store: OhlcvStore,
+        settings: Settings,
+    ) -> None:
+        self._exchange = exchange
+        self._store = store
+        self._settings = settings
+        self._tasks: set[asyncio.Task[None]] = set()
+
+    def schedule(self) -> None:
+        """따라잡기 태스크를 예약한다(이전 실행이 아직 돌고 있으면 건너뜀).
+
+        `stream_klines(on_connect=...)`에서 호출되므로 이벤트 루프 안이다. 빠른 재접속
+        루프에서 태스크가 겹겹이 쌓이지 않게 미완료 태스크가 있으면 예약하지 않는다
+        (UPSERT라 겹쳐도 무해하지만 낭비다).
+        """
+        if any(not t.done() for t in self._tasks):
+            logger.info("꼬리 따라잡기가 이미 진행 중 — 이번 접속에서는 예약 생략")
+            return
+        task = asyncio.get_running_loop().create_task(self._run())
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _run(self) -> None:
+        try:
+            results = await asyncio.to_thread(
+                backfill_all,
+                self._exchange,
+                self._store,
+                self._settings.symbols,
+                self._settings.timeframes,
+                settings=self._settings,
+            )
+            filled = sum(results.values())
+            if filled:
+                logger.info(
+                    "접속 직후 꼬리 따라잡기: %d봉 채움(스트림이 주지 않는 접속 전 확정봉)",
+                    filled,
+                )
+        except Exception:  # noqa: BLE001 — 따라잡기 실패가 스트림을 죽이면 안 된다.
+            logger.exception("꼬리 따라잡기 백필 실패 — 다음 (재)접속에서 다시 시도합니다")
 
 
 async def _backfill_funding(settings: Settings, exchange: FundingRateSource) -> None:
@@ -207,6 +268,10 @@ async def run_collector(
                 )
                 watchdog.start()
 
+            # 접속 직후 꼬리 따라잡기(WAN-314) — 기동 백필~접속 사이·재접속 공백에
+            # 닫힌 봉은 스트림이 다시 주지 않으므로 매 접속마다 REST로 메운다.
+            catchup = TailCatchup(exchange, store, settings)
+
             async def _stream_once() -> None:
                 # 한 번의 접속·소비. 유휴 타임아웃을 걸어(WAN-173 (1)) half-open stall을
                 # StreamStalled 예외로 바꾼다 — run_with_recovery가 잡아 재접속한다.
@@ -216,6 +281,7 @@ async def run_collector(
                     settings.timeframes,
                     heartbeat=_beat,
                     idle_timeout_seconds=settings.collector_stream_idle_timeout_seconds,
+                    on_connect=catchup.schedule,
                 )
 
             try:
