@@ -45,19 +45,22 @@ k=1.0에서는 두 변형이 **정의상 같고 현행 엔진과 비트 동일**
 ⚠️ **WAN-277 셀과 직접 비교 금지** — 유니버스(9→12)·펀딩 처리·유동성 한도 세 축이 함께
 다르다. 대조는 `--legacy-wan277`(세 축을 전부 되돌린 재현 모드)에서만 성립한다.
 
-## 재현
+## 재현 (WAN-316에서 채택 좌표 전체로 완성)
 
 ```
-uv run python -m backtest.wan312_stop_r_multiple --tf 4h --jobs 4            # 가벼운 TF부터
-uv run python -m backtest.wan312_stop_r_multiple --tf 2h --jobs 4 --append
-uv run python -m backtest.wan312_stop_r_multiple --tf 1h --jobs 4 --append
-uv run python -m backtest.wan312_stop_r_multiple --tf 15m --jobs 4 --append  # 무겁다(~37분/셀)
+uv run python -m backtest.wan312_stop_r_multiple --tf 15m,1h,2h,4h --jobs 4  # 정본(무겁다)
 uv run python -m backtest.wan312_stop_r_multiple --from-csv                  # 요약만 재생성
 uv run python -m backtest.wan312_stop_r_multiple --tf 4h --legacy-wan277     # 검산 (b)
 ```
 
-⚠️ `both`(채택 TF 집합 공유 지갑)는 전 TF가 **한 실행에 모여 있을 때만** 나온다 — 15m을
-뒤로 미룬 부분 실행의 `both`는 그때까지의 TF 집합만 담는다(라벨이 `num_cells`로 읽힌다).
+🚨 **`both`(공유 지갑)는 이어붙일 수 없다** — 북은 칸=(종목,TF)를 **한 프로세스의 공통
+시간축·한 지갑**으로 묶으므로, 15m을 `--append`로 붙이면 단일 TF 스코프 행만 늘고 `both`
+행은 여전히 옛 TF 집합의 지갑이다. **채택 좌표의 `both`(= 인자 없는 `backtest.run`이 실제로
+도는 그 지갑)를 얻으려면 네 TF를 한 프로세스로 돌려야 한다**(WAN-316의 존재 이유).
+
+📌 그래서 스코프 라벨이 지갑을 밝힌다 — `both` = 채택 4TF 지갑 · **`both_no15m`** = WAN-312가
+실제로 낸 3TF 지갑(15m 칸 없음)을 **덮어쓰지 않고 보존한** 대조 팔이다. 둘은 같은 실행에서
+같은 payload로 나오므로 한 표에서 직접 비교된다.
 """
 
 from __future__ import annotations
@@ -109,6 +112,17 @@ VARIANTS: tuple[str, ...] = (VARIANT_PURE, VARIANT_OBSERVED)
 
 #: 채택 북(WAN-213) — `LeverageBookParams()` 기본값이 곧 채택 북이다.
 ADOPTED_BOOK = LeverageBookParams()
+
+#: 공유 지갑 스코프 — 이 실행에 모인 **전 TF**의 칸(= 채택 좌표라면 15m·1h·2h·4h).
+BOTH_SCOPE = "both"
+
+#: WAN-312가 실제로 낸 **3TF 지갑**(15m 칸 없음)을 보존한 대조 팔 — WAN-316에서 신설.
+#: 채택 좌표의 `both`를 새로 내면서 옛 `both` 행을 덮어쓰면 「어느 쪽이 몇 TF 지갑인가」가
+#: 표에서 사라진다. 같은 실행·같은 payload에서 15m 칸만 빼 함께 내므로 둘이 직접 비교된다.
+BOTH_NO_15M_SCOPE = "both_no15m"
+
+#: 위 대조 팔이 빼는 TF.
+BOTH_EXCLUDED_TF = "15m"
 
 #: 구간 — `full`에 6년 MDD가 살고, `oos_warm`(주)·`oos`(스트레스)는 WAN-166 규약.
 SEGMENTS: tuple[str, ...] = (SEGMENT_FULL, SEGMENT_OOS_WARM, SEGMENT_OOS)
@@ -296,6 +310,33 @@ def _book_row(
     )
 
 
+def scope_payloads(payloads: Sequence[CellPayload], scope: str) -> list[CellPayload]:
+    """스코프의 칸 — 단일 TF · `both`(전 TF) · `both_no15m`(15m 뺀 지갑).
+
+    `both_no15m`을 **스코프로** 표현하는 것이 핵심이다: 지갑은 한 프로세스의 칸 집합으로
+    정의되므로, 15m을 뺀 지갑도 같은 실행 안에서 칸을 걸러 내야 옛 3TF 판과 같은 값이 나온다
+    (별도 실행으로 내면 창·데이터가 같아도 「둘을 한 표에서 비교한다」는 계약이 깨진다).
+    """
+    if scope == BOTH_NO_15M_SCOPE:
+        return [p for p in payloads if p.timeframe != BOTH_EXCLUDED_TF]
+    return _scope_payloads(payloads, scope)
+
+
+def resolve_scopes(timeframes: Sequence[str], existing: Sequence[str]) -> list[str]:
+    """이번 실행이 낼 스코프 — 요청 TF 각각 + `both` + (15m이 섞였으면) `both_no15m`.
+
+    `both`는 전 TF가 **한 프로세스**에 모였을 때만 낸다(공유 지갑). 대조 팔은 그 지갑에서
+    15m을 뺐을 때도 TF가 2개 이상 남아야 뜻이 있다.
+    """
+    scopes = [s for s in _resolve_scopes(timeframes, existing) if s != BOTH_SCOPE]
+    if len(timeframes) >= 2:
+        scopes.append(BOTH_SCOPE)
+        rest = [t for t in timeframes if t != BOTH_EXCLUDED_TF]
+        if BOTH_EXCLUDED_TF in timeframes and len(rest) >= 2:
+            scopes.append(BOTH_NO_15M_SCOPE)
+    return scopes
+
+
 def _exclude_payloads(
     payloads: Sequence[CellPayload], excluded: Sequence[str]
 ) -> list[CellPayload]:
@@ -309,7 +350,7 @@ def build_grid(payloads: Sequence[CellPayload], scopes: Sequence[str]) -> list[R
     base_cfg = harness.build_config(BOOK_ANNUALIZATION_TF)
     rows: list[RMultipleRow] = []
     for scope in scopes:
-        scoped = _scope_payloads(payloads, scope)
+        scoped = scope_payloads(payloads, scope)
         if not scoped:
             continue
         for k in K_MULTIPLES:
@@ -346,7 +387,7 @@ def build_leave_one_out(
         drops.append(("-new3", present_new))
     rows: list[RMultipleRow] = []
     for scope in scopes:
-        scoped = _scope_payloads(payloads, scope)
+        scoped = scope_payloads(payloads, scope)
         if not scoped:
             continue
         for label, dropped in drops:
@@ -414,6 +455,42 @@ def verify_adopted_identity(payloads: Sequence[CellPayload], *, start: str, end:
             abs(mine.max_drawdown - theirs.max_drawdown),
         )
     return worst
+
+
+def compare_legacy_wallet(
+    rows: Sequence[RMultipleRow], legacy: Sequence[RMultipleRow]
+) -> tuple[int, float] | None:
+    """검산 (c, WAN-316) — 이 실행이 **WAN-312 판을 되살리는가**.
+
+    돌려주는 값은 `(대조한 행 수, 최대 절대차)`. 대조는 두 갈래이고 둘 다 **비트 동일**이어야
+    한다:
+
+    * 단일 TF 스코프(15m을 뺀 나머지) — 그 지갑은 자기 TF 칸만 쓰므로 15m이 실행에 섞여도
+      값이 움직이면 안 된다. 움직이면 15m 칸이 다른 스코프로 새고 있다는 뜻이다.
+    * 옛 `both` ↔ 새 `both_no15m` — 「보존한다」는 라벨이 아니라 **같은 숫자**여야 성립한다.
+
+    옛 격자 CSV는 저장소가 덮어쓰므로 git에서 꺼낸다:
+    `git show <ref>:backtest/reports/wan312_stop_r_multiple_grid.csv > /tmp/prev.csv`.
+    """
+    ref = {(r.scenario, r.segment, r.exclude, r.scope): r for r in legacy}
+    matched = 0
+    worst = 0.0
+    for row in rows:
+        if row.scope == BOTH_SCOPE:
+            continue  # 4TF 지갑은 옛 판에 대응물이 없다(그래서 이 이슈가 있다).
+        old_scope = BOTH_SCOPE if row.scope == BOTH_NO_15M_SCOPE else row.scope
+        other = ref.get((row.scenario, row.segment, row.exclude, old_scope))
+        if other is None:
+            continue  # 15m 스코프 등 옛 판에 없던 행.
+        matched += 1
+        worst = max(
+            worst,
+            abs(row.total_return - other.total_return),
+            abs(row.max_drawdown - other.max_drawdown),
+            abs(row.max_concurrent_risk - other.max_concurrent_risk),
+            float(abs(row.num_trades - other.num_trades)),
+        )
+    return (matched, worst) if matched else None
 
 
 def restore_pre_backfill_funding(payloads: Sequence[CellPayload]) -> list[CellPayload]:
@@ -494,6 +571,33 @@ def _pct(value: float) -> str:
 
 def _rr(value: float | None) -> str:
     return "—" if value is None else f"{value:.2f}"
+
+
+#: 표에서 스코프를 눕히는 순서 — 단일 TF(짧은 것부터) → 채택 지갑 → 대조 지갑.
+_TF_ORDER: tuple[str, ...] = ("15m", "1h", "2h", "4h", "1d")
+
+
+def scope_sort_key(scope: str) -> tuple[int, int, str]:
+    if scope == BOTH_SCOPE:
+        return (1, 0, scope)
+    if scope == BOTH_NO_15M_SCOPE:
+        return (2, 0, scope)
+    idx = _TF_ORDER.index(scope) if scope in _TF_ORDER else len(_TF_ORDER)
+    return (0, idx, scope)
+
+
+def scope_title(scope: str, rows: Sequence[RMultipleRow]) -> str:
+    """스코프 제목 — 지갑이면 **몇 TF 지갑인지**를 제목이 밝힌다(WAN-316 완료 기준 1)."""
+    if scope == BOTH_SCOPE:
+        tfs = sorted(
+            {r.scope for r in rows if r.scope not in (BOTH_SCOPE, BOTH_NO_15M_SCOPE)},
+            key=scope_sort_key,
+        )
+        joined = "+".join(tfs) if tfs else "전 TF"
+        return f"{scope} — 채택 좌표 공유 지갑({joined})"
+    if scope == BOTH_NO_15M_SCOPE:
+        return f"{scope} — 대조: WAN-312가 낸 3TF 지갑({BOTH_EXCLUDED_TF} 칸 없음)"
+    return f"{scope} (단일 TF 지갑)"
 
 
 def _scenario_order(scenario: str) -> tuple[float, int]:
@@ -578,6 +682,40 @@ def _capital_destruction_lines(main: Sequence[RMultipleRow]) -> list[str]:
     return lines
 
 
+def _observed_arm_lines(main: Sequence[RMultipleRow]) -> list[str]:
+    """`봉극값` 팔이 최대 k에서 어디까지 가는가 — 스코프별로 판정한다(WAN-316 완료 기준 3).
+
+    세 TF(4h·2h·1h)에서 나온 결론은 **「1분봉이 실제로 본 범위 안에서는 이 사이즈가
+    버틴다」**였다. 15m은 손절폭이 좁아 같은 봉-내 갭이라도 1R 대비 비중이 커지므로 그 결론이
+    유독 안 설 수 있다 — 그래서 한 줄로 뭉개지 않고 **스코프마다** 최악 MDD를 찍는다.
+    """
+    kmax = max((r.k for r in main), default=1.0)
+    picked = [r for r in main if r.variant == VARIANT_OBSERVED and r.k == kmax]
+    if not picked:
+        return []
+    worst_by_scope: dict[str, RMultipleRow] = {}
+    for row in picked:
+        cur = worst_by_scope.get(row.scope)
+        if cur is None or row.max_drawdown > cur.max_drawdown:
+            worst_by_scope[row.scope] = row
+    parts = [
+        f"{scope} {_pct(worst_by_scope[scope].max_drawdown)}({worst_by_scope[scope].segment})"
+        for scope in sorted(worst_by_scope, key=scope_sort_key)
+    ]
+    holds = [s for s, r in worst_by_scope.items() if r.max_drawdown < RUIN_MDD]
+    broken = [s for s, r in worst_by_scope.items() if r.max_drawdown >= RUIN_MDD]
+    lead = (
+        f"📌 **`봉극값` 팔은 k={kmax:g}에서도 전 스코프가 {RUIN_MDD * 100:.0f}% 선 아래다** — "
+        "「1분봉이 실제로 본 범위 안에서는 이 사이즈가 버틴다」가 **스코프를 안 가리고 선다**."
+        if not broken
+        else f"🚨 **`봉극값` 팔이 k={kmax:g}에서 {RUIN_MDD * 100:.0f}% 선을 넘는 스코프가 있다"
+        f"**({'·'.join(sorted(broken, key=scope_sort_key))}) — 「1분봉이 본 범위 안에서는 "
+        f"버틴다」가 거기서는 서지 않는다(버티는 쪽: "
+        f"{'·'.join(sorted(holds, key=scope_sort_key)) or '없음'})."
+    )
+    return [f"**`봉극값` 최악 MDD(k={kmax:g})**: " + " · ".join(parts) + f". {lead}"]
+
+
 def _verdict(rows: Sequence[RMultipleRow], loo_rows: Sequence[RMultipleRow]) -> list[str]:
     """판정 — 청산 0건이 유지되는 k의 상한 · 실효 리스크가 계획과 얼마나 벌어지나."""
     main = [r for r in rows if not r.exclude]
@@ -605,8 +743,9 @@ def _verdict(rows: Sequence[RMultipleRow], loo_rows: Sequence[RMultipleRow]) -> 
         )
 
     lines += _capital_destruction_lines(main)
+    lines += _observed_arm_lines(main)
 
-    for scope in sorted({r.scope for r in main}):
+    for scope in sorted({r.scope for r in main}, key=scope_sort_key):
         base = _find(main, scope, SEGMENT_FULL, 1.0, VARIANT_PURE)
         if base is None:
             continue
@@ -621,7 +760,7 @@ def _verdict(rows: Sequence[RMultipleRow], loo_rows: Sequence[RMultipleRow]) -> 
         lines.append(f"**MDD 심화({scope}·full · 무조건/봉극값)**: " + " → ".join(parts) + ".")
 
     # 실효 vs 계획 — 이 이슈의 주 산출물.
-    for scope in sorted({r.scope for r in main}):
+    for scope in sorted({r.scope for r in main}, key=scope_sort_key):
         row = _find(main, scope, SEGMENT_OOS_WARM, 1.5, VARIANT_PURE)
         if row is None:
             continue
@@ -700,8 +839,20 @@ def build_summary_markdown(
     loo_csv: Path,
     identity_diff: float | None = None,
     legacy_note: str = "",
+    legacy_check: tuple[int, float] | None = None,
 ) -> str:
-    scopes = sorted({r.scope for r in grid_rows})
+    scopes = sorted({r.scope for r in grid_rows}, key=scope_sort_key)
+    legacy_lines = (
+        [
+            f"- **검산 (c, WAN-316)** — 이 실행이 **WAN-312 판을 되살린다**: 단일 TF 스코프"
+            f"(15m 제외)와 새 `both_no15m`이 옛 격자와 **{legacy_check[0]}행 최대 절대차 "
+            f"{legacy_check[1]:.2e}**. 즉 `both_no15m`은 「보존한다」는 라벨이 아니라 **같은 "
+            "숫자**이고, 15m 칸이 다른 스코프로 새지 않았다는 뜻이기도 하다"
+            "(`--check-legacy-grid <옛 격자 CSV>`)."
+        ]
+        if legacy_check is not None
+        else []
+    )
     identity_line = (
         f"k=1.00 행이 **인자 없는 채택 북**(`backtest.run --oos-warm`, `book_cli.build_book_rows`)"
         f"과 일치(최대 절대차 {identity_diff:.2e})."
@@ -734,9 +885,17 @@ def build_summary_markdown(
         "**두 팔의 차이가 곧 「1분봉으로는 안 보이는 몫」**이다.",
         "",
         *([f"📌 {legacy_note}", ""] if legacy_note else []),
-        "재현: `uv run python -m backtest.wan312_stop_r_multiple --tf 4h,2h,1h --jobs 4` "
-        "(`both`은 전 TF가 한 프로세스에 모여야 나온다 · 15m은 `--append` 후속 · 요약만: "
-        "`--from-csv`). 원자료: "
+        "🚨 **스코프 라벨이 지갑을 밝힌다(WAN-316)** — `both` = **채택 좌표의 4TF 공유 지갑**"
+        "(15m·1h·2h·4h = 인자 없는 `backtest.run`이 실제로 도는 그 지갑) · `both_no15m` = "
+        "**WAN-312가 실제로 낸 3TF 지갑**(15m 칸 없음)을 덮어쓰지 않고 보존한 대조 팔. 북은 칸을 "
+        "**한 프로세스의 공통 시간축·한 지갑**으로 묶으므로 지갑은 이어붙일 수 없고, 그래서 네 "
+        "TF를 한 실행으로 돌려 둘을 같은 payload에서 함께 냈다.",
+        "",
+        "재현: `uv run python -m backtest.wan312_stop_r_multiple --tf 15m,1h,2h,4h --jobs 4` "
+        "(요약만: `--from-csv`). ⚠️ 정본 실행은 `--skip-engine-check`를 함께 썼다 — 칸별 표준 "
+        "경로 재실행은 **이 표의 어떤 숫자에도 안 실리는** 배선 검산이고(격자는 후보만 쓴다) "
+        "15m에서 셀 비용을 배로 만든다. 배선은 검산 (a)(k=1.00 ≡ 인자 없는 채택 북, 네 TF "
+        "payload 전부를 태운다)가 더 강하게 잡는다. 원자료: "
         f"`{grid_csv}`(격자) · `{loo_csv}`(leave-one-out).",
         "",
         "## 0. 검산",
@@ -749,10 +908,11 @@ def build_summary_markdown(
         "동작으로 고정된다(`test_multiple_moves_only_exit_price`).",
         "- 「계획 동시 리스크」가 k에 **불변**이고 「실효」만 k배로 움직이는지 고정된다"
         "(`test_effective_risk_scales_planned_stays`).",
+        *legacy_lines,
         "",
     ]
     for scope in scopes:
-        lines += [f"## 1. 채택 북 스트레스 — {scope}", ""]
+        lines += [f"## 1. 채택 북 스트레스 — {scope_title(scope, grid_rows)}", ""]
         for seg, title in (
             (SEGMENT_FULL, "full (6년 MDD가 사는 구간)"),
             (SEGMENT_OOS_WARM, "oos_warm (주)"),
@@ -776,7 +936,7 @@ def build_summary_markdown(
     ]
     if loo_rows:
         lines += ["## 3. leave-one-out — 특정 종목이 만든 결과인가", ""]
-        for scope in sorted({r.scope for r in loo_rows}):
+        for scope in sorted({r.scope for r in loo_rows}, key=scope_sort_key):
             for seg in LOO_SEGMENTS:
                 table = _loo_table(loo_rows, scope, seg)
                 if table:
@@ -812,7 +972,7 @@ def _planned_vs_effective_table(rows: Sequence[RMultipleRow]) -> list[str]:
     picked = [
         r for r in rows if not r.exclude and r.variant == VARIANT_PURE and r.segment != SEGMENT_OOS
     ]
-    for row in sorted(picked, key=lambda r: (r.scope, r.segment, r.k)):
+    for row in sorted(picked, key=lambda r: (scope_sort_key(r.scope), r.segment, r.k)):
         gap = row.max_effective_concurrent_risk - row.max_concurrent_risk
         lines.append(
             f"| {row.scope} | {row.segment} | {row.k:g} | {_pct(row.max_concurrent_risk)} | "
@@ -827,13 +987,40 @@ def _planned_vs_effective_table(rows: Sequence[RMultipleRow]) -> list[str]:
 # --------------------------------------------------------------------------- #
 
 
+def _write_meta(
+    path: Path,
+    *,
+    legacy_note: str,
+    identity_diff: float | None,
+    legacy_check: tuple[int, float] | None,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "legacy_note": legacy_note,
+                "identity_diff": identity_diff,
+                "legacy_check": list(legacy_check) if legacy_check else None,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="WAN-312 손절 손실 R 배수 스트레스")
     parser.add_argument(
         "--symbols", type=str, default=",".join(harness.DEFAULT_SYMBOLS), help="채택 12종목."
     )
     parser.add_argument(
-        "--tf", type=str, default="4h", help="쉼표 구분. 가벼운 TF부터, 15m은 --append."
+        "--tf",
+        type=str,
+        default="15m,1h,2h,4h",
+        help="쉼표 구분. 채택 좌표의 `both`(공유 지갑)는 전 TF가 한 프로세스에 모여야 나온다 "
+        "— 15m을 --append로 붙이면 단일 TF 행만 늘고 지갑은 옛 TF 집합 그대로다(WAN-316).",
     )
     parser.add_argument("--start", type=str, default=harness.DEFAULT_START)
     parser.add_argument("--end", type=str, default=harness.DEFAULT_END)
@@ -856,6 +1043,13 @@ def main(argv: list[str] | None = None) -> int:
         help="검산 (b): 유니버스 9종목 · 펀딩 대리 켬 · 유동성 한도 끔으로 되돌려 "
         "wan277 alpha_0.00을 재현한다(채택 좌표 실행이 아니다).",
     )
+    parser.add_argument(
+        "--check-legacy-grid",
+        type=Path,
+        default=None,
+        help="검산 (c, WAN-316): 이 실행이 WAN-312 판(3TF)을 되살리는지 대조한다. "
+        "옛 격자 CSV 경로 — `git show <ref>:backtest/reports/wan312_stop_r_multiple_grid.csv`.",
+    )
     parser.add_argument("--skip-loo", action="store_true", help="leave-one-out 표를 건너뛴다.")
     parser.add_argument("--skip-verify", action="store_true", help="검산 (a)를 생략(속도).")
     parser.add_argument(
@@ -868,6 +1062,7 @@ def main(argv: list[str] | None = None) -> int:
     out_md = Path(args.out_md)
     out_meta = Path(args.out_meta)
 
+    legacy_check: tuple[int, float] | None = None
     if args.from_csv:
         grid_rows = grid_from_csv(out_grid)
         loo_rows = grid_from_csv(out_loo) if out_loo.exists() else []
@@ -877,6 +1072,9 @@ def main(argv: list[str] | None = None) -> int:
             meta = json.loads(out_meta.read_text(encoding="utf-8"))
             legacy_note = str(meta.get("legacy_note", ""))
             identity_diff = meta.get("identity_diff")
+            stored = meta.get("legacy_check")
+            if stored:
+                legacy_check = (int(stored[0]), float(stored[1]))
         print(f"[wan312] CSV 로드 — 격자 {len(grid_rows)}행 · LOO {len(loo_rows)}행 (재실행 없음)")
     else:
         symbols = tuple(s.strip() for s in str(args.symbols).split(",") if s.strip())
@@ -916,8 +1114,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.append and out_grid.exists():
             existing_rows = grid_from_csv(out_grid)
             existing_loo = grid_from_csv(out_loo) if out_loo.exists() else []
-        scopes = _resolve_scopes(timeframes, sorted({r.scope for r in existing_rows}))
-        scopes = [s for s in scopes if s != "both" or len(timeframes) >= 2]
+        scopes = resolve_scopes(timeframes, sorted({r.scope for r in existing_rows}))
 
         identity_diff = (
             None
@@ -934,15 +1131,6 @@ def main(argv: list[str] | None = None) -> int:
         out_grid.parent.mkdir(parents=True, exist_ok=True)
         grid_to_frame(grid_rows).to_csv(out_grid, index=False)
         grid_to_frame(loo_rows).to_csv(out_loo, index=False)
-        out_meta.write_text(
-            json.dumps(
-                {"legacy_note": legacy_note, "identity_diff": identity_diff},
-                ensure_ascii=False,
-                indent=2,
-            )
-            + "\n",
-            encoding="utf-8",
-        )
         print(f"[wan312] 격자 {len(grid_rows)}행 → {out_grid}")
         print(f"[wan312] leave-one-out {len(loo_rows)}행 → {out_loo}")
         if identity_diff is not None:
@@ -960,6 +1148,24 @@ def main(argv: list[str] | None = None) -> int:
                     f"[wan312] 검산 (b) k=1.00 ≡ wan277 alpha_0.00: {matched}셀 최대차 {worst:.2e}"
                 )
 
+    # 검산 (c, WAN-316) — CSV 대 CSV라 `--from-csv`에서도 돈다(백테스트 재실행 없음).
+    if args.check_legacy_grid is not None:
+        legacy_check = compare_legacy_wallet(grid_rows, grid_from_csv(Path(args.check_legacy_grid)))
+        if legacy_check is None:
+            print("[wan312] 검산 (c) 생략 — 옛 격자에 대응하는 행이 없습니다.")
+        else:
+            matched, worst = legacy_check
+            print(f"[wan312] 검산 (c) WAN-312 판 재현: {matched}행 최대차 {worst:.2e}")
+            if worst >= 1e-12:
+                print("[wan312] 🚨 검산 실패 — 3TF 지갑·단일 TF 행이 옛 판과 갈라졌습니다.")
+                return 1
+    _write_meta(
+        out_meta,
+        legacy_note=legacy_note,
+        identity_diff=identity_diff,
+        legacy_check=legacy_check,
+    )
+
     out_md.parent.mkdir(parents=True, exist_ok=True)
     out_md.write_text(
         build_summary_markdown(
@@ -969,6 +1175,7 @@ def main(argv: list[str] | None = None) -> int:
             loo_csv=out_loo,
             identity_diff=identity_diff,
             legacy_note=legacy_note,
+            legacy_check=legacy_check,
         ),
         encoding="utf-8",
     )

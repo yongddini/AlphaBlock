@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import dataclasses
+from pathlib import Path
 
 import pytest
 
@@ -23,6 +24,8 @@ from backtest.leverage_book import BookCell, LeverageBookParams, run_leverage_bo
 from backtest.models import BacktestConfig, ExitReason, PositionSide
 from backtest.wan169_leverage_book import CellPayload, _segment_cells
 from backtest.wan312_stop_r_multiple import (
+    BOTH_NO_15M_SCOPE,
+    BOTH_SCOPE,
     K_MULTIPLES,
     NEW_THREE,
     VARIANT_OBSERVED,
@@ -30,8 +33,12 @@ from backtest.wan312_stop_r_multiple import (
     apply_stop_multiple,
     build_grid,
     build_leave_one_out,
+    build_summary_markdown,
+    compare_legacy_wallet,
+    resolve_scopes,
     restore_pre_backfill_funding,
     scenario_label,
+    scope_payloads,
     stop_multiple_candidate,
 )
 from backtest.zone_limit_backtest import _Candidate
@@ -166,6 +173,100 @@ def test_reentry_candidates_get_the_same_multiple() -> None:
     )
     out = apply_stop_multiple([payload], 1.5, VARIANT_PURE)
     assert out[0].reentry_candidates[harness.SEGMENT_FULL][0].exit_price == pytest.approx(85.0)
+
+
+# --------------------------------------------------------------------------- #
+# 스코프 — 채택 4TF 지갑과 WAN-312의 3TF 지갑을 라벨로 가른다 (WAN-316)
+# --------------------------------------------------------------------------- #
+
+
+def _four_tf_payloads() -> list[CellPayload]:
+    return [
+        _payload(symbol, tf)
+        for symbol in ("BTCUSDT", "ETHUSDT")
+        for tf in ("15m", "1h", "2h", "4h")
+    ]
+
+
+def test_resolve_scopes_adds_the_no15m_wallet_only_when_15m_is_present() -> None:
+    """`both_no15m`은 15m이 이번 실행에 섞였을 때만 뜻이 있다(빼도 TF가 2개 이상 남아야)."""
+    assert resolve_scopes(["15m", "1h", "2h", "4h"], []) == [
+        "15m",
+        "1h",
+        "2h",
+        "4h",
+        BOTH_SCOPE,
+        BOTH_NO_15M_SCOPE,
+    ]
+    assert resolve_scopes(["4h", "2h", "1h"], []) == ["4h", "2h", "1h", BOTH_SCOPE]
+    assert resolve_scopes(["15m", "1h"], []) == ["15m", "1h", BOTH_SCOPE]  # 빼면 1TF뿐
+    assert resolve_scopes(["4h"], []) == ["4h"]  # 단일 TF엔 지갑이 없다
+
+
+def test_resolve_scopes_never_revives_both_from_an_append() -> None:
+    """🚨 지갑은 이어붙일 수 없다 — 15m만 추가 실행하면 `both`를 내면 안 된다(WAN-316 전제).
+
+    옛 CSV에 `both`가 있다고 그 라벨을 다시 내면, 15m 칸이 없는 지갑 위에 15m을 끼얹은 듯한
+    행이 생겨 「어느 TF 집합의 지갑인가」가 표에서 거짓이 된다.
+    """
+    assert resolve_scopes(["15m"], ["1h", "2h", "4h", BOTH_SCOPE]) == ["15m"]
+
+
+def test_no15m_scope_drops_exactly_the_15m_cells() -> None:
+    payloads = _four_tf_payloads()
+    assert len(scope_payloads(payloads, BOTH_SCOPE)) == 8
+    kept = scope_payloads(payloads, BOTH_NO_15M_SCOPE)
+    assert {p.timeframe for p in kept} == {"1h", "2h", "4h"}
+    assert len(kept) == 6
+    assert {p.timeframe for p in scope_payloads(payloads, "15m")} == {"15m"}
+
+
+def test_two_wallets_are_distinguishable_rows_from_one_run() -> None:
+    """완료 기준 1 — 두 지갑이 **같은 실행**에서 서로 구분되는 라벨로 함께 나온다."""
+    rows = build_grid(_four_tf_payloads(), resolve_scopes(["15m", "1h", "2h", "4h"], []))
+    by_scope = {r.scope: r for r in rows if r.k == 1.0 and r.variant == VARIANT_PURE}
+    assert by_scope[BOTH_SCOPE].num_cells == 8  # 2종목 × 4TF
+    assert by_scope[BOTH_NO_15M_SCOPE].num_cells == 6  # 15m 칸이 빠졌다
+    assert by_scope[BOTH_SCOPE].num_cells != by_scope[BOTH_NO_15M_SCOPE].num_cells
+
+
+def test_legacy_wallet_check_maps_old_both_onto_the_no15m_wallet() -> None:
+    """검산 (c) — 옛 `both`는 새 `both_no15m`과 대조되고, 4TF `both`는 대조 대상이 아니다."""
+    rows = build_grid(_four_tf_payloads(), resolve_scopes(["15m", "1h", "2h", "4h"], []))
+    # 「옛 판」 = 15m 없이 3TF만 돌린 실행의 `both` 지갑.
+    legacy = build_grid(scope_payloads(_four_tf_payloads(), BOTH_NO_15M_SCOPE), [BOTH_SCOPE])
+    assert {r.scope for r in legacy} == {BOTH_SCOPE}
+    checked = compare_legacy_wallet(rows, legacy)
+    assert checked is not None
+    matched, worst = checked
+    assert matched == len(legacy)  # 옛 both 전부가 새 both_no15m과 짝지어졌다
+    assert worst == 0.0
+
+    # 🚨 4TF 지갑은 옛 판에 대응물이 없으므로 **대조에서 빠져야 한다** — 끼워 넣으면 "칸이
+    # 늘었는데 값이 같다"는 거짓 통과가 나온다.
+    only_four = [r for r in rows if r.scope == BOTH_SCOPE]
+    assert compare_legacy_wallet(only_four, legacy) is None
+
+
+def test_legacy_wallet_check_catches_a_drifted_row() -> None:
+    """옛 판과 갈라지면 0이 아닌 차이를 낸다 — 조용한 통과가 없다."""
+    rows = build_grid(_four_tf_payloads(), resolve_scopes(["15m", "1h", "2h", "4h"], []))
+    legacy = [
+        r.model_copy(update={"scope": BOTH_SCOPE, "max_drawdown": r.max_drawdown + 0.01})
+        for r in rows
+        if r.scope == BOTH_NO_15M_SCOPE
+    ]
+    checked = compare_legacy_wallet(rows, legacy)
+    assert checked is not None
+    assert checked[1] == pytest.approx(0.01)
+
+
+def test_summary_names_the_wallets_in_its_headings() -> None:
+    """요약 제목이 지갑의 TF 구성을 밝힌다 — 표만 보고 3TF/4TF를 가릴 수 있어야 한다."""
+    rows = build_grid(_four_tf_payloads(), resolve_scopes(["15m", "1h", "2h", "4h"], []))
+    md = build_summary_markdown(rows, [], grid_csv=Path("g.csv"), loo_csv=Path("l.csv"))
+    assert "채택 좌표 공유 지갑(15m+1h+2h+4h)" in md
+    assert "WAN-312가 낸 3TF 지갑(15m 칸 없음)" in md
 
 
 # --------------------------------------------------------------------------- #
