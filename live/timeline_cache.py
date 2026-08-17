@@ -76,6 +76,7 @@ __all__ = [
     "DayCacheResult",
     "DuplicateTimelineCacheError",
     "PersistReport",
+    "PruneCandidate",
     "TimelineCacheFingerprint",
     "TimelineCacheStore",
     "adopted_universe",
@@ -486,6 +487,73 @@ class TimelineCacheStore:
         rows = tuple(_row_from_db(r) for r in row_data)
         return CachedCell(fingerprint=fingerprint, created_at=int(cell[0]), rows=rows)
 
+    # ------------------------------------------------------------------ 정리
+
+    def stale_cells(
+        self,
+        *,
+        keep_revision: str | None = None,
+        before_day: str | None = None,
+    ) -> tuple[PruneCandidate, ...]:
+        """정리 후보 셀을 **읽기만** 해서 돌려준다(삭제하지 않는다, WAN-297 §2-6).
+
+        기준은 두 가지이고 **적어도 하나는 명시해야 한다** — 둘 다 없으면 "전부 지워라"가
+        되므로 `ValueError`로 거부한다(무엇을 지우는지 모르는 삭제를 저장소가 스스로 만들지
+        않는다, WAN-194 원칙):
+
+        * `keep_revision`: 이 리비전이 **아닌** 셀(= 옛 엔진으로 적재된 셀)이 후보다.
+        * `before_day`: 이 KST 날짜보다 **앞선** 날의 셀이 후보다(`YYYY-MM-DD` 문자열 비교 —
+          ISO 날짜는 사전순이 곧 시간순이다).
+
+        둘을 함께 주면 **합집합**이다(옛 엔진 셀 + 오래된 날 셀).
+        """
+        if keep_revision is None and before_day is None:
+            raise ValueError(
+                "정리 기준을 하나 이상 명시하세요(keep_revision 또는 before_day) — "
+                "기준 없는 일괄 삭제는 거부합니다."
+            )
+        clauses: list[str] = []
+        params: list[object] = []
+        if keep_revision is not None:
+            clauses.append("revision != ?")
+            params.append(keep_revision)
+        if before_day is not None:
+            clauses.append("day_key < ?")
+            params.append(before_day)
+        where = " OR ".join(clauses)
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT run_id, day_key, symbol, timeframe, revision, cache_version, num_rows "
+                f"FROM timeline_cache_cells WHERE {where} ORDER BY day_key, symbol, timeframe",
+                params,
+            ).fetchall()
+        return tuple(
+            PruneCandidate(
+                run_id=str(r[0]),
+                day_key=str(r[1]),
+                symbol=str(r[2]),
+                timeframe=str(r[3]),
+                revision=str(r[4]),
+                cache_version=str(r[5]),
+                num_rows=int(r[6]),
+            )
+            for r in rows
+        )
+
+    def delete_cells(self, run_ids: Sequence[str]) -> int:
+        """주어진 셀들을 지우고 지운 셀 수를 돌려준다(행도 함께). 없는 id는 조용히 통과."""
+        deleted = 0
+        with self._lock, self._conn:
+            for run_id in run_ids:
+                exists = self._conn.execute(
+                    "SELECT 1 FROM timeline_cache_cells WHERE run_id = ?", (run_id,)
+                ).fetchone()
+                if exists is None:
+                    continue
+                self._delete_locked(run_id)
+                deleted += 1
+        return deleted
+
 
 def _row_values(run_id: str, row_no: int, row: TimelineRow) -> tuple[object, ...]:
     """백테 `TimelineRow` → DB 행. 백테 행은 예약·목표가·손절 칸이 없어 저장하지 않는다."""
@@ -762,3 +830,21 @@ def compute_and_persist_day(
         revision=revision,
     )
     return report, cached
+
+
+# --------------------------------------------------------------------------- #
+# 정리(pruning) — 명시적 옵트인만, 자동 삭제 없음 (WAN-297 §2-6 · WAN-194 원칙)
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class PruneCandidate:
+    """정리 후보 한 셀 — 무엇을 지우려는지 사람이 읽고 판단할 수 있게 전부 드러낸다."""
+
+    run_id: str
+    day_key: str
+    symbol: str
+    timeframe: str
+    revision: str
+    cache_version: str
+    num_rows: int

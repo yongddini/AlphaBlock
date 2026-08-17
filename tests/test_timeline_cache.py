@@ -16,6 +16,7 @@ WAN-297이 더한 것:
 - 「채택 좌표 전부」 경로가 **디스크 캐시**를 읽는다(세션이 끊겨도 재계산 없이 뜬다).
 - 화면 버튼(`compute_and_persist_day`)과 야간 크론(`persist_day`)이 **같은 함수**를 타
   산출물이 갈라지지 않는다 — 화면이 그리는 행이 곧 디스크에 담긴 행이다.
+- 정리(pruning)는 기준 없이는 거부하고, 세기와 삭제가 갈라져 있다(`--prune-apply`).
 """
 
 from __future__ import annotations
@@ -516,3 +517,167 @@ def test_button_recompute_replaces_instead_of_raising(
     store.close()
     assert report.skipped == ()
     assert len(report.persisted) == len(symbols) * len(timeframes)
+
+
+# --------------------------------------------------------------------------- #
+# WAN-297 §2-6 — 정리(pruning): 기준 없이는 거부 · 세기와 삭제가 갈라져 있다
+# --------------------------------------------------------------------------- #
+
+
+def _seed_cell(store: TimelineCacheStore, *, day: str, revision: str) -> str:
+    fingerprint = cell_fingerprint(_SYMBOL, _TF, day, warmup_days=120, revision=revision)
+    return store.save_cell(fingerprint, [_bt_row(fill_ms=1_700_000_000_000)])
+
+
+def test_prune_without_criteria_is_refused(tmp_path: Path) -> None:
+    """기준 없는 일괄 삭제는 거부한다 — "무엇을 지웠는지 모르는 DB"를 만들지 않는다(WAN-194)."""
+    store = TimelineCacheStore(tmp_path / "cache.db")
+    _seed_cell(store, day=_DAY, revision=_REV)
+    with pytest.raises(ValueError, match="정리 기준"):
+        store.stale_cells()
+    store.close()
+
+
+def test_prune_candidates_are_old_revisions_and_old_days(tmp_path: Path) -> None:
+    store = TimelineCacheStore(tmp_path / "cache.db")
+    current = _seed_cell(store, day="2026-08-10", revision="now")
+    old_engine = _seed_cell(store, day="2026-08-10", revision="then")
+    old_day = _seed_cell(store, day="2026-07-01", revision="now")
+
+    by_revision = {c.run_id for c in store.stale_cells(keep_revision="now")}
+    assert by_revision == {old_engine}
+
+    by_day = {c.run_id for c in store.stale_cells(before_day="2026-08-01")}
+    assert by_day == {old_day}
+
+    union = {c.run_id for c in store.stale_cells(keep_revision="now", before_day="2026-08-01")}
+    assert union == {old_engine, old_day}
+    assert current not in union
+    store.close()
+
+
+def test_delete_cells_removes_rows_and_leaves_the_rest(tmp_path: Path) -> None:
+    store = TimelineCacheStore(tmp_path / "cache.db")
+    keep = cell_fingerprint(_SYMBOL, _TF, _DAY, warmup_days=120, revision="now")
+    store.save_cell(keep, [_bt_row(fill_ms=1_700_000_000_000)])
+    stale = _seed_cell(store, day=_DAY, revision="then")
+
+    assert store.delete_cells([stale]) == 1
+    assert store.delete_cells([stale]) == 0  # 없는 id는 조용히 통과
+    remaining = store.load_cell(keep)
+    rows_left = store._conn.execute(  # noqa: SLF001 — 행까지 지워졌는지 직접 본다
+        "SELECT COUNT(*) FROM timeline_cache_rows WHERE run_id = ?", (stale,)
+    ).fetchone()[0]
+    store.close()
+    assert remaining is not None and len(remaining.rows) == 1
+    assert rows_left == 0
+
+
+# --------------------------------------------------------------------------- #
+# WAN-297 §2 — CLI: `--days N` 되채우기 · 정리 플래그
+# --------------------------------------------------------------------------- #
+
+
+def test_cli_trades_backfill_and_prune_flags() -> None:
+    from cli.main import build_parser, cmd_trades
+
+    ns = build_parser().parse_args(["trades", "--day", _DAY, "--persist-cache", "--days", "3"])
+    assert ns.func is cmd_trades
+    assert ns.persist_cache is True and ns.days == 3
+    # 기본은 하루치 — 옛 크론 줄이 그대로 돈다(동작 불변).
+    assert build_parser().parse_args(["trades", "--persist-cache"]).days == 1
+    prune = build_parser().parse_args(["trades", "--prune-cache", "--prune-before", "2026-08-01"])
+    assert prune.prune_cache is True
+    assert prune.prune_before == "2026-08-01"
+    assert prune.prune_apply is False  # 세기가 기본, 삭제는 명시 옵트인
+
+
+def test_cli_persist_backfills_n_days_ending_at_day(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--days 3`은 `--day`에서 **거슬러** 3일치를 적재한다(배포 뒤 되채우기, WAN-318 §5 자동화)."""
+    from cli.main import build_parser, cmd_trades
+    from config.settings import Settings
+
+    monkeypatch.setattr(
+        "live.timeline_cache.backtest_setup_by_cell", lambda **_k: {(_SYMBOL, _TF): []}
+    )
+    db = str(tmp_path / "cache.db")
+    ns = build_parser().parse_args(
+        [
+            "trades",
+            "--db",
+            db,
+            "--day",
+            "2026-08-10",
+            "--symbol",
+            _SYMBOL,
+            "--tf",
+            _TF,
+            "--persist-cache",
+            "--days",
+            "3",
+        ]
+    )
+    assert cmd_trades(ns, Settings(db_path=db)) == 0
+    out = capsys.readouterr().out
+    for day in ("2026-08-08", "2026-08-09", "2026-08-10"):
+        assert day in out
+    store = TimelineCacheStore(db)
+    try:
+        days = {
+            str(row[0])
+            for row in store._conn.execute(  # noqa: SLF001 — 어느 날이 담겼는지 직접 본다
+                "SELECT DISTINCT day_key FROM timeline_cache_cells"
+            )
+        }
+    finally:
+        store.close()
+    assert days == {"2026-08-08", "2026-08-09", "2026-08-10"}
+
+
+def test_cli_prune_counts_by_default_and_deletes_only_with_apply(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--prune-cache`는 읽기 전용(세기)이고, 삭제는 `--prune-apply`에만 일어난다."""
+    from cli.main import build_parser, cmd_trades
+    from config.settings import Settings
+
+    db = str(tmp_path / "cache.db")
+    store = TimelineCacheStore(db)
+    _seed_cell(store, day="2026-07-01", revision="then")
+    store.close()
+
+    args = ["trades", "--db", db, "--prune-cache", "--prune-before", "2026-08-01"]
+    assert cmd_trades(build_parser().parse_args(args), Settings(db_path=db)) == 0
+    assert "세기만 했습니다" in capsys.readouterr().out
+    store = TimelineCacheStore(db)
+    try:
+        assert len(store.stale_cells(before_day="2026-08-01")) == 1  # 안 지워졌다
+    finally:
+        store.close()
+
+    assert (
+        cmd_trades(build_parser().parse_args([*args, "--prune-apply"]), Settings(db_path=db)) == 0
+    )
+    assert "삭제 1셀" in capsys.readouterr().out
+    store = TimelineCacheStore(db)
+    try:
+        assert store.stale_cells(before_day="2026-08-01") == ()
+    finally:
+        store.close()
+
+
+def test_cli_prune_refuses_when_all_criteria_are_disabled(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """리비전 기준을 빼고 날짜도 안 주면 「전부 삭제」가 되므로 종료 코드 2로 거부한다."""
+    from cli.main import build_parser, cmd_trades
+    from config.settings import Settings
+
+    db = str(tmp_path / "cache.db")
+    ns = build_parser().parse_args(
+        ["trades", "--db", db, "--prune-cache", "--prune-keep-all-revisions", "--prune-apply"]
+    )
+    assert cmd_trades(ns, Settings(db_path=db)) == 2
+    assert "정리 기준이 없습니다" in capsys.readouterr().err
