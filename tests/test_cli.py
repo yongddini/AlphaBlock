@@ -249,6 +249,79 @@ def test_cmd_doctor_exit_code_signals_findings(
     assert "lost_and_found" in capsys.readouterr().out
 
 
+def test_cmd_doctor_exit_zero_when_only_open_positions_is_empty(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """WAN-321 §1 완료기준 1 — 서버에서 매시간 울리던 그 상태가 **종료 코드 0**이다.
+
+    실측 상태를 그대로 재현한다: 체결은 처분까지 기록돼 있고(`orphan_fills` 0), 누적 장부는
+    성한데 `open_positions`만 0행. 옛 규칙은 여기서 1을 내 `systemctl --failed`를 상시
+    빨갛게 만들었고, 그 상시 빨간불이 진짜 이상을 가렸다.
+    """
+    from live.limit_orders import LimitFill, PendingLimitOrder
+    from paper.store import PaperTradeRecord, PaperTradeStore
+    from strategy.models import OrderBlockDirection, SignalExitReason
+    from strategy.realtime_rsi import RealtimeRsi
+
+    settings = _settings(tmp_path)
+    journal = OrderJournal(settings.db_path)
+    session = journal.start_session(now_ms=0)
+    journal_id = journal.record_placed(
+        PendingLimitOrder(
+            symbol="BTC/USDT:USDT",
+            timeframe="1h",
+            direction=OrderBlockDirection.BULLISH,
+            limit_price=100.0,
+            stop_price=90.0,
+            rsi_state=RealtimeRsi(length=3),
+            placed_ms=1_000,
+        ),
+        session_id=session,
+        zone_start_time=0,
+        zone_confirmed_time=0,
+    )
+    journal.record_filled(
+        journal_id,
+        LimitFill(
+            symbol="BTC/USDT:USDT",
+            timeframe="1h",
+            direction=OrderBlockDirection.BULLISH,
+            price=100.0,
+            time=61_000,
+            rsi=25.0,
+            stop_price=90.0,
+            take_profit_price=115.0,
+            penetration_bps=0.0,
+            waited_ms=60_000,
+        ),
+    )
+    journal.record_entry_result(journal_id, entered=True)  # 처분 기록 = 유실이 아니다.
+    journal.close()
+
+    store = PaperTradeStore(settings.db_path)
+    store.upsert_record(
+        PaperTradeRecord(
+            symbol="BTC/USDT:USDT",
+            timeframe="1h",
+            direction=OrderBlockDirection.BULLISH,
+            entry_time=0,
+            entry_price=100.0,
+            exit_time=60_000,
+            exit_price=115.0,
+            reason=SignalExitReason.TAKE_PROFIT,
+            gross_pct=15.0,
+            fee_pct=0.04,
+            funding_pct=0.0,
+            net_pct=14.96,
+        )
+    )
+    store.close()  # 포지션은 닫혔다 = `open_positions` 0행.
+
+    assert cmd_doctor(_doctor_args(), settings) == 0
+    out = capsys.readouterr().out
+    assert "open_positions" in out  # 리포트에는 계속 찍는다(정보로).
+
+
 def test_cmd_doctor_drop_is_explicit_and_reports(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -327,9 +400,11 @@ class _CaptureTelegram:
     def __init__(self, ok: bool = True) -> None:
         self.ok = ok
         self.sent: list[str] = []
+        self.parse_modes: list[str | None] = []
 
     def send_message(self, text: str, *, parse_mode: str | None = "Markdown") -> bool:
         self.sent.append(text)
+        self.parse_modes.append(parse_mode)
         return self.ok
 
 
@@ -348,7 +423,7 @@ def test_doctor_alert_text_lists_tripped_categories() -> None:
             "quick_check_ok": False,
             "recovery_artifacts": [_Cat("lost_and_found")],
             "orphan_fills": [object(), object()],
-            "empty_ledgers": [_Cat("paper_trades")],
+            "empty_cumulative_ledgers": [_Cat("paper_trades")],
         },
     )()
     text = _doctor_alert_text(report, "orderblock")
@@ -358,7 +433,84 @@ def test_doctor_alert_text_lists_tripped_categories() -> None:
     assert "quick_check 손상" in text
     assert "복구 산출물 1개" in text
     assert "처분 미기록 체결 2건" in text
-    assert "빈 장부(paper_trades)" in text
+    assert "빈 누적 장부(paper_trades)" in text
+
+
+def test_doctor_alert_text_carries_no_markup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """경고문에 레거시 Markdown 서식이 없다 — 있으면 400으로 거부된다(WAN-321 §2).
+
+    서버 실측에서 파서를 깨뜨린 것이 `open_positions`의 **밑줄**이었다. 테이블 이름은
+    경고문에 실릴 수밖에 없으므로 서식 자체를 쓰지 않는다(라벨이 아니라 동작으로 고정).
+    """
+    report = type(
+        "R",
+        (),
+        {
+            "db_path": "/srv/data/ohlcv.db",
+            "quick_check_ok": True,
+            "recovery_artifacts": [],
+            "orphan_fills": [object()],
+            "empty_cumulative_ledgers": [_Cat("paper_trades")],
+        },
+    )()
+    text = _doctor_alert_text(report, "orderblock")
+
+    assert "`" not in text
+    assert "*" not in text
+    # 밑줄이 든 이름은 그대로 실린다 — 서식을 안 쓰므로 문제가 되지 않는다.
+    assert "paper_trades" in text
+
+
+def test_notify_doctor_failure_sends_plain_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    """doctor 경고는 평문으로 보낸다(WAN-321 §2) — 파싱 자체가 없어야 안 깨진다."""
+    client = _CaptureTelegram()
+    monkeypatch.setattr("common.telegram.build_telegram_client", lambda _s: client)
+
+    report = type(
+        "R",
+        (),
+        {
+            "db_path": "/srv/ohlcv.db",
+            "quick_check_ok": True,
+            "recovery_artifacts": [],
+            "orphan_fills": [object()],
+            "empty_cumulative_ledgers": [],
+        },
+    )()
+    _notify_doctor_failure(report, Settings())
+
+    assert client.parse_modes == [None]
+
+
+def test_notify_doctor_failure_escalates_send_failure(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """전송이 실패하면 ERROR로 올리고 경고 본문을 남긴다(WAN-321 §2).
+
+    「경보를 못 보냈다」가 WARNING 한 줄로 묻히면 두 다리(systemctl·텔레그램)가 모두
+    죽은 것을 아무도 모른다.
+    """
+    client = _CaptureTelegram(ok=False)
+    monkeypatch.setattr("common.telegram.build_telegram_client", lambda _s: client)
+
+    report = type(
+        "R",
+        (),
+        {
+            "db_path": "/srv/ohlcv.db",
+            "quick_check_ok": False,
+            "recovery_artifacts": [],
+            "orphan_fills": [],
+            "empty_cumulative_ledgers": [],
+        },
+    )()
+    with caplog.at_level("ERROR"):
+        _notify_doctor_failure(report, Settings())
+
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert errors, "전송 실패가 ERROR로 남아야 한다"
+    # 본문이 함께 남아야 로그만 보고도 무슨 이상이었는지 알 수 있다.
+    assert "quick_check 손상" in errors[0].getMessage()
 
 
 def test_notify_doctor_failure_sends_when_configured(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -373,7 +525,7 @@ def test_notify_doctor_failure_sends_when_configured(monkeypatch: pytest.MonkeyP
             "quick_check_ok": True,
             "recovery_artifacts": [_Cat("lost_and_found")],
             "orphan_fills": [],
-            "empty_ledgers": [],
+            "empty_cumulative_ledgers": [],
         },
     )()
     _notify_doctor_failure(report, Settings())
@@ -396,7 +548,7 @@ def test_notify_doctor_failure_logs_when_unconfigured(
             "quick_check_ok": False,
             "recovery_artifacts": [],
             "orphan_fills": [],
-            "empty_ledgers": [],
+            "empty_cumulative_ledgers": [],
         },
     )()
     with caplog.at_level("WARNING"):

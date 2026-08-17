@@ -685,6 +685,12 @@ def _doctor_alert_text(report: IntegrityReport, hostname: str) -> str:
 
     `render_report`는 화면·로그용 전체 마크다운이라 텔레그램엔 길다 — 무결성 판정
     (`healthy`)을 무너뜨린 카테고리만 골라 한 줄로 만든다.
+
+    🚨 **서식을 쓰지 않는다(WAN-321 §2).** 옛 판은 `*굵게*`·`` `코드` ``를 섞은 레거시
+    Markdown이었는데, 본문에 실리는 것이 하필 **테이블·열 이름**(`open_positions`)이라
+    밑줄이 「닫히지 않은 이탤릭」으로 읽혀 텔레그램이 **400으로 거부**했다 — 즉 이상이
+    났을 때만 나가는 경고가 **정확히 그때 안 나갔다**. 알림은 읽히기만 하면 되므로
+    표현력을 버리고 평문으로 보낸다(호출부가 `parse_mode=None`을 준다).
     """
     reasons: list[str] = []
     if not report.quick_check_ok:
@@ -693,20 +699,30 @@ def _doctor_alert_text(report: IntegrityReport, hostname: str) -> str:
         reasons.append(f"복구 산출물 {len(report.recovery_artifacts)}개")
     if report.orphan_fills:
         reasons.append(f"처분 미기록 체결 {len(report.orphan_fills)}건")
-    if report.empty_ledgers:
-        names = ", ".join(t.name for t in report.empty_ledgers)
-        reasons.append(f"빈 장부({names})")
+    if report.empty_cumulative_ledgers:
+        names = ", ".join(t.name for t in report.empty_cumulative_ledgers)
+        reasons.append(f"빈 누적 장부({names})")
     body = "; ".join(reasons) if reasons else "이상 감지"
     return (
-        f"🚨 *AlphaBlock DB 이상* — `{hostname}`\n"
-        f"DB: `{report.db_path}`\n"
+        f"🚨 AlphaBlock DB 이상 — {hostname}\n"
+        f"DB: {report.db_path}\n"
         f"{body}\n"
-        f"서버에서 `alphablock doctor`로 확인하세요."
+        f"서버에서 alphablock doctor 로 확인하세요."
     )
 
 
 def _notify_doctor_failure(report: IntegrityReport, settings: Settings) -> None:
-    """무결성 이상을 텔레그램으로 알린다 — 설정이 없으면 로그로만 남긴다(경고 유실 방지)."""
+    """무결성 이상을 텔레그램으로 알린다 — 설정이 없으면 로그로만 남긴다(경고 유실 방지).
+
+    전송은 **평문**이다(`parse_mode=None`, WAN-321 §2) — 경고문에 테이블·열 이름이 실려
+    레거시 Markdown 파서가 400으로 거부하던 자리다.
+
+    전송에 실패하면 **ERROR로 올리고 경고 본문을 함께 남긴다**(WAN-321 §2). 옛 판은
+    `WARNING` 한 줄이라 「경보를 못 보냈다」는 사실 자체가 사실상 경보되지 않았고, 본문도
+    남지 않아 무슨 이상이었는지 로그만 보고는 알 수 없었다. **종료 코드는 건드리지
+    않는다** — doctor의 종료 코드는 DB 무결성 판정 전용이고(이미 이상이라 1이다), 전송
+    실패로 그 뜻을 흐리지 않는다.
+    """
     from common.telegram import build_telegram_client
 
     text = _doctor_alert_text(report, socket.gethostname())
@@ -714,8 +730,12 @@ def _notify_doctor_failure(report: IntegrityReport, settings: Settings) -> None:
     if client is None:
         logger.warning("doctor 이상 감지 — 텔레그램 미설정으로 경고 미전송:\n%s", text)
         return
-    if not client.send_message(text):
-        logger.warning("doctor 이상 경고의 텔레그램 전송이 실패했습니다.")
+    if not client.send_message(text, parse_mode=None):
+        logger.error(
+            "🚨 doctor 이상 경고의 텔레그램 전송이 실패했습니다 — 폰으로는 아무것도 가지"
+            " 않았습니다. 경고 본문:\n%s",
+            text,
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
