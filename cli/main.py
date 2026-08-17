@@ -929,7 +929,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--symbol",
         default=None,
         metavar="SYM[,SYM...]",
-        help="백테스트 대조 심볼(콤마 목록). 생략 시 채택 좌표 9종목",
+        help="백테스트 대조 심볼(콤마 목록). 생략 시 채택 좌표 전 종목",
     )
     p_trades.add_argument(
         "--tf",

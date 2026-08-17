@@ -617,3 +617,30 @@ def test_tab_labels_follow_the_mockup(seeded_db_path: str) -> None:
         "Health",
         "분석 · 거래 (참고·대조)",
     ]
+
+
+def test_full_universe_label_follows_the_adopted_coordinates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WAN-318 §6: 「채택 N종목×MTF 전부」 라벨이 좌표에서 파생된다 — 하드코딩 금지.
+
+    예전엔 「9종목」이 문자열 상수였는데 셀 수만 계산돼, 유니버스가 12종목이 된 뒤
+    (WAN-307) 화면에 **「9종목 × 4TF = 48셀」이라는 자기모순**이 떴다. 이 저장소가 가장
+    경계하는 「라벨과 동작이 어긋남」(WAN-91/95/112/123/159 계열)이 사용자 화면에 그대로
+    노출된 것이라, **좌표를 바꾸면 라벨도 바뀌는지**를 동작으로 잠근다.
+    """
+    import backtest.harness as harness
+    from dashboard.app import full_universe_label, full_universe_shape
+
+    # 지금 좌표에서: 숫자가 실제 기본값과 같고 셀 수와 모순되지 않는다.
+    n_symbols, n_timeframes, n_cells = full_universe_shape()
+    assert n_symbols == len(harness.DEFAULT_SYMBOLS)
+    assert n_timeframes == len(harness.DEFAULT_TIMEFRAMES)
+    assert n_cells == n_symbols * n_timeframes
+    assert full_universe_label() == f"채택 {n_symbols}종목×{n_timeframes}TF 전부 (WAN-290)"
+
+    # 좌표를 바꾸면 라벨이 따라온다(다음 재-베이스라인에서 또 어긋나지 않게).
+    monkeypatch.setattr(harness, "DEFAULT_SYMBOLS", ("BTCUSDT", "ETHUSDT"))
+    monkeypatch.setattr(harness, "DEFAULT_TIMEFRAMES", ("1h", "4h", "1d"))
+    assert full_universe_shape() == (2, 3, 6)
+    assert full_universe_label() == "채택 2종목×3TF 전부 (WAN-290)"

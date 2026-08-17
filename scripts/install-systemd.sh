@@ -13,10 +13,15 @@
 #   ./scripts/install-systemd.sh collector       # 수집기만
 #   ./scripts/install-systemd.sh live            # 러너만
 #   ./scripts/install-systemd.sh dashboard       # 대시보드만
-#   ./scripts/install-systemd.sh doctor          # DB 무결성 주기 점검 타이머만(WAN-185)
+#   ./scripts/install-systemd.sh doctor          # DB 점검 타이머 두 쌍(전수 + 싼 점검)
 #
-# 무결성 점검 간격은 ALPHABLOCK_DOCTOR_INTERVAL(기본 15min)로 지정한다. 예:
-#   ALPHABLOCK_DOCTOR_INTERVAL=1h ./scripts/install-systemd.sh doctor
+# 무결성 점검은 타이머 **두 쌍**으로 돈다(WAN-318 §2):
+#   • alphablock-doctor.timer        전수(`PRAGMA quick_check` 포함)  기본 1d
+#   • alphablock-doctor-light.timer  싼 점검만(--skip-quick-check)    기본 1h
+# 간격은 ALPHABLOCK_DOCTOR_INTERVAL / ALPHABLOCK_DOCTOR_LIGHT_INTERVAL 로 지정한다. 예:
+#   ALPHABLOCK_DOCTOR_INTERVAL=12h ./scripts/install-systemd.sh doctor
+# 🚨 주기를 실행 시간보다 짧게 잡지 말 것 — 옛 기본값 15min 은 서버 실측 18분+ 전수
+# 스캔보다 짧아 DB 풀스캔이 상시 걸려 있었다(WAN-318 §1).
 #
 # 대시보드 포트는 ALPHABLOCK_DASHBOARD_PORT(기본 8501)로 지정한다. 예:
 #   ALPHABLOCK_DASHBOARD_PORT=9000 ./scripts/install-systemd.sh dashboard
@@ -44,7 +49,10 @@ TEMPLATE_DIR="$REPO_DIR/scripts/systemd"
 UNIT_DIR="/etc/systemd/system"
 LOG_DIR="${ALPHABLOCK_LOG_DIR:-$REPO_DIR/logs}"
 DASHBOARD_PORT="${ALPHABLOCK_DASHBOARD_PORT:-8501}"
-DOCTOR_INTERVAL="${ALPHABLOCK_DOCTOR_INTERVAL:-15min}"
+# WAN-318 §1: 전수 점검은 하루 1회(옛 기본값 15min 은 서버 실측 18분+ 실행보다 짧았다).
+DOCTOR_INTERVAL="${ALPHABLOCK_DOCTOR_INTERVAL:-1d}"
+# WAN-318 §2: quick_check 를 뺀 싼 점검은 자주 본다(로컬 7.3GB 실측 90초 → 1h 는 40배 여유).
+DOCTOR_LIGHT_INTERVAL="${ALPHABLOCK_DOCTOR_LIGHT_INTERVAL:-1h}"
 RUN_USER="$(id -un)"
 
 # uv 실행 파일 절대 경로(systemd 는 셸 PATH 를 물려받지 않는다).
@@ -97,14 +105,16 @@ render_unit() {
         -e "s|__RUN_USER__|${RUN_USER}|g" \
         -e "s|__DASHBOARD_PORT__|${DASHBOARD_PORT}|g" \
         -e "s|__DOCTOR_INTERVAL__|${DOCTOR_INTERVAL}|g" \
+        -e "s|__DOCTOR_LIGHT_INTERVAL__|${DOCTOR_LIGHT_INTERVAL}|g" \
         "$template" > "$out"
 }
 
-# DB 무결성 주기 점검(WAN-185): oneshot 서비스 + 타이머 한 쌍.
+# DB 점검(WAN-185, 분리 = WAN-318 §2): oneshot 서비스 + 타이머 한 쌍을 설치한다.
 # 서비스는 부팅 자동 시작하지 않고(타이머가 트리거), 타이머만 enable --now 한다.
-install_doctor() {
-    local svc="alphablock-doctor.service"
-    local timer="alphablock-doctor.timer"
+install_timer_pair() {
+    local name="$1" interval="$2"
+    local svc="${name}.service"
+    local timer="${name}.timer"
     local rendered
     rendered="$(mktemp)"
 
@@ -116,7 +126,14 @@ install_doctor() {
 
     sudo systemctl daemon-reload
     sudo systemctl enable --now "$timer"
-    echo "✅ 설치·시작: $timer (간격 ${DOCTOR_INTERVAL} · 로그: $LOG_DIR/doctor.log)"
+    echo "✅ 설치·시작: $timer (간격 ${interval} · 로그: $LOG_DIR/doctor.log)"
+}
+
+# 전수 점검(하루 1회) + 싼 점검(자주) 두 쌍을 함께 건다 — 한쪽만 걸면 「무겁지만 드문
+# 점검」이나 「자주 보지만 손상은 못 보는 점검」 한쪽만 남는다(WAN-318 §2).
+install_doctor() {
+    install_timer_pair alphablock-doctor "$DOCTOR_INTERVAL"
+    install_timer_pair alphablock-doctor-light "$DOCTOR_LIGHT_INTERVAL"
 }
 
 TARGET="${1:-all}"
@@ -147,5 +164,5 @@ esac
 
 echo
 echo "상태 확인: systemctl status alphablock-collector alphablock-live alphablock-dashboard"
-echo "타이머 확인: systemctl list-timers alphablock-doctor.timer   (DB 무결성 주기 점검 = WAN-185)"
+echo "타이머 확인: systemctl list-timers 'alphablock-doctor*'   (전수 + 싼 점검 = WAN-185/318)"
 echo "수집 확인: uv run -- alphablock status   (웹소켓이 1분봉을 받는지 = WAN-174 완료 기준)"

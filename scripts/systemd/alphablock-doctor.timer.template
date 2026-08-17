@@ -1,14 +1,21 @@
-# AlphaBlock DB 무결성 점검 타이머 (WAN-185).
+# AlphaBlock DB 무결성 전수 점검 타이머 (WAN-185, 주기 = WAN-318 §1).
 #
 # 부팅 5분 뒤 첫 실행 + 이후 __DOCTOR_INTERVAL__ 마다 alphablock-doctor.service 를
 # 트리거한다. 사람이 화면을 안 봐도 "봉은 오는데 DB가 조용히 깨지는"(WAN-194 07-22
 # 손상) 상태를 잡는다. 간격은 install-systemd.sh 실행 시 ALPHABLOCK_DOCTOR_INTERVAL
-# 로 조정한다(기본 15min).
+# 로 조정한다(기본 1d).
+#
+# 🚨 기본값이 15min 이던 시절 서버에서 「주기(15분) < 실행 시간(18분+)」이 되어 전수
+# 스캔이 사실상 상시 걸려 있었다(WAN-318 §1 실측). 무결성 점검은 15분 안에 알아야 하는
+# 일이 아니므로 하루 1회로 내렸다 — 실행 시간의 80배 여유다. 이 값을 다시 줄일 때는
+# 반드시 서버의 실제 1회 소요(`systemd-analyze` 또는 doctor.log 타임스탬프)보다 충분히
+# 길게 잡을 것. 싼 점검을 더 자주 보고 싶으면 주기를 줄이지 말고
+# alphablock-doctor-light.timer(기본 1h, quick_check 생략)를 쓴다.
 #
 # Persistent=true: 서버가 꺼져 있어 놓친 실행이 있으면 부팅 후 한 번 만회한다.
 
 [Unit]
-Description=AlphaBlock DB integrity check timer (WAN-185)
+Description=AlphaBlock DB integrity check timer, full (WAN-185)
 
 [Timer]
 OnBootSec=5min
