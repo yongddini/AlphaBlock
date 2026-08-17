@@ -1,4 +1,8 @@
 {
   "legacy_note": "",
-  "identity_diff": 0.0
+  "identity_diff": 0.0,
+  "legacy_check": [
+    96,
+    0.0
+  ]
 }
