@@ -72,18 +72,44 @@ scp data/ohlcv.db <서버>:~/AlphaBlock/data/ohlcv.db
 
 ```bash
 cd ~/AlphaBlock
-./scripts/install-systemd.sh            # 수집기 + 러너 + 대시보드 + DB 무결성 타이머 넷 다
+./scripts/install-systemd.sh            # 수집기 + 러너 + 대시보드 + DB 점검 타이머 두 쌍
 # 또는 개별: ./scripts/install-systemd.sh collector|live|dashboard|doctor
 ```
 
 systemd 시스템 서비스로 등록되어 **부팅 시 자동 시작 + 크래시 시 10초 후 자동 재시작**된다
 (launchd 판 WAN-31/48과 대칭). 로그는 `~/AlphaBlock/logs/{collector,live,dashboard}.log`.
 
-`doctor` 는 서비스가 아니라 **타이머**로 등록된다(WAN-185) — 부팅 5분 뒤부터 기본 15분마다
-`alphablock doctor` 를 돌려 DB 무결성(손상·복구 산출물·빈 장부·처분 미기록 체결)을 점검하고,
+`doctor` 는 서비스가 아니라 **타이머 두 쌍**으로 등록된다(WAN-185 · 분리 = WAN-318 §2).
 이상이면 종료 코드 1로 systemd 에 실패를 남기고(`systemctl --failed`) 텔레그램 경고를 보낸다
 (`ALPHABLOCK_TELEGRAM_*` 설정 시). 07-22 손상처럼 "봉은 오는데 DB가 조용히 깨지는" 상태를
-사람이 화면을 안 봐도 잡는다. 간격 조정: `ALPHABLOCK_DOCTOR_INTERVAL=1h ./scripts/install-systemd.sh doctor`.
+사람이 화면을 안 봐도 잡는다.
+
+| 타이머 | 도는 것 | 기본 주기 | 환경변수 |
+| -- | -- | -- | -- |
+| `alphablock-doctor.timer` | 전수 — `PRAGMA quick_check` 포함 | **1d** | `ALPHABLOCK_DOCTOR_INTERVAL` |
+| `alphablock-doctor-light.timer` | 싼 점검만 — `--skip-quick-check` | **1h** | `ALPHABLOCK_DOCTOR_LIGHT_INTERVAL` |
+
+🚨 **주기를 실행 시간보다 짧게 잡지 말 것.** 옛 기본값은 15min 이었는데 서버 실측(2026-08-17)
+전수 1회가 **18분+**(4.0GB · CPU 37초 · 나머지는 전부 디스크 I/O 대기 · 실효 3.7MB/s)라
+**끝나기 전에 다음 차례가 와 DB 풀스캔이 상시 걸려 있었다.** 수집기·러너가 그 스캔과 디스크를
+두고 싸웠고, 하필 WAN-195 가 규명한 07-22 손상의 최유력 벡터가 **동시 접근**이다 — 무결성을
+지키려는 점검이 압력을 상시로 만들고 있었던 셈이다. 두 유닛 모두 `Nice=19` ·
+`IOSchedulingClass=idle` 로 수집·러너에 디스크를 양보한다.
+
+⚠️ **점검 항목을 줄인 게 아니다** — 같은 `alphablock doctor` 를 두 주기로 나눠 돌릴 뿐이다
+(무엇을 검사하는가는 WAN-194 소관). 나눈 이유: 전 페이지를 읽는 것은 `quick_check` 하나이고,
+「장부만 비었는데 러너는 계속 쓰는」(WAN-194 원형) 상태는 싼 점검으로 잡히므로 하루를 기다릴
+이유가 없다. 단 싼 판도 공짜는 아니다 — 인구조사가 6,500만 행 테이블을 세느라 로컬 7.3GB
+실측 **90초**였다(전수는 174초). 그래서 1h 이지 15min 이 아니다.
+
+간격 조정: `ALPHABLOCK_DOCTOR_INTERVAL=12h ./scripts/install-systemd.sh doctor`.
+설치 후 **서버에서 1회 실측을 확인**하고(아래) 주기가 그보다 충분히 긴지 본다:
+
+```bash
+systemctl list-timers 'alphablock-doctor*' --no-pager    # 다음 실행·마지막 실행 시각
+systemctl show alphablock-doctor -p ExecMainStartTimestamp -p ExecMainExitTimestamp   # 1회 소요
+tail -20 logs/doctor.log                                  # 판정 출력(전수·싼 점검 공용)
+```
 
 ## 4a. 재배포 — 코드 갱신 시 (서버에서, WAN-185)
 
@@ -105,6 +131,66 @@ cd ~/AlphaBlock
 깨끗하지 않으면(손으로 얹힌 변경) 덮어쓰기 전에 멈추고 알린다 — 먼저 `git stash` 또는
 `git checkout` 하라. `.env`·DB 는 건드리지 않으므로 `ALPHABLOCK_LIVE_TRADING`(기본 false)은
 이 스크립트로 바뀌지 않는다(페이퍼 전용).
+
+## 4b. 유닛 템플릿이 바뀌었을 때 — 재설치 절차 (서버에서, WAN-318)
+
+`deploy.sh` 는 **코드만** 새로 하고 `/etc/systemd/system/*.service` 는 **그대로 둔다**.
+`scripts/systemd/*.template` 이 바뀐 배포(예: WAN-318 의 doctor 주기·I/O 우선순위·
+`SuccessExitStatus=143`)는 **설치 스크립트를 다시 돌려야** 반영된다 — 안 돌리면 소스만 새것이고
+돌고 있는 유닛은 옛 설정이다(같은 부류의 「배포했다고 믿는데 안 바뀐 것」).
+
+```bash
+cd ~/AlphaBlock && git pull
+
+# ① 서비스 유닛(collector·live·dashboard) 재설치 — 재시작까지 함께 된다
+./scripts/install-systemd.sh collector
+./scripts/install-systemd.sh live
+./scripts/install-systemd.sh dashboard
+
+# ② doctor 타이머 두 쌍 재설치(옛 15min 타이머를 새 주기로 덮어쓴다)
+./scripts/install-systemd.sh doctor
+
+# ③ 확인
+systemctl cat alphablock-live | grep SuccessExitStatus        # 143 이 보여야 한다
+systemctl cat alphablock-doctor | grep -E 'Nice|IOScheduling' # idle · 19
+systemctl list-timers 'alphablock-doctor*' --no-pager         # 주기 1d / 1h
+```
+
+⚠️ **옛 설치본이 남아 있을 수 있다** — 15min 타이머가 이미 돌던 서버라면 ②가 그 파일을
+덮어쓰지만, `install-systemd.sh` 는 `daemon-reload` 까지 하므로 추가 조치는 없다. 확인은
+`grep OnUnitActiveSec /etc/systemd/system/alphablock-doctor.timer`.
+
+📌 **§3 확인법**: `sudo systemctl stop alphablock-live` 후 `systemctl status alphablock-live`
+가 `failed` 가 아니라 **`inactive (dead)`** 여야 한다(옛 유닛은 SIGTERM 종료 143 을 실패로
+찍어 정상 정지와 크래시가 구분되지 않았다). doctor 는 **일부러 예외**다 — 이상 시 종료 코드
+1 = `systemctl --failed` 감시가 설계라 `SuccessExitStatus` 를 넣지 않았다.
+
+## 4c. DB 백업 — 검증된 백업만 남긴다 (WAN-318 §4)
+
+```bash
+cd ~/AlphaBlock
+# 타이머만 멈추면 이미 돌고 있는 점검은 계속 돈다 — 서비스까지 함께 세운다.
+sudo systemctl stop alphablock-live alphablock-collector \
+    alphablock-doctor.timer alphablock-doctor-light.timer \
+    alphablock-doctor.service alphablock-doctor-light.service
+
+./scripts/db-backup.sh                       # data/ohlcv.db → data/ohlcv.db.bak-<타임스탬프>
+
+sudo systemctl start alphablock-live alphablock-collector \
+    alphablock-doctor.timer alphablock-doctor-light.timer
+```
+
+🚨 **`cp`·맨손 `sqlite3 .backup` 을 쓰지 말 것.** 2026-08-17 에 실제로, doctor 가 DB 를 붙잡은
+상태에서 돈 `.backup` 이 중간에 끊겼는데 **잘린 1.5GB 파일이 4.0GB 백업과 똑같은 이름으로
+남았다**(옆에 `-journal` 이 중단 흔적으로 함께). 그걸 복구본으로 쓰면 DB 의 3분의 2 가 조용히
+사라진다. `db-backup.sh` 는 임시 이름으로 받아 **검증(헤더 페이지 수 × 페이지 크기 = 실제 크기
+· 스키마 읽힘 · 저널 없음)에 성공해야만** 최종 이름을 붙이고, 실패하면 `.FAILED` 로 남기며
+종료 코드 1 을 낸다.
+
+- 이미 갖고 있는 백업이 성한지: `./scripts/db-backup.sh --verify-only <파일>`
+- 더 깊게 보려면 `--quick-check`(수 GB 면 수 분~수십 분).
+- 러너·수집기·doctor 가 돌고 있으면 **거부**한다(경합이 사고 원인이었다) — 정말 필요하면
+  `--allow-running`.
 
 ## 5. 검증 — WAN-174 완료 기준
 

@@ -23,6 +23,10 @@ ExecStart=__UV_BIN__ run -- streamlit run dashboard/app.py --server.port __DASHB
 Restart=always
 RestartSec=10
 
+# WAN-318 §3: `systemctl stop` 의 SIGTERM 종료(128+15=143)를 성공으로 본다 — 정상 정지가
+# `failed` 로 남으면 진짜 크래시와 구분되지 않는다.
+SuccessExitStatus=143
+
 StandardOutput=append:__LOG_DIR__/dashboard.log
 StandardError=append:__LOG_DIR__/dashboard.log
 

@@ -1977,6 +1977,42 @@ LimitOrderBook 배선)가 이 간극을 닫는다.
   구멍은 `uv run alphablock backfill --repair`(사용자 수행). **전략·기본값·토대 불변** ·
   실거래 보류 유지.
 
+📌 **운영 위생 묶음(WAN-318 = WAN-315 실행 중 발견): doctor 주기가 실행 시간보다 짧아
+DB 풀스캔이 상시 걸려 있었다 · 정상 정지가 `failed`로 보였다 · 잘린 백업이 정상 백업과 같은
+이름으로 남았다.** 운영/도구 전용 — **전략·엔진·토대 불변**(`ConfluenceParams()`·
+`LeverageBookParams()` 그대로 · `ALPHABLOCK_LIVE_TRADING=false` 유지).
+- 📌 **doctor 타이머가 둘로 나뉘고 주기가 내려갔다** — `alphablock-doctor.timer`(전수 =
+  `PRAGMA quick_check` 포함) **기본 15min → 1d** · 신설 `alphablock-doctor-light.timer`
+  (`--skip-quick-check`) **기본 1h**. 근거: 서버 실측(2026-08-17) 전수 1회가 **18분+**
+  (4.0GB · CPU 37초 · 나머지는 디스크 I/O 대기)인데 주기가 15분이라 **끝나기 전에 다음
+  차례가 왔다**. 두 유닛 모두 `Nice=19` · `IOSchedulingClass=idle`로 수집기·러너에 디스크를
+  양보한다. ⚠️ **점검 항목을 줄인 게 아니다**(무엇을 보는가는 WAN-194 소관) — 같은 doctor를
+  두 주기로 나눠 돌린다. ⚠️ **싼 판도 공짜가 아니다**(로컬 7.3GB 실측: 전수 174초 · 싼 판
+  **90초** — 인구조사가 6,500만 행을 센다). 그래서 1h이지 옛 15min이 아니고, **주기를 줄일
+  때는 서버 실측을 먼저 볼 것**(회귀 테스트가 기본값을 분 단위로 잠근다).
+- 📌 **collector·live·dashboard에 `SuccessExitStatus=143`** — `systemctl stop`의 SIGTERM
+  종료(128+15)가 `failed`로 남아 **정상 정지와 크래시가 화면에서 구분되지 않았다**(실제
+  오진). ⚠️ **doctor 유닛은 일부러 예외다** — 이상 시 종료 코드 1 = `systemctl --failed`
+  감시가 설계의 전부라(WAN-185) 넣으면 감시가 조용히 죽는다.
+- 📌 **백업은 `scripts/db-backup.sh`로만 한다**(신설) — 임시 이름으로 받아 **검증**(헤더
+  page_count × page_size = 실제 크기 · 스키마 읽힘 · 저널 없음)에 성공해야 최종 이름을 붙이고,
+  실패하면 `.FAILED`로 격리 + 종료 코드 1. 사고(2026-08-17): 경합 중 끊긴 `.backup`이
+  **잘린 1.5GB 파일을 4.0GB 백업과 똑같은 이름으로** 남겼다(WAN-194 「실패가 성공과 같은
+  모양」 계열). 기존 백업 점검은 `--verify-only`. `paper-reset.sh`도 `cp` 대신 이걸 쓴다.
+- 📌 **배포하면 과거 타임라인 캐시가 전부 미스된다 — 되채우는 절차가 런북에 있다**
+  (`docs/ops/wan239-nightly-timeline-cache.md` 「배포 뒤」). 캐시 키의 엔진 소스 지문이
+  바뀌기 때문이고 **그 무효화는 설계대로다**(WAN-106/253 — 지문 정의를 바꿔 미스를 없애는
+  것은 「엔진 고쳤는데 옛 결과를 꺼내 주는」 사고의 복귀다). 크론은 어제치만 돌므로 배포
+  뒤에는 사람이 날짜를 다시 돌린다. ⚠️ **대시보드 「채택 좌표 전부」 모드가 매번 버튼을
+  요구하는 것은 이 문제가 아니다**(그 모드는 디스크 캐시를 안 읽는다 — WAN-297 §1).
+- 📌 **대시보드 라벨이 좌표를 따라간다** — 「9종목」 하드코딩이 `full_universe_shape()`
+  (`len(DEFAULT_SYMBOLS)`·`len(DEFAULT_TIMEFRAMES)`)에서 파생된다. 12종목이 된 뒤
+  (WAN-307) 화면에 **「9종목 × 4TF = 48셀」**이라는 자기모순이 떠 있었다 — 이 저장소가 가장
+  경계하는 「라벨과 동작이 어긋남」(WAN-91/95/112/123/159)이 사용자 화면에 노출된 것이다.
+  회귀 테스트가 **좌표를 바꾸면 라벨도 바뀌는지**로 잠근다.
+- 📌 **템플릿 변경은 `deploy.sh`로 반영되지 않는다** — 유닛 파일은 `install-systemd.sh`를
+  다시 돌려야 갱신된다(절차: `docs/ops/server-migration.md` §4b, 백업은 §4c).
+
 📌 **체결 ≠ 진입 — 「체결됐는데 포지션이 없다」는 손상이 아니라 정상 동작일 수 있다
 (WAN-194)**: [`docs/decisions/wan194.md`](docs/decisions/wan194.md). 지정가 체결
 (`live_limit_orders`)과 페이퍼 진입(`open_positions`) 사이에는 집행 계층의 거부 관문이

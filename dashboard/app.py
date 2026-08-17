@@ -7,7 +7,7 @@
 강등**되고 **지연 로딩**된다(WAN-220 원칙 유지 — 제거가 아니라 강등. 지우지 않은 이유는
 백테스트가 라이브 실측과 대조하는 **잣대**이기 때문이다: 약속·기대수익이 아니라 대조용).
 
-**차트 탭(메인)**: 채택 유니버스 9종목 × 작업 TF(15m·1h·2h·4h) 중 하나를 골라 최근 봉과
+**차트 탭(메인)**: 채택 유니버스(`DEFAULT_SYMBOLS`) × 작업 TF(15m·1h·2h·4h) 중 하나를 골라 봉과
 **활성 오더블록 6개**(+ 그 구간의 죽은 존 회색, WAN-289 사용자 결정 2026-08-12)만
 그린다. 분석 탭 cold load ~10초(WAN-202)의 원인이던 "6년치 재계산 + 통째 전송"이 이
 화면에는 **구조적으로 없다** — 읽는 양 자체가 다르다.
@@ -1085,17 +1085,40 @@ _TIMELINE_CHART_HEIGHT = 520
 _TIMELINE_CHART_PAD_MS = 12 * 3_600_000
 
 #: 백테스트 대조 대상 라디오(WAN-290). 「라이브 칸만」은 WAN-234 그대로, 「전부」는 임의
-#: 날짜 × 채택 9종목×4TF 온디맨드 실행이다.
+#: 날짜 × 채택 좌표 전부(종목 × TF) 온디맨드 실행이다.
 _TARGET_LIVE_CELLS = "라이브 칸만 (WAN-234)"
-_TARGET_FULL_UNIVERSE = "채택 9종목×4TF 전부 (WAN-290)"
-#: 임의 날짜 × 9×4 온디맨드 실행 결과의 세션 캐시(날짜별). 버튼으로만 채우고, 필터·선택
-#: 재실행에서 다시 돌지 않게 유지한다(WAN-239 「클릭 시에만 무거운 재계산」).
+#: 임의 날짜 × 채택 좌표 전부 온디맨드 실행 결과의 세션 캐시(날짜별). 버튼으로만 채우고,
+#: 필터·선택 재실행에서 다시 돌지 않게 유지한다(WAN-239 「클릭 시에만 무거운 재계산」).
 _TIMELINE_FULL_RESULT_KEY = "timeline_full_backtest_by_day"
+
+
+def full_universe_shape() -> tuple[int, int, int]:
+    """채택 좌표의 (종목 수, TF 수, 셀 수)를 코드 기본값에서 읽는다(WAN-318 §6).
+
+    화면 라벨을 **하드코딩하지 않기 위한** 한 곳이다. 예전엔 「9종목」이 문자열 상수였는데
+    셀 수는 `len(DEFAULT_SYMBOLS) * len(DEFAULT_TIMEFRAMES)`로 계산돼, 유니버스가 12종목이
+    된 뒤(WAN-307) 화면에 **「9종목 × 4TF = 48셀」이라는 자기모순**이 떴다. 이 저장소가
+    가장 경계하는 「라벨과 동작이 어긋남」(WAN-91/95/112/123/159 계열)이 사용자 화면에
+    그대로 노출된 것이라, 라벨도 좌표에서 파생시킨다.
+    """
+    from backtest.harness import DEFAULT_SYMBOLS, DEFAULT_TIMEFRAMES
+
+    return (
+        len(DEFAULT_SYMBOLS),
+        len(DEFAULT_TIMEFRAMES),
+        len(DEFAULT_SYMBOLS) * len(DEFAULT_TIMEFRAMES),
+    )
+
+
+def full_universe_label() -> str:
+    """대조 대상 라디오의 「전부」 선택지 라벨 — 좌표에서 파생된다(WAN-318 §6)."""
+    n_symbols, n_timeframes, _ = full_universe_shape()
+    return f"채택 {n_symbols}종목×{n_timeframes}TF 전부 (WAN-290)"
 
 
 @dataclass(frozen=True)
 class _FullRunResult:
-    """임의 날짜 × 9×4 온디맨드 실행 한 판의 세션 캐시 값(WAN-290).
+    """임의 날짜 × 채택 좌표 전부 온디맨드 실행 한 판의 세션 캐시 값(WAN-290).
 
     행은 튜플(불변)로 담아 세션에 안전히 보관하고, 실행 소요·엔진 배지를 함께 둔다 —
     필터·선택 재실행에서 다시 계산하지 않고 이 값을 그대로 다시 그린다.
@@ -1134,9 +1157,11 @@ def _timeline_live_cell_backtest(
     symbols = sorted({r.symbol for r in live_rows})
     timeframes = sorted({r.timeframe for r in live_rows})
     if not symbols or not timeframes:
+        n_symbols, n_timeframes, _ = full_universe_shape()
         st.info(
             "이 날 라이브 예약이 없어 백테스트 대조 대상 셀이 없습니다. 라이브와 무관하게 "
-            "그날 하루치 백테를 보려면 위에서 **채택 9종목×4TF 전부**를 고르세요(WAN-290)."
+            f"그날 하루치 백테를 보려면 위에서 **채택 {n_symbols}종목×{n_timeframes}TF "
+            "전부**를 고르세요(WAN-290)."
         )
         return []
 
@@ -1170,12 +1195,16 @@ def _timeline_live_cell_backtest(
 
 
 def _timeline_full_universe_backtest(day_key: str, start_ms: int, end_ms: int) -> list[TimelineRow]:
-    """「채택 9종목×4TF 전부」 대조 — 임의 날짜의 하루치 백테를 버튼으로 온디맨드 실행(WAN-290).
+    """「채택 좌표 전부」 대조 — 임의 날짜의 하루치 백테를 버튼으로 온디맨드 실행(WAN-290).
 
-    무거우므로(9×4 = 36셀 × 워밍업 연속, cold ~35초) **버튼을 눌렀을 때만** 돈다(WAN-239
-    「클릭 시에만 무거운 재계산」). 결과는 세션에 날짜별로 캐시해 필터·선택 재실행에서 다시
-    돌지 않는다. 라이브 활동과 무관하게 실행되므로 라이브가 없던 과거 날짜도 백테만으로
-    대조할 수 있다(완료 기준 1). 좌표·엔진은 인자 없는 `backtest.run`과 같다(핀 없음) —
+    ⚠️ 화면 라벨의 종목 수·TF 수는 **하드코딩하지 않는다** — `full_universe_shape()`가
+    `DEFAULT_SYMBOLS`·`DEFAULT_TIMEFRAMES`에서 뽑는다(WAN-318 §6: 좌표가 9→12종목이 된 뒤
+    라벨만 안 따라가 「9종목 × 4TF = 48셀」이 떴다).
+
+    무거우므로(전 셀 × 워밍업 연속, 9종목 시절 cold ~35초 실측) **버튼을 눌렀을 때만**
+    돈다(WAN-239 「클릭 시에만 무거운 재계산」). 결과는 세션에 날짜별로 캐시해 필터·선택
+    재실행에서 다시 돌지 않는다. 라이브 활동과 무관하게 실행되므로 라이브가 없던 과거 날짜도
+    백테만으로 대조할 수 있다(완료 기준 1). 좌표·엔진은 인자 없는 `backtest.run`과 같다(핀 없음) —
     `backtest_timeline_rows`가 워밍업 연속(warm)·per-cell 단일로 그날만 평가한다(완료 기준 2).
 
     ⚠️ **직렬(jobs=1)로 돈다** — 셀마다 120일치 1분봉을 로드하므로 프로세스 풀 병렬은
@@ -1184,9 +1213,10 @@ def _timeline_full_universe_backtest(day_key: str, start_ms: int, end_ms: int) -
     """
     from backtest.harness import DEFAULT_SYMBOLS, DEFAULT_TIMEFRAMES
 
-    n_cells = len(DEFAULT_SYMBOLS) * len(DEFAULT_TIMEFRAMES)
+    n_symbols, n_timeframes, n_cells = full_universe_shape()
     st.caption(
-        f"채택 좌표 **9종목 × 4TF({', '.join(DEFAULT_TIMEFRAMES)}) = {n_cells}셀** · 인자 없는 "
+        f"채택 좌표 **{n_symbols}종목 × {n_timeframes}TF({', '.join(DEFAULT_TIMEFRAMES)}) = "
+        f"{n_cells}셀** · 인자 없는 "
         "`backtest.run`과 같은 엔진·기본값 · 워밍업 연속(warm)으로 **탭이 그날인 셋업만** "
         "평가합니다."
     )
@@ -1198,7 +1228,7 @@ def _timeline_full_universe_backtest(day_key: str, start_ms: int, end_ms: int) -
 
     results: dict[str, _FullRunResult] = st.session_state.setdefault(_TIMELINE_FULL_RESULT_KEY, {})
     if st.button(
-        f"▶ {day_key} 백테 실행 (9종목×4TF · 무겁습니다)",
+        f"▶ {day_key} 백테 실행 ({n_symbols}종목×{n_timeframes}TF · 무겁습니다)",
         key="timeline_full_run",
         help="누른 날짜만 계산합니다. 날짜를 바꿔도 자동 실행하지 않습니다(WAN-239).",
     ):
@@ -1243,9 +1273,10 @@ def _render_trade_timeline(settings: Settings) -> None:
 
     라이브(주문 장부 + 페이퍼 라운드트립)를 주인공으로 그리고, 백테스트 대조는 무거우니
     (셀마다 워밍업 연속) **옵트인**이다. 대조 대상을 두 가지로 고른다(WAN-290):
-    「라이브 칸만」(그날 라이브가 있던 셀만 — WAN-234 그대로)과 「채택 9종목×4TF 전부」
+    「라이브 칸만」(그날 라이브가 있던 셀만 — WAN-234 그대로)과 「채택 좌표 전부」
     (라이브 유무와 무관하게 임의 날짜의 하루치 백테를 버튼으로 온디맨드 실행). 행을 누르면
-    그 거래 지점으로 차트가 이동한다(저장된 거래 탭 패턴).
+    그 거래 지점으로 차트가 이동한다(저장된 거래 탭 패턴). 뒤쪽 라디오 라벨의 종목 수는
+    `full_universe_label()`이 채택 좌표에서 뽑는다(WAN-318 §6 — 하드코딩 금지).
     """
     db_path = settings.db_path
     st.subheader("당일 거래별 타임라인")
@@ -1256,14 +1287,15 @@ def _render_trade_timeline(settings: Settings) -> None:
 
     default_day = datetime.now(tz=KST).date()
     day = st.date_input("날짜(KST)", value=default_day, key="timeline_day")
+    full_universe = full_universe_label()
     target = st.radio(
         "백테스트 대조 대상",
-        [_TARGET_LIVE_CELLS, _TARGET_FULL_UNIVERSE],
+        [_TARGET_LIVE_CELLS, full_universe],
         horizontal=True,
         key="timeline_target",
         help=(
             "라이브 칸만: 그날 라이브 예약이 있던 (심볼, TF)만 대조합니다(WAN-234).  "
-            "채택 9종목×4TF 전부: 라이브 유무와 무관하게 임의 날짜의 하루치 백테를 버튼으로 "
+            f"{full_universe}: 라이브 유무와 무관하게 임의 날짜의 하루치 백테를 버튼으로 "
             "온디맨드 실행합니다(WAN-290)."
         ),
     )
@@ -1277,7 +1309,7 @@ def _render_trade_timeline(settings: Settings) -> None:
         store.close()
         journal.close()
 
-    if target == _TARGET_FULL_UNIVERSE:
+    if target == full_universe:
         backtest_rows = _timeline_full_universe_backtest(day_key, start_ms, end_ms)
     else:
         backtest_rows = _timeline_live_cell_backtest(db_path, day_key, start_ms, end_ms, live_rows)

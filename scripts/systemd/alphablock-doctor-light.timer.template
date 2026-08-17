@@ -1,0 +1,27 @@
+# AlphaBlock DB 위생 「싼 점검」 타이머 (WAN-318 §2).
+#
+# 부팅 10분 뒤 첫 실행 + 이후 __DOCTOR_LIGHT_INTERVAL__ 마다
+# alphablock-doctor-light.service 를 트리거한다. 간격은 install-systemd.sh 실행 시
+# ALPHABLOCK_DOCTOR_LIGHT_INTERVAL 로 조정한다(기본 1h).
+#
+# 기본 1h 의 근거(WAN-318): quick_check 를 뺀 판은 로컬 실측 7.3GB DB 에 90초였다
+# (인구조사가 6,500만 행 테이블을 세는 몫). 서버는 디스크가 느려 더 걸리므로 옛 15min
+# 은 다시 「주기 < 실행 시간」이 될 위험이 있고, 1h 는 그 실측의 40배 여유다. 줄이려면
+# 서버 doctor.log 에서 이 유닛의 실제 소요를 먼저 볼 것.
+#
+# 전수 판(alphablock-doctor.timer)의 OnBootSec 5min 과 5분 어긋나게 두어 부팅 직후 둘이
+# 동시에 디스크를 물지 않게 한다.
+#
+# Persistent=true: 꺼져 있어 놓친 실행이 있으면 부팅 후 한 번 만회한다.
+
+[Unit]
+Description=AlphaBlock DB hygiene check timer, cheap checks only (WAN-318)
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=__DOCTOR_LIGHT_INTERVAL__
+Persistent=true
+Unit=alphablock-doctor-light.service
+
+[Install]
+WantedBy=timers.target

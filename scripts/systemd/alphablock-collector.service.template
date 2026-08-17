@@ -25,6 +25,11 @@ ExecStart=__UV_BIN__ run -- alphablock collect
 Restart=always
 RestartSec=10
 
+# WAN-318 §3: `systemctl stop` 은 SIGTERM 을 보내고, 파이썬 프로세스는 그때 128+15=143
+# 으로 끝난다. 이걸 성공으로 선언하지 않으면 **정상 정지가 크래시와 같은 모양**으로
+# 남아(`failed`) 화면에서 구분되지 않는다(실제로 오진이 있었다).
+SuccessExitStatus=143
+
 # launchd 판과 같은 파일 로그(수집기·러너·대시보드가 같은 규약을 쓴다).
 StandardOutput=append:__LOG_DIR__/collector.log
 StandardError=append:__LOG_DIR__/collector.log

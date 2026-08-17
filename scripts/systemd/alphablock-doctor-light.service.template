@@ -1,0 +1,35 @@
+# AlphaBlock DB 위생 「싼 점검」 oneshot (WAN-318 §2, doctor = WAN-194).
+#
+# scripts/install-systemd.sh 가 __PLACEHOLDER__ 를 치환해
+# /etc/systemd/system/alphablock-doctor-light.service 로 설치한다. 부팅 시 자동
+# 시작하지 않는다 — 짝인 alphablock-doctor-light.timer 가 트리거한다.
+#
+# 왜 나눴나(WAN-318 §2): doctor 가 보는 것 중 DB 전 페이지를 읽는 것은 `PRAGMA
+# quick_check` 하나이고(서버 4.0GB 에 18분+), 나머지(인구조사·빈 장부·복구 산출물·처분
+# 미기록 체결·공간·WAL·디스크)는 훨씬 싸다. 전수 판을 하루 1회로 내리면서 싼 점검까지
+# 하루 1회가 되면, WAN-194 가 실제로 잡고 싶었던 「장부만 비었는데 러너는 계속 쓰는」
+# 상태를 하루 늦게 알게 된다. 그래서 싼 점검만 --skip-quick-check 로 자주 돌린다.
+#
+# ⚠️ 점검 항목을 줄인 게 아니다 — 같은 doctor 를 두 주기로 나눠 돌릴 뿐이고, quick_check
+# 는 전수 판(alphablock-doctor.service)이 하루 1회 그대로 본다.
+# ⚠️ 이 유닛에도 SuccessExitStatus 를 넣지 않는다 — 이상 시 종료 코드 1 = `systemctl
+# --failed` 감시가 설계의 핵심이다(WAN-185).
+
+[Unit]
+Description=AlphaBlock DB hygiene check, cheap checks only (doctor --skip-quick-check, WAN-318)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=__RUN_USER__
+WorkingDirectory=__WORKDIR__
+Environment=PATH=__PATH__
+ExecStart=__UV_BIN__ run -- alphablock doctor --skip-quick-check --notify-on-failure
+
+# 전수 판과 같은 이유로 한 단계 물러선다(WAN-318 §1).
+Nice=19
+IOSchedulingClass=idle
+
+# 전수 판과 같은 로그 파일을 쓴다 — 한 파일에서 시간순으로 읽힌다.
+StandardOutput=append:__LOG_DIR__/doctor.log
+StandardError=append:__LOG_DIR__/doctor.log

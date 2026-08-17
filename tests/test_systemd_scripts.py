@@ -9,6 +9,7 @@ launchd 판(tests/test_daemon_scripts.py, WAN-31/48)과 같은 방식이다. 대
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,8 @@ _UNINSTALL = _REPO / "scripts" / "uninstall-systemd.sh"
 _SETUP = _REPO / "scripts" / "setup-server.sh"
 
 _LABELS = ("collector", "live", "dashboard")
+#: 타이머로 도는 oneshot 점검 쌍(WAN-185 전수 + WAN-318 §2 싼 점검).
+_DOCTOR_UNITS = ("alphablock-doctor", "alphablock-doctor-light")
 
 
 @pytest.mark.parametrize("label", _LABELS)
@@ -99,6 +102,104 @@ def test_install_is_linux_only_and_renders_all_placeholders() -> None:
         ):
             if token in template:
                 assert f"s|{token}|" in install, f"{token} 치환 누락"
+
+
+@pytest.mark.parametrize("label", _LABELS)
+def test_clean_stop_is_not_recorded_as_failure(label: str) -> None:
+    """WAN-318 §3: `systemctl stop` 의 SIGTERM 종료(128+15=143)는 성공이다.
+
+    이게 없으면 **정상 정지가 크래시와 화면에서 구분되지 않는다**(실제 오진 사례) —
+    WAN-194 의 「정상 거부가 DB 손상과 같은 모양」과 같은 부류다.
+    """
+    text = (_SYSTEMD / f"alphablock-{label}.service.template").read_text()
+    assert "SuccessExitStatus=143" in text
+
+
+@pytest.mark.parametrize("unit", _DOCTOR_UNITS)
+def test_doctor_units_keep_failure_monitoring(unit: str) -> None:
+    """🚨 doctor 는 예외다 — 이상 시 종료 코드 1이 `systemctl --failed` 감시의 전부다.
+
+    SuccessExitStatus 를 넣으면 그 감시가 조용히 죽는다(WAN-185 설계). 라벨이 아니라
+    유닛 내용으로 잠근다.
+    """
+    text = (_SYSTEMD / f"{unit}.service.template").read_text()
+    # 주석은 "왜 안 넣는지"를 적고 있으므로 **지시문만** 본다.
+    assert "SuccessExitStatus" not in _directives(text)
+    assert "Type=oneshot" in text
+    assert "--notify-on-failure" in text
+
+
+@pytest.mark.parametrize("unit", _DOCTOR_UNITS)
+def test_doctor_units_yield_disk_to_collector_and_runner(unit: str) -> None:
+    """WAN-318 §1·§2: 점검은 수집기·러너와 디스크를 두고 싸우지 않는다."""
+    text = (_SYSTEMD / f"{unit}.service.template").read_text()
+    assert "IOSchedulingClass=idle" in text
+    assert "Nice=19" in text
+
+
+def test_doctor_split_runs_quick_check_only_in_the_full_unit() -> None:
+    """WAN-318 §2: 전수 판만 `quick_check` 를 돌고, 잦은 판은 그것만 건너뛴다.
+
+    ⚠️ 점검 **항목을 줄인 게 아니다** — 같은 doctor 를 두 주기로 나눠 돌릴 뿐이라,
+    싼 판에 `--skip-quick-check` 가 있고 전수 판에는 없어야 한다.
+    """
+    full = (_SYSTEMD / "alphablock-doctor.service.template").read_text()
+    light = (_SYSTEMD / "alphablock-doctor-light.service.template").read_text()
+    assert "--skip-quick-check" not in full
+    assert "--skip-quick-check" in light
+
+
+def test_doctor_interval_is_longer_than_a_measured_run() -> None:
+    """WAN-318 §1: 「주기 < 실행 시간」이 되면 전수 스캔이 상시로 걸린다.
+
+    서버 실측(2026-08-17) 전수 1회 = 18분+ 인데 옛 기본값이 15min 이었다. 기본값이 그
+    실측보다 짧아지지 않게 **분 단위로 환산해** 잠근다(단위를 바꿔 적어도 걸리게).
+    """
+    install = _INSTALL.read_text()
+    match = re.search(r"DOCTOR_INTERVAL=\"\$\{ALPHABLOCK_DOCTOR_INTERVAL:-([0-9a-z]+)\}\"", install)
+    assert match is not None, "전수 점검 간격 기본값을 찾지 못했다"
+    assert _to_minutes(match.group(1)) >= 12 * 60, "전수 점검 기본 주기가 서버 실측보다 짧다"
+
+    light = re.search(
+        r"DOCTOR_LIGHT_INTERVAL=\"\$\{ALPHABLOCK_DOCTOR_LIGHT_INTERVAL:-([0-9a-z]+)\}\"", install
+    )
+    assert light is not None, "싼 점검 간격 기본값을 찾지 못했다"
+    # 싼 판도 로컬 7.3GB 실측 90초라 「공짜」가 아니다 — 옛 15min 로 되돌리지 않게 잠근다.
+    assert _to_minutes(light.group(1)) >= 30
+
+
+def _directives(unit_text: str) -> str:
+    """유닛 파일에서 주석(`#`)을 뺀 지시문만 남긴다."""
+    return "\n".join(line for line in unit_text.splitlines() if not line.lstrip().startswith("#"))
+
+
+def _to_minutes(value: str) -> float:
+    """systemd 간격 표기(`15min`·`1h`·`1d`)를 분으로 환산한다."""
+    units = {"min": 1.0, "h": 60.0, "d": 1440.0, "s": 1 / 60, "w": 10080.0}
+    for suffix, factor in sorted(units.items(), key=lambda kv: -len(kv[0])):
+        if value.endswith(suffix):
+            return float(value[: -len(suffix)]) * factor
+    raise AssertionError(f"알 수 없는 간격 표기: {value}")
+
+
+@pytest.mark.parametrize("unit", _DOCTOR_UNITS)
+def test_install_and_uninstall_handle_both_doctor_timers(unit: str) -> None:
+    """한쪽만 설치·해제되면 「무겁지만 드문 점검」이나 「손상을 못 보는 점검」만 남는다."""
+    install = _INSTALL.read_text()
+    uninstall = _UNINSTALL.read_text()
+    for suffix in (".service", ".timer"):
+        assert (_SYSTEMD / f"{unit}{suffix}.template").is_file()
+    assert f"install_timer_pair {unit}" in install
+    assert f"uninstall_timer_pair {unit}" in uninstall
+
+
+def test_install_substitutes_both_doctor_intervals() -> None:
+    install = _INSTALL.read_text()
+    for token in ("__DOCTOR_INTERVAL__", "__DOCTOR_LIGHT_INTERVAL__"):
+        assert f"s|{token}|" in install, f"{token} 치환 누락"
+        assert any(
+            token in (_SYSTEMD / f"{unit}.timer.template").read_text() for unit in _DOCTOR_UNITS
+        ), f"{token} 를 쓰는 타이머 템플릿이 없다"
 
 
 def test_setup_server_creates_swap_and_installs_uv() -> None:

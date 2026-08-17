@@ -11,7 +11,7 @@
 #   ./scripts/uninstall-systemd.sh collector     # 수집기만
 #   ./scripts/uninstall-systemd.sh live          # 러너만
 #   ./scripts/uninstall-systemd.sh dashboard     # 대시보드만
-#   ./scripts/uninstall-systemd.sh doctor        # DB 무결성 타이머만
+#   ./scripts/uninstall-systemd.sh doctor        # DB 점검 타이머 두 쌍(전수 + 싼 점검)
 set -euo pipefail
 
 if [[ "$(uname -s)" != "Linux" ]] || ! command -v systemctl >/dev/null; then
@@ -34,9 +34,10 @@ uninstall_one() {
     fi
 }
 
-uninstall_doctor() {
-    local timer="alphablock-doctor.timer"
-    local svc="alphablock-doctor.service"
+uninstall_timer_pair() {
+    local name="$1"
+    local timer="${name}.timer"
+    local svc="${name}.service"
     if [[ -f "$UNIT_DIR/$timer" || -f "$UNIT_DIR/$svc" ]]; then
         sudo systemctl disable --now "$timer" || true
         sudo rm -f "$UNIT_DIR/$timer" "$UNIT_DIR/$svc"
@@ -44,6 +45,12 @@ uninstall_doctor() {
     else
         echo "ℹ️  설치돼 있지 않음: $timer"
     fi
+}
+
+# 전수 + 싼 점검 두 쌍을 함께 해제한다(WAN-318 §2). 한쪽만 지우면 유닛이 남아 계속 돈다.
+uninstall_doctor() {
+    uninstall_timer_pair alphablock-doctor
+    uninstall_timer_pair alphablock-doctor-light
 }
 
 TARGET="${1:-all}"
