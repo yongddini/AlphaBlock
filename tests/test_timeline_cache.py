@@ -8,6 +8,14 @@
 - `persist_day` → `load_cached_day` 왕복(무거운 백테는 스텁으로 대체).
 - 렌더러가 엔진 배지·캐시 상태 노트를 표에 얹는다(완료 기준 4-c).
 - CLI 라우팅: `--persist-cache`/`--recompute` 플래그.
+
+WAN-297이 더한 것:
+
+- 캐시에 담기는 것은 **셋업 전부**(청산·미진입·미체결·건너뜀)다 — 좁은 판(청산만)을 담고
+  넓게 읽으면 「계산은 됐는데 미체결 행이 없는」 조용한 실패가 된다.
+- 「채택 좌표 전부」 경로가 **디스크 캐시**를 읽는다(세션이 끊겨도 재계산 없이 뜬다).
+- 화면 버튼(`compute_and_persist_day`)과 야간 크론(`persist_day`)이 **같은 함수**를 타
+  산출물이 갈라지지 않는다 — 화면이 그리는 행이 곧 디스크에 담긴 행이다.
 """
 
 from __future__ import annotations
@@ -20,10 +28,13 @@ from live.timeline_cache import (
     CachedCell,
     DuplicateTimelineCacheError,
     TimelineCacheStore,
+    adopted_universe,
     cell_fingerprint,
+    compute_and_persist_day,
     current_engine_label,
     describe_engine,
     load_cached_day,
+    load_full_universe_day,
     persist_day,
 )
 from live.trade_timeline import SOURCE_BACKTEST, TimelineRow
@@ -188,12 +199,12 @@ def test_load_miss_on_revision_change(tmp_path: Path) -> None:
 def _stub_by_cell(
     monkeypatch: pytest.MonkeyPatch, mapping: dict[tuple[str, str], list[TimelineRow]]
 ) -> None:
-    """`backtest_timeline_by_cell`을 스텁으로 갈아 무거운 백테를 피한다."""
+    """`backtest_setup_by_cell`을 스텁으로 갈아 무거운 백테를 피한다(WAN-297: 셋업 전부)."""
 
     def _fake(**_kwargs: object) -> dict[tuple[str, str], list[TimelineRow]]:
         return mapping
 
-    monkeypatch.setattr("live.timeline_cache.backtest_timeline_by_cell", _fake)
+    monkeypatch.setattr("live.timeline_cache.backtest_setup_by_cell", _fake)
 
 
 def test_persist_then_load(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -309,3 +320,199 @@ def test_cli_trades_persist_flags() -> None:
     ns2 = build_parser().parse_args(["trades", "--recompute"])
     assert ns2.recompute is True
     assert ns2.persist_cache is False
+
+
+# --------------------------------------------------------------------------- #
+# WAN-297 §1 — 캐시는 셋업 전부를 담고, 「채택 좌표 전부」가 디스크에서 읽는다
+# --------------------------------------------------------------------------- #
+
+
+def _setup_row(*, status: str, symbol: str = _SYMBOL, timeframe: str = _TF) -> TimelineRow:
+    """청산이 아닌 셋업 행(미체결·건너뜀 등) — 체결·손익 칸이 비어 있다."""
+    return TimelineRow(
+        source=SOURCE_BACKTEST,
+        symbol=symbol,
+        timeframe=timeframe,
+        is_long=True,
+        status=status,
+        reserve_ms=None,
+        limit_price=None,
+        fill_ms=None,
+        fill_price=None,
+        stop_price=None,
+        take_profit_price=None,
+        exit_ms=None,
+        exit_price=None,
+        exit_reason=None,
+        pnl_pct=None,
+        pnl_amount=None,
+        zone_start_time=1_699_000_000_000,
+        zone_confirmed_time=1_699_003_600_000,
+    )
+
+
+def test_persist_day_computes_setup_rows_not_only_closed_trades(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """적재가 `backtest_setup_by_cell`을 탄다 — 라벨이 아니라 **호출한 함수**로 고정한다.
+
+    청산 거래만 담으면 「채택 좌표 전부」 모드(셋업 3열 대조)가 캐시를 히트하고도 미체결·
+    건너뜀 행을 잃는다. 그 조용한 실패를 막는 자리라, 좁은 쪽 함수를 부르면 테스트가 깨진다.
+    """
+    called: list[str] = []
+
+    def _fake_setups(**_kwargs: object) -> dict[tuple[str, str], list[TimelineRow]]:
+        called.append("setup")
+        return {(_SYMBOL, _TF): []}
+
+    def _fake_trades(**_kwargs: object) -> dict[tuple[str, str], list[TimelineRow]]:
+        raise AssertionError("청산 거래만 내는 함수를 부르면 안 된다(WAN-297).")
+
+    monkeypatch.setattr("live.timeline_cache.backtest_setup_by_cell", _fake_setups)
+    monkeypatch.setattr("live.trade_timeline.backtest_timeline_by_cell", _fake_trades)
+    store = TimelineCacheStore(":memory:")
+    persist_day(
+        store,
+        day_start_ms=0,
+        day_end_ms=86_400_000,
+        day_key=_DAY,
+        symbols=[_SYMBOL],
+        timeframes=[_TF],
+        warmup_days=120,
+        revision=_REV,
+    )
+    store.close()
+    assert called == ["setup"]
+
+
+def test_non_closed_setup_rows_survive_the_round_trip(tmp_path: Path) -> None:
+    """미체결·건너뜀 행이 그대로 복원된다(스키마가 셋업 행을 담는다 — 이슈 §1-4)."""
+    rows = [
+        _bt_row(fill_ms=1_700_000_000_000),
+        _setup_row(status="미체결"),
+        _setup_row(status="건너뜀(존폭)"),
+    ]
+    store = TimelineCacheStore(tmp_path / "cache.db")
+    fingerprint = cell_fingerprint(_SYMBOL, _TF, _DAY, warmup_days=120, revision=_REV)
+    store.save_cell(fingerprint, rows)
+    cell = store.load_cell(fingerprint)
+    store.close()
+    assert cell is not None
+    assert [r.status for r in cell.rows] == ["청산", "미체결", "건너뜀(존폭)"]
+    assert cell.rows[1].fill_ms is None and cell.rows[1].pnl_pct is None
+
+
+def test_full_universe_survives_a_dropped_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """완료 기준 1 — 적재된 하루는 **새 스토어 객체**(= 끊긴 세션)에서 재계산 없이 뜬다.
+
+    적재 후 조회가 무거운 계산을 다시 부르면 스텁이 터진다(폴백 없음 · WAN-239 §3).
+    """
+    symbols, timeframes = adopted_universe()
+    mapping: dict[tuple[str, str], list[TimelineRow]] = {
+        (sym, tf): [] for sym in symbols for tf in timeframes
+    }
+    mapping[(symbols[0], timeframes[0])] = [
+        _bt_row(fill_ms=1_700_000_000_000, symbol=symbols[0], timeframe=timeframes[0])
+    ]
+    monkeypatch.setattr("live.timeline_cache.backtest_setup_by_cell", lambda **_k: mapping)
+    db = tmp_path / "cache.db"
+    writer = TimelineCacheStore(db)
+    persist_day(
+        writer,
+        day_start_ms=0,
+        day_end_ms=86_400_000,
+        day_key=_DAY,
+        symbols=list(symbols),
+        timeframes=list(timeframes),
+        revision=_REV,
+    )
+    writer.close()
+
+    def _explode(**_kwargs: object) -> dict[tuple[str, str], list[TimelineRow]]:
+        raise AssertionError("조회는 무거운 계산으로 폴백하지 않는다.")
+
+    monkeypatch.setattr("live.timeline_cache.backtest_setup_by_cell", _explode)
+    reader = TimelineCacheStore(db)
+    result = load_full_universe_day(reader, day_key=_DAY, revision=_REV)
+    reader.close()
+    assert result.all_hit is True
+    assert len(result.hits) == len(symbols) * len(timeframes)
+    assert len(result.rows) == 1
+
+
+def test_full_universe_misses_after_engine_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """완료 기준 2 — 엔진(소스 지문)이 바뀌면 옛 캐시를 **내주지 않는다**(동작으로 고정)."""
+    symbols, timeframes = adopted_universe()
+    monkeypatch.setattr(
+        "live.timeline_cache.backtest_setup_by_cell",
+        lambda **_k: {(sym, tf): [] for sym in symbols for tf in timeframes},
+    )
+    store = TimelineCacheStore(tmp_path / "cache.db")
+    persist_day(
+        store,
+        day_start_ms=0,
+        day_end_ms=86_400_000,
+        day_key=_DAY,
+        symbols=list(symbols),
+        timeframes=list(timeframes),
+        revision="old-engine",
+    )
+    assert load_full_universe_day(store, day_key=_DAY, revision="old-engine").all_hit is True
+    after = load_full_universe_day(store, day_key=_DAY, revision="new-engine")
+    store.close()
+    assert after.all_hit is False
+    assert len(after.misses) == len(symbols) * len(timeframes)
+
+
+def test_screen_button_and_cron_share_one_persist_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """완료 기준 4 — 화면 버튼 경로가 낸 행 == 디스크에 담긴 행 == 크론이 담는 행.
+
+    `compute_and_persist_day`(버튼)는 `persist_day`(크론)를 그대로 타고, **적재한 뒤 다시
+    읽어** 돌려준다. 그래서 "화면에는 떴는데 캐시에는 없다"가 구조적으로 불가능하다.
+    """
+    symbols, timeframes = adopted_universe()
+    mapping: dict[tuple[str, str], list[TimelineRow]] = {
+        (sym, tf): [] for sym in symbols for tf in timeframes
+    }
+    mapping[(symbols[0], timeframes[0])] = [
+        _bt_row(fill_ms=1_700_000_000_000, symbol=symbols[0], timeframe=timeframes[0]),
+        _setup_row(status="미체결", symbol=symbols[0], timeframe=timeframes[0]),
+    ]
+    monkeypatch.setattr("live.timeline_cache.backtest_setup_by_cell", lambda **_k: mapping)
+    store = TimelineCacheStore(tmp_path / "cache.db")
+    report, from_button = compute_and_persist_day(
+        store,
+        day_start_ms=0,
+        day_end_ms=86_400_000,
+        day_key=_DAY,
+        revision=_REV,
+    )
+    from_disk = load_full_universe_day(store, day_key=_DAY, revision=_REV)
+    store.close()
+    assert len(report.persisted) == len(symbols) * len(timeframes)
+    assert from_button.rows == from_disk.rows
+    assert [r.status for r in from_button.rows] == ["청산", "미체결"]
+
+
+def test_button_recompute_replaces_instead_of_raising(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """버튼을 두 번 눌러도 「이미 적재됨」으로 죽지 않는다(명시적 재계산 = 덮어쓰기)."""
+    symbols, timeframes = adopted_universe()
+    monkeypatch.setattr(
+        "live.timeline_cache.backtest_setup_by_cell",
+        lambda **_k: {(sym, tf): [] for sym in symbols for tf in timeframes},
+    )
+    store = TimelineCacheStore(tmp_path / "cache.db")
+    args = dict(day_start_ms=0, day_end_ms=86_400_000, day_key=_DAY, revision=_REV)
+    compute_and_persist_day(store, **args)  # type: ignore[arg-type]
+    report, _ = compute_and_persist_day(store, **args)  # type: ignore[arg-type]
+    store.close()
+    assert report.skipped == ()
+    assert len(report.persisted) == len(symbols) * len(timeframes)

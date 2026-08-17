@@ -68,7 +68,7 @@ from pydantic import BaseModel, ConfigDict, field_validator
 
 from backtest.trade_store import ENGINE_VERSION, UNKNOWN_REVISION, engine_source_revision
 from data.sqlite_util import configure_connection
-from live.trade_timeline import SOURCE_BACKTEST, TimelineRow, backtest_timeline_by_cell
+from live.trade_timeline import SOURCE_BACKTEST, TimelineRow, backtest_setup_by_cell
 
 __all__ = [
     "TIMELINE_CACHE_VERSION",
@@ -78,10 +78,13 @@ __all__ = [
     "PersistReport",
     "TimelineCacheFingerprint",
     "TimelineCacheStore",
+    "adopted_universe",
     "cell_fingerprint",
+    "compute_and_persist_day",
     "current_engine_label",
     "describe_engine",
     "load_cached_day",
+    "load_full_universe_day",
     "persist_day",
 ]
 
@@ -90,7 +93,11 @@ __all__ = [
 #: 거래 의미(엔진)를, 이 값은 캐시 표현(행 스키마·조합 규칙)을 각각 판별한다.
 #: wan305.1: 백테 타임라인이 채택 재진입(band)을 포함하고 행에 `is_reentry`가 실린다 —
 #: 옛 적재분(재진입 없는 판)은 지문이 갈라져 자동 미스가 된다(WAN-305).
-TIMELINE_CACHE_VERSION = "wan305.1"
+#: wan297.1: 셀에 담기는 행이 **청산 거래만**에서 **셋업 전부**(청산·미진입·미체결·건너뜀,
+#: WAN-295)로 넓어졌다 — 화면 「채택 좌표 전부」 모드가 읽는 것이 셋업 행이라, 한 캐시가 두
+#: 모드를 다 먹이려면 담기는 것이 넓은 쪽이어야 한다(좁은 쪽을 넓은 소비자에게 내주면
+#: 「계산했는데 미체결 행이 없는」 조용한 실패가 된다). 옛 적재분은 버전이 갈라져 자동 미스다.
+TIMELINE_CACHE_VERSION = "wan297.1"
 
 
 class DuplicateTimelineCacheError(RuntimeError):
@@ -563,17 +570,24 @@ def persist_day(
 ) -> PersistReport:
     """하루치 백테 타임라인을 셀 단위로 계산해 캐시에 적재한다(야간 크론, WAN-239 §2).
 
-    계산은 `backtest_timeline_by_cell`(WAN-234 규약: 워밍업 연속 · 그날만 평가 · per-cell
+    계산은 `backtest_setup_by_cell`(WAN-234 규약: 워밍업 연속 · 그날만 평가 · per-cell
     단일 · 미래 봉 없음)이 하고, 이 함수는 각 셀에 지문을 붙여 저장할 뿐이다. 같은 지문이
     이미 있으면 `replace=False`에서 조용히 건너뛴다(`skipped`) — 크론을 두 번 돌려도 무해하다.
     거래 0건 셀도 적재해 조회가 미스와 구분한다.
+
+    📌 **담기는 것은 셋업 전부다(WAN-297)** — 청산 거래만이 아니라 미진입·미체결·건너뜀까지
+    (`cell_setup_timeline`, WAN-295). 화면의 「채택 좌표 전부」 모드가 읽는 것이 셋업 행이라
+    한 캐시가 두 모드를 다 먹이려면 넓은 쪽을 담아야 한다. 「청산」 행만 추리면
+    `backtest_timeline_by_cell`과 비트 동일하므로(실데이터 회귀 테스트가 고정) 거래만 보는
+    소비자(`alphablock trades` 표)는 걸러 읽는다 — 좁은 판을 담고 넓게 읽으면 「계산은 됐는데
+    미체결 행이 없는」 조용한 실패가 된다.
     """
     from live.live_vs_backtest import DEFAULT_WARMUP_DAYS
 
     warm = warmup_days if warmup_days is not None else DEFAULT_WARMUP_DAYS
     rev = revision if revision is not None else engine_source_revision()
 
-    by_cell = backtest_timeline_by_cell(
+    by_cell = backtest_setup_by_cell(
         day_start_ms=day_start_ms,
         day_end_ms=day_end_ms,
         symbols=symbols,
@@ -657,3 +671,94 @@ def load_cached_day(
         misses=tuple(misses),
         label=current_engine_label(revision=rev),
     )
+
+
+# --------------------------------------------------------------------------- #
+# 채택 좌표 전부(full-universe) — 화면 버튼과 야간 크론이 **같은 함수**를 탄다 (WAN-297 §1)
+# --------------------------------------------------------------------------- #
+
+
+def adopted_universe() -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """채택 좌표(종목, TF)를 코드 기본값에서 읽는다 — 호출부가 하드코딩하지 않게.
+
+    유니버스가 9→12종목이 된 뒤(WAN-307) 화면 라벨만 안 따라가 「9종목 × 4TF = 48셀」이
+    떴던 사고(WAN-318 §6)의 캐시 축 대응이다. `backtest.run`의 인자 없는 좌표와 같은 상수를
+    읽으므로 좌표를 옮기면 캐시가 읽는 셀도 함께 옮겨진다.
+    """
+    from backtest.harness import DEFAULT_SYMBOLS, DEFAULT_TIMEFRAMES
+
+    return tuple(DEFAULT_SYMBOLS), tuple(DEFAULT_TIMEFRAMES)
+
+
+def load_full_universe_day(
+    store: TimelineCacheStore,
+    *,
+    day_key: str,
+    warmup_days: int | None = None,
+    revision: str | None = None,
+) -> DayCacheResult:
+    """채택 좌표 **전 셀**의 하루치 백테 셋업 행을 캐시에서만 읽는다(WAN-297 §1-2).
+
+    화면 「채택 좌표 전부」 모드의 조회 경로다. `load_cached_day`에 채택 좌표를 먹이는 얇은
+    래퍼일 뿐이고, 미스는 여전히 폴백하지 않는다(WAN-239 §3) — 호출부가 "아직 계산 안 됨"을
+    명시한다.
+    """
+    symbols, timeframes = adopted_universe()
+    return load_cached_day(
+        store,
+        day_key=day_key,
+        symbols=symbols,
+        timeframes=timeframes,
+        warmup_days=warmup_days,
+        revision=revision,
+    )
+
+
+def compute_and_persist_day(
+    store: TimelineCacheStore,
+    *,
+    day_start_ms: int,
+    day_end_ms: int,
+    day_key: str,
+    symbols: Sequence[str] | None = None,
+    timeframes: Sequence[str] | None = None,
+    warmup_days: int | None = None,
+    jobs: int = 1,
+    revision: str | None = None,
+    created_at: int = 0,
+) -> tuple[PersistReport, DayCacheResult]:
+    """하루치를 **계산해 적재한 뒤 캐시에서 다시 읽어** 돌려준다(화면 버튼 경로, WAN-297 §1-1).
+
+    화면 버튼이 이 함수를 타므로 **화면이 그리는 행은 언제나 디스크에 담긴 그 행**이다 —
+    "화면에는 떴는데 캐시에는 없다"가 구조적으로 불가능하고, 세션이 끊겨도 다음 조회가
+    `load_full_universe_day`로 그대로 뜬다(완료 기준 1).
+
+    적재는 야간 크론과 **같은 `persist_day`**를 탄다(완료 기준 4) — 두 경로가 각자 계산하면
+    산출물이 갈라진다(WAN-146의 교훈). `replace=True`인 이유는 버튼이 「지금 다시 계산해
+    달라」는 명시적 요청이기 때문이다(같은 지문이 이미 있으면 크론 판을 이 판으로 덮는다 —
+    같은 엔진·같은 좌표라 값은 같다).
+    """
+    report = persist_day(
+        store,
+        day_start_ms=day_start_ms,
+        day_end_ms=day_end_ms,
+        day_key=day_key,
+        symbols=symbols,
+        timeframes=timeframes,
+        warmup_days=warmup_days,
+        jobs=jobs,
+        replace=True,
+        revision=revision,
+        created_at=created_at,
+    )
+    syms = list(symbols) if symbols is not None else list(adopted_universe()[0])
+    tfs = list(timeframes) if timeframes is not None else list(adopted_universe()[1])
+    cached = load_cached_day(
+        store,
+        day_key=day_key,
+        symbols=syms,
+        timeframes=tfs,
+        warmup_days=warmup_days,
+        revision=revision,
+    )
+    return report, cached
