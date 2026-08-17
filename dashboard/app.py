@@ -1572,9 +1572,9 @@ def _render_db_integrity(db_path: str) -> None:
             issues.append(f"복구 산출물 테이블 잔존({names})")
         if report.orphan_fills:
             issues.append(f"처분 미기록 체결 {len(report.orphan_fills)}건")
-        if report.empty_ledgers:
-            names = ", ".join(t.name for t in report.empty_ledgers)
-            issues.append(f"빈 장부 테이블({names})")
+        if report.empty_cumulative_ledgers:
+            names = ", ".join(t.name for t in report.empty_cumulative_ledgers)
+            issues.append(f"빈 누적 장부 테이블({names})")
         st.error(
             "doctor 판정 경고 — "
             + " · ".join(issues)

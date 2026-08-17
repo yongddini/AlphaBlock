@@ -15,6 +15,10 @@ WAN-194 §3이 닫았다) 진단 도구가 없어 구분에 반나절이 걸렸�
 * **테이블 인구조사** — 앱 테이블 행 수. WAN-194에서 결정적이었던 자료다: `backtest_*`가
   성한 채 `paper_trades`·`open_positions`만 0이면 **광범위 유실이 아니라 배선 문제**라는
   뜻이었다(PM 진단 갱신). 이 표가 그 판단을 자동으로 준다.
+  ⚠️ **장부는 성격이 둘이고 종료 코드는 한쪽만 본다(WAN-321)** — 누적
+  (`CUMULATIVE_LEDGER_TABLES`)이 비면 이상이지만 현재 상태(`STATE_LEDGER_TABLES` =
+  `open_positions`)가 비는 것은 **정상**이다(포지션은 닫힌다). 둘을 묶어 두면 싼 판이 도는
+  매시간 거짓 경보가 나 진짜 이상이 상시 빨간불에 묻힌다.
 * **복구 산출물** — `lost_and_found`처럼 `.recover`가 남긴 테이블(앱 스키마 아님). 있으면
   "이 DB는 한 번 복구됐다"는 증거이고, 행 수만큼 공간을 먹는다.
 * **처분 미기록 체결** — `live_limit_orders`의 `filled` 중 `entry_status IS NULL`
@@ -62,13 +66,32 @@ RECOVERY_ARTIFACT_TABLES = frozenset({"lost_and_found"})
 #: `.recover`는 행이 **어느 테이블 것인지**를 잃어버리고 필드 개수와 값만 남긴다.
 _OHLCV_ARITY = 9
 
-#: 페이퍼 운영 장부 — 0행이면 매매 기록이 없다는 뜻이라 눈에 띄어야 한다(WAN-194).
-LEDGER_TABLES: tuple[str, ...] = (
+#: 페이퍼 운영 장부 중 **누적**되는 것 — 한 번 쓰면 지워지지 않으므로 0행이면 이상이다
+#: (WAN-194가 겪은 사고의 모양). **종료 코드에 반영된다.**
+CUMULATIVE_LEDGER_TABLES: tuple[str, ...] = (
     "live_limit_orders",
     "live_runner_sessions",
-    "open_positions",
     "paper_trades",
 )
+
+#: 페이퍼 운영 장부 중 **현재 상태**를 담는 것 — 포지션은 닫히므로 **0행이 정상이다**
+#: (WAN-321). 리포트에는 계속 찍되 **종료 코드에는 반영하지 않는다.**
+#:
+#: WAN-194는 두 성격을 한 규칙으로 묶어 「장부가 비면 경고」라고만 했다. 그 규칙이 잡으려던
+#: 사고는 「체결은 `filled`인데 포지션·거래가 없다」였는데, `open_positions`가 0인 것은 그
+#: 사고의 신호가 아니라 **그냥 지금 열린 포지션이 없다**는 뜻이라 싼 판이 도는 매시간
+#: 거짓 경보를 냈다(WAN-321 §1). `systemctl --failed`가 상시 빨간 상태면 진짜 이상과
+#: 구분되지 않으므로 — 「정상이 실패로 보임」은 이 저장소가 반복해서 데인 「실패가 성공과
+#: 같은 모양」(WAN-194)의 거울상이다 — 성격을 갈랐다.
+#:
+#: ⚠️ **점검 항목을 줄인 게 아니다.** WAN-194의 사고는 두 겹으로 여전히 잡힌다:
+#: (1) 누적 장부(`paper_trades`)가 0이면 여기서 걸리고, (2) 「`filled` + 처분 NULL」은
+#: `orphan_fills`가 **더 정확히** 잡는다(WAN-194가 `entry_status` 열을 넣은 이유).
+STATE_LEDGER_TABLES: tuple[str, ...] = ("open_positions",)
+
+#: 두 성격을 합친 전체 장부 목록(인구조사 표기용). 분류가 빠진 장부가 생기지 않도록
+#: **두 집합에서 파생**한다 — 새 장부를 추가하려면 성격을 반드시 골라야 한다.
+LEDGER_TABLES: tuple[str, ...] = tuple(sorted(CUMULATIVE_LEDGER_TABLES + STATE_LEDGER_TABLES))
 
 
 @dataclass(frozen=True)
@@ -101,6 +124,8 @@ class TableCensus:
     rows: int
     is_recovery_artifact: bool = False
     is_ledger: bool = False
+    is_state_ledger: bool = False
+    """현재 상태 장부인가(WAN-321) — 참이면 0행이 정상이라 종료 코드에 반영하지 않는다."""
 
 
 @dataclass(frozen=True)
@@ -228,17 +253,33 @@ class IntegrityReport:
         return [t for t in self.tables if t.is_recovery_artifact]
 
     @property
-    def empty_ledgers(self) -> list[TableCensus]:
-        return [t for t in self.tables if t.is_ledger and t.rows == 0]
+    def empty_cumulative_ledgers(self) -> list[TableCensus]:
+        """0행이면 이상인 누적 장부(WAN-321) — **종료 코드의 근거**.
+
+        ⚠️ 옛 `empty_ledgers`는 일부러 없앴다. 그 이름은 상태 장부까지 포함해 「비면 경고」로
+        읽혔고, 호출부가 옛 뜻을 조용히 이어받으면 거짓 경보가 그대로 돌아온다 — 이름이
+        아니라 **성격을 고르게** 강제한다.
+        """
+        return [t for t in self.tables if t.is_ledger and not t.is_state_ledger and t.rows == 0]
+
+    @property
+    def empty_state_ledgers(self) -> list[TableCensus]:
+        """0행이 정상인 상태 장부(WAN-321) — 리포트에 찍는 **정보이지 경고가 아니다**."""
+        return [t for t in self.tables if t.is_state_ledger and t.rows == 0]
 
     @property
     def healthy(self) -> bool:
-        """경고할 것이 하나도 없는가(종료 코드의 근거)."""
+        """경고할 것이 하나도 없는가(종료 코드의 근거).
+
+        `empty_state_ledgers`는 **일부러 빠져 있다**(WAN-321 §1) — 포지션이 안 열려 있는
+        것은 페이퍼 러너의 정상 상태다. WAN-194가 잡으려던 사고는 `empty_cumulative_ledgers`
+        와 `orphan_fills`가 두 겹으로 계속 잡는다.
+        """
         return (
             self.quick_check_ok
             and not self.recovery_artifacts
             and not self.orphan_fills
-            and not self.empty_ledgers
+            and not self.empty_cumulative_ledgers
         )
 
 
@@ -459,6 +500,7 @@ def inspect(
                     rows=_count_rows(conn, name),
                     is_recovery_artifact=name in RECOVERY_ARTIFACT_TABLES,
                     is_ledger=name in LEDGER_TABLES,
+                    is_state_ledger=name in STATE_LEDGER_TABLES,
                 )
             )
         space = collect_space(conn, path)
@@ -686,19 +728,30 @@ def render_report(report: IntegrityReport) -> str:
         note = ""
         if table.is_recovery_artifact:
             note = "복구 산출물"
+        elif table.is_state_ledger:
+            # 0행이 정상이라 여기서는 굵게 세우지 않는다(WAN-321) — 눈이 그리로 가면
+            # 사람이 다시 "빈 장부"로 읽는다.
+            empty_note = " · 0행 = 열린 포지션 없음" if table.rows == 0 else ""
+            note = "페이퍼 장부(현재 상태)" + empty_note
         elif table.is_ledger:
-            note = "페이퍼 장부" + (" · **0행**" if table.rows == 0 else "")
+            note = "페이퍼 장부(누적)" + (" · **0행**" if table.rows == 0 else "")
         lines.append(f"| `{table.name}` | {table.rows:,} | {note} |")
     lines.append("")
-    empty = report.empty_ledgers
+    empty = report.empty_cumulative_ledgers
     if empty:
         names = ", ".join(f"`{t.name}`" for t in empty)
         lines.append(
-            f"⚠️ 빈 장부: {names}. **다른 테이블이 성한 채 장부만 비었으면 광범위 유실이"
+            f"⚠️ 빈 누적 장부: {names}. **다른 테이블이 성한 채 장부만 비었으면 광범위 유실이"
             " 아니라 배선·거부 쪽**이다(WAN-194의 판별 근거) — 아래 처분 섹션과 함께 읽을 것."
         )
     else:
-        lines.append("장부 테이블에 빈 것은 없다.")
+        lines.append("누적 장부에 빈 것은 없다.")
+    for table in report.empty_state_ledgers:
+        # 정보 한 줄로만 남긴다 — 종료 코드에는 반영하지 않는다(WAN-321 §1).
+        lines.append(
+            f"ℹ️ `{table.name}` 0행 — **지금 열린 포지션이 없다는 뜻이고 정상이다**"
+            "(포지션은 닫힌다). 진짜 유실은 아래 처분 섹션이 잡는다."
+        )
 
     lines.append("")
     lines.append("## 처분 미기록 체결 (§3 잔여 유실)")

@@ -13,14 +13,21 @@ from pathlib import Path
 import pytest
 
 from data.integrity import (
+    CUMULATIVE_LEDGER_TABLES,
+    LEDGER_TABLES,
     RECOVERY_ARTIFACT_TABLES,
+    STATE_LEDGER_TABLES,
     SalvageableRowsPresent,
     drop_recovery_artifacts,
     inspect,
     render_report,
     salvage_ohlcv,
 )
+from live.limit_orders import LimitFill, PendingLimitOrder
 from live.order_journal import OrderJournal
+from paper.store import PaperTradeRecord, PaperTradeStore
+from strategy.models import OrderBlockDirection, SignalExitReason
+from strategy.realtime_rsi import RealtimeRsi
 
 
 def _journal_db(path: Path) -> None:
@@ -44,6 +51,172 @@ def _add_recovery_artifact(path: Path, rows: int = 3) -> None:
     conn.close()
 
 
+def _pending_order() -> PendingLimitOrder:
+    return PendingLimitOrder(
+        symbol="BTC/USDT:USDT",
+        timeframe="1h",
+        direction=OrderBlockDirection.BULLISH,
+        limit_price=100.0,
+        stop_price=90.0,
+        rsi_state=RealtimeRsi(length=3),
+        placed_ms=1_000,
+    )
+
+
+def _limit_fill() -> LimitFill:
+    return LimitFill(
+        symbol="BTC/USDT:USDT",
+        timeframe="1h",
+        direction=OrderBlockDirection.BULLISH,
+        price=100.0,
+        time=61_000,
+        rsi=25.0,
+        stop_price=90.0,
+        take_profit_price=115.0,
+        penetration_bps=0.0,
+        waited_ms=60_000,
+    )
+
+
+def _full_ledger_db(path: Path) -> None:
+    """장부 4개(누적 3 + 상태 1)가 모두 존재하는 DB — 성격 구분을 재려면 표가 다 있어야 한다.
+
+    스키마는 소유자(`OrderJournal`·`PaperTradeStore`)가 만든다 — 여기서 재구현하면 실제
+    스키마와 갈라진 채 초록불이 난다.
+    """
+    _journal_db(path)
+    store = PaperTradeStore(path)
+    store.close()
+
+
+def _ledger_rows(path: Path, *, record_disposition: bool = True) -> None:
+    """누적 장부를 정상 상태로 채운다 — 체결 1건(처분 기록) + 청산된 거래 1건.
+
+    `open_positions`는 **일부러 비운 채 둔다**(포지션이 닫힌 뒤의 정상 상태 = WAN-321이
+    재는 바로 그 모양). 행은 스키마 소유자의 API로만 넣는다 — 손으로 쓴 INSERT는 스키마가
+    움직이면 테스트만 조용히 다른 표를 재게 된다.
+    """
+    journal = OrderJournal(path)
+    session = journal.start_session(now_ms=0)
+    journal_id = journal.record_placed(
+        _pending_order(), session_id=session, zone_start_time=0, zone_confirmed_time=0
+    )
+    journal.record_filled(journal_id, _limit_fill())
+    if record_disposition:
+        journal.record_entry_result(journal_id, entered=True)
+    journal.close()
+
+    store = PaperTradeStore(path)
+    store.upsert_record(
+        PaperTradeRecord(
+            symbol="BTC/USDT:USDT",
+            timeframe="1h",
+            direction=OrderBlockDirection.BULLISH,
+            entry_time=0,
+            entry_price=100.0,
+            exit_time=60_000,
+            exit_price=115.0,
+            reason=SignalExitReason.TAKE_PROFIT,
+            gross_pct=15.0,
+            fee_pct=0.04,
+            funding_pct=0.0,
+            net_pct=14.96,
+        )
+    )
+    store.close()
+
+
+# --- 장부의 성격 구분: 누적 vs 현재 상태 (WAN-321 §1) --------------------------
+
+
+def test_empty_open_positions_is_healthy(tmp_path: Path) -> None:
+    """완료기준 1 — `open_positions` 0행 + 처분 미기록 0이면 **종료 코드 0**이다.
+
+    포지션은 닫히므로 「지금 열린 포지션이 없다」는 페이퍼 러너의 정상 상태다. 옛 규칙은
+    이것을 매시간 경보로 냈고(싼 판 1시간 주기 × 24회/일), 그 상시 빨간불이 진짜 이상을
+    가렸다(WAN-321 §1).
+    """
+    db = tmp_path / "ohlcv.db"
+    _full_ledger_db(db)
+    _ledger_rows(db)
+
+    report = inspect(db)
+
+    assert [t.name for t in report.empty_state_ledgers] == ["open_positions"]
+    assert report.empty_cumulative_ledgers == []
+    assert report.orphan_fills == []
+    assert report.healthy, "열린 포지션이 없는 것은 정상이다 — 경보가 아니다"
+
+
+def test_empty_cumulative_ledger_still_trips(tmp_path: Path) -> None:
+    """완료기준 2 — 누적 장부가 통째로 비면 **여전히 종료 코드 1**이다.
+
+    🚨 WAN-321이 지우려는 것은 거짓 경보 하나이지 WAN-194의 신호가 아니다. `paper_trades`가
+    0인 것은 「매매 기록이 사라졌다」는 뜻이라 성격이 완전히 다르다.
+    """
+    db = tmp_path / "ohlcv.db"
+    _full_ledger_db(db)
+    journal = OrderJournal(db)
+    journal.start_session(now_ms=0)
+    journal.close()
+
+    report = inspect(db)
+
+    names = {t.name for t in report.empty_cumulative_ledgers}
+    assert "paper_trades" in names
+    assert "live_limit_orders" in names
+    assert not report.healthy
+
+
+def test_orphan_fill_still_trips_with_empty_open_positions(tmp_path: Path) -> None:
+    """완료기준 2 — WAN-194의 **진짜 사고 모양**은 그대로 잡힌다.
+
+    「체결은 `filled`인데 처분 NULL」 + `open_positions` 0행. 옛 규칙에서는 빈 장부가 먼저
+    울어서 이 신호가 묻혔는데, 이제 `orphan_fills`가 **혼자서** 종료 코드 1을 낸다 — 즉
+    WAN-194가 `entry_status` 열을 넣어 만든 정밀한 자가 판정의 주인이 된다.
+    """
+    db = tmp_path / "ohlcv.db"
+    _full_ledger_db(db)
+    _ledger_rows(db)
+    conn = sqlite3.connect(db)
+    with conn:  # 처분을 지운다 = 러너가 두 쓰기 사이에서 죽은 모양.
+        conn.execute("UPDATE live_limit_orders SET entry_status = NULL")
+    conn.close()
+
+    report = inspect(db)
+
+    assert report.empty_cumulative_ledgers == []  # 누적 장부는 성하다.
+    assert [t.name for t in report.empty_state_ledgers] == ["open_positions"]
+    assert len(report.orphan_fills) == 1
+    assert not report.healthy, "처분 미기록 체결 하나만으로도 경보여야 한다"
+
+
+def test_report_prints_empty_state_ledger_as_information(tmp_path: Path) -> None:
+    """리포트에는 계속 찍되 **경고가 아니라 정보**로 적는다(WAN-321 §1).
+
+    점검 항목을 줄인 게 아니라는 것을 사람이 읽는 자리에서도 확인한다.
+    """
+    db = tmp_path / "ohlcv.db"
+    _full_ledger_db(db)
+    _ledger_rows(db)
+
+    text = render_report(inspect(db))
+
+    assert "open_positions" in text
+    assert "열린 포지션이 없" in text
+    assert "⚠️ 빈 누적 장부" not in text
+
+
+def test_ledger_tables_classification_is_total() -> None:
+    """모든 장부가 두 성격 중 하나로 분류돼 있다 — 분류 없는 장부가 생기면 실패한다.
+
+    `LEDGER_TABLES`를 파생값으로 둔 이유를 동작으로 고정한다(새 장부를 추가하면서 성격을
+    안 고르면 종료 코드가 어느 쪽으로 갈지 아무도 모른다).
+    """
+    assert set(LEDGER_TABLES) == set(CUMULATIVE_LEDGER_TABLES) | set(STATE_LEDGER_TABLES)
+    assert not set(CUMULATIVE_LEDGER_TABLES) & set(STATE_LEDGER_TABLES)
+
+
 def test_inspect_missing_file_raises(tmp_path: Path) -> None:
     """없는 경로를 조용히 새 DB로 만들지 않는다 — 경로 오타가 초록불로 보이면 안 된다."""
     with pytest.raises(FileNotFoundError):
@@ -64,8 +237,8 @@ def test_inspect_clean_db_is_healthy(tmp_path: Path) -> None:
     assert report.quick_check_ok
     assert report.recovery_artifacts == []
     assert report.orphan_fills == []
-    assert [t.name for t in report.empty_ledgers] == ["live_limit_orders"]
-    assert not report.healthy  # 빈 장부가 있으므로 경고 상태다.
+    assert [t.name for t in report.empty_cumulative_ledgers] == ["live_limit_orders"]
+    assert not report.healthy  # 빈 누적 장부가 있으므로 경고 상태다.
 
 
 def test_inspect_detects_recovery_artifact(tmp_path: Path) -> None:

@@ -2013,6 +2013,43 @@ DB 풀스캔이 상시 걸려 있었다 · 정상 정지가 `failed`로 보였�
 - 📌 **템플릿 변경은 `deploy.sh`로 반영되지 않는다** — 유닛 파일은 `install-systemd.sh`를
   다시 돌려야 갱신된다(절차: `docs/ops/server-migration.md` §4b, 백업은 §4c).
 
+📌 **doctor 경보 두 겹 수리(WAN-321 = WAN-320 서버 확인 중 발견): 「정상이 실패로 보임」 +
+「경보가 아예 안 감」.** [`docs/decisions/wan321.md`](docs/decisions/wan321.md). 운영/알림
+전용 — **전략·엔진·기본값·토대 불변**(`ConfluenceParams()`·`LeverageBookParams()` 그대로 ·
+`ALPHABLOCK_LIVE_TRADING=false` 유지) · **doctor 점검 항목도 불변**(무엇을 보는가는 WAN-194
+소관 · 이 이슈는 **그 결과를 종료 코드·알림으로 옮기는 법**만 고친다).
+- 📌 **장부의 성격이 갈렸다 — 누적 vs 현재 상태.** `CUMULATIVE_LEDGER_TABLES`
+  (`live_limit_orders`·`live_runner_sessions`·`paper_trades`)는 0행이면 이상이라 **종료
+  코드에 반영**하고, `STATE_LEDGER_TABLES`(`open_positions`)는 **0행이 정상**이라(포지션은
+  닫힌다) 리포트에 정보로만 찍는다. `LEDGER_TABLES`는 두 집합에서 **파생**되므로 새 장부를
+  넣으려면 성격을 골라야 한다(회귀 테스트가 분류의 전체성을 고정).
+- 🚨 **WAN-194의 신호는 지워지지 않았다 — 두 겹으로 그대로 잡힌다**: (1) `paper_trades` 0행은
+  누적이라 걸리고, (2) 「`filled` + 처분 NULL」은 `orphan_fills`가 **더 정확히** 잡는다(그
+  열을 넣은 것이 WAN-194다). 정밀한 자와 옛 어림자가 함께 걸려 있었고 **어림자만 울고
+  있었다** — 싼 판 1시간 주기라 하루 24번(WAN-318이 계기). `systemctl --failed`가 상시
+  빨가면 진짜 이상과 구분되지 않는다(WAN-194 「실패가 성공과 같은 모양」·WAN-318 §3 「정상
+  정지가 failed」의 **거울상**).
+- 📌 **`empty_ledgers` 속성은 일부러 없앴다** — 이름이 옛 뜻(「비면 경고」)으로 읽혀 호출부가
+  조용히 이어받으면 거짓 경보가 돌아온다. `empty_cumulative_ledgers`(종료 코드) ·
+  `empty_state_ledgers`(정보)로 갈라 **성격을 고르도록 강제**했다(「라벨과 동작이 어긋남」
+  WAN-91/95/112/123/159 예방).
+- 🚨 **텔레그램 경보가 죽어 있었다 — WAN-185 감시의 두 다리 중 하나.** 경고문에 실리는 것이
+  하필 테이블·열 이름이라 `open_positions`의 **밑줄**을 레거시 Markdown이 「닫히지 않은
+  이탤릭」으로 읽고 **400으로 거부**했다 = 진짜 손상이 나도 폰에는 아무것도 안 갔다. 게다가
+  그 실패가 `WARNING` 한 줄이라 **「경보를 못 보냈다」가 경보되지 않았다.**
+- 📌 **고친 자리는 클라이언트다 — 호출부를 안 고쳐도 전 경로가 낫는다.** `send_message`가
+  **서식 파싱 실패(400)만은 평문으로 딱 한 번** 다시 보낸다(평문에는 파싱이 없어 같은 이유로
+  재실패할 수 없다 = 루프 아님 · 서식 무관 400과 네트워크 소진은 재전송 안 함). doctor
+  경고문 자체도 **평문**으로 바뀌었다(`parse_mode=None`). 최종 실패 로그는 `ERROR`로 올랐고
+  doctor는 **경고 본문을 함께** 남긴다. ⚠️ **종료 코드는 안 건드렸다**(무결성 판정 전용).
+- 📌 **doctor 하나만의 함정이 아니었다**(완료기준 5 조사) — `data/repair.py`(예외 메시지) ·
+  `data/collector.py`(복구 사유) · `live/zone_limit_notifier.py`(거부 사유 — `REJECT_CODE_*`
+  는 `min_stop_distance`처럼 **밑줄 포함**) · `live/health_watch.py`가 전부 자유 텍스트를
+  레거시 Markdown 안에 끼워 넣는다. 표는 wan321.md §2. ⚠️ **폴백은 그물이지 면허가 아니다**
+  — 걸리면 서식 없이 도착하고 `WARNING`이 남는다.
+- ⚠️ **서버 실증은 남아 있다**(세션에 SSH 없음) — 배포 후 doctor 이상 시 텔레그램이 실제로
+  도착하는지 1회 확인. 파싱이 안 깨지는 것 자체는 테스트가 고정한다.
+
 📌 **체결 ≠ 진입 — 「체결됐는데 포지션이 없다」는 손상이 아니라 정상 동작일 수 있다
 (WAN-194)**: [`docs/decisions/wan194.md`](docs/decisions/wan194.md). 지정가 체결
 (`live_limit_orders`)과 페이퍼 진입(`open_positions`) 사이에는 집행 계층의 거부 관문이

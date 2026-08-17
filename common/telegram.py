@@ -47,6 +47,18 @@ class TelegramResponse:
 #: 네트워크 오류는 `TransportError`로 올려 클라이언트가 재시도하게 한다.
 Transport = Callable[[str, dict[str, Any]], TelegramResponse]
 
+#: 텔레그램이 **서식 파싱**에 실패했을 때 400과 함께 주는 설명의 지문(WAN-321 §2).
+#: 예: `Bad Request: can't parse entities: Can't find end of the entity starting at byte offset 80`.
+_PARSE_ERROR_MARKERS = ("can't parse entities", "can't find end of the entity")
+
+
+def _is_parse_error(response: TelegramResponse) -> bool:
+    """이 400이 「서식이 깨졌다」인가 — 평문으로 다시 보내면 통과할 실패인가."""
+    if response.status_code != 400:
+        return False
+    description = (response.description or "").lower()
+    return any(marker in description for marker in _PARSE_ERROR_MARKERS)
+
 
 def _parse_response(status_code: int, body: bytes) -> TelegramResponse:
     """텔레그램 JSON 응답 본문을 `TelegramResponse`로 변환한다."""
@@ -128,6 +140,45 @@ class TelegramClient:
         네트워크 오류·HTTP 429·5xx는 지수 백오프로 최대 `max_retries`회 재시도한다.
         429가 `retry_after`를 주면 백오프 대신 그 시간을 존중한다. 그 외 4xx는
         재시도해도 소용없으므로 즉시 실패로 처리한다.
+
+        🚨 **서식 파싱 실패(400)만은 평문으로 딱 한 번 다시 보낸다(WAN-321 §2).**
+        레거시 Markdown은 `_`·`*`·`` ` ``를 서식으로 읽는데, 이 저장소의 알림은 하나같이
+        **자유 텍스트를 그 안에 끼워 넣는다** — 테이블·열 이름(`open_positions`)·거부
+        사유 코드(`min_stop_distance`)·예외 메시지·수집 복구 사유. 그중 하나에 짝이 안
+        맞는 밑줄이 끼면 텔레그램이 400으로 거부하고, 하필 **이상이 났을 때만 나가는
+        경고가 정확히 그때 안 나간다**(WAN-185 감시의 두 다리 중 하나가 죽는다).
+
+        재시도는 **평문 1회로 끝난다** — 평문에는 파싱 자체가 없어 같은 이유로 다시 실패할
+        수 없으므로 루프가 되지 않는다. 호출부를 고치지 않아도 모든 알림 경로가 함께 낫는다.
+        """
+        ok, response = self._deliver(text, parse_mode)
+        if ok:
+            return True
+
+        if parse_mode is not None and response is not None and _is_parse_error(response):
+            _logger.warning(
+                "텔레그램 %s 서식 파싱 실패 — 평문으로 1회 재전송합니다: %s",
+                parse_mode,
+                response.description,
+            )
+            ok, response = self._deliver(text, None)
+            if ok:
+                return True
+
+        if response is not None:
+            # 실패는 ERROR로 남긴다 — 「경보를 못 보냈다」가 조용히 묻히면 안 된다(WAN-321 §2).
+            _logger.error(
+                "텔레그램 전송 실패: status=%s description=%s",
+                response.status_code,
+                response.description,
+            )
+        return False
+
+    def _deliver(self, text: str, parse_mode: str | None) -> tuple[bool, TelegramResponse | None]:
+        """한 가지 `parse_mode`로 전송한다(재시도 포함). 반환 `(성공, 마지막 API 응답)`.
+
+        응답이 `None`이면 **API가 답한 적이 없다**(네트워크 오류로 재시도 소진) — 서식
+        문제인지 판정할 근거가 없으므로 호출부는 평문 재전송을 시도하지 않는다.
         """
         payload: dict[str, Any] = {"chat_id": self._chat_id, "text": text}
         if parse_mode:
@@ -138,13 +189,13 @@ class TelegramClient:
                 response = self._transport(self._send_url, payload)
             except TransportError as exc:
                 if attempt >= self._max_retries:
-                    _logger.warning("텔레그램 전송 네트워크 오류(재시도 소진): %s", exc)
-                    return False
+                    _logger.error("텔레그램 전송 네트워크 오류(재시도 소진): %s", exc)
+                    return False, None
                 self._wait(self._backoff(attempt), reason=f"네트워크 오류: {exc}")
                 continue
 
             if response.ok:
-                return True
+                return True, response
 
             if self._is_retryable(response) and attempt < self._max_retries:
                 delay = response.retry_after
@@ -154,13 +205,8 @@ class TelegramClient:
                 )
                 continue
 
-            _logger.warning(
-                "텔레그램 전송 실패: status=%s description=%s",
-                response.status_code,
-                response.description,
-            )
-            return False
-        return False
+            return False, response
+        return False, None
 
     @staticmethod
     def _is_retryable(response: TelegramResponse) -> bool:
