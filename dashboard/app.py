@@ -127,13 +127,18 @@ from data.storage import OhlcvStore, source_timeframe
 from live.order_journal import LedgerEntry, OrderJournal
 from live.runtime_state import EventRecord, RuntimeStateStore
 from live.setup_compare import build_setup_comparisons
-from live.timeline_cache import TimelineCacheStore, current_engine_label, load_cached_day
+from live.timeline_cache import (
+    TimelineCacheStore,
+    compute_and_persist_day,
+    current_engine_label,
+    load_cached_day,
+    load_full_universe_day,
+)
 from live.trade_timeline import (
     STATUS_BACKTEST_CLOSED,
     DayTimeline,
     TimelineRow,
     backtest_setup_rows,
-    backtest_timeline_rows,
     live_timeline_rows,
     resolve_day_window,
 )
@@ -1087,8 +1092,10 @@ _TIMELINE_CHART_PAD_MS = 12 * 3_600_000
 #: 백테스트 대조 대상 라디오(WAN-290). 「라이브 칸만」은 WAN-234 그대로, 「전부」는 임의
 #: 날짜 × 채택 좌표 전부(종목 × TF) 온디맨드 실행이다.
 _TARGET_LIVE_CELLS = "라이브 칸만 (WAN-234)"
-#: 임의 날짜 × 채택 좌표 전부 온디맨드 실행 결과의 세션 캐시(날짜별). 버튼으로만 채우고,
-#: 필터·선택 재실행에서 다시 돌지 않게 유지한다(WAN-239 「클릭 시에만 무거운 재계산」).
+#: 임의 날짜 × 채택 좌표 전부 실행 결과의 세션 캐시(날짜별) — **디스크 캐시 위의 즉시 히트
+#: 계층**이다(WAN-297 §1-1). 진짜 저장소는 `TimelineCacheStore`이고, 이 dict는 같은 세션 안의
+#: 필터·선택 재실행에서 SQLite를 다시 읽지 않기 위한 것뿐이다(옛 판은 이것만 있어서 앱
+#: 재시작·새 브라우저 세션이면 결과가 통째로 날아갔다 — 이 이슈가 고친 자리).
 _TIMELINE_FULL_RESULT_KEY = "timeline_full_backtest_by_day"
 
 
@@ -1118,15 +1125,18 @@ def full_universe_label() -> str:
 
 @dataclass(frozen=True)
 class _FullRunResult:
-    """임의 날짜 × 채택 좌표 전부 온디맨드 실행 한 판의 세션 캐시 값(WAN-290).
+    """임의 날짜 × 채택 좌표 전부 한 판의 세션 캐시 값(WAN-290 · WAN-297).
 
-    행은 튜플(불변)로 담아 세션에 안전히 보관하고, 실행 소요·엔진 배지를 함께 둔다 —
-    필터·선택 재실행에서 다시 계산하지 않고 이 값을 그대로 다시 그린다.
+    행은 튜플(불변)로 담아 세션에 안전히 보관하고, 엔진 배지를 함께 둔다 — 필터·선택
+    재실행에서 다시 계산하지 않고 이 값을 그대로 다시 그린다. `elapsed`는 **이번 세션에서
+    직접 계산했을 때만** 값이 있다(디스크 캐시에서 읽었으면 `None` — 안 잰 시간을 지어내지
+    않는다). `from_cache`가 그 출처를 화면에 밝힌다.
     """
 
     rows: tuple[TimelineRow, ...]
-    elapsed: float
+    elapsed: float | None
     engine: str
+    from_cache: bool
 
 
 def _timeline_live_cell_backtest(
@@ -1167,9 +1177,11 @@ def _timeline_live_cell_backtest(
 
     if recompute:
         # 명시적 온디맨드 재계산(캐시 무시, 무겁다) — 사용자가 골랐을 때만(WAN-239).
+        # 캐시가 담는 것과 **같은 셋업 행**을 낸다(WAN-297) — 캐시 경로와 재계산 경로가
+        # 다른 모양을 내면 체크박스 하나로 3열 대조의 행 수가 달라진다.
         st.caption(f"백테 대조 엔진: **{current_engine_label()}** · 즉시 재계산(캐시 무시)")
         with st.spinner("백테스트 대조 재산출 중… (그날 라이브 셀만)"):
-            return backtest_timeline_rows(
+            return backtest_setup_rows(
                 day_start_ms=start_ms,
                 day_end_ms=end_ms,
                 symbols=symbols,
@@ -1194,24 +1206,32 @@ def _timeline_live_cell_backtest(
     return list(cached.rows)
 
 
-def _timeline_full_universe_backtest(day_key: str, start_ms: int, end_ms: int) -> list[TimelineRow]:
-    """「채택 좌표 전부」 대조 — 임의 날짜의 하루치 백테를 버튼으로 온디맨드 실행(WAN-290).
+def _timeline_full_universe_backtest(
+    db_path: str, day_key: str, start_ms: int, end_ms: int
+) -> list[TimelineRow]:
+    """「채택 좌표 전부」 대조 — 디스크 캐시를 먼저 읽고, 미스면 버튼으로 계산·적재한다.
 
     ⚠️ 화면 라벨의 종목 수·TF 수는 **하드코딩하지 않는다** — `full_universe_shape()`가
     `DEFAULT_SYMBOLS`·`DEFAULT_TIMEFRAMES`에서 뽑는다(WAN-318 §6: 좌표가 9→12종목이 된 뒤
     라벨만 안 따라가 「9종목 × 4TF = 48셀」이 떴다).
 
-    무거우므로(전 셀 × 워밍업 연속, 9종목 시절 cold ~35초 실측) **버튼을 눌렀을 때만**
-    돈다(WAN-239 「클릭 시에만 무거운 재계산」). 결과는 세션에 날짜별로 캐시해 필터·선택
-    재실행에서 다시 돌지 않는다. 라이브 활동과 무관하게 실행되므로 라이브가 없던 과거 날짜도
-    백테만으로 대조할 수 있다(완료 기준 1). 좌표·엔진은 인자 없는 `backtest.run`과 같다(핀 없음) —
-    `backtest_timeline_rows`가 워밍업 연속(warm)·per-cell 단일로 그날만 평가한다(완료 기준 2).
+    📌 **읽는 계층이 세 겹이다(WAN-297 §1)** — (1) 세션 캐시(같은 세션 안 즉시 히트) →
+    (2) **디스크 캐시**(`TimelineCacheStore`, 야간 크론이 채운다) → (3) 미스면 버튼 안내.
+    옛 판은 (1)뿐이라 야간 크론이 디스크에 48셀을 잘 넣어 두어도 이 모드는 **쳐다보지도
+    않았고**, 앱 재시작·새 브라우저 세션이면 무조건 버튼을 다시 눌러야 했다(사용자가
+    2026-08-15 날짜에서 겪은 화면). 미스여도 **자동 재계산은 하지 않는다**(WAN-239 §3).
+
+    무거우므로(전 셀 × 워밍업 연속, 12종목 48셀 cold ~55초 실측 — 아래 ⚠️) **버튼을 눌렀을
+    때만** 돈다. 버튼 경로는 `compute_and_persist_day`를 타므로 **계산 결과가 곧 디스크에
+    담기고**, 화면은 그 담긴 행을 다시 읽어 그린다 — "화면에는 떴는데 캐시에는 없다"가
+    구조적으로 불가능하다. 적재는 야간 크론과 **같은 `persist_day`**다(완료 기준 4).
 
     ⚠️ **직렬(jobs=1)로 돈다** — 셀마다 120일치 1분봉을 로드하므로 프로세스 풀 병렬은
     메모리 압박으로 워커가 죽을 수 있다(M1 실측 `BrokenProcessPool`). 화면 버튼은 크래시
-    없이 도는 게 우선이라 직렬을 쓴다(전 셀 cold 실측 ~35초). 대량 격자는 CLI가 담당한다.
+    없이 도는 게 우선이라 직렬을 쓴다. 대량 격자·야간 되채우기는 CLI가 담당한다
+    (`alphablock trades --persist-cache --days N`).
     """
-    from backtest.harness import DEFAULT_SYMBOLS, DEFAULT_TIMEFRAMES
+    from backtest.harness import DEFAULT_TIMEFRAMES
 
     n_symbols, n_timeframes, n_cells = full_universe_shape()
     st.caption(
@@ -1230,38 +1250,66 @@ def _timeline_full_universe_backtest(day_key: str, start_ms: int, end_ms: int) -
     if st.button(
         f"▶ {day_key} 백테 실행 ({n_symbols}종목×{n_timeframes}TF · 무겁습니다)",
         key="timeline_full_run",
-        help="누른 날짜만 계산합니다. 날짜를 바꿔도 자동 실행하지 않습니다(WAN-239).",
+        help=(
+            "누른 날짜만 계산하고 그 결과를 디스크 캐시에 적재합니다(다음 접속엔 버튼 없이 "
+            "바로 뜹니다). 날짜를 바꿔도 자동 실행하지 않습니다(WAN-239)."
+        ),
     ):
         started = time.time()
         with st.spinner(f"{day_key} 백테스트 실행 중… ({n_cells}셀 · 워밍업 연속)"):
             # WAN-295: 셋업 전부(청산·미진입·미체결·건너뜀)를 낸다 — 라이브와 셋업 단위로
             # 대칭인 대조가 가능하게. 표·요약은 「청산」 행만 추려 WAN-290과 같게 본다.
-            rows = backtest_setup_rows(
-                day_start_ms=start_ms,
-                day_end_ms=end_ms,
-                symbols=list(DEFAULT_SYMBOLS),
-                timeframes=list(DEFAULT_TIMEFRAMES),
-                jobs=1,
-            )
+            # WAN-297: 계산과 적재가 한 함수라 화면이 그리는 행 == 디스크에 담긴 행이다.
+            cache = TimelineCacheStore(db_path)
+            try:
+                _report, computed = compute_and_persist_day(
+                    cache,
+                    day_start_ms=start_ms,
+                    day_end_ms=end_ms,
+                    day_key=day_key,
+                    jobs=1,
+                )
+            finally:
+                cache.close()
         results[day_key] = _FullRunResult(
-            rows=tuple(rows),
+            rows=computed.rows,
             elapsed=time.time() - started,
-            engine=current_engine_label(),
+            engine=computed.label,
+            from_cache=False,
         )
 
     result = results.get(day_key)
     if result is None:
-        st.info(
-            "위 **실행** 버튼을 눌러 그날 백테스트를 계산하세요. 라이브가 없던 날도 백테만으로 "
-            "대조할 수 있습니다(WAN-290)."
-        )
-        return []
+        # 세션에 없으면 **디스크 캐시**를 읽는다(야간 크론이 채워 뒀을 수 있다, WAN-297 §1-2).
+        cache = TimelineCacheStore(db_path)
+        try:
+            cached = load_full_universe_day(cache, day_key=day_key)
+        finally:
+            cache.close()
+        if cached.all_hit:
+            result = _FullRunResult(
+                rows=cached.rows, elapsed=None, engine=cached.label, from_cache=True
+            )
+            results[day_key] = result
+        else:
+            st.info(
+                f"**아직 계산 안 됨** — {len(cached.misses)}/{n_cells}칸 캐시 미스입니다. 위 "
+                "**실행** 버튼을 누르면 계산하고 디스크에 적재합니다(다음 접속엔 버튼 없이 "
+                "바로 뜹니다). 야간 크론이 미리 채우기도 합니다"
+                "(`alphablock trades --day … --persist-cache`). 조회 시 자동 재계산은 "
+                "하지 않습니다(WAN-239). 라이브가 없던 날도 백테만으로 대조할 수 "
+                "있습니다(WAN-290)."
+            )
+            return []
 
     rows = list(result.rows)
     # 요약은 「청산」 거래만 센다(WAN-290 의미 유지) — 미진입·미체결·건너뜀 셋업은 제외.
     summary = backtest_day_summary([r for r in rows if r.status == STATUS_BACKTEST_CLOSED])
+    origin = (
+        "디스크 캐시" if result.from_cache else f"이번 실행 {result.elapsed:.1f}초 · 캐시 적재됨"
+    )
     st.caption(
-        f"백테 대조 엔진: **{result.engine}** · 실행 {result.elapsed:.1f}초 · "
+        f"백테 대조 엔진: **{result.engine}** · {origin} · "
         f"거래 {summary.trades}건({summary.cells_with_trades}셀 · 승 {summary.wins} · "
         f"패 {summary.losses})"
     )
@@ -1310,7 +1358,7 @@ def _render_trade_timeline(settings: Settings) -> None:
         journal.close()
 
     if target == full_universe:
-        backtest_rows = _timeline_full_universe_backtest(day_key, start_ms, end_ms)
+        backtest_rows = _timeline_full_universe_backtest(db_path, day_key, start_ms, end_ms)
     else:
         backtest_rows = _timeline_live_cell_backtest(db_path, day_key, start_ms, end_ms, live_rows)
 

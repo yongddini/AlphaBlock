@@ -644,3 +644,80 @@ def test_full_universe_label_follows_the_adopted_coordinates(
     monkeypatch.setattr(harness, "DEFAULT_TIMEFRAMES", ("1h", "4h", "1d"))
     assert full_universe_shape() == (2, 3, 6)
     assert full_universe_label() == "채택 2종목×3TF 전부 (WAN-290)"
+
+
+def test_full_universe_reads_the_disk_cache_without_the_button(
+    seeded_db_path: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """WAN-297 §1: 야간 크론이 채워 둔 하루는 **버튼 없이** 뜬다(세션이 끊겨도).
+
+    옛 판은 이 모드가 `st.session_state`만 봐서, 크론이 디스크에 48셀을 잘 넣어 두어도
+    쳐다보지 않았다 — 앱 재시작·새 브라우저 세션이면 무조건 버튼을 다시 눌러야 했다
+    (사용자가 2026-08-15 날짜에서 겪은 화면). 이 테스트는 **새 앱 세션**(AppTest 한 판 =
+    세션 상태 비어 있음)에서 디스크 캐시만으로 행이 뜨는지 본다.
+
+    무거운 백테는 스텁으로 갈아 두되 **조회가 그걸 부르면 터지게** 해서, 「캐시를 읽었다」가
+    라벨이 아니라 동작으로 고정된다(자동 재계산 금지 · WAN-239 §3).
+    """
+    from datetime import date
+
+    from backtest.trade_store import engine_source_revision
+    from dashboard.app import full_universe_label
+    from live.live_vs_backtest import DEFAULT_WARMUP_DAYS
+    from live.timeline_cache import TimelineCacheStore, adopted_universe, cell_fingerprint
+    from live.trade_timeline import SOURCE_BACKTEST, TimelineRow
+
+    day = date(2026, 8, 15)
+    day_key = day.isoformat()
+    symbols, timeframes = adopted_universe()
+    revision = engine_source_revision()  # 화면이 조회에 쓰는 것과 같은 지문(리비전 키 검산)
+    row = TimelineRow(
+        source=SOURCE_BACKTEST,
+        symbol=symbols[0],
+        timeframe=timeframes[0],
+        is_long=True,
+        status="청산",
+        reserve_ms=None,
+        limit_price=None,
+        fill_ms=1_786_000_000_000,
+        fill_price=100.0,
+        stop_price=None,
+        take_profit_price=None,
+        exit_ms=1_786_003_600_000,
+        exit_price=101.5,
+        exit_reason="take_profit",
+        pnl_pct=1.5,
+        pnl_amount=15.0,
+    )
+    store = TimelineCacheStore(seeded_db_path)
+    try:
+        for symbol in symbols:
+            for timeframe in timeframes:
+                fingerprint = cell_fingerprint(
+                    symbol,
+                    timeframe,
+                    day_key,
+                    warmup_days=DEFAULT_WARMUP_DAYS,
+                    revision=revision,
+                )
+                first_cell = symbol == symbols[0] and timeframe == timeframes[0]
+                store.save_cell(fingerprint, [row] if first_cell else [])
+    finally:
+        store.close()
+
+    def _explode(**_kwargs: object) -> object:
+        raise AssertionError("조회 경로가 무거운 백테를 다시 돌리면 안 된다(WAN-239 §3).")
+
+    monkeypatch.setattr("live.timeline_cache.backtest_setup_by_cell", _explode)
+
+    at = AppTest.from_file("dashboard/app.py")
+    at.run(timeout=60)
+    at.date_input(key="timeline_day").set_value(day)
+    at.radio(key="timeline_target").set_value(full_universe_label())
+    at.run(timeout=60)
+
+    assert not at.exception
+    captions = [c.value for c in at.caption]
+    assert any("디스크 캐시" in c for c in captions), captions
+    # 「아직 계산 안 됨」 안내가 뜨면 안 된다(= 버튼을 요구하는 옛 화면).
+    assert not any("아직 계산 안 됨" in info.value for info in at.info)

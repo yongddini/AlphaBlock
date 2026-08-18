@@ -11,8 +11,9 @@ import argparse
 import asyncio
 import logging
 import socket
+import sys
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import date, datetime
 from typing import TYPE_CHECKING
 
 from common import timefmt
@@ -481,13 +482,9 @@ def cmd_trades(args: argparse.Namespace, settings: Settings) -> int:
     """
     from backtest.harness import DEFAULT_SYMBOLS, DEFAULT_TIMEFRAMES
     from live.order_journal import OrderJournal
-    from live.timeline_cache import (
-        TimelineCacheStore,
-        current_engine_label,
-        load_cached_day,
-        persist_day,
-    )
+    from live.timeline_cache import TimelineCacheStore, current_engine_label, load_cached_day
     from live.trade_timeline import (
+        STATUS_BACKTEST_CLOSED,
         DayTimeline,
         TimelineRow,
         backtest_timeline_rows,
@@ -502,32 +499,19 @@ def cmd_trades(args: argparse.Namespace, settings: Settings) -> int:
     symbols = _split_csv(args.symbol)
     timeframes = _split_csv(args.tf)
 
+    # --- 캐시 정리 경로: 세어 보여 주고, `--prune-apply`가 있을 때만 지운다(WAN-297 §2-6). ---
+    if args.prune_cache:
+        return _prune_timeline_cache(args, db_path)
+
     # --- 야간 크론 적재 경로: 계산 후 저장만 하고 표는 렌더하지 않는다(WAN-239 §2). ---
     if args.persist_cache:
-        cache = TimelineCacheStore(db_path)
-        try:
-            report = persist_day(
-                cache,
-                day_start_ms=start_ms,
-                day_end_ms=end_ms,
-                day_key=day_key,
-                symbols=symbols,
-                timeframes=timeframes,
-                warmup_days=args.warmup_days,
-                jobs=args.jobs,
-                replace=args.persist_replace,
-            )
-        finally:
-            cache.close()
-        print(f"# 당일 백테 타임라인 캐시 적재 · {day_key} (KST) — WAN-239")
-        print(f"엔진: **{report.label}**")
-        print(
-            f"적재 {len(report.persisted)}셀(거래 {report.total_rows}건) · "
-            f"건너뜀(지문 동일) {len(report.skipped)}셀"
+        return _persist_timeline_cache(
+            args,
+            db_path,
+            day_key=day_key,
+            symbols=symbols,
+            timeframes=timeframes,
         )
-        if report.skipped and not args.persist_replace:
-            print("이미 같은 지문으로 적재돼 있습니다 — 다시 적재하려면 `--persist-replace`.")
-        return 0
 
     # --- 라이브 부분은 언제나 즉시 조회(가볍다). ---
     journal = OrderJournal(db_path)
@@ -571,7 +555,11 @@ def cmd_trades(args: argparse.Namespace, settings: Settings) -> int:
             )
         finally:
             cache.close()
-        backtest_rows = list(result.rows)
+        # WAN-297: 캐시에는 셋업 전부(청산·미진입·미체결·건너뜀)가 담긴다. 이 표는 WAN-234
+        # 「거래별 타임라인」이라 **청산 행만** 싣는다 — `--recompute` 경로
+        # (`backtest_timeline_rows`)와 같은 모양이고, 그 둘이 비트 동일함은 실데이터 회귀
+        # 테스트가 고정한다(`test_cell_setup_timeline_closed_rows_match_cell_trades`).
+        backtest_rows = [r for r in result.rows if r.status == STATUS_BACKTEST_CLOSED]
         engine_label = result.label
         if result.misses:
             status_note = (
@@ -582,6 +570,110 @@ def cmd_trades(args: argparse.Namespace, settings: Settings) -> int:
 
     timeline = DayTimeline(day_key=day_key, live=tuple(live), backtest=tuple(backtest_rows))
     print(render_day_timeline(timeline, engine_label=engine_label, status_note=status_note))
+    return 0
+
+
+def _persist_timeline_cache(
+    args: argparse.Namespace,
+    db_path: str,
+    *,
+    day_key: str,
+    symbols: list[str] | None,
+    timeframes: list[str] | None,
+) -> int:
+    """`--persist-cache` 경로 — `--day`에서 거슬러 `--days N`일치 적재(WAN-239 §2 · WAN-297 §2).
+
+    N일 루프가 여기 있는 이유는 **배포 뒤 되채우기**다(WAN-318 §5 런북이 손으로 돌리던 `for`
+    루프의 자리) — 엔진 소스가 바뀌면 과거 캐시가 전부 미스되므로 화면에서 보려는 날짜를
+    한 번에 채울 수 있어야 한다. 하루씩 순서대로 돌고, **한 날이 실패해도 나머지를 계속
+    돌리지 않는다**(조용히 절반만 채워진 캐시를 만들지 않는다 — 예외는 그대로 올린다).
+    """
+    from datetime import timedelta
+
+    from live.timeline_cache import TimelineCacheStore, persist_day
+    from live.trade_timeline import resolve_day_window
+
+    if args.days < 1:
+        print("`--days`는 1 이상이어야 합니다.", file=sys.stderr)
+        return 2
+
+    first_day = date.fromisoformat(day_key)
+    day_keys = [(first_day - timedelta(days=offset)).isoformat() for offset in range(args.days)]
+    day_keys.reverse()  # 오래된 날부터 채운다(중간에 멈춰도 앞쪽이 이어진다).
+
+    print(f"# 당일 백테 타임라인 캐시 적재 · {len(day_keys)}일 — WAN-239/297")
+    cache = TimelineCacheStore(db_path)
+    printed_label = False
+    try:
+        for key in day_keys:
+            start_ms, end_ms, _ = resolve_day_window(key)
+            report = persist_day(
+                cache,
+                day_start_ms=start_ms,
+                day_end_ms=end_ms,
+                day_key=key,
+                symbols=symbols,
+                timeframes=timeframes,
+                warmup_days=args.warmup_days,
+                jobs=args.jobs,
+                replace=args.persist_replace,
+            )
+            if not printed_label:  # 엔진 배지는 한 번만(N일 루프에서 같은 줄이 반복되지 않게).
+                print(f"엔진: **{report.label}**")
+                printed_label = True
+            print(
+                f"{key} (KST): 적재 {len(report.persisted)}셀(셋업 {report.total_rows}행) · "
+                f"건너뜀(지문 동일) {len(report.skipped)}셀"
+            )
+            if report.skipped and not args.persist_replace:
+                print("  이미 같은 지문으로 적재돼 있습니다 — 다시 적재하려면 `--persist-replace`.")
+    finally:
+        cache.close()
+    return 0
+
+
+def _prune_timeline_cache(args: argparse.Namespace, db_path: str) -> int:
+    """`--prune-cache` 경로 — 정리 후보를 세어 보여 주고, `--prune-apply`에만 삭제한다.
+
+    **자동 삭제는 없다**(WAN-194 원칙 — "무엇을 지웠는지 모르는 DB"를 저장소가 스스로 만들지
+    않는다). 기본 기준은 「지금 엔진 리비전이 **아닌** 셀」이고, `--prune-before`로 날짜
+    기준을 더할 수 있다(합집합). 두 기준이 다 없으면 스토어가 `ValueError`로 거부한다.
+    """
+    from backtest.trade_store import engine_source_revision
+    from live.timeline_cache import TimelineCacheStore
+
+    keep_revision = None if args.prune_keep_all_revisions else engine_source_revision()
+    if keep_revision is None and args.prune_before is None:
+        print(
+            "정리 기준이 없습니다 — `--prune-before`를 주거나 "
+            "`--prune-keep-all-revisions`를 빼세요(기준 없는 일괄 삭제는 거부합니다).",
+            file=sys.stderr,
+        )
+        return 2
+
+    cache = TimelineCacheStore(db_path)
+    try:
+        candidates = cache.stale_cells(keep_revision=keep_revision, before_day=args.prune_before)
+        print("# 타임라인 캐시 정리 — WAN-297 §2-6")
+        criteria = []
+        if keep_revision is not None:
+            criteria.append(f"리비전 != `{keep_revision}`(지금 엔진)")
+        if args.prune_before is not None:
+            criteria.append(f"날짜 < `{args.prune_before}`(KST)")
+        print(f"기준: {' 또는 '.join(criteria)}")
+        by_revision: dict[str, int] = {}
+        for cand in candidates:
+            by_revision[cand.revision] = by_revision.get(cand.revision, 0) + 1
+        print(f"후보 {len(candidates)}셀(셋업 {sum(c.num_rows for c in candidates)}행)")
+        for revision, count in sorted(by_revision.items()):
+            print(f"  - 리비전 `{revision}`: {count}셀")
+        if not args.prune_apply:
+            print("세기만 했습니다(읽기 전용) — 실제로 지우려면 `--prune-apply`.")
+            return 0
+        deleted = cache.delete_cells([c.run_id for c in candidates])
+        print(f"삭제 {deleted}셀. (VACUUM은 하지 않습니다 — 사람이 판단합니다, WAN-194)")
+    finally:
+        cache.close()
     return 0
 
 
@@ -939,6 +1031,43 @@ def build_parser() -> argparse.ArgumentParser:
         "--persist-replace",
         action="store_true",
         help="적재 시 같은 지문의 셀이 있어도 덮어쓴다(`--persist-cache`와 함께)",
+    )
+    p_trades.add_argument(
+        "--days",
+        type=int,
+        default=1,
+        metavar="N",
+        help=(
+            "`--persist-cache`와 함께: `--day`에서 **거슬러** N일치를 적재한다(기본 1 = "
+            "그날만). 배포 뒤 되채우기용(WAN-297 §2)"
+        ),
+    )
+    p_trades.add_argument(
+        "--prune-cache",
+        action="store_true",
+        help=(
+            "캐시 정리 후보를 **세어 보여만** 준다(옛 엔진 리비전 셀 · `--prune-before` 이전 "
+            "날짜). 실제 삭제는 `--prune-apply`를 함께 줘야 한다(WAN-297 §2-6)"
+        ),
+    )
+    p_trades.add_argument(
+        "--prune-before",
+        default=None,
+        metavar="YYYY-MM-DD",
+        help="정리 기준에 「이 KST 날짜 이전의 셀」을 추가한다(`--prune-cache`와 함께)",
+    )
+    p_trades.add_argument(
+        "--prune-keep-all-revisions",
+        action="store_true",
+        help=(
+            "정리에서 리비전 기준을 뺀다 — 옛 엔진 셀을 남기고 `--prune-before`만 본다"
+            "(`--prune-cache`와 함께)"
+        ),
+    )
+    p_trades.add_argument(
+        "--prune-apply",
+        action="store_true",
+        help="`--prune-cache`가 센 셀을 **실제로 삭제**한다(파괴적 · 명시 옵트인)",
     )
     p_trades.add_argument(
         "--recompute",
