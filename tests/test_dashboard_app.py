@@ -721,3 +721,90 @@ def test_full_universe_reads_the_disk_cache_without_the_button(
     assert any("디스크 캐시" in c for c in captions), captions
     # 「아직 계산 안 됨」 안내가 뜨면 안 된다(= 버튼을 요구하는 옛 화면).
     assert not any("아직 계산 안 됨" in info.value for info in at.info)
+    # WAN-325 완료 기준 2 — 지금 엔진 캐시로 떴으므로 「옛 엔진」 경고가 붙으면 안 된다.
+    assert not any("옛 엔진 결과입니다" in w.value for w in at.warning)
+
+
+def test_stale_engine_rows_are_shown_with_a_warning_and_no_diff(
+    seeded_db_path: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """WAN-325 완료 기준 1·3 — 엔진이 바뀐 뒤에도 빈 화면 대신 옛 판이 **경고와 함께** 뜨고,
+    3열 대조(페이퍼 | 차이 | 백테)는 **그리지 않는다**.
+
+    엔진 소스 지문을 가짜로 바꿔(= 배포로 엔진이 바뀐 상황) 지금 지문으로는 한 칸도 못
+    찾게 만든다. 그래도 디스크에 남아 있는 옛 판이 떠야 하고(사용자 요청: 「그냥 두면 안돼?
+    안없어진채로?」), 「차이」 열은 **엔진이 바뀐 몫**을 재게 되므로 꺼져야 한다 — 그대로
+    두면 🔴 판정 갈림이 무더기로 뜨는데 그건 틀린 신호다(WAN-295가 재려던 것과 다른 것).
+
+    라벨 문구가 아니라 **동작**을 고정한다: 행이 뜨는가 · 경고가 붙는가 · 대조가 꺼지는가.
+    무거운 백테는 부르면 터지게 해서 자동 재계산 금지(WAN-239 §3)도 함께 잠근다.
+    """
+    from datetime import date
+
+    from dashboard.app import full_universe_label
+    from live.live_vs_backtest import DEFAULT_WARMUP_DAYS
+    from live.timeline_cache import TimelineCacheStore, adopted_universe, cell_fingerprint
+    from live.trade_timeline import SOURCE_BACKTEST, TimelineRow
+
+    day = date(2026, 8, 15)
+    day_key = day.isoformat()
+    symbols, timeframes = adopted_universe()
+    stale_revision = "eng:0ldeng1ne00"  # 그 날짜에 남아 있는 옛 엔진 판
+    row = TimelineRow(
+        source=SOURCE_BACKTEST,
+        symbol=symbols[0],
+        timeframe=timeframes[0],
+        is_long=True,
+        status="청산",
+        reserve_ms=None,
+        limit_price=None,
+        fill_ms=1_786_000_000_000,
+        fill_price=100.0,
+        stop_price=None,
+        take_profit_price=None,
+        exit_ms=1_786_003_600_000,
+        exit_price=101.5,
+        exit_reason="take_profit",
+        pnl_pct=1.5,
+        pnl_amount=15.0,
+    )
+    store = TimelineCacheStore(seeded_db_path)
+    try:
+        for symbol in symbols:
+            for timeframe in timeframes:
+                fingerprint = cell_fingerprint(
+                    symbol,
+                    timeframe,
+                    day_key,
+                    warmup_days=DEFAULT_WARMUP_DAYS,
+                    revision=stale_revision,
+                )
+                first_cell = symbol == symbols[0] and timeframe == timeframes[0]
+                store.save_cell(
+                    fingerprint, [row] if first_cell else [], created_at=1_755_000_000_000
+                )
+    finally:
+        store.close()
+
+    def _explode(**_kwargs: object) -> object:
+        raise AssertionError("조회 경로가 무거운 백테를 다시 돌리면 안 된다(WAN-239 §3).")
+
+    monkeypatch.setattr("live.timeline_cache.backtest_setup_by_cell", _explode)
+
+    at = AppTest.from_file("dashboard/app.py")
+    at.run(timeout=60)
+    at.date_input(key="timeline_day").set_value(day)
+    at.radio(key="timeline_target").set_value(full_universe_label())
+    at.run(timeout=60)
+
+    assert not at.exception
+    warnings = [w.value for w in at.warning]
+    infos = [i.value for i in at.info]
+    # (1) 옛 판이 실제로 떴고 경고가 붙었다 — 빈 화면이 아니다.
+    assert any("옛 엔진 결과입니다" in w for w in warnings), warnings
+    assert any(stale_revision in w for w in warnings), warnings
+    assert not any("아직 계산 안 됨" in i for i in infos), infos
+    # (2) 3열 대조는 꺼졌다(「차이」가 서로 다른 엔진을 빼지 않는다 — 완료 기준 3).
+    assert any("엔진이 달라 대조하지 않습니다" in i for i in infos), infos
+    # (3) 배지도 옛 판을 가리킨다(지금 엔진 이름표를 달고 옛 행을 내주지 않는다).
+    assert any(stale_revision in c.value for c in at.caption), [c.value for c in at.caption]

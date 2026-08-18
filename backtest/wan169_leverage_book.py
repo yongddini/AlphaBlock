@@ -268,6 +268,11 @@ class _Task:
     **키 자체가 없다**(빈 값으로 위장하지 않는다 — 요청하면 KeyError로 시끄럽게 죽는다,
     WAN-95 교훈). `True`(기본)면 예전과 **비트 단위로 같다**. `full`·`oos_warm` 산출은 이
     노브와 무관하다(같은 전체 창 후보의 경계 필터)."""
+    repair_partial_bars: bool = False
+    """WAN-327(옵트인, **비파괴**): 켜면 저장 상위TF 봉 중 **손상된 봉만** 그 구간 1분봉 합으로
+    갈아끼운 사본으로 후보를 만든다(`harness.load_market_data(repair_htf_from_1m=True)`).
+    「고치기 전후로 같은 좌표를 돌려 본다」(WAN-327 완료기준 2)를 위한 반사실이고 **DB는
+    쓰지 않는다**. `False`(기본)면 저장 봉 그대로라 예전과 **비트 단위로 같다**."""
     engine_check: bool = True
     """WAN-301(옵트인 컴퓨트 노브): `False`면 full 구간의 표준 경로 검산(`harness.run_once`
     재실행 — 후보 생성과 맞먹는 비용)을 생략한다. 검산은 배선이 같은 한 렌즈·시드 축에서
@@ -384,7 +389,12 @@ def run_cell(task: _Task, *, log: bool = True) -> CellPayload:
     (존 재고 0에서 시작 — `harness.slice_market` 규약 그대로).
     """
     market = harness.load_market_data(
-        task.symbol, task.timeframe, start_ms=task.start_ms, end_ms=task.end_ms, need_1m=True
+        task.symbol,
+        task.timeframe,
+        start_ms=task.start_ms,
+        end_ms=task.end_ms,
+        need_1m=True,
+        repair_htf_from_1m=task.repair_partial_bars,
     )
     if market.empty or market.df_1m.empty:
         raise ValueError(f"{task.symbol} {task.timeframe}: 데이터가 없습니다(창 확인).")
@@ -541,6 +551,7 @@ def run_cells(
     partial_take_profit_r: float | None = None,
     partial_take_profit_fraction: float = 0.5,
     breakeven_after_partial: bool = False,
+    repair_partial_bars: bool = False,
 ) -> list[CellPayload]:
     """전 칸을 돈다. `jobs`는 성능 노브이지 결과 축이 아니다(WAN-121).
 
@@ -580,6 +591,10 @@ def run_cells(
     (`is`/`oos`) 생성과 full 표준 경로 검산을 끈다 — 렌즈 × 시드 격자처럼 `full`/`oos_warm`만
     쓰는 실행에서 셀 비용을 절반 아래로 줄인다. 둘 다 기본 `True`면 예전과 비트 단위로 같다
     (자세한 규약은 `_Task` 필드 docstring).
+
+    `repair_partial_bars`(WAN-327, 옵트인 · **비파괴**)를 켜면 저장 상위TF 손상 봉을 1분봉
+    합으로 갈아끼운 사본에서 후보를 만든다 — 부분 봉의 백테 영향 크기를 재는 반사실이다.
+    끄면(기본) 저장 봉 그대로라 예전과 비트 단위로 같다. **DB는 쓰지 않는다.**
     """
     tasks = [
         _Task(
@@ -601,6 +616,7 @@ def run_cells(
             partial_take_profit_r=partial_take_profit_r,
             partial_take_profit_fraction=partial_take_profit_fraction,
             breakeven_after_partial=breakeven_after_partial,
+            repair_partial_bars=repair_partial_bars,
         )
         for symbol in symbols
         for timeframe in timeframes

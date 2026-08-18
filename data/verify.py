@@ -10,6 +10,10 @@
 3. **상위 TF 정합성**: 1분봉을 상위 TF(15m/1h/4h/1d)로 리샘플한 결과가 거래소에서
    직접 받아 저장한 상위 TF 봉과 (샘플 구간에서) OHLCV까지 일치하는지 본다.
    1m 커버리지가 온전한 버킷만 리샘플되므로, 갭 때문에 생기는 오탐은 없다.
+   ⚠️ **불일치는 성격이 둘로 갈린다**(WAN-327): 형성 도중에 잘려 저장된 **손상** 봉과,
+   가격은 같고 거래량 끝자리만 다른 **노이즈**. 판정(하드 실패)은 손상만 본다 —
+   한 자로 뭉치면 감시가 상시 빨간불이 되어 진짜 부분 봉이 묻힌다. 분류는
+   `data.partial_bars.classify_bucket`이 내고, 전 이력 스캔도 같은 자를 쓴다.
 4. **꼬리 신선도**(WAN-156): 시리즈의 마지막 봉이 TF 주기 대비 크게 지연됐는지.
    1~3은 **저장된 봉들 사이**만 보므로 시리즈가 통째로 멈춘 정지를 통과시킨다 —
    실제로 5일 멈춘 시리즈가 전 TF `갭 0`으로 「이상 없음」이었다. `data.freshness`가
@@ -27,6 +31,7 @@ from dataclasses import dataclass, field
 
 from data.freshness import DEFAULT_STALE_MULTIPLIER, StaleSeries, find_stale_series
 from data.gaps import Gap, find_gaps, total_missing
+from data.partial_bars import BarDiscrepancy, classify_bucket
 from data.storage import OhlcvStore
 
 # 리샘플 정합성 비교 시 허용 상대 오차(부동소수 왕복 오차 흡수).
@@ -85,10 +90,29 @@ class ParityReport:
     compared: int
     """리샘플과 저장 봉 양쪽에 존재해 비교한 버킷 수."""
     mismatches: list[ParityMismatch] = field(default_factory=list)
+    """필드 단위 불일치(사람이 읽는 상세). 한 버킷이 여러 건을 낼 수 있다."""
+    discrepancies: list[BarDiscrepancy] = field(default_factory=list)
+    """버킷 단위 불일치 + **성격 분류**(WAN-327). 판정은 `data.partial_bars`가 낸다."""
+
+    @property
+    def damaged(self) -> list[BarDiscrepancy]:
+        """엔진에 영향을 줄 수 있는 손상 봉(부분 봉 · 가격 불일치)."""
+        return [d for d in self.discrepancies if d.damaged]
+
+    @property
+    def noise(self) -> list[BarDiscrepancy]:
+        """가격은 같고 거래량만 다르되 모자라지 않은 봉(무해 — 엔진은 거래량을 안 읽는다)."""
+        return [d for d in self.discrepancies if not d.damaged]
 
     @property
     def ok(self) -> bool:
-        return not self.mismatches
+        """**손상**이 하나도 없으면 참 — 거래량 노이즈는 실패로 보지 않는다(WAN-327 §3).
+
+        옛 판정은 `1e-6` 한 자로 「봉이 반토막 났다」와 「거래량 끝자리가 다르다」를 똑같이
+        「불일치」로 찍었다. 그래서 감시가 상시 빨간불이 되고 **진짜 부분 봉이 그 안에
+        묻혔다**(실제로 WAN-327에서 두 번 오독됐다). 노이즈는 `noise`로 따로 보고한다.
+        """
+        return not self.damaged
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +152,16 @@ class VerifyReport:
     @property
     def total_gaps(self) -> int:
         return sum(len(s.gaps) for s in self.series)
+
+    @property
+    def total_damaged(self) -> int:
+        """손상 봉 총계(부분 봉 · 가격 불일치) — 하드 실패의 원인이 되는 쪽."""
+        return sum(len(p.damaged) for p in self.parity)
+
+    @property
+    def total_noise(self) -> int:
+        """거래량 노이즈 총계 — 보고는 하되 판정에는 넣지 않는다(WAN-327 §3)."""
+        return sum(len(p.noise) for p in self.parity)
 
 
 def verify_series(store: OhlcvStore, symbol: str, timeframe: str) -> SeriesReport:
@@ -192,6 +226,7 @@ def verify_resample_parity(
     stored_by_time = {int(r.open_time): r for r in stored.itertuples(index=False)}
 
     mismatches: list[ParityMismatch] = []
+    discrepancies: list[BarDiscrepancy] = []
     compared = 0
     for row in resampled.itertuples(index=False):
         ot = int(row.open_time)
@@ -208,6 +243,11 @@ def verify_resample_parity(
         sv = float(ref.volume)
         if not _values_match(rv, sv):
             mismatches.append(ParityMismatch(ot, "volume", rv, sv))
+        # 성격 분류는 `data.partial_bars`가 낸다 — 전 이력 스캔과 **같은 자**를 써야
+        # 「스캔은 손상이라는데 verify는 통과」 같은 어긋남이 안 생긴다(WAN-327).
+        found = classify_bucket(symbol, target_timeframe, ot, row, ref)
+        if found is not None:
+            discrepancies.append(found)
 
     return ParityReport(
         symbol=symbol,
@@ -215,6 +255,7 @@ def verify_resample_parity(
         target_timeframe=target_timeframe,
         compared=compared,
         mismatches=mismatches,
+        discrepancies=discrepancies,
     )
 
 

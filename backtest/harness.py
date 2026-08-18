@@ -612,6 +612,7 @@ def load_market_data(
     funding: bool = True,
     db_path: str = DB_PATH,
     cache_dir: str = CACHE_DIR,
+    repair_htf_from_1m: bool = False,
 ) -> MarketData:
     """(심볼, TF)의 상위TF·1분봉·펀딩비를 한 번에 로드한다.
 
@@ -620,6 +621,13 @@ def load_market_data(
 
     데이터가 없으면 빈 `MarketData`를 반환한다(예외를 던지지 않는다) — 격자 실행에서
     심볼 하나가 없다고 전체가 죽으면 안 되므로, 호출부가 `empty`를 보고 건너뛴다.
+
+    `repair_htf_from_1m`(WAN-327, **옵트인**)을 켜면 저장 상위TF 봉 중 **손상된 봉만**
+    그 구간 1분봉 합으로 갈아끼운 사본을 쓴다(`data.partial_bars.repair_frame`). ⚠️ **DB는
+    쓰지 않는다** — 「고치기 전후로 같은 좌표를 돌려 본다」(완료기준 2)를 위한 비파괴
+    반사실이고, 실제 수정은 사람이 하는 거래소 재수집이다(WAN-194 원칙). 끄면(기본)
+    예전과 **비트 단위로 같다** — 켜지 않으면 리샘플을 계산조차 하지 않는다. 거래량
+    노이즈 봉은 손대지 않는다(저장이 정본에 더 가깝다 — 그 판정은 `partial_bars` 소관).
     """
     store = OhlcvStore(db_path, cache_dir=cache_dir)
     if start_ms is not None or end_ms is not None:
@@ -643,6 +651,17 @@ def load_market_data(
         df_1m = store.load(symbol, "1m", start_ms=window_start, end_ms=end_ms).reset_index(
             drop=True
         )
+
+    if repair_htf_from_1m:
+        if df_1m.empty:
+            raise ValueError(
+                f"{symbol} {timeframe}: 손상 봉 교정(repair_htf_from_1m)은 1분봉이 필요한데 "
+                "데이터가 없습니다(need_1m=False이거나 1분봉 미보유)."
+            )
+        from data.partial_bars import repair_frame
+        from data.resample import resample_ohlcv
+
+        htf_df, _replaced = repair_frame(htf_df, resample_ohlcv(df_1m, "1m", timeframe))
 
     rates: list[FundingRate] = []
     if funding:

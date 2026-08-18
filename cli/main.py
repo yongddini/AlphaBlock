@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import csv
 import logging
 import socket
 import sys
 from collections.abc import Sequence
-from datetime import date, datetime
+from datetime import UTC, date, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from common import timefmt
@@ -25,6 +27,7 @@ from dashboard.health_data import HealthView, build_health_view
 
 if TYPE_CHECKING:
     from data.integrity import IntegrityReport
+    from data.partial_bars import BarDiscrepancy, SeriesScan
     from data.verify import VerifyReport
 
 logger = logging.getLogger(__name__)
@@ -264,18 +267,30 @@ def format_verify_report(report: VerifyReport) -> str:
         lines.append(f"  {s.symbol} {s.timeframe}: {s.bar_count}봉  [{span}]  {status}")
 
     lines.append("")
-    lines.append("1m→상위TF 리샘플 정합성:")
+    # 손상(부분 봉·가격 불일치)과 거래량 노이즈를 갈라 찍는다 — 한 수로 뭉치면 감시가
+    # 상시 빨간불이 되어 진짜 부분 봉이 묻힌다(WAN-327 §3).
+    lines.append("1m→상위TF 리샘플 정합성 (손상 · 거래량 노이즈):")
     if report.parity:
         for p in report.parity:
-            status = "OK" if p.ok else f"불일치 {len(p.mismatches)}건"
+            if p.ok and not p.noise:
+                status = "OK"
+            else:
+                parts = []
+                if p.damaged:
+                    parts.append(f"🚨 손상 {len(p.damaged)}봉")
+                if p.noise:
+                    parts.append(f"거래량 노이즈 {len(p.noise)}봉(무해)")
+                status = " · ".join(parts)
             lines.append(
                 f"  {p.symbol} {p.source_timeframe}→{p.target_timeframe}:"
                 f" {p.compared}버킷 비교  {status}"
             )
-            for m in p.mismatches[:3]:
+            for d in p.damaged[:3]:
+                fields = ",".join(d.price_fields) if d.price_fields else "가격 일치"
                 lines.append(
-                    f"      {_fmt_time(m.open_time)} {m.field}:"
-                    f" 리샘플 {m.resampled} ≠ 저장 {m.stored}"
+                    f"      {_fmt_time(d.open_time)} [{d.kind}]"
+                    f" 거래량 {d.volume_ratio * 100:.1f}% · {fields}"
+                    f" (최대 {d.max_price_bp:.1f}bp)"
                 )
     else:
         lines.append("  비교 대상 없음(1m 또는 상위TF 미보유)")
@@ -293,9 +308,134 @@ def format_verify_report(report: VerifyReport) -> str:
     verdict = "통과" if report.sound else "실패"
     lines.append(
         f"판정: {verdict} (하드 실패 없음={report.ok}, 정지 {len(report.stale)}건,"
-        f" 갭 총 {report.total_gaps}개)"
+        f" 갭 총 {report.total_gaps}개, 손상 {report.total_damaged}봉,"
+        f" 거래량 노이즈 {report.total_noise}봉)"
     )
     return "\n".join(lines)
+
+
+def format_partial_bar_scan(scans: Sequence[SeriesScan], *, top: int = 15) -> str:
+    """스캔 결과를 사람이 읽는 표로 요약한다(순수 함수, 테스트용).
+
+    시리즈별 합계 + **손상 봉의 일자별(KST) 분포**를 낸다. 「몇 개·언제」가 이 스캔의
+    질문이라(WAN-327 §1) 개별 봉이 아니라 날짜로 뭉쳐 보여 준다.
+    """
+    lines: list[str] = ["부분 봉 스캔 (저장 상위TF 봉 vs 같은 구간 1분봉 합)", ""]
+    lines.append("시리즈 (비교 버킷 · 손상 · 거래량 노이즈):")
+    for sc in scans:
+        span = ""
+        if sc.damaged_span is not None:
+            lo, hi = sc.damaged_span
+            span = f"  손상 구간 {_fmt_time(lo)} ~ {_fmt_time(hi)}"
+        status = "OK" if sc.ok else f"🚨 손상 {len(sc.damaged)}봉"
+        lines.append(
+            f"  {sc.symbol} {sc.source_timeframe}→{sc.timeframe}: {sc.compared}버킷 비교"
+            f"  {status} · 노이즈 {len(sc.noise)}봉{span}"
+        )
+
+    damaged = [d for sc in scans for d in sc.damaged]
+    lines.append("")
+    if not damaged:
+        lines.append("손상 봉 없음 — 저장 상위TF 봉이 1분봉 합과 일치합니다.")
+        return "\n".join(lines)
+
+    by_day: dict[str, list[BarDiscrepancy]] = {}
+    for d in damaged:
+        by_day.setdefault(timefmt.format_kst(d.open_time)[:10], []).append(d)
+    lines.append(f"손상 봉 일자별(KST) — 총 {len(damaged)}봉, {len(by_day)}일:")
+    lines.append("  날짜        봉수  partial  price_only  최소 거래량%  최대 가격오차bp  종목")
+    for day in sorted(by_day):
+        items = by_day[day]
+        syms = sorted({d.symbol.split("/")[0] for d in items})
+        shown = ",".join(syms[:6]) + ("…" if len(syms) > 6 else "")
+        partial = sum(1 for d in items if d.kind == "partial")
+        lines.append(
+            f"  {day}  {len(items):>4}  {partial:>7}  {len(items) - partial:>10}"
+            f"  {min(d.volume_ratio for d in items) * 100:>11.1f}"
+            f"  {max(d.max_price_bp for d in items):>15.1f}  {shown}"
+        )
+    if len(by_day) > top:
+        lines.append(f"  (일자 {len(by_day)}개 전부 표시)")
+    return "\n".join(lines)
+
+
+def cmd_partial_bars(args: argparse.Namespace, settings: Settings) -> int:
+    """`alphablock partial-bars` — 저장 상위TF 봉의 전 이력 부분 봉 스캔(WAN-327 §1).
+
+    `verify`가 최근 표본만 보는 것과 달리 전 구간을 훑어 「몇 개·언제」를 센다. 읽기
+    전용이고, 손상이 하나라도 있으면 종료 코드 1이라 감시에 물릴 수 있다.
+    ⚠️ **고치지 않는다** — 수정은 사람이 하는 백필이다(WAN-194 원칙 · 자동 쓰기 금지).
+    """
+    from data.partial_bars import scan_all
+    from data.storage import OhlcvStore
+
+    symbols = args.symbols or settings.symbols
+    timeframes = args.timeframes or ["4h", "1d"]
+    start_ms = _parse_utc_day_ms(args.start)
+    end_ms = _parse_utc_day_ms(args.end)
+    store = OhlcvStore(settings.db_path)
+    try:
+        scans = scan_all(
+            store,
+            symbols,
+            timeframes,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            chunk_days=args.chunk_days,
+        )
+    finally:
+        store.close()
+    print(format_partial_bar_scan(scans))
+    if args.csv:
+        path = _write_partial_bar_csv(scans, args.csv)
+        print(f"\nCSV: {path}")
+    return 0 if all(sc.ok for sc in scans) else 1
+
+
+def _parse_utc_day_ms(text: str | None) -> int | None:
+    """`YYYY-MM-DD`(UTC)를 epoch ms로. 데이터 창 인자라 표시용 KST가 아니라 UTC다."""
+    if not text:
+        return None
+    return int(datetime.strptime(text, "%Y-%m-%d").replace(tzinfo=UTC).timestamp() * 1000)
+
+
+def _write_partial_bar_csv(scans: Sequence[SeriesScan], path: str) -> Path:
+    """스캔 결과를 봉 단위 CSV로 적는다(손상·노이즈 전부 — 사후 분석용)."""
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with out.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(
+            [
+                "symbol",
+                "timeframe",
+                "open_time",
+                "open_time_kst",
+                "kind",
+                "volume_ratio",
+                "resampled_volume",
+                "stored_volume",
+                "price_fields",
+                "max_price_bp",
+            ]
+        )
+        for sc in scans:
+            for d in sc.discrepancies:
+                writer.writerow(
+                    [
+                        d.symbol,
+                        d.timeframe,
+                        d.open_time,
+                        timefmt.format_kst(d.open_time),
+                        d.kind,
+                        f"{d.volume_ratio:.6f}",
+                        f"{d.resampled_volume:.6f}",
+                        f"{d.stored_volume:.6f}",
+                        "|".join(d.price_fields),
+                        f"{d.max_price_bp:.3f}",
+                    ]
+                )
+    return out
 
 
 def cmd_verify(args: argparse.Namespace, settings: Settings) -> int:
@@ -479,6 +619,12 @@ def cmd_trades(args: argparse.Namespace, settings: Settings) -> int:
     안 됨"을 명시한다. 야간 크론은 `--persist-cache`로 전일 하루치를 미리 적재한다. 수동
     재계산은 `--recompute`(캐시 무시), 라이브만은 `--no-backtest`다. 순수 조회라 종료 코드는
     항상 0이다.
+
+    📌 **지금 엔진 캐시가 없으면 보관 중인 옛 엔진 판을 라벨 달아 보여 준다(WAN-325)** —
+    배포로 엔진 소스가 바뀌면 과거 날짜가 통째로 미스가 되는데(설계대로) 그 행은 지워지지
+    않고 남아 있고, 하루치 재계산은 서버 6분 23초다(WAN-322). 배지(`백테 대조 엔진:`)가
+    **옛 판의 이름·지문**으로 바뀌고 상태 줄이 「옛 엔진 결과」임을 밝힌다 — 즉 조용히
+    내주지 않는다. 엄격 조회는 `--no-stale`.
     """
     from backtest.harness import DEFAULT_SYMBOLS, DEFAULT_TIMEFRAMES
     from live.order_journal import OrderJournal
@@ -552,6 +698,7 @@ def cmd_trades(args: argparse.Namespace, settings: Settings) -> int:
                 symbols=syms,
                 timeframes=tfs,
                 warmup_days=args.warmup_days,
+                allow_stale=not args.no_stale,
             )
         finally:
             cache.close()
@@ -560,13 +707,28 @@ def cmd_trades(args: argparse.Namespace, settings: Settings) -> int:
         # (`backtest_timeline_rows`)와 같은 모양이고, 그 둘이 비트 동일함은 실데이터 회귀
         # 테스트가 고정한다(`test_cell_setup_timeline_closed_rows_match_cell_trades`).
         backtest_rows = [r for r in result.rows if r.status == STATUS_BACKTEST_CLOSED]
+        # 배지는 **실제로 읽은 판**의 것이다(옛 판이면 옛 판의 이름·지문) — 배지가 지금
+        # 엔진을 가리키면서 행은 옛 엔진인 상태가 이 저장소가 금지하는 조용한 실패다.
         engine_label = result.label
+        notes: list[str] = []
+        if result.stale is not None:
+            stale = result.stale
+            notes.append(
+                f"⚠️ **옛 엔진 결과입니다({stale.num_cells}칸)** — 지금 엔진 캐시가 없어 "
+                f"**{stale.created_label()}**에 계산해 둔 판을 대신 보여 줍니다(배포로 엔진이 "
+                "바뀌면 과거 날짜가 미스가 되는데 옛 행은 지우지 않습니다 — WAN-325). "
+                "**값이 지금 엔진과 다를 수 있고**, 라이브 열과의 차이를 집행 차이로 읽으면 "
+                "안 됩니다(엔진이 바뀐 몫이 섞입니다). 최신 엔진 판은 `--persist-cache`나 "
+                "`--recompute`로 만드세요. 엄격 조회는 `--no-stale`."
+            )
         if result.misses:
-            status_note = (
+            notes.append(
                 f"🚨 백테 대조 **아직 계산 안 됨** — {len(result.misses)}/{len(syms) * len(tfs)}칸 "
                 "캐시 미스(야간 크론 대기 또는 `--persist-cache`로 적재, 즉시 보려면 "
                 "`--recompute`). 조회 시 무거운 재계산은 하지 않습니다."
             )
+        if notes:
+            status_note = "\n\n".join(notes)
 
     timeline = DayTimeline(day_key=day_key, live=tuple(live), backtest=tuple(backtest_rows))
     print(render_day_timeline(timeline, engine_label=engine_label, status_note=status_note))
@@ -917,6 +1079,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_verify.set_defaults(func=cmd_verify)
 
+    p_partial = sub.add_parser(
+        "partial-bars",
+        help="저장 상위TF 봉의 전 이력 부분 봉 스캔(읽기 전용) — WAN-327",
+    )
+    p_partial.add_argument(
+        "--symbols", nargs="+", default=None, help="대상 심볼(기본: 설정 symbols)"
+    )
+    p_partial.add_argument(
+        "--timeframes",
+        nargs="+",
+        default=None,
+        help="대상 상위TF(기본: 4h 1d). 1분봉과 대조한다",
+    )
+    p_partial.add_argument("--start", default=None, metavar="YYYY-MM-DD", help="창 시작(UTC)")
+    p_partial.add_argument("--end", default=None, metavar="YYYY-MM-DD", help="창 끝(UTC)")
+    p_partial.add_argument(
+        "--chunk-days", type=int, default=120, help="1분봉 로딩 창(일, 기본 120) — 메모리 노브"
+    )
+    p_partial.add_argument("--csv", default=None, help="봉 단위 결과를 이 경로에 CSV로 저장")
+    p_partial.set_defaults(func=cmd_partial_bars)
+
     p_live = sub.add_parser("live", help="실시간 시그널 러너(페이퍼)")
     p_live.add_argument("--once", action="store_true", help="한 번만 폴링하고 종료")
     p_live.add_argument("--dry-run", action="store_true", help="텔레그램 전송 없이 로그로만 출력")
@@ -1073,6 +1256,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--recompute",
         action="store_true",
         help="캐시를 무시하고 백테 대조를 즉시 재계산(무겁다 — 수동 확인용, WAN-239)",
+    )
+    p_trades.add_argument(
+        "--no-stale",
+        action="store_true",
+        help=(
+            "지금 엔진 캐시가 없을 때 **옛 엔진 판으로 대신 보여 주지 않는다**(WAN-325). "
+            "기본은 라벨을 달아 보여 준다 — 스크립트가 「오늘 엔진으로 적재됐나」를 판정할 "
+            "때만 이 플래그를 쓴다"
+        ),
     )
     p_trades.add_argument(
         "--symbol",
