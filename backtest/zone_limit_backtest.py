@@ -235,6 +235,19 @@ class SetupDiagnostic:
     zone_confirmed_time: int | None = None
     """근거 오더블록이 확정된 봉의 `open_time`(ms) (`ob.confirmed_time`, WAN-295).
     `zone_start_time`과 한 쌍의 조인 키다."""
+    zone_height: float | None = None
+    """근거 오더블록의 높이(`|top − bottom|`, 가격 단위) (WAN-328, 진단 전용).
+
+    진입가는 존 안으로 클램프되고(`deviation_entry_price`) 손절 참조가는 존 무효화
+    경계라, **손절폭 ≤ 존 높이**가 항상 성립한다. 즉 `존 높이 / 진입가`는 그 셋업이
+    가질 수 있는 손절폭의 **구조적 천장**이다 — 그 천장이 손절폭 가드(0.3%, WAN-79)보다
+    낮으면 진입가를 어디에 잡아도 가드에 걸린다. 「존이 얇아서」와 「진입가가 깊어서」를
+    가르는 열이다."""
+    path_fill_price: float | None = None
+    """같은 체결 봉을 틱 추종으로 봤을 때의 체결가 (WAN-328, `observe_path_fill` 옵트인).
+
+    `ZoneLimitOutcome.path_fill_price` 그대로다 — 안 켜면 항상 `None`이고 체결·손익에
+    쓰이지 않는다."""
 
 
 _MS_PER_DAY = 86_400_000
@@ -380,6 +393,10 @@ class _IntrabarLiveLimit:
             if sample_or_none is None:
                 return None  # 아직 아는 가격이 없다 — 주문을 낼 근거가 없다.
             sample = sample_or_none
+        return self._limit_from_sample(sample)
+
+    def _limit_from_sample(self, sample: float) -> float | None:
+        """밴드 표본 `sample` 하나로 지정가를 낸다 — 상태를 굴리지 않는 순수 계산."""
         d_sign = self._direction_sign
         band = self.band.value(sample, d_sign)
         if band is None:
@@ -394,6 +411,20 @@ class _IntrabarLiveLimit:
             # 볼린저 재산정을 건너뛴다 — 이 한 줄이 「선별」과 「가격」을 가른다.
             price = self.params.zone_limit_price(self.order_block)
         return self.params.apply_zone_limit_offset(price, is_long=self.is_long)
+
+    def probe_limit(self, live_price: float) -> float | None:
+        """부작용 없는 지정가 조회 (WAN-328 측정 전용) — 인과 모드에서는 정의되지 않는다.
+
+        `limit_price`와 같은 사슬(밴드 → `deviation_entry_price` → 오프셋)을 타되 인과
+        모드의 지연선(`pending_price`)을 굴리지 않는다. 인과 모드는 표본이 **직전** 서브스텝
+        종가라 「이 틱이 p였다면」이라는 질문 자체가 성립하지 않으므로 거부한다.
+        """
+        if self.causal:
+            raise ValueError(
+                "probe_limit은 intrabar_causal 밴드에서 정의되지 않습니다(표본이 직전 "
+                "서브스텝 종가라 「이 틱이 p였다면」이 성립하지 않는다, WAN-328)."
+            )
+        return self._limit_from_sample(live_price)
 
     def resolve_exits(self, limit_price: float) -> tuple[float, float | None] | None:
         """체결 순간의 (손절 참조가, 익절 목표가). None이면 이 셋업은 진입하지 않는다.
@@ -763,6 +794,7 @@ def build_zone_limit_candidates(
     partial_take_profit_r: float | None = None,
     partial_take_profit_fraction: float = 0.5,
     breakeven_after_partial: bool = False,
+    observe_path_fill: bool = False,
 ) -> tuple[list[_Candidate], ZoneLimitStats]:
     """B안 셋업 순회 → 1분 서브스텝 시뮬레이션까지(비용 반영 전 원가 후보 목록).
 
@@ -1088,6 +1120,7 @@ def build_zone_limit_candidates(
             partial_take_profit_r=partial_take_profit_r,
             partial_take_profit_fraction=partial_take_profit_fraction,
             breakeven_after_partial=breakeven_after_partial,
+            observe_path_fill=observe_path_fill and live_limit is not None,
         )
 
         if not outcome.order_rested:
@@ -1133,6 +1166,9 @@ def build_zone_limit_candidates(
                     # 오더블록 기준이라 두 축이 같은 존을 가리켜야 조인이 성립한다.
                     zone_start_time=ob.start_time,
                     zone_confirmed_time=ob.confirmed_time,
+                    # WAN-328: 손절폭의 구조적 천장(진입가는 존 안, 손절은 존 경계).
+                    zone_height=abs(float(ob.top) - float(ob.bottom)),
+                    path_fill_price=outcome.path_fill_price,
                 )
             )
         if not is_filled or outcome.entry_time is None or outcome.entry_price is None:
