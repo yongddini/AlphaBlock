@@ -12,6 +12,7 @@ import pandas as pd
 import pytest
 
 from backtest.substep import (
+    PartialExit,
     SubStep,
     ZoneLimitOutcome,
     ZoneLimitStatus,
@@ -54,6 +55,9 @@ def _simulate_long(
     first_tap_free: bool = False,
     stop_slippage_alpha: float = 0.0,
     limit_stop_nonfill: bool = False,
+    partial_take_profit_r: float | None = None,
+    partial_take_profit_fraction: float = 0.5,
+    breakeven_after_partial: bool = False,
 ) -> ZoneLimitOutcome:
     return simulate_zone_limit_trade(
         direction=OrderBlockDirection.BULLISH,
@@ -73,6 +77,9 @@ def _simulate_long(
         first_tap_free=first_tap_free,
         stop_slippage_alpha=stop_slippage_alpha,
         limit_stop_nonfill=limit_stop_nonfill,
+        partial_take_profit_r=partial_take_profit_r,
+        partial_take_profit_fraction=partial_take_profit_fraction,
+        breakeven_after_partial=breakeven_after_partial,
     )
 
 
@@ -914,3 +921,253 @@ def test_alpha_and_nonfill_together_rejected() -> None:
     steps = [_step(0, high=101, low=80, close=85)]
     with pytest.raises(ValueError, match="함께 켤 수 없"):
         _simulate_long(steps, stop_slippage_alpha=0.5, limit_stop_nonfill=True)
+
+
+# ---------------------------------------------------- 반익절 래더 (WAN-323)
+#
+# 1R = 진입가 100 − 손절 90 = 10. 따라서 1.0R = 110... 이 아니라 **분할 지점**이 1.0R이면
+# 110이고 전량 익절선 `_TP`도 110이라 두 지점이 겹친다. 래더 테스트는 지점을 가르려고
+# 익절선을 120(=2.0R)으로 두고 분할 지점을 1.0R(110)로 잡는다.
+
+_LADDER_TP = 120.0  # 2.0R 전량 익절 — 분할 지점(1.0R=110)과 겹치지 않게
+
+
+def test_ladder_off_is_bit_identical() -> None:
+    """래더를 안 켜면 결과가 예전과 **글자 그대로** 같다(라벨이 아니라 동작으로 고정)."""
+    steps = [
+        _step(0, high=101, low=99, close=99),
+        _step(60_000, high=111, low=100, close=110),
+    ]
+    assert _simulate_long(steps) == _simulate_long(steps, partial_take_profit_r=None)
+    assert _simulate_long(steps).partial_exits == ()
+
+
+def test_ladder_partial_fills_at_split_then_runner_takes_profit() -> None:
+    """분할 지점(1.0R)에서 절반 청산 → 잔량이 2.0R 전량 익절선까지 간다."""
+    steps = [
+        _step(0, high=101, low=99, close=99),  # 체결 @100
+        _step(60_000, high=111, low=100, close=110),  # 1.0R=110 도달 → 부분 익절
+        _step(120_000, high=121, low=112, close=120),  # 2.0R=120 도달 → 잔량 익절
+    ]
+    out = _simulate_long(steps, take_profit_price=_LADDER_TP, partial_take_profit_r=1.0)
+    assert out.partial_exits == (
+        PartialExit(time=60_000, price=110.0, fraction=0.5, reason=SignalExitReason.TAKE_PROFIT),
+    )
+    assert out.exit_time == 120_000
+    assert out.exit_price == _LADDER_TP
+    assert out.exit_reason is SignalExitReason.TAKE_PROFIT
+
+
+def test_ladder_split_point_scales_with_the_entry_r() -> None:
+    """분할 지점은 **체결 순간 확정된 1R**의 배수다(1.3R → 100 + 1.3×10 = 113)."""
+    steps = [
+        _step(0, high=101, low=99, close=99),
+        _step(60_000, high=112.9, low=100, close=112),  # 113 미달 → 부분 익절 없음
+        _step(120_000, high=113.0, low=112, close=113),  # 정확히 113 도달
+    ]
+    out = _simulate_long(steps, take_profit_price=_LADDER_TP, partial_take_profit_r=1.3)
+    assert [p.time for p in out.partial_exits] == [120_000]
+    assert out.partial_exits[0].price == pytest.approx(113.0)
+
+
+def test_ladder_partial_happens_once() -> None:
+    """분할 지점은 2단 래더의 한 단이라 여러 번 체결되지 않는다."""
+    steps = [
+        _step(0, high=101, low=99, close=99),
+        _step(60_000, high=111, low=100, close=110),
+        _step(120_000, high=112, low=109, close=111),  # 다시 110 위 — 재체결 금지
+        _step(180_000, high=121, low=112, close=120),
+    ]
+    out = _simulate_long(steps, take_profit_price=_LADDER_TP, partial_take_profit_r=1.0)
+    assert len(out.partial_exits) == 1
+
+
+def test_ladder_stop_wins_when_both_hit_in_one_step() -> None:
+    """같은 봉에서 분할 지점과 손절이 동시 도달하면 **손절 우선**(보수적, WAN-323 §0-5)."""
+    steps = [
+        _step(0, high=101, low=99, close=99),
+        _step(60_000, high=111, low=89, close=90),  # 110도 닿고 90도 닿음
+    ]
+    out = _simulate_long(steps, take_profit_price=_LADDER_TP, partial_take_profit_r=1.0)
+    assert out.partial_exits == ()
+    assert out.exit_reason is SignalExitReason.STOP_LOSS
+    assert out.exit_price == _STOP
+
+
+def test_breakeven_stop_moves_after_the_partial() -> None:
+    """본절 스탑: 부분 청산 뒤 진입가로 되돌아오면 진입가에 잔량이 청산된다."""
+    steps = [
+        _step(0, high=101, low=99, close=99),
+        _step(60_000, high=111, low=100, close=110),  # 부분 익절 → 본절 무장
+        _step(120_000, high=105, low=99, close=100),  # 진입가 100 되돌림 → 본절 청산
+    ]
+    out = _simulate_long(
+        steps,
+        take_profit_price=_LADDER_TP,
+        partial_take_profit_r=1.0,
+        breakeven_after_partial=True,
+    )
+    assert len(out.partial_exits) == 1
+    assert out.exit_time == 120_000
+    assert out.exit_price == _LIMIT  # 원래 손절 90이 아니라 진입가 100
+    assert out.exit_reason is SignalExitReason.STOP_LOSS
+
+
+def test_breakeven_off_keeps_the_original_stop() -> None:
+    """축이 실제로 동작한다 — 끄면 같은 되돌림에서 청산되지 않는다."""
+    steps = [
+        _step(0, high=101, low=99, close=99),
+        _step(60_000, high=111, low=100, close=110),
+        _step(120_000, high=105, low=99, close=100),
+    ]
+    out = _simulate_long(steps, take_profit_price=_LADDER_TP, partial_take_profit_r=1.0)
+    assert out.status is ZoneLimitStatus.FILLED_OPEN
+    assert len(out.partial_exits) == 1
+
+
+def test_breakeven_applies_from_the_next_step_not_the_partial_step() -> None:
+    """부분 체결 봉 **안에서** 본절이 발동하지 않는다 — 그 1분 경로를 모르기 때문."""
+    steps = [
+        _step(0, high=101, low=99, close=99),
+        # 같은 봉에서 110(분할)도 닿고 99.5(진입가 아래)도 닿는다.
+        _step(60_000, high=111, low=99.5, close=100),
+        _step(120_000, high=121, low=112, close=120),
+    ]
+    out = _simulate_long(
+        steps,
+        take_profit_price=_LADDER_TP,
+        partial_take_profit_r=1.0,
+        breakeven_after_partial=True,
+    )
+    assert len(out.partial_exits) == 1
+    assert out.exit_price == _LADDER_TP  # 본절로 잘리지 않고 잔량이 익절까지 갔다
+
+
+def test_ladder_keeps_the_entry_r_as_the_mfe_ruler() -> None:
+    """본절 이동이 MFE/MAE의 자(1R)와 `stop_price`를 갈아치우지 않는다."""
+    steps = [
+        _step(0, high=101, low=99, close=99),
+        _step(60_000, high=111, low=100, close=110),
+        _step(120_000, high=120, low=99, close=100),  # 본절 청산
+    ]
+    out = _simulate_long(
+        steps,
+        take_profit_price=_LADDER_TP,
+        partial_take_profit_r=1.0,
+        breakeven_after_partial=True,
+    )
+    assert out.stop_price == _STOP  # 진입 시점 손절가(사이징 1R 기준)
+    assert out.mfe_r == pytest.approx(2.0)  # (120 − 100) / 10, 자가 10 그대로
+
+
+def test_partial_recorded_when_split_and_take_profit_share_a_step() -> None:
+    """분할 지점과 전량 익절선이 같은 봉에 닿으면 **둘 다** 체결된다(경로상 분할이 먼저)."""
+    steps = [
+        _step(0, high=101, low=99, close=99),
+        _step(60_000, high=121, low=100, close=120),
+    ]
+    out = _simulate_long(steps, take_profit_price=_LADDER_TP, partial_take_profit_r=1.0)
+    assert len(out.partial_exits) == 1
+    assert out.exit_price == _LADDER_TP
+
+
+def test_ladder_short_symmetry() -> None:
+    """숏도 대칭이다 — 진입 105 · 손절 115(1R=10) · 분할 95 · 익절 85."""
+    out = simulate_zone_limit_trade(
+        direction=OrderBlockDirection.BEARISH,
+        limit_price=105.0,
+        stop_price=115.0,
+        substeps=[
+            _step(0, high=106, low=104, close=106),
+            _step(60_000, high=105, low=94, close=95),  # 95(1.0R) 도달 → 부분 익절
+            _step(120_000, high=95, low=84, close=85),  # 85(2.0R) 도달 → 잔량 익절
+        ],
+        rsi_state=RealtimeRsi.seed_from_closed(_OVERBOUGHT_SEED, length=3),
+        rsi_oversold=30.0,
+        rsi_overbought=70.0,
+        take_profit_price=85.0,
+        partial_take_profit_r=1.0,
+    )
+    assert out.partial_exits[0].price == pytest.approx(95.0)
+    assert out.exit_price == 85.0
+    assert out.exit_reason is SignalExitReason.TAKE_PROFIT
+
+
+def test_ladder_fraction_is_honoured() -> None:
+    steps = [
+        _step(0, high=101, low=99, close=99),
+        _step(60_000, high=111, low=100, close=110),
+        _step(120_000, high=121, low=112, close=120),
+    ]
+    out = _simulate_long(
+        steps,
+        take_profit_price=_LADDER_TP,
+        partial_take_profit_r=1.0,
+        partial_take_profit_fraction=0.25,
+    )
+    assert out.partial_exits[0].fraction == 0.25
+
+
+def test_breakeven_without_a_ladder_is_rejected() -> None:
+    """켰다고 믿으면서 아무 일도 안 하는 조용한 실패를 막는다(WAN-95/112/123 관행)."""
+    steps = [_step(0, high=101, low=99, close=99)]
+    with pytest.raises(ValueError, match="breakeven_after_partial"):
+        _simulate_long(steps, breakeven_after_partial=True)
+
+
+def test_ladder_argument_ranges_rejected() -> None:
+    steps = [_step(0, high=101, low=99, close=99)]
+    with pytest.raises(ValueError, match="partial_take_profit_r"):
+        _simulate_long(steps, partial_take_profit_r=0.0)
+    with pytest.raises(ValueError, match="partial_take_profit_fraction"):
+        _simulate_long(steps, partial_take_profit_r=1.0, partial_take_profit_fraction=1.0)
+    with pytest.raises(ValueError, match="partial_take_profit_fraction"):
+        _simulate_long(steps, partial_take_profit_r=1.0, partial_take_profit_fraction=0.0)
+
+
+def test_breakeven_exit_is_flagged_so_the_zone_survives() -> None:
+    """본절 청산은 **존 무효화가 아니다** — 재진입 배선이 그 구분을 볼 수 있어야 한다.
+
+    이 플래그가 없으면 사유가 `STOP_LOSS`라는 이유로 멀쩡한 존이 죽어 재진입이 사라진다
+    (WAN-228/273 게이트가 「익절이면 재무장」이다).
+    """
+    steps = [
+        _step(0, high=101, low=99, close=99),
+        _step(60_000, high=111, low=100, close=110),
+        _step(120_000, high=105, low=99, close=100),  # 진입가 되돌림 → 본절
+    ]
+    out = _simulate_long(
+        steps,
+        take_profit_price=_LADDER_TP,
+        partial_take_profit_r=1.0,
+        breakeven_after_partial=True,
+    )
+    assert out.exit_reason is SignalExitReason.STOP_LOSS
+    assert out.exit_price == _LIMIT
+    assert out.exit_at_breakeven is True
+
+
+def test_real_stop_is_not_flagged_as_breakeven() -> None:
+    """원래 손절선(존 무효화)에서 난 청산은 거짓이어야 한다 — 그 존은 진짜로 죽었다."""
+    steps = [
+        _step(0, high=101, low=99, close=99),
+        _step(60_000, high=111, low=100, close=110),  # 분할만 체결(본절 무장)
+        _step(120_000, high=100.5, low=99.9, close=100.2),  # 아직 진입가 위
+    ]
+    # 본절을 끄면 원래 손절선(90)이 살아 있고, 거기서 나면 플래그가 거짓이다.
+    out = _simulate_long(
+        steps + [_step(180_000, high=99, low=89, close=90)],
+        take_profit_price=_LADDER_TP,
+        partial_take_profit_r=1.0,
+    )
+    assert out.exit_reason is SignalExitReason.STOP_LOSS
+    assert out.exit_price == _STOP
+    assert out.exit_at_breakeven is False
+
+
+def test_ladder_off_never_flags_breakeven() -> None:
+    steps = [
+        _step(0, high=101, low=99, close=99),
+        _step(60_000, high=101, low=89, close=90),
+    ]
+    assert _simulate_long(steps).exit_at_breakeven is False

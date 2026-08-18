@@ -220,6 +220,16 @@ class _Task:
     추가로 만들어 `CellPayload.reentry_candidates`에 싣는다. base 후보·격리 성과 행은
     **불변**이라(재진입은 별도 dict에 담긴다) `False`로 끄면 WAN-273 이전 북과 비트 단위로
     같다 — 옛 CSV를 결론에 박아 둔 모듈은 `reentry=False` **명시 핀**으로 고정한다(WAN-305)."""
+    take_profit_r: float | None = None
+    """전량 익절 R 배수(WAN-323 B 계열 · 옵트인). `None`이면 채택 기본값 1.5라 예전과
+    **비트 단위로 같다**."""
+    partial_take_profit_r: float | None = None
+    """반익절 래더 분할 지점(진입 시점 1R의 배수, WAN-323 · 옵트인). `None`이면 전량 익절이라
+    후보가 예전과 **비트 단위로 같다**. base 후보와 재진입 후보 **양쪽에** 같은 규칙이 걸린다 —
+    한쪽만 걸면 "재진입만 전량 익절"인 잡종 엔진을 재게 된다."""
+    partial_take_profit_fraction: float = 0.5
+    breakeven_after_partial: bool = False
+    """첫 부분 청산 뒤 손절을 진입가로(WAN-323 · 옵트인). 래더 없이 켜면 엔진이 거부한다."""
     reentry_entry_rule: ReentryEntryRule = "band"
     """재진입 후보의 재무장 지정가 규칙 — 기본 `"band"`(봉내 라이브 밴드 재산정) = 채택 규칙
     (WAN-273, WAN-305가 기본값으로 승격). `"freeze"`(첫 체결가 고정)는 옵트인으로 존치 —
@@ -315,6 +325,9 @@ def reentry_candidates_for_window(
     cfg: BacktestConfig,
     timeframe: str,
     entry_rule: ReentryEntryRule = "band",
+    partial_take_profit_r: float | None = None,
+    partial_take_profit_fraction: float = 0.5,
+    breakeven_after_partial: bool = False,
 ) -> list[_Candidate]:
     """이 창의 base 후보에서 「익절 후 존 내 재진입」 후보를 만든다(WAN-261, 옵트인).
 
@@ -342,7 +355,11 @@ def reentry_candidates_for_window(
     substep_times = [s.time for s in substeps]
     out: list[_Candidate] = []
     for cand, trade in paired:
-        if cand.reason is not ExitReason.TAKE_PROFIT or cand.order_block is None:
+        # WAN-323: 익절뿐 아니라 **본절 청산**도 재무장 대상이다 — 본절은 존 무효화 경계를
+        # 건드리지 않았으므로 그 오더블록이 아직 살아 있다(사용자 지적 2026-08-18). 래더를
+        # 안 켜면 `exit_at_breakeven`이 언제나 거짓이라 기존 북 CSV가 비트 재현된다.
+        zone_alive = cand.reason is ExitReason.TAKE_PROFIT or cand.exit_at_breakeven
+        if not zone_alive or cand.order_block is None:
             continue
         out.extend(
             _reentry_candidates_for_cand(
@@ -356,6 +373,9 @@ def reentry_candidates_for_window(
                 cfg=cfg,
                 funding_rates=window.funding_rates,
                 entry_rule=entry_rule,
+                partial_take_profit_r=partial_take_profit_r,
+                partial_take_profit_fraction=partial_take_profit_fraction,
+                breakeven_after_partial=breakeven_after_partial,
             )
         )
     return out
@@ -381,9 +401,9 @@ def run_cell(task: _Task, *, log: bool = True) -> CellPayload:
     # 인자 없음 = 채택 기본값(옛 핀 물려받기 금지 — 완료기준). `fill`(WAN-264, 옵트인)을 주면
     # 체결 렌즈만 갈아끼운다 — `None`이면 `build_params(fill=BASELINE_FILL)`과 같아 비트 재현.
     params = (
-        harness.build_params()
+        harness.build_params(take_profit_r=task.take_profit_r)
         if task.fill is None
-        else harness.build_params(fill=task.fill, seed=task.seed)
+        else harness.build_params(fill=task.fill, seed=task.seed, take_profit_r=task.take_profit_r)
     )
     if task.short_enabled:
         # WAN-282(옵트인): 베어리시 OB 숏을 후보에 같이 낸다. 끄면(기본) 이 model_copy를
@@ -421,6 +441,9 @@ def run_cell(task: _Task, *, log: bool = True) -> CellPayload:
             order_block_result=ob_result,
             stop_slippage_alpha=task.stop_slippage_alpha,
             limit_stop_nonfill=task.limit_stop_nonfill,
+            partial_take_profit_r=task.partial_take_profit_r,
+            partial_take_profit_fraction=task.partial_take_profit_fraction,
+            breakeven_after_partial=task.breakeven_after_partial,
         )
         candidates[segment_name] = tuple(cands)
         funding[segment_name] = tuple(window.funding_rates)
@@ -435,6 +458,9 @@ def run_cell(task: _Task, *, log: bool = True) -> CellPayload:
                     cfg=cfg,
                     timeframe=task.timeframe,
                     entry_rule=task.reentry_entry_rule,
+                    partial_take_profit_r=task.partial_take_profit_r,
+                    partial_take_profit_fraction=task.partial_take_profit_fraction,
+                    breakeven_after_partial=task.breakeven_after_partial,
                 )
             )
 
@@ -521,6 +547,10 @@ def run_cells(
     seed: int = 0,
     cold_segments: bool = True,
     engine_check: bool = True,
+    take_profit_r: float | None = None,
+    partial_take_profit_r: float | None = None,
+    partial_take_profit_fraction: float = 0.5,
+    breakeven_after_partial: bool = False,
     repair_partial_bars: bool = False,
 ) -> list[CellPayload]:
     """전 칸을 돈다. `jobs`는 성능 노브이지 결과 축이 아니다(WAN-121).
@@ -582,6 +612,10 @@ def run_cells(
             seed=seed,
             cold_segments=cold_segments,
             engine_check=engine_check,
+            take_profit_r=take_profit_r,
+            partial_take_profit_r=partial_take_profit_r,
+            partial_take_profit_fraction=partial_take_profit_fraction,
+            breakeven_after_partial=breakeven_after_partial,
             repair_partial_bars=repair_partial_bars,
         )
         for symbol in symbols

@@ -20,9 +20,11 @@ from backtest.leverage_book import (
     scale_sizing_params,
 )
 from backtest.models import BacktestConfig, ExitReason, PositionSide
+from backtest.substep import PartialExit
 from backtest.zone_limit_backtest import _Candidate, _to_trade, sequence_with_candidates
 from data.models import FundingRate
 from execution.sizing import PositionSizingParams
+from strategy.models import SignalExitReason
 
 
 def _cand(
@@ -606,3 +608,119 @@ def test_funding_window_slicing_bit_identical_to_full_list() -> None:
     assert manual is not None
     assert outcome.trades == [manual]
     assert outcome.trades[0].funding_cost != 0.0  # 구간 안 정산이 실제로 반영됐다.
+
+
+# --------------------------------------------------------------------------- #
+# 반익절 래더의 북 회계 (WAN-323) — 부분 청산이 명목·리스크를 실제로 덜어내는가
+# --------------------------------------------------------------------------- #
+
+
+def _ladder_cand(
+    entry_time: int, exit_time: int, *, partial_time: int, partial_price: float = 101.0
+) -> _Candidate:
+    """진입 100 · 손절 99(1R=1) · 최종 청산 101.5인 후보 + 중간 절반 청산."""
+    from dataclasses import replace
+
+    return replace(
+        _cand(entry_time, exit_time),
+        partial_exits=(
+            PartialExit(
+                time=partial_time,
+                price=partial_price,
+                fraction=0.5,
+                reason=SignalExitReason.TAKE_PROFIT,
+            ),
+        ),
+    )
+
+
+def test_book_without_partials_is_bit_identical() -> None:
+    """래더를 안 켜면 축소 이벤트가 없어 북이 예전과 글자 그대로 같이 돈다."""
+    cells = [_cell("BTC", "1h", [_cand(0, 100), _cand(200, 300)])]
+    out = run_leverage_book(cells, cfg=_cfg(), book=LEGACY_BOOK_PARAMS)
+    paired = sequence_with_candidates(list(cells[0].candidates), _cfg(), None)
+    assert [t.realized_pnl for t in out.trades] == [t.realized_pnl for _, t in paired]
+
+
+def test_partial_exit_releases_notional_for_another_cell() -> None:
+    """부분 청산이 공유 명목 상한을 실제로 풀어 준다 — 안 풀면 래더가 손해를 본다.
+
+    자본을 좁혀(명목 상한 = 자본 × 1배) 한 칸이 상한을 거의 다 쓰게 만든 뒤, 절반을
+    덜어낸 **다음에** 다른 칸이 들어올 수 있는지로 본다. 축소 이벤트가 없으면 그 칸은
+    `skipped_notional`로 밀린다.
+    """
+    cfg = _cfg(risk_per_trade=1.0, leverage=1.0)  # 1R=1%라 명목이 자본을 꽉 채운다
+    late = _cand(150, 400, entry_price=100.0)
+    with_partial = [
+        _cell("BTC", "1h", [_ladder_cand(0, 300, partial_time=100)]),
+        _cell("ETH", "1h", [late]),
+    ]
+    without = [
+        _cell("BTC", "1h", [_cand(0, 300)]),
+        _cell("ETH", "1h", [late]),
+    ]
+    on = run_leverage_book(with_partial, cfg=cfg, book=LEGACY_BOOK_PARAMS)
+    off = run_leverage_book(without, cfg=cfg, book=LEGACY_BOOK_PARAMS)
+    assert off.stats.skipped_notional == 1  # 절반을 안 덜면 늦은 칸이 밀린다
+    assert on.stats.skipped_notional == 0  # 덜어내면 자리가 난다
+    assert on.stats.placed == 2
+
+
+def test_partial_exit_lowers_max_concurrent_risk() -> None:
+    """부분 청산 뒤에는 동시 리스크가 그만큼 줄어 있어야 한다(래더의 존재 이유).
+
+    ⚠️ 리스크는 **배치 시점에만** 계측되므로(`_observe`) 부분 청산 **뒤에 들어오는 칸**이
+    있어야 차이가 드러난다. 명목 상한이 그 칸을 밀어내면 두 팔이 비교 불가가 되므로
+    배수 2로 여유를 준다(상한이 구속하는 경우는 위 `..._releases_notional_...`이 잰다).
+    """
+    cfg = _cfg(leverage=2.0)
+    ladder = [
+        _cell("BTC", "1h", [_ladder_cand(0, 300, partial_time=100)]),
+        _cell("ETH", "1h", [_cand(150, 400)]),
+    ]
+    plain = [
+        _cell("BTC", "1h", [_cand(0, 300)]),
+        _cell("ETH", "1h", [_cand(150, 400)]),
+    ]
+    on = run_leverage_book(ladder, cfg=cfg, book=LEGACY_BOOK_PARAMS)
+    off = run_leverage_book(plain, cfg=cfg, book=LEGACY_BOOK_PARAMS)
+    assert on.stats.max_concurrent_risk_ratio < off.stats.max_concurrent_risk_ratio
+
+
+def test_partial_exit_total_cash_matches_to_trade_exactly() -> None:
+    """시점은 나눠도 **총액은 정의상 정확하다** — 최종 청산이 나머지를 낸다."""
+    cfg = _cfg()
+    cand = _ladder_cand(0, 300, partial_time=100)
+    out = run_leverage_book([_cell("BTC", "1h", [cand])], cfg=cfg, book=LEGACY_BOOK_PARAMS)
+    trade = _to_trade(cand, cfg.initial_capital, cfg, None)
+    assert trade is not None
+    assert out.trades[0].realized_pnl == pytest.approx(trade.realized_pnl, rel=1e-12)
+
+
+def test_partial_cash_is_credited_at_the_partial_time_not_at_close() -> None:
+    """덜어낸 몫의 현금이 **그 시점에** 들어와 다른 칸의 사이징 자본이 된다.
+
+    부분 청산이 이익이면 그 뒤에 들어오는 칸의 수량이 커진다 — 최종 청산까지 미루면
+    그 효과가 사라진다(WAN-169 `realized_pnl_flows_into_other_cells_sizing`의 래더 판).
+    """
+    cfg = _cfg(leverage=2.0)
+    late = _cand(150, 400)
+    early_credit = run_leverage_book(
+        [
+            _cell("BTC", "1h", [_ladder_cand(0, 300, partial_time=100, partial_price=140.0)]),
+            _cell("ETH", "1h", [late]),
+        ],
+        cfg=cfg,
+        book=LEGACY_BOOK_PARAMS,
+    )
+    no_credit = run_leverage_book(
+        [
+            _cell("BTC", "1h", [_cand(0, 300)]),
+            _cell("ETH", "1h", [late]),
+        ],
+        cfg=cfg,
+        book=LEGACY_BOOK_PARAMS,
+    )
+    late_on = [t for t in early_credit.trades if t.entry_time == 150][0]
+    late_off = [t for t in no_credit.trades if t.entry_time == 150][0]
+    assert late_on.quantity > late_off.quantity

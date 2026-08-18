@@ -185,6 +185,9 @@ def _iter_reentries(
     cfg: BacktestConfig,
     funding_rates: Sequence[FundingRate] | None,
     entry_rule: ReentryEntryRule = "freeze",
+    partial_take_profit_r: float | None = None,
+    partial_take_profit_fraction: float = 0.5,
+    breakeven_after_partial: bool = False,
 ) -> Iterator[tuple[_Candidate, _Reentry]]:
     """익절로 닫힌 한 존의 재무장 루프 코어 — `(_Candidate, _Reentry)`를 하나씩 낸다.
 
@@ -200,6 +203,12 @@ def _iter_reentries(
     `"zone"`이면 존 근단+오프셋에 다시 걸고, `"band"`면 재무장 순간의 봉내 라이브 밴드로
     지정가를 재산정한다(`_IntrabarLiveLimit` = 엔진 본 진입과 같은 사슬). 익절 목표는 어느
     팔이든 진입가 기준 고정 1.5R이다(밴드 팔은 시뮬레이터가 체결 순간에 낸다).
+
+    `partial_take_profit_r`·`partial_take_profit_fraction`·`breakeven_after_partial`
+    (WAN-323 반익절 래더, 옵트인)은 시뮬레이터로 그대로 흘러 **재진입 거래도 base 거래와
+    같은 래더 규칙**을 받는다 — 팔마다 규칙이 갈리면 "재진입만 전량 익절"인 잡종 엔진을
+    재게 된다. 안 주면(기본) 예전과 **비트 단위로 같다**(기존 wan228/231/261/263/267/269/
+    271/280/282 CSV 재현).
     """
     ob = cand.order_block
     if ob is None:
@@ -262,6 +271,9 @@ def _iter_reentries(
                 rsi_gate_mode=params.rsi_gate_mode,
                 rsi_neutral_band=params.rsi_neutral_band,
                 penetration_bps=params.fill_penetration_bps,
+                partial_take_profit_r=partial_take_profit_r,
+                partial_take_profit_fraction=partial_take_profit_fraction,
+                breakeven_after_partial=breakeven_after_partial,
             )
         else:
             assert static_limit is not None
@@ -288,6 +300,9 @@ def _iter_reentries(
                 rsi_gate_mode=params.rsi_gate_mode,
                 rsi_neutral_band=params.rsi_neutral_band,
                 penetration_bps=params.fill_penetration_bps,
+                partial_take_profit_r=partial_take_profit_r,
+                partial_take_profit_fraction=partial_take_profit_fraction,
+                breakeven_after_partial=breakeven_after_partial,
             )
         if not outcome.filled or outcome.entry_time is None or outcome.entry_price is None:
             break  # NO_TOUCH / CANCELLED_INVALIDATED — 더는 되돌아오지 않았다.
@@ -301,12 +316,17 @@ def _iter_reentries(
         if outcome.status is ZoneLimitStatus.FILLED_EXITED:
             assert outcome.exit_time is not None and outcome.exit_price is not None
             is_win = outcome.exit_reason is SignalExitReason.TAKE_PROFIT
+            # WAN-323: 본절 청산은 **존 무효화 경계를 안 건드렸다** — 우리가 스스로 일찍
+            # 나온 것이라 그 존은 아직 살아 있고 재무장 대상이다. 이 구분이 없으면 래더가
+            # 멀쩡한 존을 죽여 재진입을 18~20% 없애 버린다(사용자 지적 2026-08-18).
+            zone_alive = is_win or outcome.exit_at_breakeven
             is_stop = outcome.exit_reason is SignalExitReason.STOP_LOSS
             exit_time, exit_price = outcome.exit_time, outcome.exit_price
             reason = ExitReason.TAKE_PROFIT if is_win else ExitReason.STOP_LOSS
         else:
             # 데이터 끝까지 보유(FILLED_OPEN) → 마지막 봉 종가로 마크. 승/패 아님.
             is_win = is_stop = False
+            zone_alive = False  # 데이터 끝 — 더 볼 봉이 없다.
             exit_time, exit_price = substeps[-1].time, substeps[-1].close
             reason = ExitReason.END_OF_DATA
 
@@ -329,6 +349,9 @@ def _iter_reentries(
             order_block=ob,
             trigger_time=outcome.entry_time,
             exit_extreme=outcome.exit_extreme,
+            exit_at_breakeven=outcome.exit_at_breakeven,
+            # WAN-323: 래더를 켰으면 재진입 거래의 부분 청산도 북 회계로 넘긴다(안 켜면 빈 튜플).
+            partial_exits=outcome.partial_exits,
         )
         # 격리 순손익: 기준자본에서 독립 체결(동시 1포지션·자본 경합 미반영 = 상한).
         trade = _to_trade(re_cand, cfg.initial_capital, cfg, funding_rates)
@@ -344,7 +367,7 @@ def _iter_reentries(
                 depth=depth,
             ),
         )
-        if not is_win:
+        if not zone_alive:
             break  # 손절(존 무효화)·데이터끝이면 이 존은 끝. 익절이라야 또 무장한다.
         cursor = exit_time
 
@@ -362,7 +385,11 @@ def reentry_events(
     funding_rates: Sequence[FundingRate] | None,
     entry_rule: ReentryEntryRule = "freeze",
 ) -> list[_Reentry]:
-    """익절로 닫힌 한 존을 익절 직후부터 무효화까지 지정가 재무장해 재진입 손익을 센다."""
+    """익절로 닫힌 한 존을 익절 직후부터 무효화까지 지정가 재무장해 재진입 손익을 센다.
+
+    ⚠️ **래더(WAN-323)를 여기로는 흘리지 않는다** — 이 함수는 WAN-228 census의 격리 손익
+    자이고 그 CSV는 전량 익절 기록으로 얼어붙어 있다. 래더가 필요한 곳은 북에 주입하는
+    `reentry_candidates` 쪽이다."""
     return [
         event
         for _cand, event in _iter_reentries(
@@ -392,6 +419,9 @@ def reentry_candidates(
     cfg: BacktestConfig,
     funding_rates: Sequence[FundingRate] | None,
     entry_rule: ReentryEntryRule = "freeze",
+    partial_take_profit_r: float | None = None,
+    partial_take_profit_fraction: float = 0.5,
+    breakeven_after_partial: bool = False,
 ) -> list[_Candidate]:
     """익절 후 재무장 재진입을 **북 시퀀서에 주입할 `_Candidate`로** 낸다(WAN-261).
 

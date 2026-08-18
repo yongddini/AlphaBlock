@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
+from dataclasses import replace
 
 import pandas as pd
 import pytest
 
 from backtest.harness import LEGACY_BAND_BAR, pin_band_bar
 from backtest.models import BacktestConfig, ExitReason, PositionSide, Trade
+from backtest.substep import PartialExit
 from backtest.sweep import timeframe_to_ms
 from backtest.synthetic import make_synthetic_ohlcv
 from backtest.zone_limit_backtest import (
@@ -47,6 +49,7 @@ from strategy.models import (
     OrderBlockParams,
     OrderBlockResult,
     OrderBlockSignal,
+    SignalExitReason,
 )
 from strategy.order_blocks import OrderBlockDetector
 from strategy.realtime_band import RealtimeBand
@@ -1381,3 +1384,124 @@ def test_trailing_adv_uses_usd_not_base_volume() -> None:
     adv_hi = _trailing_adv_usd_by_pos(times, [200.0, 200.0], volumes, window_days=30)
     assert adv_lo[1] == 500.0  # 10 × 50.
     assert adv_hi[1] == 2000.0  # 10 × 200.
+
+
+# --------------------------------------------------------------------------- #
+# 반익절 래더 회계 (WAN-323)
+# --------------------------------------------------------------------------- #
+
+_HOUR = 60 * 60_000
+
+
+def _ladder_candidate(partials: tuple[PartialExit, ...]) -> _Candidate:
+    """진입 100 · 손절 90(1R=10) · 최종 청산 120인 롱 후보."""
+    return _Candidate(
+        side=PositionSide.LONG,
+        entry_time=0,
+        entry_price=100.0,
+        exit_time=9 * _HOUR,
+        exit_price=120.0,
+        reason=ExitReason.TAKE_PROFIT,
+        stop_price=90.0,
+        partial_exits=partials,
+    )
+
+
+def _ladder_cfg(*, funding: bool = False) -> BacktestConfig:
+    return BacktestConfig(
+        funding_enabled=funding,
+        risk_sizing=None,
+        position_fraction=1.0,
+        initial_capital=10_000.0,
+    )
+
+
+def test_partial_exit_splits_quantity_and_fees() -> None:
+    """부분 청산이 `Trade.exits` 두 줄로 나오고 수량이 진입 수량 기준으로 쪼개진다."""
+    partial = PartialExit(
+        time=4 * _HOUR, price=110.0, fraction=0.5, reason=SignalExitReason.TAKE_PROFIT
+    )
+    cfg = _ladder_cfg()
+    trade = _to_trade(_ladder_candidate((partial,)), cfg.initial_capital, cfg, None)
+    assert trade is not None
+    assert [f.time for f in trade.exits] == [4 * _HOUR, 9 * _HOUR]
+    assert trade.exits[0].quantity == pytest.approx(trade.quantity * 0.5)
+    assert trade.exits[1].quantity == pytest.approx(trade.quantity * 0.5)
+    # 청산이 2회라 청산 수수료도 2회 — 래더가 비용을 늘린다는 사실이 손익에 들어간다.
+    assert all(f.fee > 0 for f in trade.exits)
+    assert trade.exit_time == 9 * _HOUR  # 최종 청산 시각은 잔량 청산 시각
+
+
+def test_partial_exit_realized_pnl_is_the_weighted_blend() -> None:
+    """절반을 110에, 절반을 120에 판 손익 = 전량 120 판 손익과 전량 110 판 손익의 중간."""
+    cfg = _ladder_cfg()
+    partial = PartialExit(
+        time=4 * _HOUR, price=110.0, fraction=0.5, reason=SignalExitReason.TAKE_PROFIT
+    )
+    ladder = _to_trade(_ladder_candidate((partial,)), cfg.initial_capital, cfg, None)
+    full = _to_trade(_ladder_candidate(()), cfg.initial_capital, cfg, None)
+    early = _to_trade(
+        replace(_ladder_candidate(()), exit_price=110.0), cfg.initial_capital, cfg, None
+    )
+    assert ladder is not None and full is not None and early is not None
+    # 절반씩이므로 손익이 "전량 110" 과 "전량 120" 사이에 온다.
+    assert early.realized_pnl < ladder.realized_pnl < full.realized_pnl
+    # 그로스는 두 체결가의 단순 평균(수량이 절반씩) — 수수료만큼만 벌어진다.
+    gross_ladder = sum((f.price - ladder.entry_price) * f.quantity for f in ladder.exits)
+    mid_price = (ladder.exits[0].price + ladder.exits[1].price) / 2
+    assert gross_ladder == pytest.approx(
+        (mid_price - ladder.entry_price) * ladder.quantity, rel=1e-9
+    )
+    # 기대값을 깎는다: 같은 거래에서 래더가 전량 익절보다 덜 번다(WAN-90 부호식).
+    assert ladder.realized_pnl < full.realized_pnl
+
+
+def test_ladder_off_reproduces_the_single_fill_trade() -> None:
+    """부분 청산이 없으면 예전과 **글자 그대로** 같은 `Trade`가 나온다."""
+    cfg = _ladder_cfg()
+    trade = _to_trade(_ladder_candidate(()), cfg.initial_capital, cfg, None)
+    assert trade is not None
+    assert len(trade.exits) == 1
+    assert trade.exits[0].quantity == pytest.approx(trade.quantity)
+
+
+def test_partial_exit_funding_uses_the_reduced_notional() -> None:
+    """부분 청산 뒤 구간의 펀딩은 **줄어든 명목**으로 매긴다(전량 보유로 과대계상 금지)."""
+    partial = PartialExit(
+        time=4 * _HOUR, price=110.0, fraction=0.5, reason=SignalExitReason.TAKE_PROFIT
+    )
+    cfg = _ladder_cfg(funding=True)
+    # 부분 청산 전 1건(2h) · 후 1건(6h).
+    rates = [
+        FundingRate(symbol="X", funding_time=2 * _HOUR, rate=0.001),
+        FundingRate(symbol="X", funding_time=6 * _HOUR, rate=0.001),
+    ]
+    ladder = _to_trade(_ladder_candidate((partial,)), cfg.initial_capital, cfg, rates)
+    full = _to_trade(_ladder_candidate(()), cfg.initial_capital, cfg, rates)
+    assert ladder is not None and full is not None
+    notional = ladder.entry_price * ladder.quantity
+    # 전량 = 명목 × 0.001 × 2건, 래더 = 명목 × 0.001 × (1 + 0.5)건.
+    assert full.funding_cost == pytest.approx(notional * 0.001 * 2, rel=1e-9)
+    assert ladder.funding_cost == pytest.approx(notional * 0.001 * 1.5, rel=1e-9)
+
+
+def test_win_rate_definition_is_net_pnl_positive() -> None:
+    """WAN-323 §3-1: 승률의 정의는 **순손익 > 0**(비용 반영 후)이다.
+
+    부분 익절 뒤 본절로 나간 거래는 그로스가 플러스여도 수수료·펀딩이 그걸 먹으면
+    **패배**로 센다. 정의가 흔들리면 팔 간 비교가 무의미해지므로 동작으로 고정한다.
+    """
+    cfg = _ladder_cfg()
+    # 절반을 진입가 바로 위(100.01)에 팔고 잔량을 진입가(본절)에 청산 → 그로스 ≈ 0,
+    # 수수료 때문에 순손익은 음수다.
+    partial = PartialExit(
+        time=4 * _HOUR, price=100.01, fraction=0.5, reason=SignalExitReason.TAKE_PROFIT
+    )
+    cand = replace(_ladder_candidate((partial,)), exit_price=100.0, reason=ExitReason.STOP_LOSS)
+    trade = _to_trade(cand, cfg.initial_capital, cfg, None)
+    assert trade is not None
+    assert trade.realized_pnl < 0
+    assert trade.is_win is False
+    metrics = build_result_from_trades([trade], cfg, "1h").metrics
+    assert metrics.win_rate == 0.0
+    assert metrics.num_wins == 0

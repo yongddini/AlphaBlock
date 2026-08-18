@@ -121,6 +121,20 @@ class LiveLimitProvider(Protocol):
 
 
 @dataclass(frozen=True)
+class PartialExit:
+    """부분 청산 체결 하나 (WAN-323 반익절 래더).
+
+    `fraction`은 **진입 수량 대비 비율**이다(잔량 대비가 아니다) — 래더가 2단이라 비율의
+    합이 1을 넘지 않고, 호출부가 수량·수수료를 진입 수량 하나로 환산할 수 있다.
+    """
+
+    time: int
+    price: float
+    fraction: float
+    reason: SignalExitReason
+
+
+@dataclass(frozen=True)
 class ZoneLimitOutcome:
     """`simulate_zone_limit_trade`의 결과."""
 
@@ -166,6 +180,25 @@ class ZoneLimitOutcome:
     있으면 후보를 다시 시뮬레이션하지 않고 α를 사후 변환으로 얹을 수 있다(`stop_slippage_alpha`
     엔진 인자와 같은 값을 낸다). α=0(기본)에서는 `exit_price`가 `active_stop` 그대로라 이
     필드가 있어도 손익은 비트 단위로 불변이다."""
+    exit_at_breakeven: bool = False
+    """손절 청산이 **본절 스탑**(진입가로 옮긴 것)에서 났는지 (WAN-323).
+
+    참이면 **존 무효화 경계는 건드려지지 않았다** — 우리가 스스로 일찍 나온 것이라 그
+    오더블록은 아직 살아 있다. 재진입 배선이 「익절이면 재무장, 손절이면 존 종료」로
+    갈라지므로(WAN-228/273) 이 구분이 없으면 본절 청산이 **멀쩡한 존을 죽인다**.
+    래더를 안 켜면 손절선이 안 움직여 언제나 거짓이다."""
+    partial_exits: tuple[PartialExit, ...] = ()
+    """부분 청산 체결들 (WAN-323, 옵트인). 래더를 안 켜면 **항상 비어 있다**.
+
+    `partial_take_profit_r`을 주면 진입 순간 확정된 1R의 그 배수 지점에서 진입 수량의
+    `partial_take_profit_fraction`만큼을 먼저 청산하고 잔량을 계속 끌고 간다. 이 튜플에
+    담긴 체결은 최종 청산(`exit_time`/`exit_price`)과 **별개**이며, 최종 청산은 남은
+    수량에 대한 것이다 — 손익 환산은 호출부(`backtest.zone_limit_backtest._to_trade`)가
+    진입 수량 × 각 비율로 한다.
+
+    ⚠️ **같은 봉에서 분할 지점과 손절이 동시 도달하면 손절이 이겨 부분 청산은 일어나지
+    않는다**(기존 `stop_before_tp` 관행과 같은 보수적 처리) — 1분봉 안의 경로를 모르므로
+    애매하면 불리한 쪽으로 간다."""
     order_rested: bool = True
     """이 셋업에 주문이 **한 번이라도 주문판에 걸렸는지** (WAN-119).
 
@@ -230,6 +263,9 @@ def simulate_zone_limit_trade(
     first_tap_free: bool = False,
     stop_slippage_alpha: float = 0.0,
     limit_stop_nonfill: bool = False,
+    partial_take_profit_r: float | None = None,
+    partial_take_profit_fraction: float = 0.5,
+    breakeven_after_partial: bool = False,
 ) -> ZoneLimitOutcome:
     """한 오더블록 셋업의 존-지정가 진입·청산을 1분 서브스텝으로 시뮬레이션한다.
 
@@ -287,6 +323,25 @@ def simulate_zone_limit_trade(
       봉 범위가 손절가를 품는 정상 터치(`step.low <= active_stop <= step.high`)는 예전처럼
       즉시 손절가 체결이라, 팔 2는 **진짜 갭 관통 봉에서만** 현행과 갈린다. α는 지정가
       체결에 안 붙으므로 두 인자를 동시에 주는 것은 무의미해 거부한다.
+
+    ## 반익절 래더 + 본절 스탑 (WAN-323, 옵트인 · 기본은 현행과 비트 동일)
+
+    `partial_take_profit_r`(양수)을 주면 **분할 지점**(롱 `진입가 + k·1R`, 숏 대칭)에서
+    진입 수량의 `partial_take_profit_fraction`(기본 0.5)을 먼저 청산하고 잔량을 원래 익절
+    목표까지 끌고 간다. 체결은 `ZoneLimitOutcome.partial_exits`에 남고, 최종 청산
+    (`exit_price`·`exit_reason`)은 **잔량**에 대한 것이다.
+
+    * **룩어헤드 없음** — 1R은 체결 순간 확정되는 `|진입가 − 손절 참조가|`이고 분할 지점은
+      그 배수라 진입 시점에 전부 계산된다(봉내 라이브 밴드 계약 유지, WAN-132/143).
+    * **손절 우선** — 같은 스텝에서 분할 지점과 손절이 동시 도달하면 **손절이 이긴다**
+      (부분 청산 없이 전량 손절). 기존 `stop_before_tp`와 같은 보수적 관행이다.
+    * `breakeven_after_partial`을 켜면 첫 부분 청산 **직후** 손절을 **진입가**로 옮긴다.
+      옮긴 스탑은 **그다음 스텝부터** 적용된다 — 부분 체결이 관측된 뒤에야 주문을 옮길 수
+      있고, 그 1분봉 안의 경로는 알 수 없기 때문이다(그 스텝의 손절 판정은 이미 원래
+      손절선으로 끝났다). 본절 스탑은 부분 익절이 있어야 뜻이 있으므로 래더 없이 켜면
+      거부한다(라벨만 붙는 조용한 실패 방지 — WAN-95/112/123 관행).
+    * **MFE/MAE·`stop_price`·사이징 기준 1R은 진입 시점 값으로 고정**된다 — 본절 이동이
+      그 자를 갈아치우면 R 단위 지표가 팔마다 다른 것을 재게 된다.
     """
     if not substeps:
         # 서브스텝이 없으면 live 밴드는 값을 낼 기회조차 없었다 = 주문이 걸린 적 없다.
@@ -300,6 +355,20 @@ def simulate_zone_limit_trade(
         raise ValueError(
             "limit_stop_nonfill(지정가 미체결)과 stop_slippage_alpha(시장가 슬리피지)는 "
             "다른 청산 모델이라 함께 켤 수 없습니다(WAN-276)."
+        )
+    if partial_take_profit_r is not None and partial_take_profit_r <= 0.0:
+        raise ValueError(f"partial_take_profit_r은 양수여야 합니다: {partial_take_profit_r}")
+    if not 0.0 < partial_take_profit_fraction < 1.0:
+        raise ValueError(
+            "partial_take_profit_fraction은 (0, 1) 범위여야 합니다(전량 청산은 래더가 "
+            f"아니다): {partial_take_profit_fraction}"
+        )
+    if breakeven_after_partial and partial_take_profit_r is None:
+        # 부분 익절이 없으면 "첫 부분 청산 직후"가 영영 오지 않아 아무 일도 안 한다 —
+        # 라벨만 붙은 채 현행 엔진이 도는 조용한 실패라 거부한다(WAN-95/112/123 관행).
+        raise ValueError(
+            "breakeven_after_partial은 partial_take_profit_r 없이는 아무 동작도 하지 "
+            "않습니다(WAN-323)."
         )
     if (limit_price is None) == (live_limit is None):
         raise ValueError("limit_price와 live_limit 중 정확히 하나를 줘야 합니다.")
@@ -317,10 +386,15 @@ def simulate_zone_limit_trade(
     hold_low: float | None = None
 
     def _excursions() -> tuple[float | None, float | None]:
-        """추적한 극값으로 (MFE_R, MAE_R)을 낸다. 1R을 못 재면 (None, None)."""
+        """추적한 극값으로 (MFE_R, MAE_R)을 낸다. 1R을 못 재면 (None, None).
+
+        1R은 **진입 시점** 손절 참조가로 고정한다(WAN-323) — 본절 스탑이 손절선을 옮겨도
+        자가 바뀌면 안 되기 때문이다. 래더를 안 켜면 `active_stop`은 체결 후 불변이라
+        예전과 같은 값이다.
+        """
         if hold_high is None or hold_low is None or entry_price is None:
             return None, None
-        risk = abs(entry_price - active_stop)
+        risk = entry_risk if entry_risk is not None else abs(entry_price - active_stop)
         if risk <= 0:
             return None, None
         if is_long:
@@ -364,6 +438,17 @@ def simulate_zone_limit_trade(
     entry_time: int | None = None
     entry_price: float | None = None
     entry_rsi: float | None = None
+    # WAN-323 래더 상태. 래더를 안 켜면 `partial_price`가 끝까지 None이라 전부 비활성이다.
+    entry_stop: float | None = None
+    """진입 시점 손절 참조가 — 1R 사이징·MFE/MAE의 자. 본절 이동이 이 값을 바꾸지 않는다."""
+    entry_risk: float | None = None
+    partial_price: float | None = None
+    partials: list[PartialExit] = []
+    pending_breakeven = False
+
+    def _entry_stop() -> float:
+        """호출부에 돌려줄 손절 참조가(진입 시점 값). 체결 전이면 현재 손절선."""
+        return entry_stop if entry_stop is not None else active_stop
 
     for step in islice(substeps, start, None):
         # 상위TF 봉 경계: 직전 봉을 확정 종가로 커밋하고 경과 봉 수를 늘린다.
@@ -438,6 +523,12 @@ def simulate_zone_limit_trade(
                     entry_time = step.time
                     entry_price = current_limit
                     entry_rsi = live_rsi
+                    # WAN-323: 1R과 분할 지점을 **체결 순간에** 못 박는다(룩어헤드 없음).
+                    entry_stop = active_stop
+                    entry_risk = abs(entry_price - entry_stop)
+                    if partial_take_profit_r is not None and entry_risk > 0.0:
+                        offset = partial_take_profit_r * entry_risk
+                        partial_price = entry_price + offset if is_long else entry_price - offset
                     # 관통 방지: 같은 스텝에서 손절/익절을 곧바로 재판정한다(아래로 진행).
                 elif cancel_on_condition_fail:
                     return ZoneLimitOutcome(
@@ -446,6 +537,13 @@ def simulate_zone_limit_trade(
                     )
 
         if position_open:
+            if pending_breakeven:
+                # WAN-323: 직전 스텝에서 부분 청산이 체결됐다 — 이제야 손절을 진입가로
+                # 옮긴다. 같은 스텝에 옮기지 않는 이유는 그 1분봉 안의 경로(분할 체결이
+                # 먼저인지 되돌림이 먼저인지)를 알 수 없기 때문이다.
+                assert entry_price is not None
+                active_stop = entry_price
+                pending_breakeven = False
             # WAN-90: 이 스텝(진입 스텝·청산 스텝 포함)의 고가/저가를 극값에 반영한 뒤
             # 청산을 판정한다 — 청산 봉의 범위까지가 보유 구간이고 그 이후는 보지 않는다.
             hold_high = step.high if hold_high is None else max(hold_high, step.high)
@@ -482,6 +580,9 @@ def simulate_zone_limit_trade(
                     stop_extreme = step.low if is_long else step.high
                     stop_exit_price = _stop_fill_price(stop_extreme)
             if stop_fill and (not tp_hit or stop_before_tp):
+                # WAN-323: 같은 스텝에서 분할 지점도 닿았을 수 있으나 **손절이 이긴다**
+                # (보수적 — `stop_before_tp`와 같은 관행). 그래서 여기서 부분 청산을
+                # 먼저 체결시키지 않는다.
                 mfe_r, mae_r = _excursions()
                 return ZoneLimitOutcome(
                     status=ZoneLimitStatus.FILLED_EXITED,
@@ -493,10 +594,27 @@ def simulate_zone_limit_trade(
                     exit_reason=SignalExitReason.STOP_LOSS,
                     mfe_r=mfe_r,
                     mae_r=mae_r,
-                    stop_price=active_stop,
+                    stop_price=_entry_stop(),
                     exit_extreme=stop_extreme,
+                    exit_at_breakeven=entry_stop is not None and active_stop != entry_stop,
+                    partial_exits=tuple(partials),
                     order_rested=order_rested,
                 )
+            if partial_price is not None:
+                # WAN-323 분할 지점 도달 — 진입 수량의 일부를 먼저 청산하고 잔량을 끌고
+                # 간다. 지점은 한 번만 쓰이므로 곧바로 비활성화한다(2단 래더).
+                partial_hit = step.high >= partial_price if is_long else step.low <= partial_price
+                if partial_hit:
+                    partials.append(
+                        PartialExit(
+                            time=step.time,
+                            price=partial_price,
+                            fraction=partial_take_profit_fraction,
+                            reason=SignalExitReason.TAKE_PROFIT,
+                        )
+                    )
+                    partial_price = None
+                    pending_breakeven = breakeven_after_partial
             if tp_hit:
                 mfe_r, mae_r = _excursions()
                 return ZoneLimitOutcome(
@@ -509,7 +627,8 @@ def simulate_zone_limit_trade(
                     exit_reason=SignalExitReason.TAKE_PROFIT,
                     mfe_r=mfe_r,
                     mae_r=mae_r,
-                    stop_price=active_stop,
+                    stop_price=_entry_stop(),
+                    partial_exits=tuple(partials),
                     order_rested=order_rested,
                 )
 
@@ -522,7 +641,8 @@ def simulate_zone_limit_trade(
             entry_rsi=entry_rsi,
             mfe_r=mfe_r,
             mae_r=mae_r,
-            stop_price=active_stop,
+            stop_price=_entry_stop(),
+            partial_exits=tuple(partials),
             order_rested=order_rested,
         )
     return ZoneLimitOutcome(status=ZoneLimitStatus.NO_TOUCH, order_rested=order_rested)

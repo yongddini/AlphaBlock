@@ -258,6 +258,28 @@ def apply_book_leverage(cfg: BacktestConfig, book: LeverageBookParams) -> Backte
     )
 
 
+@dataclass(frozen=True)
+class _Reduction:
+    """부분 청산 하나가 북 회계에 일으키는 변화 (WAN-323 반익절 래더).
+
+    북은 원래 진입 시점의 `notional`·`risk_amount` 스냅샷을 최종 청산까지 들고 있고
+    「도중에 줄었다」는 이벤트가 없었다 — 그대로 두면 이미 덜어낸 명목·위험을 계속 세서
+    **하필 래더에 불리한 방향으로** 편향된다(래더의 존재 이유가 위험을 일찍 더는 것이다).
+    """
+
+    time: int
+    notional: float
+    """이 부분 청산이 해제하는 명목(진입 명목 × 그 체결의 수량 비중)."""
+    risk: float
+    """이 부분 청산이 해제하는 리스크 금액."""
+    cash: float
+    """이 시점에 공유 현금에 실현되는 손익 — 그 체결의 그로스 − 그 체결 수수료 −
+    진입 수수료의 수량 비중. **펀딩은 최종 청산에 남긴다**(구간 배분을 여기서 또 하면
+    `_to_trade`의 산식과 갈라진다). 합계가 어긋나지 않는 것은 최종 청산이
+    `realized_pnl − 이미 반영한 누계`를 내기 때문이다 — **총액은 정의상 정확**하고
+    근사되는 것은 **시점**뿐이다."""
+
+
 @dataclass
 class _OpenBookPosition:
     """열린 칸 하나의 회계 상태."""
@@ -268,6 +290,36 @@ class _OpenBookPosition:
     notional: float
     risk_amount: float
     """손절까지 갔을 때의 손실(수수료·펀딩 제외). 최악 가정 청산 검사용."""
+    reductions: list[_Reduction] = field(default_factory=list)
+    """아직 반영하지 않은 부분 청산(시각 오름차순). 래더를 안 켜면 **항상 비어 있다**."""
+    credited: float = 0.0
+    """이미 공유 현금에 반영한 손익 누계. 최종 청산은 `realized_pnl − credited`를 낸다."""
+
+
+def _reductions_for(
+    trade: Trade, partial_count: int, notional: float, risk: float
+) -> list[_Reduction]:
+    """부분 청산 체결들을 북 회계 이벤트로 바꾼다 (WAN-323).
+
+    `trade.exits`는 **부분들 → 최종** 순서이므로 앞 `partial_count`개가 부분 청산이다
+    (`zone_limit_backtest._to_trade`가 그 순서로 만든다). 부분이 없으면 빈 리스트라
+    북이 예전과 **비트 단위로** 같이 돈다.
+    """
+    if partial_count <= 0 or trade.quantity <= 0.0:
+        return []
+    out: list[_Reduction] = []
+    for fill in trade.exits[:partial_count]:
+        share = fill.quantity / trade.quantity
+        gross = trade.side.sign * (fill.price - trade.entry_price) * fill.quantity
+        out.append(
+            _Reduction(
+                time=fill.time,
+                notional=notional * share,
+                risk=risk * share,
+                cash=gross - fill.fee - trade.entry_fee * share,
+            )
+        )
+    return out
 
 
 def _validate_cells(cells: Sequence[BookCell]) -> None:
@@ -405,24 +457,45 @@ def run_leverage_book(
             )
         last_event = end
 
-    def close_due(now: int) -> None:
-        """`now` 이전에 청산된 포지션의 손익을 공유 현금에 실현한다(시각순).
+    def settle_due(now: int) -> None:
+        """`now` 이전의 **부분 청산(축소)과 최종 청산**을 시각순으로 반영한다.
 
         반개구간 규약: `exit_time == now`도 닫는다 — 같은 시각의 청산·재진입(같은 칸
         연속 거래)이 겹침으로 세어지지 않는다(census `[entry, exit)`와 같은 경계).
+
+        WAN-323: 부분 청산은 명목·리스크를 그만큼 **줄이고** 그 몫의 손익을 그 시점에
+        실현한다. 최종 청산은 `realized_pnl − 이미 반영한 누계`를 내므로 **총액은 정의상
+        `_to_trade`와 정확히 같다**. 래더를 안 켜면 축소 이벤트가 없어 예전과 비트 동일하다
+        (정렬 키 `(시각, 종류, 칸)`이 종류 1(청산)만 남아 옛 `(exit_time, cell)`과 같다).
         """
         nonlocal cash
-        due = sorted(
-            (p for p in open_by_cell.values() if p.exit_time <= now),
-            key=lambda p: (p.exit_time, p.cell),
-        )
-        for position in due:
-            advance(position.exit_time)
-            cash += position.trade.realized_pnl
-            del open_by_cell[position.cell]
+        while True:
+            events: list[tuple[int, int, CellKey]] = []
+            for position in open_by_cell.values():
+                if position.reductions and position.reductions[0].time <= now:
+                    # 같은 포지션은 축소가 청산보다 먼저다(부분 청산 시각 ≤ 최종 청산 시각).
+                    events.append((position.reductions[0].time, 0, position.cell))
+                elif position.exit_time <= now:
+                    events.append((position.exit_time, 1, position.cell))
+            if not events:
+                return
+            events.sort()
+            _, kind, cell_key = events[0]
+            position = open_by_cell[cell_key]
+            if kind == 0:
+                reduction = position.reductions.pop(0)
+                advance(reduction.time)
+                cash += reduction.cash
+                position.credited += reduction.cash
+                position.notional -= reduction.notional
+                position.risk_amount -= reduction.risk
+            else:
+                advance(position.exit_time)
+                cash += position.trade.realized_pnl - position.credited
+                del open_by_cell[cell_key]
 
     for cand, cell in merged:
-        close_due(cand.entry_time)
+        settle_due(cand.entry_time)
         advance(cand.entry_time)
 
         if cell.key in open_by_cell:
@@ -472,6 +545,8 @@ def run_leverage_book(
             exit_time=cand.exit_time,
             notional=notional,
             risk_amount=risk_amount,
+            # WAN-323: 부분 청산이 있으면 그 시각에 명목·리스크를 덜어내는 이벤트를 예약한다.
+            reductions=_reductions_for(trade, len(cand.partial_exits), notional, risk_amount),
         )
         trades.append(trade)
         stats.placed += 1
@@ -485,7 +560,7 @@ def run_leverage_book(
         )
         _observe(stats, cand.entry_time, cash, open_by_cell, book, stress_risk_multiple)
 
-    close_due(_MAX_TIME)
+    settle_due(_MAX_TIME)
     return BookOutcome(trades=trades, stats=stats, effective_config=eff_cfg)
 
 
