@@ -231,11 +231,46 @@ class LadderRow(BaseModel):
 # --------------------------------------------------------------------------- #
 
 
+#: 래더의 폐쇄형 항등식 (WAN-323 검산). 분할 지점 `k`R에서 비율 `f`를 팔고 잔량을 `T`R
+#: 전량 익절까지 끌고 갈 때, **본절을 끄면 청산 시각이 안 바뀌므로** 같은 거래의 그로스 R이
+#: 딱 두 가지로만 움직인다:
+#:
+#:   * `T`R 익절로 끝난 거래 — 절반을 더 낮은 값에 팔았으니 `−f·(T − k)`
+#:   * `k`R을 찍고 되돌아 손절난 거래 — 절반이 `−1R` 대신 `+k R`이니 `+f·(k + 1)`
+#:   * 분할 지점을 못 찍고 손절난 거래 — `0`(래더가 아무 일도 안 했다)
+#:
+#: 즉 승자에게서 조금 잃고 **구제된 패자에게서 크게 번다**. 부호는 두 부류의 개수 비가
+#: 정하는 것이지 미리 정해져 있지 않다 — WAN-90의 부호식은 **익절선 그 자리에서** 반익절하는
+#: 다른 제안의 것이라 여기 적용되지 않는다(초안의 「이기면 버그」 판정을 실측으로 교정).
+#: `run_cell`이 매 셀에서 이 항등식을 실제 거래로 검산한다.
+_IDENTITY_TOL = 1e-6
+
+
+def expected_ladder_delta(arm: LadderArm, *, rescued: bool) -> float:
+    """본절 끈 래더 팔이 기준선 대비 내야 할 그로스 R 차이(폐쇄형)."""
+    assert arm.partial_r is not None
+    if rescued:
+        return PARTIAL_FRACTION * (arm.partial_r + 1.0)
+    return -PARTIAL_FRACTION * (arm.take_profit_r - arm.partial_r)
+
+
+@dataclass(frozen=True)
+class TradeLedger:
+    """검산용 거래 한 줄 — 진입 시각으로 팔 사이를 조인한다."""
+
+    entry_time: int
+    reason: ExitReason
+    has_partial: bool
+    gross_r: float
+
+
 @dataclass(frozen=True)
 class ArmOutcome:
     row: LadderRow
     entry_times: list[int]
     """체결 셋업의 진입 시각(정렬). 래더는 청산만 바꾸므로 14팔이 비트 단위로 같아야 한다."""
+    ledger: list[TradeLedger]
+    """거래 단위 그로스 R — `run_cell`의 항등식 검산 입력."""
 
 
 def _risk_amount(cand: _Candidate, entry_price: float, quantity: float) -> float:
@@ -285,6 +320,7 @@ def run_arm(
     trades = [trade for _, trade in paired]
     metrics = build_result_from_trades(trades, cfg, seg_market.timeframe).metrics
 
+    ledger: list[TradeLedger] = []
     net_rs: list[float] = []
     gross_rs: list[float] = []
     cost_total = 0.0
@@ -312,6 +348,16 @@ def run_arm(
         if risk > 0:
             net_rs.append(trade.realized_pnl / risk)
             gross_rs.append((trade.realized_pnl + cost) / risk)
+            # 그로스 R = 비용 반영 전 실현 R. 항등식은 비용을 타지 않으므로 이 자로 잰다
+            # (체결가에는 슬리피지가 들어 있어 `slip`을 되돌린 원가 기준으로 낸다).
+            ledger.append(
+                TradeLedger(
+                    entry_time=trade.entry_time,
+                    reason=cand.reason,
+                    has_partial=bool(cand.partial_exits),
+                    gross_r=(trade.realized_pnl + cost) / risk,
+                )
+            )
 
     row = LadderRow(
         symbol=seg_market.symbol,
@@ -339,7 +385,7 @@ def run_arm(
         n_partial_then_stop=n_partial_then_stop,
         funding_rows=len(seg_market.funding_rates),
     )
-    return ArmOutcome(row=row, entry_times=sorted(c.entry_time for c in candidates))
+    return ArmOutcome(row=row, entry_times=sorted(c.entry_time for c in candidates), ledger=ledger)
 
 
 def run_cell(
@@ -360,10 +406,12 @@ def run_cell(
 
     rows: list[LadderRow] = []
     entry_sets: dict[str, list[int]] = {}
+    ledgers: dict[str, list[TradeLedger]] = {}
     for arm in arms:
         outcome = run_arm(seg_market, segment.name, arm, obr=obr, eval_from_ms=eval_from_ms)
         rows.append(outcome.row)
         entry_sets[arm.name] = outcome.entry_times
+        ledgers[arm.name] = outcome.ledger
     # 같은 전량 익절 R 안에서만 대조한다 — 익절 R이 다르면 청산 시각이 달라 시퀀싱이
     # 다른 셋업을 집는 것이 정상이다(A0 vs B0는 서로 다른 엔진이다).
     for family, _tp_r, _splits in _FAMILIES:
@@ -378,7 +426,52 @@ def run_cell(
                     f"{segment.name} {name}: {len(entry_sets[name])} vs "
                     f"{names[0]} {len(head)}. 래더가 진입을 바꾸는 배선 버그다."
                 )
+    _check_ladder_identity(ledgers, seg_market.symbol, seg_market.timeframe, segment.name, arms)
     return rows
+
+
+def _check_ladder_identity(
+    ledgers: dict[str, list[TradeLedger]],
+    symbol: str,
+    timeframe: str,
+    segment: str,
+    arms: Sequence[LadderArm],
+) -> None:
+    """폐쇄형 항등식을 **실제 거래로** 검산한다 (WAN-323).
+
+    본절을 끈 래더 팔은 청산 시각이 기준선과 같으므로 같은 거래를 조인할 수 있고, 그 거래의
+    그로스 R 차이가 `expected_ladder_delta`와 정확히 일치해야 한다. 어긋나면 부분 청산의
+    수량·가격·수수료 배분 어딘가가 틀린 것이라 조용히 넘기지 않는다 — 이 표의 핵심 주장
+    (「승자에게서 조금 잃고 구제된 패자에게서 크게 번다」)이 곧 이 항등식이다.
+
+    본절을 켠 팔(`be_on`)은 손절선이 움직여 청산 자체가 달라지므로 대상이 아니다.
+    """
+    for arm in arms:
+        if arm.is_baseline or arm.breakeven or arm.partial_r is None:
+            continue
+        base = ledgers.get(BASELINE_OF[arm.name])
+        mine = ledgers.get(arm.name)
+        if not base or not mine:
+            continue
+        by_time = {row.entry_time: row for row in base}
+        for row in mine:
+            twin = by_time.get(row.entry_time)
+            if twin is None or row.reason is ExitReason.END_OF_DATA:
+                continue  # 데이터끝 청산은 마지막 종가라 항등식 대상이 아니다.
+            if not row.has_partial:
+                expected = 0.0
+            elif row.reason is ExitReason.TAKE_PROFIT:
+                expected = expected_ladder_delta(arm, rescued=False)
+            else:
+                expected = expected_ladder_delta(arm, rescued=True)
+            actual = row.gross_r - twin.gross_r
+            if abs(actual - expected) > _IDENTITY_TOL:
+                raise AssertionError(
+                    f"래더 항등식 위반 — {symbol} {timeframe} {segment} {arm.name} "
+                    f"진입 {row.entry_time} ({row.reason}, 분할 "
+                    f"{'O' if row.has_partial else 'X'}): 실측 Δ{actual:+.6f}R vs "
+                    f"폐쇄형 {expected:+.6f}R. 부분 청산 회계가 틀렸다."
+                )
 
 
 # --------------------------------------------------------------------------- #
@@ -741,18 +834,23 @@ EPS = 1e-5
 
 
 def _verdict(family: str, d_return: float | None, d_mdd: float | None) -> str:
-    """교환비 판정 문자. 🚨 **문장이 아니라 이 값이 정본**(WAN-142 열거형 교훈)."""
+    """교환비 판정 문자. 🚨 **문장이 아니라 이 값이 정본**(WAN-142 열거형 교훈).
+
+    ⚠️ **「수익↑·낙폭↓」은 버그 신호가 아니다**(초안의 판정을 실측으로 교정 — 아래 📌).
+    WAN-90이 부호를 확정한 것은 **익절선 그 자리에서** 반익절하고 러너를 홀딩하는 제안
+    (E[러너] vs 1.5R)이었다. 이 이슈는 **익절선보다 아래**에서 절반을 파므로 그 식이 적용되지
+    않는다 — `_LADDER_IDENTITY` 문단의 폐쇄형대로 승자에게서 `f·(T−k)`를 잃고 분할 지점을
+    찍고 되돌아 손절난 거래에서 `f·(k+1)`을 번다. 부호는 두 부류의 **개수 비**가 정한다.
+    """
     if d_return is None or d_mdd is None:
         return "판정 불가"
     mdd_down, mdd_up = d_mdd < -EPS, d_mdd > EPS
     ret_up, ret_down = d_return > EPS, d_return < -EPS
     if mdd_down and ret_up:
         if family == "A":
-            # A0는 이미 OOS 최적 배수(WAN-90)라 래더가 수익까지 이기면 설명이 없다.
-            return "🚨 수익↑·낙폭↓ — A계열에선 배선 버그부터 의심"
-        # B0(2.0R)는 A0보다 열등한 기준선이라, 1.5R 이하에서 절반을 파는 팔이 실효 청산을
-        # 그 최적 쪽으로 당긴다 — 예상된 결과이지 발견이 아니다.
-        return "수익↑·낙폭↓ (B0이 열등한 기준선이라 예상된 결과 — A계열과 섞지 말 것)"
+            return "수익↑·낙폭↓ (구제된 손절이 승자의 양보를 넘었다)"
+        # B0(2.0R)는 A0보다 열등한 기준선이라 그 효과에 「최적 쪽으로 당김」이 섞인다.
+        return "수익↑·낙폭↓ (B0이 열등한 기준선이라 효과가 섞인다 — A계열과 섞지 말 것)"
     if mdd_down:
         return "낙폭을 샀다" if ret_down else "낙폭↓·수익 무변"
     if mdd_up:

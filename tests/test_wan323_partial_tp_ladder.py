@@ -13,6 +13,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
+from backtest.models import ExitReason
 from backtest.wan323_partial_tp_ladder import (
     ARMS,
     ARMS_BY_NAME,
@@ -22,10 +23,13 @@ from backtest.wan323_partial_tp_ladder import (
     PARTIAL_FRACTION,
     PRIMARY_OOS,
     LadderRow,
+    TradeLedger,
+    _check_ladder_identity,
     _verdict,
     breakeven_conversion,
     breakeven_split,
     build_summary,
+    expected_ladder_delta,
     leave_one_out,
     partial_reach_rate,
     rows_to_frame,
@@ -93,11 +97,9 @@ def test_tiny_mdd_delta_is_not_promoted_to_a_purchase() -> None:
     assert _verdict("A", -0.02, -0.01) == "낙폭을 샀다"
 
 
-def test_free_lunch_in_family_a_is_flagged_as_a_bug_suspicion() -> None:
-    """A0는 이미 OOS 최적 배수(WAN-90)라 수익까지 이기면 설명이 없다 — 버그부터 의심."""
-    assert "배선 버그" in _verdict("A", +0.02, -0.01)
-    # B0(2.0R)는 열등한 기준선이라 같은 모양이 예상된 결과다.
-    assert "배선 버그" not in _verdict("B", +0.02, -0.01)
+def test_families_are_read_differently_when_the_ladder_wins() -> None:
+    """A는 순수 래더 효과, B는 「열등한 기준선」이 섞인다 — 판정 문자가 그걸 가른다."""
+    assert "구제된 손절" in _verdict("A", +0.02, -0.01)
     assert "B0이 열등한 기준선" in _verdict("B", +0.02, -0.01)
 
 
@@ -271,3 +273,82 @@ def test_summary_renders_the_trade_off_sentences() -> None:
     assert "체결 보수화(`pen_5bp`) 미측정" in text
     # WAN-318 교훈 — 좌표 라벨은 하드코딩이 아니라 실제 프레임에서 파생된다.
     assert "**좌표**: 2종목 ×" in text
+
+
+# --------------------------------------------------------------------------- #
+# 폐쇄형 항등식 (WAN-323) — 이 표의 핵심 주장이 곧 이 산수다
+# --------------------------------------------------------------------------- #
+
+
+def test_closed_form_matches_the_measured_deltas() -> None:
+    """실데이터 실측(ETH 2h 2024)에서 나온 Δ와 폐쇄형이 일치한다.
+
+    익절 −0.250R · 구제된 손절 +1.000R — 「승자에게서 조금 잃고 구제된 패자에게서 크게
+    번다」가 이 두 수의 관계다(교환비 1:4). 사양이 바뀌면 이 값도 바뀌므로 고정한다.
+    """
+    a1 = ARMS_BY_NAME["A1_be_off"]
+    assert expected_ladder_delta(a1, rescued=False) == pytest.approx(-0.25)
+    assert expected_ladder_delta(a1, rescued=True) == pytest.approx(+1.00)
+    # 분할 지점이 깊어지면 승자 양보가 줄고 구제 이득이 는다.
+    a3 = ARMS_BY_NAME["A3_be_off"]
+    assert expected_ladder_delta(a3, rescued=False) == pytest.approx(-0.10)
+    assert expected_ladder_delta(a3, rescued=True) == pytest.approx(+1.15)
+
+
+def _ledgers(delta_tp: float, delta_stop: float) -> dict[str, list[TradeLedger]]:
+    base = [
+        TradeLedger(entry_time=1, reason=ExitReason.TAKE_PROFIT, has_partial=False, gross_r=1.5),
+        TradeLedger(entry_time=2, reason=ExitReason.STOP_LOSS, has_partial=False, gross_r=-1.0),
+        TradeLedger(entry_time=3, reason=ExitReason.STOP_LOSS, has_partial=False, gross_r=-1.0),
+    ]
+    arm = [
+        TradeLedger(
+            entry_time=1, reason=ExitReason.TAKE_PROFIT, has_partial=True, gross_r=1.5 + delta_tp
+        ),
+        TradeLedger(
+            entry_time=2, reason=ExitReason.STOP_LOSS, has_partial=True, gross_r=-1.0 + delta_stop
+        ),
+        # 분할 지점을 못 찍은 손절 — 래더가 아무 일도 안 했어야 한다.
+        TradeLedger(entry_time=3, reason=ExitReason.STOP_LOSS, has_partial=False, gross_r=-1.0),
+    ]
+    return {"A0": base, "A1_be_off": arm}
+
+
+def test_identity_check_passes_on_correct_accounting() -> None:
+    _check_ladder_identity(
+        _ledgers(-0.25, +1.0), "BTC", "1h", "oos_warm", [ARMS_BY_NAME["A1_be_off"]]
+    )
+
+
+def test_identity_check_catches_wrong_partial_accounting() -> None:
+    """수량·가격·수수료 배분이 틀리면 조용히 넘어가지 않는다."""
+    with pytest.raises(AssertionError, match="래더 항등식 위반"):
+        _check_ladder_identity(
+            _ledgers(-0.25, +0.5), "BTC", "1h", "oos_warm", [ARMS_BY_NAME["A1_be_off"]]
+        )
+    with pytest.raises(AssertionError, match="래더 항등식 위반"):
+        _check_ladder_identity(
+            _ledgers(-0.40, +1.0), "BTC", "1h", "oos_warm", [ARMS_BY_NAME["A1_be_off"]]
+        )
+
+
+def test_identity_check_skips_breakeven_arms() -> None:
+    """본절을 켜면 손절선이 움직여 청산 자체가 달라진다 — 항등식 대상이 아니다."""
+    _check_ladder_identity(
+        {"A0": _ledgers(0, 0)["A0"], "A1_be_on": _ledgers(-0.9, -0.9)["A1_be_off"]},
+        "BTC",
+        "1h",
+        "oos_warm",
+        [ARMS_BY_NAME["A1_be_on"]],
+    )
+
+
+def test_verdict_no_longer_calls_a_win_a_bug() -> None:
+    """초안의 「A계열에서 이기면 배선 버그」 판정은 실측으로 교정됐다.
+
+    WAN-90이 부호를 확정한 것은 **익절선 그 자리에서** 반익절하는 다른 제안이다 — 분할
+    지점이 익절선보다 아래면 부호는 구제된 손절 수가 정한다.
+    """
+    text = _verdict("A", +0.02, -0.01)
+    assert "버그" not in text
+    assert "구제된 손절" in text
