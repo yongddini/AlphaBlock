@@ -65,7 +65,7 @@ from __future__ import annotations
 import argparse
 import statistics
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -616,6 +616,7 @@ def run_book_report(
     start: str = harness.DEFAULT_START,
     end: str = harness.DEFAULT_END,
     jobs: int = 1,
+    on_arm: Callable[[list[BookLadderRow]], None] | None = None,
     log: bool = True,
 ) -> list[BookLadderRow]:
     """팔마다 채택 북(cap_only 5배 · 재진입 band)을 돌려 집계 행을 낸다.
@@ -657,7 +658,12 @@ def run_book_report(
             end_ms=end_ms,
             include_reentry=True,
         )
-        rows.extend(_book_ladder_row(arm, row) for row in book_rows)
+        arm_rows = [_book_ladder_row(arm, row) for row in book_rows]
+        rows.extend(arm_rows)
+        if on_arm is not None:
+            # 팔 하나가 12종목 × 3TF를 다 돌아 ~50분이라, 중간에 죽으면 전부 잃는다.
+            # 팔마다 즉시 적재해 재실행이 남은 팔만 돌 수 있게 한다.
+            on_arm(arm_rows)
         if log:
             print(
                 f"[wan323·book] {arm.name}: {len(book_rows)}구간 ({time.time() - t0:.0f}s)",
@@ -1210,22 +1216,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     if args.book:
-        book_rows = run_book_report(
+
+        def _persist(arm_rows: list[BookLadderRow]) -> None:
+            frame = pd.DataFrame([r.model_dump() for r in arm_rows])
+            if BOOK_CSV_PATH.exists():
+                prior = pd.read_csv(BOOK_CSV_PATH)
+                frame = pd.concat([prior, frame], ignore_index=True).drop_duplicates(
+                    subset=["arm", "segment"], keep="last"
+                )
+            frame.to_csv(BOOK_CSV_PATH, index=False)
+            print(f"[wan323] 북 CSV 적재: {BOOK_CSV_PATH} ({len(frame)}행)", flush=True)
+
+        run_book_report(
             symbols,
             timeframes,
             arms=_resolve_book_arms(args.book_arms),
             start=args.start,
             end=args.end,
             jobs=args.jobs if args.jobs is not None else harness.default_jobs(),
+            on_arm=_persist,
         )
-        frame = pd.DataFrame([r.model_dump() for r in book_rows])
-        if args.append and BOOK_CSV_PATH.exists():
-            old_frame = pd.read_csv(BOOK_CSV_PATH)
-            frame = pd.concat([old_frame, frame], ignore_index=True).drop_duplicates(
-                subset=["arm", "segment"], keep="last"
-            )
-        frame.to_csv(BOOK_CSV_PATH, index=False)
-        print(f"[wan323] 북 CSV: {BOOK_CSV_PATH} ({len(frame)}행)", flush=True)
         if CSV_PATH.exists():
             _write_summary(pd.read_csv(CSV_PATH))
         return 0
