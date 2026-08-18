@@ -269,3 +269,5 @@ def test_summary_renders_the_trade_off_sentences() -> None:
     # 기본값 전환이 아니라는 것과 렌즈 한계가 늘 함께 실린다.
     assert "재-베이스라인 = 사용자 결정" in text
     assert "체결 보수화(`pen_5bp`) 미측정" in text
+    # WAN-318 교훈 — 좌표 라벨은 하드코딩이 아니라 실제 프레임에서 파생된다.
+    assert "**좌표**: 2종목 ×" in text

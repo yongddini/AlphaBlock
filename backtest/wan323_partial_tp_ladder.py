@@ -74,6 +74,7 @@ import pandas as pd
 from pydantic import BaseModel, ConfigDict
 
 from backtest import harness
+from backtest.book_cli import ADOPTED_REENTRY_ENTRY_RULE, BookRunRow, build_book_rows
 from backtest.harness import (
     SEGMENT_IS,
     SEGMENT_OOS,
@@ -82,8 +83,10 @@ from backtest.harness import (
     Segment,
     segments_for,
 )
+from backtest.leverage_book import LeverageBookParams
 from backtest.models import ExitReason
 from backtest.run import parse_date_ms
+from backtest.wan169_leverage_book import run_cells
 from backtest.zone_limit_backtest import (
     SetupDiagnostic,
     ZoneLimitStats,
@@ -98,6 +101,13 @@ from strategy.order_blocks import OrderBlockDetector
 REPORTS_DIR = Path("backtest/reports")
 CSV_PATH = REPORTS_DIR / "wan323_partial_tp_ladder.csv"
 SUMMARY_PATH = REPORTS_DIR / "wan323_partial_tp_ladder_summary.md"
+BOOK_CSV_PATH = REPORTS_DIR / "wan323_partial_tp_ladder_book.csv"
+
+#: 북 판에서 돌릴 기본 팔 — **결정적인 것만**(사용자 결정 2026-08-18 「재진입 무조건」).
+#: 14팔 전부를 북으로 돌리면 후보 생성을 14번 다시 해야 해 per-cell 격자와 맞먹는 비용이
+#: 든다. per-cell 표가 이미 팔 순위를 냈으므로 북은 **각 계열의 기준선과 그 계열에서 가장
+#: 싸게 낙폭을 산 팔**만 확인한다(`--book-arms all`로 전부 돌릴 수 있다).
+DEFAULT_BOOK_ARMS: tuple[str, ...] = ("A0", "A1_be_off", "A1_be_on", "B0", "B1_be_on")
 
 #: 판정의 주 구간(WAN-166) = 따뜻한 연속 OOS. 차가운 `oos`는 스트레스로 병기한다.
 PRIMARY_OOS = SEGMENT_OOS_WARM
@@ -467,6 +477,175 @@ def sort_rows(rows: Sequence[LadderRow]) -> list[LadderRow]:
 
 
 # --------------------------------------------------------------------------- #
+# 북 판 — 채택 회계(레버리지 북 cap_only 5배 + 재진입 band)에서 다시 잰다
+# --------------------------------------------------------------------------- #
+#
+# 🗣️ **사용자 결정 2026-08-18: "앞으로 재진입은 무조건 한다는 전제하에 하자."**
+#
+# per-cell 표(위)는 칸마다 독립 자본이고 **재진입이 없다** — 재진입은 북 회계에만 있는
+# 기능이라 코드가 `--positions single`과의 조합을 거부한다(`backtest/run.py`). 즉 그 표는
+# 팔 간 비교로는 유효해도 **실매매 조건이 아니다**. 이 절이 같은 14팔(기본은 결정적인
+# 5팔)을 **채택 북 + 재진입 band** 위에서 다시 재 그 간극을 닫는다.
+#
+# 📌 **북에 부분 청산을 얹으려면 배선이 필요했다** — 북은 진입 시점의 명목·리스크 스냅샷을
+# 최종 청산까지 들고 있어 「도중에 줄었다」는 이벤트가 없었다. 그대로 얹으면 이미 덜어낸
+# 명목·위험을 계속 세서 **하필 래더에 불리한 방향으로** 편향된다. `leverage_book._Reduction`
+# 이 그 이벤트이고, 총액은 최종 청산이 `realized_pnl − 이미 반영한 누계`를 내 정의상 정확하다.
+
+
+class BookLadderRow(BaseModel):
+    """한 (팔, 구간)의 채택 북 집계 행. 북은 칸을 가로지른 **한 지갑**이라 심볼 열이 없다."""
+
+    model_config = ConfigDict(frozen=True)
+
+    arm: str
+    family: str
+    take_profit_r: float
+    partial_r: float | None
+    breakeven: bool
+    segment: str
+    num_trades: int
+    win_rate: float
+    total_return: float
+    max_drawdown: float
+    return_over_mdd: float | None
+    peak_concurrency: int
+    max_concurrent_risk: float
+    liquidation_events: int
+    skipped_notional: int
+
+
+def run_book_report(
+    symbols: Sequence[str] = harness.DEFAULT_SYMBOLS,
+    timeframes: Sequence[str] = harness.DEFAULT_TIMEFRAMES,
+    *,
+    arms: Sequence[LadderArm] | None = None,
+    start: str = harness.DEFAULT_START,
+    end: str = harness.DEFAULT_END,
+    jobs: int = 1,
+    log: bool = True,
+) -> list[BookLadderRow]:
+    """팔마다 채택 북(cap_only 5배 · 재진입 band)을 돌려 집계 행을 낸다.
+
+    좌표·회계는 **인자 없는 `backtest.run --oos-warm`과 같은 것**을 쓴다 — 유동성 한도는
+    채택값(`UNSET`), 재진입은 켬(band), 북 파라미터는 `LeverageBookParams()`(= 채택 북).
+    래더 인자만 팔마다 갈아끼운다.
+
+    ⚠️ 래더 팔은 `engine_check`를 끈다 — 그 검산은 격리 성과가 `harness.run_once`(래더 없는
+    per-cell)와 비트 일치하는지 보는 것이라, 래더를 켠 팔에서는 **당연히** 어긋난다. 기준선
+    팔(`A0`/`B0`)에서는 켜 둬 배선이 안 틀어졌음을 계속 확인한다.
+    """
+    selected = list(arms) if arms is not None else [ARMS_BY_NAME[n] for n in DEFAULT_BOOK_ARMS]
+    start_ms, end_ms = parse_date_ms(start), parse_date_ms(end)
+    rows: list[BookLadderRow] = []
+    for arm in selected:
+        t0 = time.time()
+        payloads = run_cells(
+            symbols,
+            timeframes,
+            start=start,
+            end=end,
+            jobs=jobs,
+            # 채택 좌표: 유동성 한도 켬(채택 0.005) · 재진입 켬(band) — 핀 없음(WAN-305).
+            adv_fraction=harness.UNSET,
+            reentry=True,
+            reentry_entry_rule=ADOPTED_REENTRY_ENTRY_RULE,
+            engine_check=arm.is_baseline,
+            take_profit_r=arm.take_profit_r,
+            partial_take_profit_r=arm.partial_r,
+            partial_take_profit_fraction=PARTIAL_FRACTION,
+            breakeven_after_partial=arm.breakeven,
+        )
+        book_rows = build_book_rows(
+            payloads,
+            book=LeverageBookParams(),
+            segments=SEGMENT_ORDER,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            include_reentry=True,
+        )
+        rows.extend(_book_ladder_row(arm, row) for row in book_rows)
+        if log:
+            print(
+                f"[wan323·book] {arm.name}: {len(book_rows)}구간 ({time.time() - t0:.0f}s)",
+                flush=True,
+            )
+    return rows
+
+
+def _book_ladder_row(arm: LadderArm, row: BookRunRow) -> BookLadderRow:
+    return BookLadderRow(
+        arm=arm.name,
+        family=arm.family,
+        take_profit_r=arm.take_profit_r,
+        partial_r=arm.partial_r,
+        breakeven=arm.breakeven,
+        segment=row.segment,
+        num_trades=row.num_trades,
+        win_rate=row.win_rate,
+        total_return=row.total_return,
+        max_drawdown=row.max_drawdown,
+        return_over_mdd=row.return_over_mdd,
+        peak_concurrency=row.peak_concurrency,
+        max_concurrent_risk=row.max_concurrent_risk,
+        liquidation_events=row.liquidation_events,
+        skipped_notional=row.skipped_notional,
+    )
+
+
+def build_book_summary(frame: pd.DataFrame) -> str:
+    """북 판 표 — 판정 열은 위험조정 축이다(총수익 %는 복리 착시, WAN-169/213)."""
+    lines: list[str] = [
+        "## 채택 북 판 (cap_only 5배 · 재진입 band) — 실매매 회계",
+        "",
+        "🗣️ 사용자 결정 2026-08-18: **「앞으로 재진입은 무조건 한다는 전제하에 하자」**. 위 "
+        "per-cell 표는 재진입이 없어(북 전용 기능) 실매매 조건이 아니다 — 이 표가 같은 팔을 "
+        "채택 북 위에서 다시 잰다.",
+        "",
+        "🚨 **판정은 위험조정 축으로 읽는다** — `total_return` %는 수천 거래 복리라 실현 "
+        "수익이 아니다(WAN-169/213). MDD · 최대 동시 리스크 · 청산 건수가 판정 열이다.",
+        "",
+    ]
+    for segment in (PRIMARY_OOS, STRESS_OOS):
+        subset = frame[frame["segment"] == segment]
+        if subset.empty:
+            continue
+        label = "주 수치(따뜻한 연속 OOS)" if segment == PRIMARY_OOS else "스트레스(차가운 OOS)"
+        lines += [
+            f"### {label}",
+            "",
+            "| 팔 | 전량 익절 | 분할 | 본절 | 거래 | 총수익 | MDD | 수익/MDD | 승률 | "
+            "최대 동시 리스크 | 최대 동시 칸 | 청산 | 명목 밀림 |",
+            "| -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- | -- |",
+        ]
+        for arm in ARMS:
+            hit = subset[subset["arm"] == arm.name]
+            if hit.empty:
+                continue
+            row = hit.iloc[0]
+            split = "—" if arm.partial_r is None else f"{arm.partial_r:.1f}R"
+            be = "on" if arm.breakeven else ("—" if arm.is_baseline else "off")
+            over = row["return_over_mdd"]
+            lines.append(
+                f"| `{arm.name}` | {arm.take_profit_r:.1f}R | {split} | {be} | "
+                f"{int(row['num_trades'])} | {float(row['total_return']) * 100:+,.0f}% | "
+                f"{float(row['max_drawdown']) * 100:.2f}% | "
+                f"{'—' if pd.isna(over) else f'{float(over):,.1f}'} | "
+                f"{float(row['win_rate']) * 100:.2f}% | "
+                f"{float(row['max_concurrent_risk']) * 100:.2f}% | "
+                f"{int(row['peak_concurrency'])} | {int(row['liquidation_events'])} | "
+                f"{int(row['skipped_notional'])} |"
+            )
+        lines.append("")
+    lines += [
+        "⚠️ **per-cell 표와 셀을 직접 비교하지 말 것** — 회계가 통째로 다르다(독립 자본 vs "
+        "공유 지갑 · 재진입 없음 vs 있음 · 배수 1 vs 5).",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- #
 # 검산 — 기준선 팔이 곧 채택 엔진인가
 # --------------------------------------------------------------------------- #
 
@@ -731,7 +910,8 @@ def build_summary(frame: pd.DataFrame) -> str:
         "부분 익절 뒤 본전으로 나간 거래는 그로스가 0 언저리여도 비용 때문에 대개 패배로 센다 — "
         "`Trade.is_win`이 곧 이 정의이고 회귀 테스트가 동작으로 고정한다.",
         "",
-        f"**좌표**: 12종목 × 못 박은 6년({harness.DEFAULT_START}~{harness.DEFAULT_END}) × "
+        f"**좌표**: {frame['symbol'].nunique()}종목 × "
+        f"못 박은 6년({harness.DEFAULT_START}~{harness.DEFAULT_END}) × "
         f"{'·'.join(timeframes) if timeframes else '—'} · `baseline` 단독 · per-cell 단일 포지션 · "
         "핀 없음(WAN-305). 주 구간 = `oos_warm`(따뜻), 스트레스 = `oos`(차가움).",
         "",
@@ -876,7 +1056,38 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--append", action="store_true", help="기존 CSV에 이어붙인다")
     parser.add_argument("--from-csv", action="store_true", help="격자를 돌지 않고 요약만 재생성")
     parser.add_argument("--checksum", action="store_true", help="A0 ≡ harness.run_once 검산만")
+    parser.add_argument(
+        "--book",
+        action="store_true",
+        help="채택 북(cap_only 5배 · 재진입 band)에서 팔을 다시 잰다(별도 CSV)",
+    )
+    parser.add_argument(
+        "--book-arms",
+        default=None,
+        help=f"북 판에서 돌릴 팔(쉼표) 또는 all. 기본: {','.join(DEFAULT_BOOK_ARMS)}",
+    )
     return parser.parse_args(argv)
+
+
+def _resolve_book_arms(arg: str | None) -> list[LadderArm]:
+    if arg is None:
+        return [ARMS_BY_NAME[name] for name in DEFAULT_BOOK_ARMS]
+    if arg.strip().lower() == "all":
+        return list(ARMS)
+    names = [name.strip() for name in arg.split(",") if name.strip()]
+    unknown = [name for name in names if name not in ARMS_BY_NAME]
+    if unknown:
+        raise ValueError(f"모르는 팔입니다: {unknown} (가능: {', '.join(ARMS_BY_NAME)})")
+    return [ARMS_BY_NAME[name] for name in names]
+
+
+def _write_summary(frame: pd.DataFrame) -> None:
+    """per-cell 요약 + (있으면) 북 판 절을 한 파일로 낸다."""
+    text = build_summary(frame)
+    if BOOK_CSV_PATH.exists():
+        text = text + "\n" + build_book_summary(pd.read_csv(BOOK_CSV_PATH))
+    SUMMARY_PATH.write_text(text, encoding="utf-8")
+    print(f"[wan323] 요약: {SUMMARY_PATH}", flush=True)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -898,6 +1109,27 @@ def main(argv: Sequence[str] | None = None) -> int:
             symbols, timeframes, start=args.start, end=args.end, db_path=harness.DB_PATH
         ):
             print(f"[wan323] 검산 {note}", flush=True)
+        return 0
+
+    if args.book:
+        book_rows = run_book_report(
+            symbols,
+            timeframes,
+            arms=_resolve_book_arms(args.book_arms),
+            start=args.start,
+            end=args.end,
+            jobs=args.jobs if args.jobs is not None else harness.default_jobs(),
+        )
+        frame = pd.DataFrame([r.model_dump() for r in book_rows])
+        if args.append and BOOK_CSV_PATH.exists():
+            old_frame = pd.read_csv(BOOK_CSV_PATH)
+            frame = pd.concat([old_frame, frame], ignore_index=True).drop_duplicates(
+                subset=["arm", "segment"], keep="last"
+            )
+        frame.to_csv(BOOK_CSV_PATH, index=False)
+        print(f"[wan323] 북 CSV: {BOOK_CSV_PATH} ({len(frame)}행)", flush=True)
+        if CSV_PATH.exists():
+            _write_summary(pd.read_csv(CSV_PATH))
         return 0
 
     if args.from_csv:
@@ -923,8 +1155,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         frame.to_csv(CSV_PATH, index=False)
         print(f"[wan323] CSV: {CSV_PATH} ({len(frame)}행)", flush=True)
 
-    SUMMARY_PATH.write_text(build_summary(frame), encoding="utf-8")
-    print(f"[wan323] 요약: {SUMMARY_PATH}", flush=True)
+    _write_summary(frame)
     return 0
 
 
