@@ -603,3 +603,61 @@ def test_cmd_doctor_notifies_only_with_flag(
 
     assert cmd_doctor(_doctor_args(notify_on_failure=True), settings) == 1
     assert len(calls) == 1  # 플래그 + 이상 → 한 번 보낸다.
+
+
+# --------------------------------------------------------------------------- #
+# 부분 봉 스캔 출력 (WAN-327)
+# --------------------------------------------------------------------------- #
+
+
+def test_format_partial_bar_scan_splits_damage_from_noise() -> None:
+    """손상과 거래량 노이즈를 갈라 찍는다 — 한 수로 뭉치면 진짜 부분 봉이 묻힌다."""
+    from cli.main import format_partial_bar_scan
+    from data.partial_bars import BarDiscrepancy, SeriesScan
+
+    damaged = BarDiscrepancy(
+        symbol="BTC/USDT:USDT",
+        timeframe="4h",
+        open_time=1_784_000_000_000,
+        kind="partial",
+        resampled_volume=100.0,
+        stored_volume=45.0,
+        price_fields=("high", "close"),
+        max_price_bp=29.8,
+    )
+    noise = BarDiscrepancy(
+        symbol="BTC/USDT:USDT",
+        timeframe="4h",
+        open_time=1_784_100_000_000,
+        kind="volume_noise",
+        resampled_volume=100.0,
+        stored_volume=100.2,
+        price_fields=(),
+        max_price_bp=0.0,
+    )
+    text = format_partial_bar_scan(
+        [
+            SeriesScan(
+                symbol="BTC/USDT:USDT",
+                timeframe="4h",
+                source_timeframe="1m",
+                compared=13_139,
+                discrepancies=[damaged, noise],
+            )
+        ]
+    )
+    assert "손상 1봉" in text
+    assert "노이즈 1봉" in text
+    assert "partial" in text
+    assert "45.0" in text  # 거래량 비율이 보인다(판정자)
+
+
+def test_format_partial_bar_scan_clean_says_so() -> None:
+    from cli.main import format_partial_bar_scan
+    from data.partial_bars import SeriesScan
+
+    text = format_partial_bar_scan(
+        [SeriesScan(symbol="BTC/USDT:USDT", timeframe="4h", source_timeframe="1m", compared=10)]
+    )
+    assert "손상 봉 없음" in text
+    assert "OK" in text
