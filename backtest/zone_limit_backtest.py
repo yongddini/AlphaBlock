@@ -61,7 +61,12 @@ from backtest.multi_tf_overlap import (
     find_refinement,
 )
 from backtest.portfolio import PortfolioParams, PortfolioStats, sequence_portfolio
-from backtest.substep import ZoneLimitStatus, build_substeps, simulate_zone_limit_trade
+from backtest.substep import (
+    PartialExit,
+    ZoneLimitStatus,
+    build_substeps,
+    simulate_zone_limit_trade,
+)
 from backtest.sweep import bars_per_year, default_backtest_config, timeframe_to_ms
 from common.costs import Liquidity
 from data.funding import Direction, cumulative_funding_cost, funding_coverage
@@ -133,6 +138,11 @@ class _Candidate:
     """보유 구간의 최대유리이탈(MFE), R 단위(WAN-90). 시뮬레이터가 낸 값 그대로 싣는다."""
     mae_r: float | None = None
     """보유 구간의 최대불리이탈(MAE), R 단위(WAN-90). 시뮬레이터가 낸 값 그대로 싣는다."""
+    partial_exits: tuple[PartialExit, ...] = ()
+    """부분 청산 체결들 (WAN-323 반익절 래더, 옵트인). 래더를 안 켜면 항상 비어 있다.
+
+    시뮬레이터가 낸 값 그대로다. `exit_price`/`reason`은 **잔량**의 최종 청산이고,
+    `_to_trade`가 진입 수량 × 각 `fraction`으로 수량·수수료·펀딩을 환산한다."""
     exit_extreme: float | None = None
     """손절 청산 봉의 불리 극값(롱=저가, 숏=고가) (WAN-276). 손절 청산일 때만 값이 있다.
 
@@ -744,6 +754,9 @@ def build_zone_limit_candidates(
     stop_loss_override: StopLossOverride | None = None,
     stop_slippage_alpha: float = 0.0,
     limit_stop_nonfill: bool = False,
+    partial_take_profit_r: float | None = None,
+    partial_take_profit_fraction: float = 0.5,
+    breakeven_after_partial: bool = False,
 ) -> tuple[list[_Candidate], ZoneLimitStats]:
     """B안 셋업 순회 → 1분 서브스텝 시뮬레이션까지(비용 반영 전 원가 후보 목록).
 
@@ -791,7 +804,13 @@ def build_zone_limit_candidates(
     규칙은 같고 시점만 다르다. 다만 `stop_loss_override`가 `None`을 돌려줄 때의 처리가
     갈린다: 정적 경로는 탭 봉에서 셋업을 빼(분모에도 안 들어간다), 봉내 경로는 이미 주문이
     걸린 뒤라 `CANCELLED_CONDITION_FAILED`(미체결)로 끝난다 — 오버라이드를 안 주면 두
-    경로 모두 예전과 비트 단위로 같다."""
+    경로 모두 예전과 비트 단위로 같다.
+
+    `partial_take_profit_r`·`partial_take_profit_fraction`·`breakeven_after_partial`
+    (WAN-323 반익절 래더, 옵트인)은 시뮬레이터로 그대로 흘려보낸다. 래더는 **청산만**
+    바꾸므로 진입 결정·체결 판정에는 전혀 안 쓰이고, 따라서 셋업·체결 집합(후보 수·
+    `ZoneLimitStats`)은 기본과 **비트 단위로 같다** — 달라지는 건 각 후보의 부분 청산
+    (`partial_exits`)과 잔량의 최종 청산뿐이다. 안 주면(기본) 엔진이 예전과 같다."""
     if overlap is not None and overlap.arm != "A" and zone_provider is None:
         raise ValueError(
             "overlap.arm이 'B'/'C'면 zone_provider가 필요합니다 — 하위TF 겹침 존을 "
@@ -1060,6 +1079,9 @@ def build_zone_limit_candidates(
             first_tap_free=first_tap_free,
             stop_slippage_alpha=stop_slippage_alpha,
             limit_stop_nonfill=limit_stop_nonfill,
+            partial_take_profit_r=partial_take_profit_r,
+            partial_take_profit_fraction=partial_take_profit_fraction,
+            breakeven_after_partial=breakeven_after_partial,
         )
 
         if not outcome.order_rested:
@@ -1145,6 +1167,7 @@ def build_zone_limit_candidates(
                 trigger_time=signal.trigger_time,
                 mfe_r=outcome.mfe_r,
                 mae_r=outcome.mae_r,
+                partial_exits=outcome.partial_exits,
                 exit_extreme=outcome.exit_extreme,
                 refinement_tf=refinement_tf,
                 # WAN-244: 탭 봉 pos의 룩어헤드-안전 ADV. 상한이 꺼져 있으면 None(무시).
@@ -1258,8 +1281,12 @@ def _to_trade(
     이 비대칭이 A안(시장가=테이커 진입)과의 공정한 비교의 핵심이다.
 
     보유 구간 `[진입시각, 청산시각)`의 펀딩비는 A안 엔진(`BacktestEngine._funding_cost`)
-    과 동일하게 진입 명목가 기준으로 산출해 실현손익에서 뺀다(WAN-95). B안은 부분청산이
-    없어 구간 분할이 필요 없다.
+    과 동일하게 진입 명목가 기준으로 산출해 실현손익에서 뺀다(WAN-95). 반익절 래더
+    (WAN-323, 옵트인)로 부분 청산이 있으면 명목이 도중에 줄므로 구간을 나눠 각 구간의
+    잔량 명목으로 매긴다 — 래더를 안 켜면 구간이 하나라 예전과 비트 단위로 같다.
+
+    ⚠️ **부분 청산도 청산이라 테이커**로 본다(전량 익절과 같은 취급) — 래더는 청산이
+    2회라 **수수료가 늘고**, 그 비용이 표에 그대로 드러나는 것이 WAN-323 §3-3의 요구다.
 
     `open_notional`(WAN-103)은 이미 열린 포지션들의 명목 합이다. 명목 상한이 포트폴리오
     전체에 걸리므로 사이징이 그 여유분만 새 포지션에 배정한다 — 동시 1포지션 경로는
@@ -1291,26 +1318,51 @@ def _to_trade(
     entry_notional = entry_fill * qty
     entry_fee = costs.fee(entry_notional, Liquidity.MAKER)
 
+    # WAN-323: 부분 청산(있으면)을 먼저 체결시키고 **잔량**으로 최종 청산한다. 래더를
+    # 안 켜면 `partial_exits`가 비어 있어 아래 루프가 돌지 않고 remaining == qty라
+    # 예전 식과 글자 그대로 같다.
+    fills: list[TradeFill] = []
+    gross = 0.0
+    remaining = qty
+    for partial in cand.partial_exits:
+        part_qty = min(qty * partial.fraction, remaining)
+        if part_qty <= 0.0:
+            continue
+        part_fill = costs.exit_fill(partial.price, is_long=is_long, liquidity=Liquidity.TAKER)
+        part_fee = costs.fee(part_fill * part_qty, Liquidity.TAKER)
+        gross += side.sign * (part_fill - entry_fill) * part_qty
+        fills.append(
+            TradeFill(
+                time=partial.time,
+                price=part_fill,
+                quantity=part_qty,
+                fee=part_fee,
+                reason=_EXIT_REASON[partial.reason],
+            )
+        )
+        remaining -= part_qty
     exit_fill = costs.exit_fill(cand.exit_price, is_long=is_long, liquidity=Liquidity.TAKER)
-    exit_fee = costs.fee(exit_fill * qty, Liquidity.TAKER)
-    gross = side.sign * (exit_fill - entry_fill) * qty
+    exit_fee = costs.fee(exit_fill * remaining, Liquidity.TAKER)
+    gross += side.sign * (exit_fill - entry_fill) * remaining
+    fills.append(
+        TradeFill(
+            time=cand.exit_time,
+            price=exit_fill,
+            quantity=remaining,
+            fee=exit_fee,
+            reason=cand.reason,
+        )
+    )
+    total_exit_fee = sum(f.fee for f in fills)
     funding_cost = _funding_cost_for(cand, entry_notional, cfg, funding_rates)
-    realized = gross - entry_fee - exit_fee - funding_cost
+    realized = gross - entry_fee - total_exit_fee - funding_cost
     return Trade(
         side=side,
         entry_time=cand.entry_time,
         entry_price=entry_fill,
         quantity=qty,
         entry_fee=entry_fee,
-        exits=[
-            TradeFill(
-                time=cand.exit_time,
-                price=exit_fill,
-                quantity=qty,
-                fee=exit_fee,
-                reason=cand.reason,
-            )
-        ],
+        exits=fills,
         funding_cost=funding_cost,
         realized_pnl=realized,
         return_pct=realized / entry_notional if entry_notional else 0.0,
@@ -1325,18 +1377,38 @@ def _funding_cost_for(
     cfg: BacktestConfig,
     funding_rates: Sequence[FundingRate] | None,
 ) -> float:
-    """셋업 보유 구간의 누적 펀딩비용(양수=지불, 음수=수취). 미사용/무데이터면 0."""
+    """셋업 보유 구간의 누적 펀딩비용(양수=지불, 음수=수취). 미사용/무데이터면 0.
+
+    부분 청산(WAN-323)이 있으면 그 시각에 명목이 줄므로 구간을 나눠 각 구간의 잔량
+    명목으로 매긴다. 부분 청산이 없으면(기본) 구간이 하나라 예전과 비트 단위로 같다.
+    """
     if not cfg.funding_enabled or not funding_rates:
         return 0.0
     direction: Direction = "long" if cand.side is PositionSide.LONG else "short"
-    return cumulative_funding_cost(
-        funding_rates,
-        position_notional=entry_notional,
-        direction=direction,
-        start_ms=cand.entry_time,
-        end_ms=cand.exit_time,
-        include_predicted=cfg.funding_include_predicted,
-    )
+
+    def _segment(notional: float, start_ms: int, end_ms: int) -> float:
+        if notional <= 0.0 or end_ms <= start_ms:
+            return 0.0
+        return cumulative_funding_cost(
+            funding_rates,
+            position_notional=notional,
+            direction=direction,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            include_predicted=cfg.funding_include_predicted,
+        )
+
+    if not cand.partial_exits:
+        return _segment(entry_notional, cand.entry_time, cand.exit_time)
+
+    total = 0.0
+    fraction = 1.0
+    cursor = cand.entry_time
+    for partial in cand.partial_exits:
+        total += _segment(entry_notional * fraction, cursor, partial.time)
+        fraction = max(0.0, fraction - partial.fraction)
+        cursor = max(cursor, partial.time)
+    return total + _segment(entry_notional * fraction, cursor, cand.exit_time)
 
 
 def build_result_from_trades(
