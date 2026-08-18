@@ -18,6 +18,7 @@ from backtest.wan323_partial_tp_ladder import (
     ARMS,
     ARMS_BY_NAME,
     BASELINE_OF,
+    BUCKET_EDGES,
     EPS,
     MIN_TRADES,
     PARTIAL_FRACTION,
@@ -28,6 +29,8 @@ from backtest.wan323_partial_tp_ladder import (
     _verdict,
     breakeven_conversion,
     breakeven_split,
+    bucket_of,
+    bucket_rows,
     build_summary,
     expected_ladder_delta,
     leave_one_out,
@@ -352,3 +355,96 @@ def test_verdict_no_longer_calls_a_win_a_bug() -> None:
     text = _verdict("A", +0.02, -0.01)
     assert "버그" not in text
     assert "구제된 손절" in text
+
+
+# --------------------------------------------------------------------------- #
+# 손절폭 버킷 (사용자 요청 2026-08-18)
+# --------------------------------------------------------------------------- #
+
+
+def test_bucket_edges_match_wan154() -> None:
+    """WAN-154 §3과 **같은 경계**여야 옛 표와 방향을 대조할 수 있다."""
+    assert [name for name, _lo, _hi in BUCKET_EDGES] == [
+        "0~0.2%",
+        "0.2~0.3%",
+        "0.3~0.5%",
+        "0.5~1%",
+        "1~2%",
+        ">2%",
+    ]
+    assert bucket_of(0.0015) == "0~0.2%"
+    assert bucket_of(0.003) == "0.3~0.5%"  # 경계는 아래쪽 버킷이 아니라 위쪽에 든다
+    assert bucket_of(0.05) == ">2%"
+
+
+def _ledger(stop_frac: float, net_r: float, *, stopped: bool, partial: bool = False) -> TradeLedger:
+    return TradeLedger(
+        entry_time=int(stop_frac * 1e9),
+        reason=ExitReason.STOP_LOSS if stopped else ExitReason.TAKE_PROFIT,
+        has_partial=partial,
+        gross_r=net_r + 0.1,
+        stop_frac=stop_frac,
+        net_r=net_r,
+        cost_r=0.1,
+        cap_hit=stop_frac < 0.01,
+        effective_risk=min(0.01, stop_frac),
+    )
+
+
+def test_survival_and_win_rate_diverge_when_cost_eats_the_win() -> None:
+    """좁은 버킷의 핵심 관찰 — **손절을 안 당하고도 진다**(WAN-154 §3).
+
+    생존율과 승률을 같은 값으로 내면 그 간극이 표에서 사라진다.
+    """
+    rows = bucket_rows(
+        "BTC/USDT:USDT",
+        "1h",
+        "oos_warm",
+        "A0",
+        [
+            _ledger(0.0015, -0.05, stopped=False),  # 손절 아님인데 순손익 음수
+            _ledger(0.0015, +0.40, stopped=False),
+            _ledger(0.0015, -1.10, stopped=True),
+            _ledger(0.0015, -1.10, stopped=True),
+        ],
+    )
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.bucket == "0~0.2%"
+    assert row.survival_rate == pytest.approx(0.5)  # 손절 2/4
+    assert row.win_rate == pytest.approx(0.25)  # 순플러스 1/4
+    assert row.survival_rate > row.win_rate
+
+
+def test_bucket_row_reports_cap_and_effective_risk() -> None:
+    """레버리지 상한이 좁은 손절을 작게 베팅시키는 것이 열로 드러난다(WAN-154 §2)."""
+    rows = bucket_rows(
+        "BTC/USDT:USDT",
+        "1h",
+        "oos_warm",
+        "A0",
+        [_ledger(0.004, +0.3, stopped=False), _ledger(0.015, +0.3, stopped=False)],
+    )
+    narrow = next(r for r in rows if r.bucket == "0.3~0.5%")
+    wide = next(r for r in rows if r.bucket == "1~2%")
+    assert narrow.cap_hit_rate == 1.0  # 손절폭 0.4% < 1% → 상한 발동
+    assert wide.cap_hit_rate == 0.0
+    # 이름값 1%와 다르다 — 좁은 버킷의 실효 리스크가 더 작다.
+    assert narrow.effective_risk_mean < wide.effective_risk_mean
+
+
+def test_partial_counts_are_bucketed() -> None:
+    """래더가 **어느 버킷에서** 일하는지 세는 것이 이 표의 목적이다."""
+    rows = bucket_rows(
+        "BTC/USDT:USDT",
+        "1h",
+        "oos_warm",
+        "A1_be_on",
+        [
+            _ledger(0.004, +0.5, stopped=False, partial=True),
+            _ledger(0.004, +0.1, stopped=True, partial=True),  # 본절 청산
+            _ledger(0.004, -1.1, stopped=True, partial=False),  # 분할 미도달
+        ],
+    )
+    row = rows[0]
+    assert (row.n_trades, row.n_partial, row.n_partial_then_stop) == (3, 2, 1)

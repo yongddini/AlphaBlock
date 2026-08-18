@@ -102,6 +102,7 @@ REPORTS_DIR = Path("backtest/reports")
 CSV_PATH = REPORTS_DIR / "wan323_partial_tp_ladder.csv"
 SUMMARY_PATH = REPORTS_DIR / "wan323_partial_tp_ladder_summary.md"
 BOOK_CSV_PATH = REPORTS_DIR / "wan323_partial_tp_ladder_book.csv"
+BUCKET_CSV_PATH = REPORTS_DIR / "wan323_partial_tp_ladder_buckets.csv"
 
 #: 북 판에서 돌릴 기본 팔 — **결정적인 것만**(사용자 결정 2026-08-18 「재진입 무조건」).
 #: 14팔 전부를 북으로 돌리면 후보 생성을 14번 다시 해야 해 per-cell 격자와 맞먹는 비용이
@@ -256,12 +257,20 @@ def expected_ladder_delta(arm: LadderArm, *, rescued: bool) -> float:
 
 @dataclass(frozen=True)
 class TradeLedger:
-    """검산용 거래 한 줄 — 진입 시각으로 팔 사이를 조인한다."""
+    """검산·버킷 집계용 거래 한 줄 — 진입 시각으로 팔 사이를 조인한다."""
 
     entry_time: int
     reason: ExitReason
     has_partial: bool
     gross_r: float
+    stop_frac: float = 0.0
+    """손절 거리 ÷ 진입 체결가. 버킷 축의 키다(WAN-154와 같은 정의)."""
+    net_r: float = 0.0
+    cost_r: float = 0.0
+    cap_hit: bool = False
+    """레버리지 상한이 명목을 깎았는지 — 손절폭 < `리스크/레버리지`와 동치(WAN-152 대수식)."""
+    effective_risk: float = 0.0
+    """실효 리스크 = min(`risk_per_trade`, `leverage` × 손절폭). 이름값(1%)과 다를 수 있다."""
 
 
 @dataclass(frozen=True)
@@ -350,12 +359,24 @@ def run_arm(
             gross_rs.append((trade.realized_pnl + cost) / risk)
             # 그로스 R = 비용 반영 전 실현 R. 항등식은 비용을 타지 않으므로 이 자로 잰다
             # (체결가에는 슬리피지가 들어 있어 `slip`을 되돌린 원가 기준으로 낸다).
+            stop_frac = abs(trade.entry_price - cand.stop_price) / trade.entry_price
+            sizing = cfg.risk_sizing
+            cap_hit = False
+            effective_risk = 0.0
+            if sizing is not None and sizing.sizing_mode == "risk_pct":
+                cap_hit = stop_frac < sizing.risk_per_trade / sizing.leverage
+                effective_risk = min(sizing.risk_per_trade, sizing.leverage * stop_frac)
             ledger.append(
                 TradeLedger(
                     entry_time=trade.entry_time,
                     reason=cand.reason,
                     has_partial=bool(cand.partial_exits),
                     gross_r=(trade.realized_pnl + cost) / risk,
+                    stop_frac=stop_frac,
+                    net_r=trade.realized_pnl / risk,
+                    cost_r=cost / risk,
+                    cap_hit=cap_hit,
+                    effective_risk=effective_risk,
                 )
             )
 
@@ -390,7 +411,7 @@ def run_arm(
 
 def run_cell(
     market: MarketData, segment: Segment, *, arms: Sequence[LadderArm] = ARMS
-) -> list[LadderRow]:
+) -> tuple[list[LadderRow], list[BucketRow]]:
     """한 (심볼, TF, 구간)의 14팔을 돈다.
 
     🚨 **검산이 코드에 있다** — 래더는 청산만 바꾸므로 모든 팔의 체결 셋업 진입 시각
@@ -399,7 +420,7 @@ def run_cell(
     """
     seg_market = harness.slice_market(market, segment)
     if seg_market.empty or seg_market.df_1m.empty:
-        return []
+        return [], []
     eval_from_ms = harness.eval_boundary_ms(market, segment)
     # ⚠️ 핀 없음(WAN-305) — `OrderBlockParams()`가 곧 오늘의 채택 탐지 파라미터다.
     obr: OrderBlockResult = OrderBlockDetector(OrderBlockParams()).run(seg_market.htf_df)
@@ -427,7 +448,14 @@ def run_cell(
                     f"{names[0]} {len(head)}. 래더가 진입을 바꾸는 배선 버그다."
                 )
     _check_ladder_identity(ledgers, seg_market.symbol, seg_market.timeframe, segment.name, arms)
-    return rows
+    buckets = [
+        b
+        for arm in arms
+        for b in bucket_rows(
+            seg_market.symbol, seg_market.timeframe, segment.name, arm.name, ledgers[arm.name]
+        )
+    ]
+    return rows, buckets
 
 
 def _check_ladder_identity(
@@ -486,9 +514,11 @@ class CellWork:
     start: str
     end: str
     db_path: str
+    arms: tuple[str, ...] = ()
+    """돌릴 팔 이름(빈 튜플 = 14팔 전부). 버킷 축처럼 일부 팔만 다시 돌 때 쓴다."""
 
 
-def _cell_worker(work: CellWork) -> tuple[list[LadderRow], str]:
+def _cell_worker(work: CellWork) -> tuple[list[LadderRow], list[BucketRow], str]:
     start_ms, end_ms = parse_date_ms(work.start), parse_date_ms(work.end)
     market = harness.load_market_data(
         work.symbol,
@@ -500,13 +530,21 @@ def _cell_worker(work: CellWork) -> tuple[list[LadderRow], str]:
         db_path=work.db_path,
     )
     if market.empty or market.df_1m.empty:
-        return [], f"{work.symbol} {work.timeframe}: 데이터 없음 — 건너뜀"
+        return [], [], f"{work.symbol} {work.timeframe}: 데이터 없음 — 건너뜀"
     t0 = time.time()
     rows: list[LadderRow] = []
+    buckets: list[BucketRow] = []
+    arms = [ARMS_BY_NAME[name] for name in work.arms] if work.arms else list(ARMS)
     for segment in segments_for(warm_oos=True):
-        rows.extend(run_cell(market, segment))
+        cell_rows, cell_buckets = run_cell(market, segment, arms=arms)
+        rows.extend(cell_rows)
+        buckets.extend(cell_buckets)
     gap = "" if market.funding_rates else " ⚠️ 펀딩 0행"
-    return rows, f"{work.symbol} {work.timeframe}: {len(rows)}행 ({time.time() - t0:.0f}s){gap}"
+    return (
+        rows,
+        buckets,
+        f"{work.symbol} {work.timeframe}: {len(rows)}행 ({time.time() - t0:.0f}s){gap}",
+    )
 
 
 def run_report(
@@ -517,8 +555,9 @@ def run_report(
     end: str = harness.DEFAULT_END,
     db_path: str = harness.DB_PATH,
     jobs: int = 1,
+    arms: Sequence[str] = (),
     log: bool = True,
-) -> list[LadderRow]:
+) -> tuple[list[LadderRow], list[BucketRow]]:
     """격자 실행. `jobs`는 **순수 성능 노브**다(직렬과 행이 같다 — WAN-121 관행)."""
     works = [
         CellWork(
@@ -527,17 +566,20 @@ def run_report(
             start=start,
             end=end,
             db_path=db_path,
+            arms=tuple(arms),
         )
         for timeframe in timeframes
         for symbol in symbols
     ]
     rows: list[LadderRow] = []
+    buckets: list[BucketRow] = []
     done = 0
 
-    def _absorb(cell: list[LadderRow], note: str) -> None:
+    def _absorb(cell: list[LadderRow], cell_buckets: list[BucketRow], note: str) -> None:
         nonlocal done
         done += 1
         rows.extend(cell)
+        buckets.extend(cell_buckets)
         if log:
             print(f"[wan323] ({done}/{len(works)}) {note}", flush=True)
 
@@ -545,13 +587,11 @@ def run_report(
         with ProcessPoolExecutor(max_workers=jobs if jobs > 0 else None) as pool:
             futures = [pool.submit(_cell_worker, work) for work in works]
             for fut in as_completed(futures):
-                cell, note = fut.result()
-                _absorb(cell, note)
+                _absorb(*fut.result())
     else:
         for work in works:
-            cell, note = _cell_worker(work)
-            _absorb(cell, note)
-    return sort_rows(rows)
+            _absorb(*_cell_worker(work))
+    return sort_rows(rows), buckets
 
 
 def sort_rows(rows: Sequence[LadderRow]) -> list[LadderRow]:
@@ -567,6 +607,103 @@ def sort_rows(rows: Sequence[LadderRow]) -> list[LadderRow]:
             arm_rank.get(r.arm, len(arm_rank)),
         ),
     )
+
+
+# --------------------------------------------------------------------------- #
+# 손절폭 버킷 — 래더가 「어디서」 일하는가 (사용자 요청 2026-08-18)
+# --------------------------------------------------------------------------- #
+#
+# WAN-154 §3이 손절폭 버킷별로 「좁을수록 승률은 높은데 비용의 R 비중이 더 빨리 올라 기대값이
+# 음수」임을 보였고, 그것이 손절폭 가드 0.3%의 근거다. 다만 그 표는 **6종목·3년·필터 끔**이고
+# **래더 축이 없다**. 오늘 엔진(12종목·6년·필터 1.28)에서 분포가 어떻게 생겼는지, 그리고
+# **래더가 어느 버킷에서 일하는지**는 잰 적이 없다.
+#
+# 🚨 이 축이 중요한 이유: 래더의 본절 보장(「분할 지점에 닿으면 순플러스」)은 확정 이익
+# `f·k·R`이 비용을 넘을 때만 성립한다. 실측 비용 0.07~0.11R 기준 그 임계 손절폭이 약
+# **0.22%** 라 가드 0.3%가 겨우 1.36배 여유로 막고 있다. 좁은 버킷에 거래가 몰려 있으면
+# 래더의 승률 효과가 그만큼 얇은 얼음 위에 있다는 뜻이다.
+#
+# ⚠️ 레버리지 상한(명목 ≤ 자본 × 1배)이 손절폭 1% 미만을 자동으로 작게 베팅시키므로
+# (`cap_hit`), 버킷별 **실효 리스크**도 함께 낸다 — 「이름값 1%」와 다르다(WAN-154 §2).
+
+#: WAN-154 §3과 **같은 경계**를 쓴다 — 그래야 옛 표와 방향을 대조할 수 있다(셀 직접 비교는
+#: 금지: 창·유니버스·필터가 다르다).
+BUCKET_EDGES: tuple[tuple[str, float, float], ...] = (
+    ("0~0.2%", 0.0, 0.002),
+    ("0.2~0.3%", 0.002, 0.003),
+    ("0.3~0.5%", 0.003, 0.005),
+    ("0.5~1%", 0.005, 0.01),
+    ("1~2%", 0.01, 0.02),
+    (">2%", 0.02, float("inf")),
+)
+
+
+def bucket_of(stop_frac: float) -> str:
+    for name, lo, hi in BUCKET_EDGES:
+        if lo <= stop_frac < hi:
+            return name
+    return BUCKET_EDGES[-1][0]
+
+
+class BucketRow(BaseModel):
+    """한 (심볼, TF, 구간, 팔, 손절폭 버킷) 집계."""
+
+    model_config = ConfigDict(frozen=True)
+
+    symbol: str
+    timeframe: str
+    segment: str
+    arm: str
+    bucket: str
+    n_trades: int
+    win_rate: float
+    """순손익 > 0 비율(WAN-323 §3-1 정의)."""
+    survival_rate: float
+    """손절로 끝나지 **않은** 비율. ⚠️ 승률과 다르다 — 좁은 버킷에서는 살아남고도 비용에
+    먹혀 지는 거래가 있다(WAN-154 §3이 그 간극을 처음 보였다)."""
+    mean_net_r: float
+    cost_r_median: float
+    n_partial: int
+    n_partial_then_stop: int
+    cap_hit_rate: float
+    effective_risk_mean: float
+
+
+def bucket_rows(
+    market_symbol: str,
+    timeframe: str,
+    segment: str,
+    arm: str,
+    ledger: Sequence[TradeLedger],
+) -> list[BucketRow]:
+    grouped: dict[str, list[TradeLedger]] = {}
+    for row in ledger:
+        grouped.setdefault(bucket_of(row.stop_frac), []).append(row)
+    out: list[BucketRow] = []
+    for name, _lo, _hi in BUCKET_EDGES:
+        items = grouped.get(name)
+        if not items:
+            continue
+        stops = [t for t in items if t.reason is ExitReason.STOP_LOSS]
+        out.append(
+            BucketRow(
+                symbol=market_symbol,
+                timeframe=timeframe,
+                segment=segment,
+                arm=arm,
+                bucket=name,
+                n_trades=len(items),
+                win_rate=sum(1 for t in items if t.net_r > 0) / len(items),
+                survival_rate=1.0 - len(stops) / len(items),
+                mean_net_r=statistics.fmean(t.net_r for t in items),
+                cost_r_median=statistics.median(t.cost_r for t in items),
+                n_partial=sum(1 for t in items if t.has_partial),
+                n_partial_then_stop=sum(1 for t in items if t.has_partial and t in stops),
+                cap_hit_rate=sum(1 for t in items if t.cap_hit) / len(items),
+                effective_risk_mean=statistics.fmean(t.effective_risk for t in items),
+            )
+        )
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -1160,6 +1297,11 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="채택 북(cap_only 5배 · 재진입 band)에서 팔을 다시 잰다(별도 CSV)",
     )
     parser.add_argument(
+        "--arms",
+        default=None,
+        help="per-cell 격자에서 돌릴 팔(쉼표). 기본: 14팔 전부",
+    )
+    parser.add_argument(
         "--book-arms",
         default=None,
         help=f"북 판에서 돌릴 팔(쉼표) 또는 all. 기본: {','.join(DEFAULT_BOOK_ARMS)}",
@@ -1177,6 +1319,20 @@ def _resolve_book_arms(arg: str | None) -> list[LadderArm]:
     if unknown:
         raise ValueError(f"모르는 팔입니다: {unknown} (가능: {', '.join(ARMS_BY_NAME)})")
     return [ARMS_BY_NAME[name] for name in names]
+
+
+def _persist_buckets(buckets: Sequence[BucketRow], *, append: bool) -> None:
+    """손절폭 버킷 표를 별도 CSV로 낸다(팔 일부만 돌려도 이어붙는다)."""
+    if not buckets:
+        return
+    frame = pd.DataFrame([b.model_dump() for b in buckets])
+    if append and BUCKET_CSV_PATH.exists():
+        old = pd.read_csv(BUCKET_CSV_PATH)
+        frame = pd.concat([old, frame], ignore_index=True).drop_duplicates(
+            subset=["timeframe", "symbol", "segment", "arm", "bucket"], keep="last"
+        )
+    frame.to_csv(BUCKET_CSV_PATH, index=False)
+    print(f"[wan323] 버킷 CSV: {BUCKET_CSV_PATH} ({len(frame)}행)", flush=True)
 
 
 def _write_summary(frame: pd.DataFrame) -> None:
@@ -1236,14 +1392,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 1
         frame = pd.read_csv(CSV_PATH)
     else:
-        rows = run_report(
+        rows, buckets = run_report(
             symbols,
             timeframes,
             start=args.start,
             end=args.end,
             jobs=args.jobs if args.jobs is not None else harness.default_jobs(),
+            arms=[a.name for a in _resolve_book_arms(args.arms)] if args.arms else (),
         )
         frame = rows_to_frame(rows)
+        _persist_buckets(buckets, append=args.append)
         if args.append and CSV_PATH.exists():
             old = pd.read_csv(CSV_PATH)
             # 같은 (TF, 심볼, 구간, 팔)이 두 번 들어가지 않게 새 판이 이긴다.
