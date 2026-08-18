@@ -60,6 +60,7 @@ import sqlite3
 import threading
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
 from typing import Any
@@ -67,12 +68,15 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from backtest.trade_store import ENGINE_VERSION, UNKNOWN_REVISION, engine_source_revision
+from common.timefmt import format_kst_zoned
 from data.sqlite_util import configure_connection
 from live.trade_timeline import SOURCE_BACKTEST, TimelineRow, backtest_setup_by_cell
 
 __all__ = [
     "TIMELINE_CACHE_VERSION",
     "CachedCell",
+    "CachedCellRef",
+    "CachedEngine",
     "DayCacheResult",
     "DuplicateTimelineCacheError",
     "PersistReport",
@@ -349,6 +353,60 @@ class CachedCell:
     rows: tuple[TimelineRow, ...]
 
 
+@dataclass(frozen=True)
+class CachedCellRef:
+    """캐시에 담긴 셀 하나의 좌표 — (심볼, TF)와 그 셀의 `run_id`·적재 시각 (WAN-325).
+
+    행을 싣지 않는 가벼운 참조다. 「어느 엔진이 어느 칸을 갖고 있나」를 먼저 세고, 실제로
+    보여 주기로 고른 엔진의 셀만 `load_rows`로 읽기 위한 것이다.
+    """
+
+    run_id: str
+    symbol: str
+    timeframe: str
+    created_at: int
+
+
+@dataclass(frozen=True)
+class CachedEngine:
+    """한 날짜의 캐시가 담고 있는 **엔진 한 판**과 그 판이 가진 셀 전부 (WAN-325).
+
+    「옛 엔진 결과를 라벨 달아 보여준다」의 단위가 **셀이 아니라 엔진**인 것이 핵심이다 —
+    미스인 칸마다 제일 가까운 셀을 주워 오면 한 표에 여러 리비전이 섞이고, 그것이야말로
+    이 저장소가 금지하는 「여러 엔진의 숫자를 한 표에서 비교」다(완료 기준 4). 엔진 정체는
+    (엔진 소스 지문, 엔진 버전) 쌍으로 가른다 — 리비전만으로 가르면 엔진 버전이 오른 옛
+    적재분이 같은 판으로 뭉친다.
+    """
+
+    revision: str
+    engine_version: str
+    engine_name: str
+    created_at: int
+    cells: tuple[CachedCellRef, ...]
+
+    @property
+    def num_cells(self) -> int:
+        return len(self.cells)
+
+    def display_label(self) -> str:
+        """화면·터미널 배지 — (Ⅰ) 설명형 이름 + (Ⅱ) 엔진 소스 지문.
+
+        `current_engine_label()`과 **같은 꼴**이라 배지만 보고 두 판을 헷갈리지 않는다.
+        """
+        return f"{self.engine_name} ({self.revision})"
+
+    def created_label(self) -> str:
+        """적재 시각(KST). 시각이 안 남아 있으면 지어내지 않고 「적재 시각 미상」이다.
+
+        WAN-325 이전 적재분은 `created_at`이 0으로 저장돼 있어(호출부가 값을 안 넘겼다)
+        이 문구가 나온다 — 없는 시각을 그럴듯하게 만들어 내는 것보다 모른다고 밝히는 편이
+        낫다(`UNKNOWN_REVISION`과 같은 태도).
+        """
+        if self.created_at <= 0:
+            return "적재 시각 미상"
+        return format_kst_zoned(self.created_at)
+
+
 class TimelineCacheStore:
     """당일 백테 타임라인 캐시를 담는 SQLite 저장소 (WAN-239).
 
@@ -411,6 +469,10 @@ class TimelineCacheStore:
         거래 없음"과 "아직 계산 안 됨"을 구분한다. 같은 지문이 이미 있으면
         `DuplicateTimelineCacheError`이고, 덮어쓰려면 `replace=True`(엔진이 그대로인데 다시
         돌린 경우). 엔진이 바뀌면 `run_id`가 달라 **다른 셀**이 되므로 옛 셀을 안 건드린다.
+
+        `created_at`(UTC epoch ms)은 「이 행이 **언제** 계산됐나」다 — 옛 엔진 판을 보여 줄 때
+        배너에 찍힌다(WAN-325). 기본 `0`은 「모른다」이고, 실제 적재 경로(`persist_day`)는
+        지금 시각을 넣는다(옛 적재분은 0이라 배너가 「적재 시각 미상」으로 밝힌다).
         """
         run_id = fingerprint.run_id
         with self._lock, self._conn:
@@ -477,15 +539,89 @@ class TimelineCacheStore:
             ).fetchone()
             if cell is None:
                 return None
-            row_data = self._conn.execute(
-                "SELECT symbol, timeframe, is_long, status, fill_ms, fill_price, exit_ms, "
-                "exit_price, exit_reason, pnl_pct, pnl_amount, zone_start_time, "
-                "zone_confirmed_time, is_reentry FROM timeline_cache_rows WHERE run_id = ?"
-                " ORDER BY row_no",
-                (run_id,),
-            ).fetchall()
-        rows = tuple(_row_from_db(r) for r in row_data)
+            # 셀 조회와 행 조회를 **한 락 안에서** 한다(그 사이 정리가 끼면 "셀은 있는데
+            # 행이 0"으로 보인다) — `self._lock`은 재진입이 안 되므로 헬퍼를 나눠 둔다.
+            rows = self._rows_locked(run_id)
         return CachedCell(fingerprint=fingerprint, created_at=int(cell[0]), rows=rows)
+
+    def _rows_locked(self, run_id: str) -> tuple[TimelineRow, ...]:
+        """`load_rows`의 알맹이 — **락을 이미 쥔 채** 부른다."""
+        row_data = self._conn.execute(
+            "SELECT symbol, timeframe, is_long, status, fill_ms, fill_price, exit_ms, "
+            "exit_price, exit_reason, pnl_pct, pnl_amount, zone_start_time, "
+            "zone_confirmed_time, is_reentry FROM timeline_cache_rows WHERE run_id = ?"
+            " ORDER BY row_no",
+            (run_id,),
+        ).fetchall()
+        return tuple(_row_from_db(r) for r in row_data)
+
+    def load_rows(self, run_id: str) -> tuple[TimelineRow, ...]:
+        """`run_id` 한 셀의 백테 행을 적재 순서대로 복원한다(없으면 빈 튜플).
+
+        지문이 아니라 **`run_id`로** 꺼내는 저수준 경로다 — 옛 엔진 셀은 지금 지문으로 만들
+        수 없으므로(그게 미스의 정의다) `day_engines`가 찾아낸 `run_id`로 읽는다(WAN-325).
+        ⚠️ 빈 튜플은 「셀이 없다」와 「셀은 있는데 거래가 0건」을 구분하지 않는다 — 그 구분이
+        필요한 자리는 `load_cell`(지문 경로)이나 `day_engines`(셀 목록)를 쓸 것.
+        """
+        with self._lock:
+            return self._rows_locked(run_id)
+
+    def day_engines(
+        self,
+        day_key: str,
+        *,
+        warmup_days: int,
+        fill: str,
+        cache_version: str = TIMELINE_CACHE_VERSION,
+    ) -> tuple[CachedEngine, ...]:
+        """그 날짜의 캐시가 담고 있는 **엔진들**을 커버리지와 함께 돌려준다 (WAN-325).
+
+        지문의 나머지(날짜·워밍업·체결 렌즈·캐시 버전)를 맞춘 뒤 **엔진 축만 열어** 훑는다.
+        옛 엔진 결과를 보여 줄 후보를 고르는 자리이고, 삭제는 하지 않는다(읽기 전용).
+
+        🚨 **`cache_version`은 반드시 맞춘다 — 여기가 조용한 실패의 자리다.** 캐시 버전은
+        「행의 의미」다: `wan305.1` 셀은 **청산 거래만** 담고 `wan297.1`은 **셋업 전부**
+        (청산·미진입·미체결·건너뜀)를 담는다. 옛 버전 셀을 「옛 엔진 결과」라며 3열 대조에
+        내주면 미체결·건너뜀 행이 통째로 빠진 표가 「계산됨」으로 떠서, WAN-297이 이름 붙인
+        「계산은 됐는데 미체결 행이 없는」 실패가 그대로 재현된다. 그래서 캐시 버전이 다른
+        셀은 **후보에서 아예 뺀다**(옛 행은 지우지 않고 그냥 안 쓴다).
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT run_id, symbol, timeframe, revision, engine_version, engine_name, "
+                "created_at FROM timeline_cache_cells WHERE day_key = ? AND warmup_days = ? "
+                "AND fill = ? AND cache_version = ? ORDER BY created_at DESC, rowid DESC",
+                (day_key, warmup_days, fill, cache_version),
+            ).fetchall()
+
+        grouped: dict[tuple[str, str], list[tuple[Any, ...]]] = {}
+        for row in rows:
+            grouped.setdefault((str(row[3]), str(row[4])), []).append(row)
+
+        engines: list[CachedEngine] = []
+        for (revision, engine_version), members in grouped.items():
+            seen: dict[tuple[str, str], CachedCellRef] = {}
+            for row in members:  # created_at DESC 정렬이라 같은 칸이 겹치면 최신이 이긴다.
+                key = (str(row[1]), str(row[2]))
+                if key in seen:
+                    continue
+                seen[key] = CachedCellRef(
+                    run_id=str(row[0]),
+                    symbol=key[0],
+                    timeframe=key[1],
+                    created_at=int(row[6]),
+                )
+            engines.append(
+                CachedEngine(
+                    revision=revision,
+                    engine_version=engine_version,
+                    engine_name=str(members[0][5]),
+                    created_at=max(int(row[6]) for row in members),
+                    cells=tuple(seen.values()),
+                )
+            )
+        engines.sort(key=lambda e: (-e.created_at, e.revision, e.engine_version))
+        return tuple(engines)
 
     # ------------------------------------------------------------------ 정리
 
@@ -611,6 +747,15 @@ def _row_from_db(r: tuple[Any, ...]) -> TimelineRow:
 # --------------------------------------------------------------------------- #
 
 
+def _now_ms() -> int:
+    """지금(UTC epoch ms) — 적재 시각의 기본값.
+
+    ⚠️ 저장·비교는 UTC epoch 그대로이고 KST는 **표시 계층에서만** 붙인다(WAN-172).
+    이 값이 「옛 엔진 결과입니다 · 언제 계산됨」 배너의 시각이 된다(WAN-325).
+    """
+    return int(datetime.now(tz=UTC).timestamp() * 1000)
+
+
 @dataclass(frozen=True)
 class PersistReport:
     """`persist_day`의 결과 요약 — 몇 셀을 적재/건너뛰고 몇 거래를 담았나."""
@@ -634,7 +779,7 @@ def persist_day(
     jobs: int = 1,
     replace: bool = False,
     revision: str | None = None,
-    created_at: int = 0,
+    created_at: int | None = None,
 ) -> PersistReport:
     """하루치 백테 타임라인을 셀 단위로 계산해 캐시에 적재한다(야간 크론, WAN-239 §2).
 
@@ -654,6 +799,7 @@ def persist_day(
 
     warm = warmup_days if warmup_days is not None else DEFAULT_WARMUP_DAYS
     rev = revision if revision is not None else engine_source_revision()
+    stamp = created_at if created_at is not None else _now_ms()
 
     by_cell = backtest_setup_by_cell(
         day_start_ms=day_start_ms,
@@ -670,7 +816,7 @@ def persist_day(
     for (symbol, timeframe), rows in by_cell.items():
         fingerprint = cell_fingerprint(symbol, timeframe, day_key, warmup_days=warm, revision=rev)
         try:
-            store.save_cell(fingerprint, rows, replace=replace, created_at=created_at)
+            store.save_cell(fingerprint, rows, replace=replace, created_at=stamp)
         except DuplicateTimelineCacheError:
             skipped.append((symbol, timeframe))
             continue
@@ -687,16 +833,27 @@ def persist_day(
 
 @dataclass(frozen=True)
 class DayCacheResult:
-    """`load_cached_day`의 결과 — 캐시에 있던 행 + 어느 셀이 있고 없었나."""
+    """`load_cached_day`의 결과 — 캐시에 있던 행 + 어느 셀이 있고 없었나.
+
+    `stale`이 `None`이 아니면 **행이 지금 엔진의 것이 아니다**(옛 엔진 판을 대신 읽었다,
+    WAN-325). 그때 `label`도 그 옛 엔진의 배지로 바뀐다 — 배지가 지금 엔진을 가리키면서
+    행은 옛 엔진인 상태가 바로 이 저장소가 금지하는 「조용히 내주기」다.
+    """
 
     rows: tuple[TimelineRow, ...]
     hits: tuple[tuple[str, str], ...]
     misses: tuple[tuple[str, str], ...]
     label: str
+    stale: CachedEngine | None = None
 
     @property
     def all_hit(self) -> bool:
         return not self.misses
+
+    @property
+    def is_stale(self) -> bool:
+        """이 행들이 **지금 엔진이 아닌** 판에서 왔나(호출부가 경고를 붙일지 판단)."""
+        return self.stale is not None
 
 
 def load_cached_day(
@@ -707,37 +864,127 @@ def load_cached_day(
     timeframes: Sequence[str],
     warmup_days: int | None = None,
     revision: str | None = None,
+    allow_stale: bool = False,
 ) -> DayCacheResult:
     """요청한 셀들의 백테 타임라인을 **캐시에서만** 읽는다(조회 경로, WAN-239 §3).
 
     미스인 셀은 무거운 계산으로 폴백하지 않고 `misses`에 담아 돌려준다 — 호출부(CLI·대시보드)가
     "아직 계산 안 됨"을 명시한다(완료 기준 3). `symbols`/`timeframes`는 반드시 명시한다(기본
     좌표 확정은 호출부 책임 — 캐시는 무엇을 읽을지 스스로 넓히지 않는다).
+
+    📌 **`allow_stale=True`면 미스일 때 옛 엔진 판을 대신 읽는다(WAN-325).** 배포로 엔진
+    소스가 바뀌면 과거 날짜가 통째로 미스가 되는데(설계대로 — WAN-106/253/318) 그 행은
+    **지워지지 않고 DB에 그대로 있다**(삭제는 `--prune-cache --prune-apply`뿐). 하루치
+    재계산이 서버 6분 23초(WAN-322 실측)라 옛 날짜를 훑어보는 것만으로 그 비용을 치르는
+    것이 사용자 요청의 계기였다.
+
+    ⚠️ **리비전 키를 느슨하게 하는 게 아니다** — 지금 엔진 셀이 있으면 **언제나 그쪽이
+    이기고**(아래 순위), 옛 판을 읽었을 때는 `stale`과 `label`이 그 사실을 밝힌다. 금지된
+    것은 옛 결과를 **조용히** 새 결과인 척 내주는 것이지 라벨을 달아 내주는 것이 아니다.
+
+    고르는 규칙(엔진 **단위**로 고른다 — 셀을 주워 섞지 않는다):
+
+    1. 지금 엔진이 요청한 칸을 **전부** 갖고 있으면 그대로 쓴다(옛 것이 새 것을 못 가린다).
+    2. 아니면 후보는 「그 날짜의 다른 엔진 판」이고, **지금 엔진보다 더 많은 칸을 가진**
+       판만 남긴다(부분만 남은 오늘 판을 옛 판이 이유 없이 밀어내지 않게).
+    3. 그중 커버리지 → 적재 시각 순으로 **하나**를 고른다(§5: 옛 리비전이 여럿이면 가장
+       최근 것 하나만). 고른 판에 없는 칸은 그대로 `misses`다 — 다른 판에서 메우지 않는다.
     """
     from live.live_vs_backtest import DEFAULT_WARMUP_DAYS
 
     warm = warmup_days if warmup_days is not None else DEFAULT_WARMUP_DAYS
     rev = revision if revision is not None else engine_source_revision()
+    wanted = [(symbol, timeframe) for symbol in symbols for timeframe in timeframes]
 
     rows: list[TimelineRow] = []
     hits: list[tuple[str, str]] = []
     misses: list[tuple[str, str]] = []
-    for symbol in symbols:
-        for timeframe in timeframes:
-            fingerprint = cell_fingerprint(
-                symbol, timeframe, day_key, warmup_days=warm, revision=rev
-            )
-            cell = store.load_cell(fingerprint)
-            if cell is None:
-                misses.append((symbol, timeframe))
-                continue
-            hits.append((symbol, timeframe))
-            rows.extend(cell.rows)
+    for symbol, timeframe in wanted:
+        fingerprint = cell_fingerprint(symbol, timeframe, day_key, warmup_days=warm, revision=rev)
+        cell = store.load_cell(fingerprint)
+        if cell is None:
+            misses.append((symbol, timeframe))
+            continue
+        hits.append((symbol, timeframe))
+        rows.extend(cell.rows)
+
+    if allow_stale and misses:
+        stale = _pick_stale_engine(
+            store,
+            day_key=day_key,
+            wanted=wanted,
+            warmup_days=warm,
+            revision=rev,
+            fresh_hits=len(hits),
+        )
+        if stale is not None:
+            return _stale_day_result(store, stale=stale, wanted=wanted)
+
     return DayCacheResult(
         rows=tuple(rows),
         hits=tuple(hits),
         misses=tuple(misses),
         label=current_engine_label(revision=rev),
+    )
+
+
+def _pick_stale_engine(
+    store: TimelineCacheStore,
+    *,
+    day_key: str,
+    wanted: Sequence[tuple[str, str]],
+    warmup_days: int,
+    revision: str,
+    fresh_hits: int,
+) -> CachedEngine | None:
+    """지금 엔진 대신 보여 줄 **옛 엔진 판 하나**를 고른다(없으면 `None`, WAN-325).
+
+    엔진 정체는 (엔진 소스 지문, 엔진 버전)이라 지금 코드가 쓴 판은 후보에서 빠진다. 남은
+    후보 중 요청한 칸을 지금 엔진보다 **더 많이** 덮는 판만 겨루고, 커버리지가 같으면 더
+    최근에 적재된 판이 이긴다(§5 — 옛 리비전이 여럿이어도 표에 오르는 것은 하나다).
+    """
+    from backtest.harness import BASELINE_FILL
+
+    # 체결 렌즈는 `cell_fingerprint`가 쓰는 것과 **같아야** 한다(다르면 후보를 못 찾는다).
+    engines = store.day_engines(day_key, warmup_days=warmup_days, fill=BASELINE_FILL.name)
+    wanted_set = set(wanted)
+    best: tuple[int, int, CachedEngine] | None = None
+    for engine in engines:
+        if (engine.revision, engine.engine_version) == (revision, ENGINE_VERSION):
+            continue  # 지금 엔진 판 — 위에서 이미 지문으로 읽었다.
+        coverage = sum(1 for cell in engine.cells if (cell.symbol, cell.timeframe) in wanted_set)
+        if coverage <= fresh_hits:
+            continue  # 오늘 판보다 나을 게 없으면 굳이 옛 판으로 갈아타지 않는다.
+        rank = (coverage, engine.created_at)
+        if best is None or rank > (best[0], best[1]):
+            best = (coverage, engine.created_at, engine)
+    return None if best is None else best[2]
+
+
+def _stale_day_result(
+    store: TimelineCacheStore,
+    *,
+    stale: CachedEngine,
+    wanted: Sequence[tuple[str, str]],
+) -> DayCacheResult:
+    """고른 옛 엔진 판 **하나만으로** 하루치 결과를 짠다 — 한 표에 두 리비전이 섞이지 않는다."""
+    by_cell = {(cell.symbol, cell.timeframe): cell for cell in stale.cells}
+    rows: list[TimelineRow] = []
+    hits: list[tuple[str, str]] = []
+    misses: list[tuple[str, str]] = []
+    for key in wanted:
+        ref = by_cell.get(key)
+        if ref is None:
+            misses.append(key)
+            continue
+        hits.append(key)
+        rows.extend(store.load_rows(ref.run_id))
+    return DayCacheResult(
+        rows=tuple(rows),
+        hits=tuple(hits),
+        misses=tuple(misses),
+        label=stale.display_label(),
+        stale=stale,
     )
 
 
@@ -764,12 +1011,13 @@ def load_full_universe_day(
     day_key: str,
     warmup_days: int | None = None,
     revision: str | None = None,
+    allow_stale: bool = False,
 ) -> DayCacheResult:
     """채택 좌표 **전 셀**의 하루치 백테 셋업 행을 캐시에서만 읽는다(WAN-297 §1-2).
 
     화면 「채택 좌표 전부」 모드의 조회 경로다. `load_cached_day`에 채택 좌표를 먹이는 얇은
     래퍼일 뿐이고, 미스는 여전히 폴백하지 않는다(WAN-239 §3) — 호출부가 "아직 계산 안 됨"을
-    명시한다.
+    명시한다. `allow_stale`은 그대로 넘어간다(옛 엔진 판을 라벨 달아 보여줄지, WAN-325).
     """
     symbols, timeframes = adopted_universe()
     return load_cached_day(
@@ -779,6 +1027,7 @@ def load_full_universe_day(
         timeframes=timeframes,
         warmup_days=warmup_days,
         revision=revision,
+        allow_stale=allow_stale,
     )
 
 
@@ -793,7 +1042,7 @@ def compute_and_persist_day(
     warmup_days: int | None = None,
     jobs: int = 1,
     revision: str | None = None,
-    created_at: int = 0,
+    created_at: int | None = None,
 ) -> tuple[PersistReport, DayCacheResult]:
     """하루치를 **계산해 적재한 뒤 캐시에서 다시 읽어** 돌려준다(화면 버튼 경로, WAN-297 §1-1).
 
