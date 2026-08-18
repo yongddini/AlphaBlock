@@ -479,6 +479,12 @@ def cmd_trades(args: argparse.Namespace, settings: Settings) -> int:
     안 됨"을 명시한다. 야간 크론은 `--persist-cache`로 전일 하루치를 미리 적재한다. 수동
     재계산은 `--recompute`(캐시 무시), 라이브만은 `--no-backtest`다. 순수 조회라 종료 코드는
     항상 0이다.
+
+    📌 **지금 엔진 캐시가 없으면 보관 중인 옛 엔진 판을 라벨 달아 보여 준다(WAN-325)** —
+    배포로 엔진 소스가 바뀌면 과거 날짜가 통째로 미스가 되는데(설계대로) 그 행은 지워지지
+    않고 남아 있고, 하루치 재계산은 서버 6분 23초다(WAN-322). 배지(`백테 대조 엔진:`)가
+    **옛 판의 이름·지문**으로 바뀌고 상태 줄이 「옛 엔진 결과」임을 밝힌다 — 즉 조용히
+    내주지 않는다. 엄격 조회는 `--no-stale`.
     """
     from backtest.harness import DEFAULT_SYMBOLS, DEFAULT_TIMEFRAMES
     from live.order_journal import OrderJournal
@@ -552,6 +558,7 @@ def cmd_trades(args: argparse.Namespace, settings: Settings) -> int:
                 symbols=syms,
                 timeframes=tfs,
                 warmup_days=args.warmup_days,
+                allow_stale=not args.no_stale,
             )
         finally:
             cache.close()
@@ -560,13 +567,28 @@ def cmd_trades(args: argparse.Namespace, settings: Settings) -> int:
         # (`backtest_timeline_rows`)와 같은 모양이고, 그 둘이 비트 동일함은 실데이터 회귀
         # 테스트가 고정한다(`test_cell_setup_timeline_closed_rows_match_cell_trades`).
         backtest_rows = [r for r in result.rows if r.status == STATUS_BACKTEST_CLOSED]
+        # 배지는 **실제로 읽은 판**의 것이다(옛 판이면 옛 판의 이름·지문) — 배지가 지금
+        # 엔진을 가리키면서 행은 옛 엔진인 상태가 이 저장소가 금지하는 조용한 실패다.
         engine_label = result.label
+        notes: list[str] = []
+        if result.stale is not None:
+            stale = result.stale
+            notes.append(
+                f"⚠️ **옛 엔진 결과입니다({stale.num_cells}칸)** — 지금 엔진 캐시가 없어 "
+                f"**{stale.created_label()}**에 계산해 둔 판을 대신 보여 줍니다(배포로 엔진이 "
+                "바뀌면 과거 날짜가 미스가 되는데 옛 행은 지우지 않습니다 — WAN-325). "
+                "**값이 지금 엔진과 다를 수 있고**, 라이브 열과의 차이를 집행 차이로 읽으면 "
+                "안 됩니다(엔진이 바뀐 몫이 섞입니다). 최신 엔진 판은 `--persist-cache`나 "
+                "`--recompute`로 만드세요. 엄격 조회는 `--no-stale`."
+            )
         if result.misses:
-            status_note = (
+            notes.append(
                 f"🚨 백테 대조 **아직 계산 안 됨** — {len(result.misses)}/{len(syms) * len(tfs)}칸 "
                 "캐시 미스(야간 크론 대기 또는 `--persist-cache`로 적재, 즉시 보려면 "
                 "`--recompute`). 조회 시 무거운 재계산은 하지 않습니다."
             )
+        if notes:
+            status_note = "\n\n".join(notes)
 
     timeline = DayTimeline(day_key=day_key, live=tuple(live), backtest=tuple(backtest_rows))
     print(render_day_timeline(timeline, engine_label=engine_label, status_note=status_note))
@@ -1073,6 +1095,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--recompute",
         action="store_true",
         help="캐시를 무시하고 백테 대조를 즉시 재계산(무겁다 — 수동 확인용, WAN-239)",
+    )
+    p_trades.add_argument(
+        "--no-stale",
+        action="store_true",
+        help=(
+            "지금 엔진 캐시가 없을 때 **옛 엔진 판으로 대신 보여 주지 않는다**(WAN-325). "
+            "기본은 라벨을 달아 보여 준다 — 스크립트가 「오늘 엔진으로 적재됐나」를 판정할 "
+            "때만 이 플래그를 쓴다"
+        ),
     )
     p_trades.add_argument(
         "--symbol",

@@ -17,16 +17,28 @@ WAN-297이 더한 것:
 - 화면 버튼(`compute_and_persist_day`)과 야간 크론(`persist_day`)이 **같은 함수**를 타
   산출물이 갈라지지 않는다 — 화면이 그리는 행이 곧 디스크에 담긴 행이다.
 - 정리(pruning)는 기준 없이는 거부하고, 세기와 삭제가 갈라져 있다(`--prune-apply`).
+
+WAN-325가 더한 것:
+
+- 엔진이 바뀌어 미스일 때 **보관 중인 옛 엔진 판**을 라벨 달아 내준다(`allow_stale=True`) —
+  기본값은 예전 그대로 안 내준다.
+- 지금 엔진 셀이 있으면 **언제나 그쪽이 이긴다**(옛 것이 새 것을 못 가린다).
+- 옛 판을 내줄 때 **배지(`label`)가 그 판의 것으로 바뀐다** — 배지가 지금 엔진을 가리키면서
+  행은 옛 엔진인 상태가 이 저장소가 금지하는 「조용히 내주기」다.
+- 옛 리비전이 여럿이어도 표에 오르는 것은 **한 판**이고, 캐시 버전이 다른 셀은 행의 의미가
+  달라 후보에서 아예 뺀다.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
 
 from live.timeline_cache import (
     CachedCell,
+    CachedEngine,
     DuplicateTimelineCacheError,
     TimelineCacheStore,
     adopted_universe,
@@ -681,3 +693,257 @@ def test_cli_prune_refuses_when_all_criteria_are_disabled(
     )
     assert cmd_trades(ns, Settings(db_path=db)) == 2
     assert "정리 기준이 없습니다" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- #
+# WAN-325 — 옛 엔진 결과를 **라벨 달아** 보여준다(지우지 않고 보관 중인 행을 살려 쓴다)
+# --------------------------------------------------------------------------- #
+
+
+def _seed_engine(
+    store: TimelineCacheStore,
+    *,
+    revision: str,
+    cells: Sequence[tuple[str, str]],
+    created_at: int,
+    fill_ms: int = 1_700_000_000_000,
+) -> None:
+    """한 리비전으로 여러 칸을 적재한다(옛 엔진 판을 흉내 내는 픽스처)."""
+    for symbol, timeframe in cells:
+        fingerprint = cell_fingerprint(symbol, timeframe, _DAY, warmup_days=120, revision=revision)
+        store.save_cell(
+            fingerprint,
+            [_bt_row(fill_ms=fill_ms, symbol=symbol, timeframe=timeframe)],
+            created_at=created_at,
+        )
+
+
+def test_stale_engine_is_not_served_unless_asked(tmp_path: Path) -> None:
+    """기본값은 예전 그대로 — 옵트인하지 않으면 옛 판을 **안** 내준다(WAN-239 §3 불변)."""
+    store = TimelineCacheStore(tmp_path / "cache.db")
+    _seed_engine(store, revision="old-engine", cells=[(_SYMBOL, _TF)], created_at=1_000)
+
+    strict = load_cached_day(
+        store, day_key=_DAY, symbols=[_SYMBOL], timeframes=[_TF], revision="new-engine"
+    )
+    store.close()
+    assert strict.rows == ()
+    assert strict.misses == ((_SYMBOL, _TF),)
+    assert strict.stale is None and strict.is_stale is False
+
+
+def test_stale_engine_is_served_with_a_label(tmp_path: Path) -> None:
+    """완료 기준 1 — 엔진이 바뀌면 빈 화면 대신 옛 판이 뜨고 **경고가 실제로 붙는다**.
+
+    문구가 아니라 동작을 고정한다: (a) 행이 실제로 나오고, (b) `stale`이 채워져 호출부가
+    배너를 띄울 수 있고, (c) **배지(`label`)가 옛 판의 것으로 바뀐다** — 배지가 지금
+    엔진을 가리키면서 행은 옛 엔진인 상태가 이 저장소가 금지하는 「조용히 내주기」다.
+    """
+    store = TimelineCacheStore(tmp_path / "cache.db")
+    _seed_engine(store, revision="old-engine", cells=[(_SYMBOL, _TF)], created_at=1_755_000_000_000)
+
+    result = load_cached_day(
+        store,
+        day_key=_DAY,
+        symbols=[_SYMBOL],
+        timeframes=[_TF],
+        revision="new-engine",
+        allow_stale=True,
+    )
+    store.close()
+    assert result.is_stale is True
+    assert result.stale is not None
+    assert result.stale.revision == "old-engine"
+    assert result.hits == ((_SYMBOL, _TF),) and result.misses == ()
+    assert len(result.rows) == 1
+    # 배지가 옛 판을 가리킨다(지금 엔진 배지가 아니다).
+    assert result.label == result.stale.display_label()
+    assert "old-engine" in result.label
+    assert result.label != current_engine_label(revision="new-engine")
+    # 적재 시각이 배너에 실릴 수 있게 남아 있다(KST 표시 — WAN-172).
+    assert "KST" in result.stale.created_label()
+
+
+def test_current_engine_wins_over_stale(tmp_path: Path) -> None:
+    """완료 기준 2 — 지금 엔진 캐시가 있으면 그쪽이 우선이고 경고가 뜨지 않는다."""
+    store = TimelineCacheStore(tmp_path / "cache.db")
+    _seed_engine(
+        store,
+        revision="old-engine",
+        cells=[(_SYMBOL, _TF)],
+        created_at=2_000,
+        fill_ms=1_700_000_000_000,
+    )
+    _seed_engine(
+        store,
+        revision="new-engine",
+        cells=[(_SYMBOL, _TF)],
+        created_at=1_000,  # 옛 판이 **더 최근에** 적재됐어도 지금 엔진이 이긴다
+        fill_ms=1_700_007_200_000,
+    )
+
+    result = load_cached_day(
+        store,
+        day_key=_DAY,
+        symbols=[_SYMBOL],
+        timeframes=[_TF],
+        revision="new-engine",
+        allow_stale=True,
+    )
+    store.close()
+    assert result.stale is None
+    assert result.all_hit is True
+    assert [r.fill_ms for r in result.rows] == [1_700_007_200_000]  # 새 판의 행
+
+
+def test_stale_pick_is_one_engine_only(tmp_path: Path) -> None:
+    """완료 기준 4 · §5 — 옛 리비전이 여럿이면 **하나만** 쓰고 섞지 않는다.
+
+    같은 커버리지면 더 최근 판이 이기고, 그 판에 없는 칸은 다른 판에서 메우지 않고 그냥
+    미스로 남는다(여러 엔진의 셀을 한 표에 섞는 것이 금지된 바로 그것).
+    """
+    store = TimelineCacheStore(tmp_path / "cache.db")
+    _seed_engine(
+        store,
+        revision="engine-older",
+        cells=[(_SYMBOL, _TF), ("ETHUSDT", _TF)],
+        created_at=1_000,
+        fill_ms=1_700_000_000_000,
+    )
+    _seed_engine(
+        store,
+        revision="engine-newer",
+        cells=[(_SYMBOL, _TF)],
+        created_at=9_000,
+        fill_ms=1_700_014_400_000,
+    )
+
+    result = load_cached_day(
+        store,
+        day_key=_DAY,
+        symbols=[_SYMBOL, "ETHUSDT"],
+        timeframes=[_TF],
+        revision="new-engine",
+        allow_stale=True,
+    )
+    store.close()
+    # 커버리지가 큰 판(2칸)이 이긴다 — 「더 최근」은 커버리지가 같을 때의 타이브레이크다.
+    assert result.stale is not None and result.stale.revision == "engine-older"
+    assert result.hits == ((_SYMBOL, _TF), ("ETHUSDT", _TF))
+    # 한 판에서만 왔다: 다른 리비전이 만든 행(fill_ms)이 섞이지 않는다.
+    assert {r.fill_ms for r in result.rows} == {1_700_000_000_000}
+
+
+def test_stale_does_not_hide_a_more_complete_current_engine(tmp_path: Path) -> None:
+    """옛 판이 지금 엔진보다 **덜** 덮으면 갈아타지 않는다(부분이라도 오늘 판이 낫다)."""
+    store = TimelineCacheStore(tmp_path / "cache.db")
+    _seed_engine(store, revision="old-engine", cells=[(_SYMBOL, _TF)], created_at=9_000)
+    _seed_engine(
+        store,
+        revision="new-engine",
+        cells=[(_SYMBOL, _TF), ("ETHUSDT", _TF)],
+        created_at=1_000,
+        fill_ms=1_700_014_400_000,
+    )
+
+    result = load_cached_day(
+        store,
+        day_key=_DAY,
+        symbols=[_SYMBOL, "ETHUSDT", "SOLUSDT"],
+        timeframes=[_TF],
+        revision="new-engine",
+        allow_stale=True,
+    )
+    store.close()
+    assert result.stale is None
+    assert result.misses == (("SOLUSDT", _TF),)
+    assert {r.fill_ms for r in result.rows} == {1_700_014_400_000}
+
+
+def test_stale_ignores_cells_from_an_older_cache_version(tmp_path: Path) -> None:
+    """🚨 캐시 버전이 다른 셀은 후보에서 뺀다 — 「행의 의미」가 달라서다.
+
+    `wan305.1` 셀은 **청산 거래만** 담고 지금 버전은 **셋업 전부**를 담는다. 옛 버전 셀을
+    「옛 엔진 결과」라며 내주면 미체결·건너뜀 행이 통째로 빠진 표가 「계산됨」으로 떠서,
+    WAN-297이 이름 붙인 「계산은 됐는데 미체결 행이 없는」 조용한 실패가 재현된다.
+    """
+    store = TimelineCacheStore(tmp_path / "cache.db")
+    base = cell_fingerprint(_SYMBOL, _TF, _DAY, warmup_days=120, revision="old-engine")
+    ancient = base.model_copy(update={"cache_version": "wan305.1"})
+    store.save_cell(ancient, [_bt_row(fill_ms=1_700_000_000_000)], created_at=9_000)
+
+    result = load_cached_day(
+        store,
+        day_key=_DAY,
+        symbols=[_SYMBOL],
+        timeframes=[_TF],
+        revision="new-engine",
+        allow_stale=True,
+    )
+    store.close()
+    assert result.stale is None
+    assert result.rows == ()
+    assert result.misses == ((_SYMBOL, _TF),)
+
+
+def test_persist_day_stamps_created_at(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """적재 시각이 실제로 남는다 — 「언제 계산된 판인가」가 배너에 실릴 수 있게(WAN-325 §2).
+
+    옛 판은 호출부가 값을 안 넘겨 0으로 남아 있는데, 그때는 지어내지 않고 「적재 시각 미상」이다.
+    """
+    monkeypatch.setattr(
+        "live.timeline_cache.backtest_setup_by_cell", lambda **_k: {(_SYMBOL, _TF): []}
+    )
+    store = TimelineCacheStore(tmp_path / "cache.db")
+    persist_day(
+        store,
+        day_start_ms=0,
+        day_end_ms=86_400_000,
+        day_key=_DAY,
+        symbols=[_SYMBOL],
+        timeframes=[_TF],
+        revision=_REV,
+    )
+    engines = store.day_engines(_DAY, warmup_days=120, fill=_baseline_fill_name())
+    store.close()
+    assert len(engines) == 1
+    assert engines[0].created_at > 1_700_000_000_000  # 지어낸 0이 아니라 진짜 시각
+    assert "KST" in engines[0].created_label()
+
+    unknown = CachedEngine(
+        revision="then", engine_version="x", engine_name="n", created_at=0, cells=()
+    )
+    assert unknown.created_label() == "적재 시각 미상"
+
+
+def _baseline_fill_name() -> str:
+    from backtest.harness import BASELINE_FILL
+
+    return str(BASELINE_FILL.name)
+
+
+def test_cli_trades_marks_stale_engine_rows(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """터미널도 옛 판을 라벨 달아 낸다 — 배지가 옛 판이고 상태 줄이 그 사실을 밝힌다."""
+    from cli.main import build_parser, cmd_trades
+    from config.settings import Settings
+
+    db = str(tmp_path / "cache.db")
+    store = TimelineCacheStore(db)
+    _seed_engine(
+        store, revision="eng:oldoldold12", cells=[(_SYMBOL, _TF)], created_at=1_755_000_000_000
+    )
+    store.close()
+
+    argv = ["trades", "--db", db, "--day", _DAY, "--symbol", _SYMBOL, "--tf", _TF]
+    assert cmd_trades(build_parser().parse_args(argv), Settings(db_path=db)) == 0
+    out = capsys.readouterr().out
+    assert "옛 엔진 결과입니다" in out
+    assert "eng:oldoldold12" in out  # 배지가 옛 판의 지문을 단다
+
+    # `--no-stale`은 예전처럼 「아직 계산 안 됨」으로 남는다(스크립트용 엄격 조회).
+    assert cmd_trades(build_parser().parse_args([*argv, "--no-stale"]), Settings(db_path=db)) == 0
+    strict = capsys.readouterr().out
+    assert "아직 계산 안 됨" in strict
+    assert "옛 엔진 결과입니다" not in strict
