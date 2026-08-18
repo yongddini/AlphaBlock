@@ -525,6 +525,63 @@ def cmd_fills(args: argparse.Namespace, settings: Settings) -> int:
     return 0
 
 
+def cmd_stop_width(args: argparse.Namespace, settings: Settings) -> int:
+    """`alphablock stop-width [--day …] [--days N]` — 손절폭(1R) 해부(WAN-328).
+
+    체결됐는데 **손절폭 가드(0.3%)에 걸려 진입하지 못한** 주문이 왜 그렇게 많은지를 두 축으로
+    낸다: 창 안 라이브 체결의 손절폭·거부 사유 분포(§3)와, 같은 셋업을 백테와 짝지어 «진입가가
+    갈렸나 · 무효화 경계가 갈렸나»를 지목하는 표(§1, `--with-backtest`).
+
+    순수 조회라 종료 코드는 항상 0이다. 가드 값은 채택값을 **읽기만** 한다 — 바꾸는 것은
+    WAN-76/79 소관이고 재-베이스라인 = 사용자 결정이다.
+    """
+    from live.fill_report import resolve_day_window
+    from live.order_journal import OrderJournal
+    from live.stop_width_parity import build_report, render_report
+    from live.trade_timeline import backtest_timeline_rows, live_timeline_rows
+    from paper.store import PaperTradeStore
+
+    db_path = args.db if args.db is not None else settings.db_path
+    end_start_ms, end_end_ms, day_key = resolve_day_window(args.day)
+    days = max(1, args.days)
+    start_ms = end_start_ms - (days - 1) * 86_400_000
+    label = day_key if days == 1 else f"{days}일 창(끝 {day_key})"
+    if days > 1 and args.with_backtest:
+        # 백테 대조는 하루 단위 워밍업 규약(WAN-233/295)에 묶여 있다 — 여러 날을 한 번에
+        # 돌리면 창마다 다른 워밍업이 섞여 조인이 조용히 어긋난다. 거부한다.
+        print("--days > 1과 --with-backtest는 함께 쓸 수 없습니다(워밍업 규약이 하루 단위).")
+        return 0
+
+    journal = OrderJournal(db_path)
+    try:
+        backtest_rows = None
+        live_rows = None
+        if args.with_backtest:
+            store = PaperTradeStore(db_path)
+            try:
+                live_rows = live_timeline_rows(journal, store, start_ms=start_ms, end_ms=end_end_ms)
+            finally:
+                store.close()
+            backtest_rows = backtest_timeline_rows(
+                day_start_ms=start_ms,
+                day_end_ms=end_end_ms,
+                warmup_days=args.warmup_days,
+                jobs=args.jobs,
+            )
+        report = build_report(
+            journal,
+            start_ms=start_ms,
+            end_ms=end_end_ms,
+            window_label=label,
+            backtest_rows=backtest_rows,
+            live_rows=live_rows,
+        )
+    finally:
+        journal.close()
+    print(render_report(report))
+    return 0
+
+
 def cmd_compare(args: argparse.Namespace, settings: Settings) -> int:
     """`alphablock compare [--day YYYY-MM-DD]` — 당일 라이브 vs 백테스트 대조(WAN-233).
 
@@ -1140,6 +1197,36 @@ def build_parser() -> argparse.ArgumentParser:
         help="조회할 KST 날짜(기본: 오늘). 예: 2026-08-02",
     )
     p_fills.set_defaults(func=cmd_fills)
+
+    p_stop_width = sub.add_parser(
+        "stop-width",
+        help="손절폭(1R) 해부 — 가드 0.3%에 걸린 체결의 분포·라이브 대 백테 귀속(WAN-328)",
+    )
+    p_stop_width.add_argument("--db", default=None, help="장부 DB 경로(기본: 설정의 db_path)")
+    p_stop_width.add_argument(
+        "--day",
+        default="today",
+        metavar="YYYY-MM-DD",
+        help="창의 마지막 KST 날짜(기본: 오늘). 예: 2026-08-17",
+    )
+    p_stop_width.add_argument(
+        "--days", type=int, default=1, help="--day에서 거슬러 올라갈 일수(§3 표본 확대)"
+    )
+    p_stop_width.add_argument(
+        "--with-backtest",
+        action="store_true",
+        help="같은 셋업 백테 대조(§1)까지 낸다 — 채택 좌표 48셀 × 워밍업이라 무겁다",
+    )
+    p_stop_width.add_argument(
+        "--warmup-days",
+        type=int,
+        default=None,
+        help="백테스트 워밍업 길이(일). 라이브 전-이력 존 재고 근사 노브 — 길수록 느리다",
+    )
+    p_stop_width.add_argument(
+        "--jobs", type=int, default=1, help="백테스트 (심볼, TF) 병렬 워커 수(기본 1)"
+    )
+    p_stop_width.set_defaults(func=cmd_stop_width)
 
     p_compare = sub.add_parser(
         "compare",

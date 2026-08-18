@@ -37,7 +37,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from itertools import islice
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 import pandas as pd
 
@@ -120,6 +120,25 @@ class LiveLimitProvider(Protocol):
         ...
 
 
+@runtime_checkable
+class PathProbeProvider(Protocol):
+    """봉내 지정가를 **부작용 없이** 조회할 수 있는 공급자 (WAN-328, 측정 전용).
+
+    `LiveLimitProvider`의 **선택적 확장**이다 — 필수 멤버로 넣지 않는 이유는 그러면 기존
+    라이브·테스트 공급자 전부가 측정 전용 메서드 하나 때문에 계약 위반이 되기 때문이다.
+    `observe_path_fill`을 켠 호출만 이 계약을 요구하고, 없으면 **거부한다**(조용히 관측을
+    건너뛰면 표에 빈칸이 생긴 이유를 알 수 없다).
+
+    `probe_limit`은 `limit_price`와 같은 값을 내되 내부 상태(인과 모드의 지연선)를 굴리지
+    않는다 — 봉내 경로를 되짚어 여러 번 물어보는 조회라, 그 조회가 상태를 굴리면 시뮬레이션
+    자체가 달라져 **관측이 대상을 바꾼다**.
+    """
+
+    def probe_limit(self, live_price: float) -> float | None:
+        """`live_price`를 밴드 표본으로 썼을 때의 지정가(주문이 없으면 `None`)."""
+        ...
+
+
 @dataclass(frozen=True)
 class PartialExit:
     """부분 청산 체결 하나 (WAN-323 반익절 래더).
@@ -199,6 +218,20 @@ class ZoneLimitOutcome:
     ⚠️ **같은 봉에서 분할 지점과 손절이 동시 도달하면 손절이 이겨 부분 청산은 일어나지
     않는다**(기존 `stop_before_tp` 관행과 같은 보수적 처리) — 1분봉 안의 경로를 모르므로
     애매하면 불리한 쪽으로 간다."""
+    path_fill_price: float | None = None
+    """같은 체결 봉을 **틱 추종 모델**로 봤을 때의 체결가 (WAN-328, 측정 전용 · 옵트인).
+
+    `observe_path_fill=True`일 때만 값이 있고(그 밖에는 항상 `None`), **손익·체결 판정에는
+    쓰이지 않는다** — `exit_extreme`(WAN-276)과 같은 순수 관측 필드다.
+
+    엔진은 봉내 라이브 밴드의 표본으로 **1분봉 종가**를 쓰면서 터치는 **저가**로 판정한다
+    (롱). 라이브 러너는 틱마다 같은 가격으로 표본과 터치를 **동시에** 굴리므로 그 비대칭이
+    없다(WAN-256 틱 피드 기본). 이 필드는 그 차이를 같은 봉 안에서 잰다: 가격이 봉 범위를
+    지나는 동안 `p <= 지정가(p)`(롱)가 처음 성립하는 고정점 `p*`이 틱 추종 체결가다.
+
+    ⚠️ **1분봉 OHLC 근사이지 틱 데이터가 아니다**(WAN-98 Canceled) — 봉 안의 경로를 모르므로
+    「가격이 [저가, 고가]의 모든 값을 지난다」는 연속성만 쓴다. 같은 봉 안의 체결가 차이만
+    재고, 틱 모델이 **더 이른 봉**에서 체결했을 가능성은 재지 않는다."""
     order_rested: bool = True
     """이 셋업에 주문이 **한 번이라도 주문판에 걸렸는지** (WAN-119).
 
@@ -241,6 +274,68 @@ def build_substeps(df_1m: pd.DataFrame, htf_ms: int) -> list[SubStep]:
     ]
 
 
+def _path_fill_price(
+    live_limit: PathProbeProvider,
+    step: SubStep,
+    *,
+    is_long: bool,
+    grid: int = 16,
+    refine: int = 40,
+) -> float | None:
+    """이 봉을 **틱 추종**으로 봤을 때의 체결가 (WAN-328, 측정 전용).
+
+    지정가 `L(p)`는 밴드 표본 `p`에 대해 단조 증가한다(SMA20의 20번째 표본이 `p`다). 롱은
+    `p <= L(p)`가 성립하는 순간 체결되므로 체결 집합은 `(-inf, p*]`이고, 가격이 위에서
+    내려오며 처음 만나는 점이 고정점 `p*`다 — 그 순간의 체결가는 `L(p*) = p*`. 봉 전체가
+    이미 체결 집합 안이면(`고가`에서도 성립) 봉이 열리자마자 체결이라 `L(고가)`를 낸다.
+
+    `L(p)`가 `None`인 구간(밴드가 존보다 불리 = 주문 없음, WAN-75 규칙 3)이 있으므로
+    구간을 격자로 훑어 「주문이 있고 이미 닿은」 가장 유리한 점을 찾고, 그 이웃과의 사이만
+    이분법으로 좁힌다. 두 끝의 주문 유무가 갈리면 좁히지 않고 격자 점을 그대로 낸다
+    (근사임을 숨기지 않는다 — 격자 간격이 그 셋업의 해상도 한계다).
+    """
+    lo, hi = float(step.low), float(step.high)
+    if not (hi >= lo):  # pragma: no cover - 데이터 이상
+        return None
+
+    def reached(price: float) -> float | None:
+        """주문이 있으면 `지정가 - 가격`(롱) 부호 여유, 없으면 None. >= 0 이면 체결."""
+        limit = live_limit.probe_limit(price)
+        if limit is None:
+            return None
+        return (limit - price) if is_long else (price - limit)
+
+    # 가격이 지나는 순서: 롱은 고가 → 저가(내려오며 체결), 숏은 저가 → 고가.
+    span = hi - lo
+    points = [
+        (hi - span * i / grid) if is_long else (lo + span * i / grid) for i in range(grid + 1)
+    ]
+    hit_at: int | None = None
+    for i, price in enumerate(points):
+        slack = reached(price)
+        if slack is not None and slack >= 0.0:
+            hit_at = i
+            break
+    if hit_at is None:
+        return None
+    if hit_at == 0:
+        # 봉이 열리는 쪽 끝에서 이미 체결 — 그 순간 걸려 있던 지정가가 체결가다.
+        return live_limit.probe_limit(points[0])
+    near, far = points[hit_at - 1], points[hit_at]
+    if reached(near) is None:
+        return live_limit.probe_limit(far)  # 미정의 구간과 맞물렸다 — 격자 해상도로 답한다.
+    for _ in range(refine):
+        mid = (near + far) / 2.0
+        slack = reached(mid)
+        if slack is None:
+            break
+        if slack >= 0.0:
+            far = mid
+        else:
+            near = mid
+    return live_limit.probe_limit(far)
+
+
 def simulate_zone_limit_trade(
     *,
     direction: OrderBlockDirection,
@@ -266,6 +361,7 @@ def simulate_zone_limit_trade(
     partial_take_profit_r: float | None = None,
     partial_take_profit_fraction: float = 0.5,
     breakeven_after_partial: bool = False,
+    observe_path_fill: bool = False,
 ) -> ZoneLimitOutcome:
     """한 오더블록 셋업의 존-지정가 진입·청산을 1분 서브스텝으로 시뮬레이션한다.
 
@@ -372,6 +468,14 @@ def simulate_zone_limit_trade(
         )
     if (limit_price is None) == (live_limit is None):
         raise ValueError("limit_price와 live_limit 중 정확히 하나를 줘야 합니다.")
+    if observe_path_fill and not isinstance(live_limit, PathProbeProvider):
+        # 상수 지정가는 봉내에 안 움직여 「틱 추종 체결가」가 정의되지 않고, 공급자가
+        # `probe_limit`을 안 내면 되짚을 방법이 없다 — 켜 봐야 언제나 None이라 라벨만
+        # 붙는다(WAN-95/112/123 관행: 조용히 무시하지 않는다).
+        raise ValueError(
+            "observe_path_fill은 probe_limit을 내는 live_limit(봉내 라이브 밴드)에서만 "
+            "뜻이 있습니다(WAN-328)."
+        )
     if live_limit is not None and take_profit_price is not None:
         raise ValueError(
             "live_limit을 쓰면 익절 목표는 체결 순간에 산출되므로 "
@@ -435,6 +539,7 @@ def simulate_zone_limit_trade(
     htf_elapsed = 0  # 주문 이후 마감된 상위TF 봉 수
     running_close: float | None = None
     position_open = False
+    path_fill_price: float | None = None
     entry_time: int | None = None
     entry_price: float | None = None
     entry_rsi: float | None = None
@@ -519,6 +624,10 @@ def simulate_zone_limit_trade(
                                 order_rested=order_rested,
                             )
                         active_stop, active_tp = exits
+                    if observe_path_fill and isinstance(live_limit, PathProbeProvider):
+                        # WAN-328 측정 전용: 같은 봉을 틱 추종으로 봤다면 어디서 체결됐나.
+                        # 체결 여부·가격·손익은 이 값을 보지 않는다(순수 관측).
+                        path_fill_price = _path_fill_price(live_limit, step, is_long=is_long)
                     position_open = True
                     entry_time = step.time
                     entry_price = current_limit
@@ -595,6 +704,7 @@ def simulate_zone_limit_trade(
                     mfe_r=mfe_r,
                     mae_r=mae_r,
                     stop_price=_entry_stop(),
+                    path_fill_price=path_fill_price,
                     exit_extreme=stop_extreme,
                     exit_at_breakeven=entry_stop is not None and active_stop != entry_stop,
                     partial_exits=tuple(partials),
@@ -628,6 +738,7 @@ def simulate_zone_limit_trade(
                     mfe_r=mfe_r,
                     mae_r=mae_r,
                     stop_price=_entry_stop(),
+                    path_fill_price=path_fill_price,
                     partial_exits=tuple(partials),
                     order_rested=order_rested,
                 )
@@ -642,6 +753,7 @@ def simulate_zone_limit_trade(
             mfe_r=mfe_r,
             mae_r=mae_r,
             stop_price=_entry_stop(),
+            path_fill_price=path_fill_price,
             partial_exits=tuple(partials),
             order_rested=order_rested,
         )
