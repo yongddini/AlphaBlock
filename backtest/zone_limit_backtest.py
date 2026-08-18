@@ -138,6 +138,12 @@ class _Candidate:
     """보유 구간의 최대유리이탈(MFE), R 단위(WAN-90). 시뮬레이터가 낸 값 그대로 싣는다."""
     mae_r: float | None = None
     """보유 구간의 최대불리이탈(MAE), R 단위(WAN-90). 시뮬레이터가 낸 값 그대로 싣는다."""
+    exit_at_breakeven: bool = False
+    """손절 청산이 **본절 스탑**에서 났는지 (WAN-323) — 참이면 존은 아직 살아 있다.
+
+    재진입 배선(WAN-228/273)이 「익절이면 재무장」으로 갈라지는데, 본절 청산은 사유가
+    `STOP_LOSS`라 그대로 두면 **무효화되지도 않은 존이 죽는다**. 그 게이트가 이 값을 함께
+    본다. 래더를 안 켜면 항상 거짓이라 기존 재진입 CSV가 비트 재현된다."""
     partial_exits: tuple[PartialExit, ...] = ()
     """부분 청산 체결들 (WAN-323 반익절 래더, 옵트인). 래더를 안 켜면 항상 비어 있다.
 
@@ -1168,6 +1174,7 @@ def build_zone_limit_candidates(
                 mfe_r=outcome.mfe_r,
                 mae_r=outcome.mae_r,
                 partial_exits=outcome.partial_exits,
+                exit_at_breakeven=outcome.exit_at_breakeven,
                 exit_extreme=outcome.exit_extreme,
                 refinement_tf=refinement_tf,
                 # WAN-244: 탭 봉 pos의 룩어헤드-안전 ADV. 상한이 꺼져 있으면 None(무시).

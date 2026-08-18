@@ -1123,3 +1123,51 @@ def test_ladder_argument_ranges_rejected() -> None:
         _simulate_long(steps, partial_take_profit_r=1.0, partial_take_profit_fraction=1.0)
     with pytest.raises(ValueError, match="partial_take_profit_fraction"):
         _simulate_long(steps, partial_take_profit_r=1.0, partial_take_profit_fraction=0.0)
+
+
+def test_breakeven_exit_is_flagged_so_the_zone_survives() -> None:
+    """본절 청산은 **존 무효화가 아니다** — 재진입 배선이 그 구분을 볼 수 있어야 한다.
+
+    이 플래그가 없으면 사유가 `STOP_LOSS`라는 이유로 멀쩡한 존이 죽어 재진입이 사라진다
+    (WAN-228/273 게이트가 「익절이면 재무장」이다).
+    """
+    steps = [
+        _step(0, high=101, low=99, close=99),
+        _step(60_000, high=111, low=100, close=110),
+        _step(120_000, high=105, low=99, close=100),  # 진입가 되돌림 → 본절
+    ]
+    out = _simulate_long(
+        steps,
+        take_profit_price=_LADDER_TP,
+        partial_take_profit_r=1.0,
+        breakeven_after_partial=True,
+    )
+    assert out.exit_reason is SignalExitReason.STOP_LOSS
+    assert out.exit_price == _LIMIT
+    assert out.exit_at_breakeven is True
+
+
+def test_real_stop_is_not_flagged_as_breakeven() -> None:
+    """원래 손절선(존 무효화)에서 난 청산은 거짓이어야 한다 — 그 존은 진짜로 죽었다."""
+    steps = [
+        _step(0, high=101, low=99, close=99),
+        _step(60_000, high=111, low=100, close=110),  # 분할만 체결(본절 무장)
+        _step(120_000, high=100.5, low=99.9, close=100.2),  # 아직 진입가 위
+    ]
+    # 본절을 끄면 원래 손절선(90)이 살아 있고, 거기서 나면 플래그가 거짓이다.
+    out = _simulate_long(
+        steps + [_step(180_000, high=99, low=89, close=90)],
+        take_profit_price=_LADDER_TP,
+        partial_take_profit_r=1.0,
+    )
+    assert out.exit_reason is SignalExitReason.STOP_LOSS
+    assert out.exit_price == _STOP
+    assert out.exit_at_breakeven is False
+
+
+def test_ladder_off_never_flags_breakeven() -> None:
+    steps = [
+        _step(0, high=101, low=99, close=99),
+        _step(60_000, high=101, low=89, close=90),
+    ]
+    assert _simulate_long(steps).exit_at_breakeven is False

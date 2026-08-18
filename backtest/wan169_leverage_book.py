@@ -350,7 +350,11 @@ def reentry_candidates_for_window(
     substep_times = [s.time for s in substeps]
     out: list[_Candidate] = []
     for cand, trade in paired:
-        if cand.reason is not ExitReason.TAKE_PROFIT or cand.order_block is None:
+        # WAN-323: 익절뿐 아니라 **본절 청산**도 재무장 대상이다 — 본절은 존 무효화 경계를
+        # 건드리지 않았으므로 그 오더블록이 아직 살아 있다(사용자 지적 2026-08-18). 래더를
+        # 안 켜면 `exit_at_breakeven`이 언제나 거짓이라 기존 북 CSV가 비트 재현된다.
+        zone_alive = cand.reason is ExitReason.TAKE_PROFIT or cand.exit_at_breakeven
+        if not zone_alive or cand.order_block is None:
             continue
         out.extend(
             _reentry_candidates_for_cand(

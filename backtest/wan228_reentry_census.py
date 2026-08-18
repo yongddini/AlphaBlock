@@ -316,12 +316,17 @@ def _iter_reentries(
         if outcome.status is ZoneLimitStatus.FILLED_EXITED:
             assert outcome.exit_time is not None and outcome.exit_price is not None
             is_win = outcome.exit_reason is SignalExitReason.TAKE_PROFIT
+            # WAN-323: 본절 청산은 **존 무효화 경계를 안 건드렸다** — 우리가 스스로 일찍
+            # 나온 것이라 그 존은 아직 살아 있고 재무장 대상이다. 이 구분이 없으면 래더가
+            # 멀쩡한 존을 죽여 재진입을 18~20% 없애 버린다(사용자 지적 2026-08-18).
+            zone_alive = is_win or outcome.exit_at_breakeven
             is_stop = outcome.exit_reason is SignalExitReason.STOP_LOSS
             exit_time, exit_price = outcome.exit_time, outcome.exit_price
             reason = ExitReason.TAKE_PROFIT if is_win else ExitReason.STOP_LOSS
         else:
             # 데이터 끝까지 보유(FILLED_OPEN) → 마지막 봉 종가로 마크. 승/패 아님.
             is_win = is_stop = False
+            zone_alive = False  # 데이터 끝 — 더 볼 봉이 없다.
             exit_time, exit_price = substeps[-1].time, substeps[-1].close
             reason = ExitReason.END_OF_DATA
 
@@ -344,6 +349,7 @@ def _iter_reentries(
             order_block=ob,
             trigger_time=outcome.entry_time,
             exit_extreme=outcome.exit_extreme,
+            exit_at_breakeven=outcome.exit_at_breakeven,
             # WAN-323: 래더를 켰으면 재진입 거래의 부분 청산도 북 회계로 넘긴다(안 켜면 빈 튜플).
             partial_exits=outcome.partial_exits,
         )
@@ -361,7 +367,7 @@ def _iter_reentries(
                 depth=depth,
             ),
         )
-        if not is_win:
+        if not zone_alive:
             break  # 손절(존 무효화)·데이터끝이면 이 존은 끝. 익절이라야 또 무장한다.
         cursor = exit_time
 

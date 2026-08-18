@@ -180,6 +180,13 @@ class ZoneLimitOutcome:
     있으면 후보를 다시 시뮬레이션하지 않고 α를 사후 변환으로 얹을 수 있다(`stop_slippage_alpha`
     엔진 인자와 같은 값을 낸다). α=0(기본)에서는 `exit_price`가 `active_stop` 그대로라 이
     필드가 있어도 손익은 비트 단위로 불변이다."""
+    exit_at_breakeven: bool = False
+    """손절 청산이 **본절 스탑**(진입가로 옮긴 것)에서 났는지 (WAN-323).
+
+    참이면 **존 무효화 경계는 건드려지지 않았다** — 우리가 스스로 일찍 나온 것이라 그
+    오더블록은 아직 살아 있다. 재진입 배선이 「익절이면 재무장, 손절이면 존 종료」로
+    갈라지므로(WAN-228/273) 이 구분이 없으면 본절 청산이 **멀쩡한 존을 죽인다**.
+    래더를 안 켜면 손절선이 안 움직여 언제나 거짓이다."""
     partial_exits: tuple[PartialExit, ...] = ()
     """부분 청산 체결들 (WAN-323, 옵트인). 래더를 안 켜면 **항상 비어 있다**.
 
@@ -589,6 +596,7 @@ def simulate_zone_limit_trade(
                     mae_r=mae_r,
                     stop_price=_entry_stop(),
                     exit_extreme=stop_extreme,
+                    exit_at_breakeven=entry_stop is not None and active_stop != entry_stop,
                     partial_exits=tuple(partials),
                     order_rested=order_rested,
                 )
