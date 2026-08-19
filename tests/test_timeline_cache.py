@@ -947,3 +947,81 @@ def test_cli_trades_marks_stale_engine_rows(
     strict = capsys.readouterr().out
     assert "아직 계산 안 됨" in strict
     assert "옛 엔진 결과입니다" not in strict
+
+
+# --------------------------------------------------------------------------- #
+# WAN-335 — 셋업 행 왕복이 무손실이어야 한다(조인 키가 캐시에서 사라지고 있었다)
+# --------------------------------------------------------------------------- #
+
+
+def test_setup_row_roundtrip_is_lossless(tmp_path: Path) -> None:
+    """🚨 캐시 왕복이 셋업 행의 **어떤 칸도 버리지 않는다** (WAN-335).
+
+    옛 행 스키마는 「백테 행은 예약·목표가·손절 칸이 없다」는 전제로 다섯 열을 버렸는데,
+    그건 거래 행(`cell_timeline_trades`) 시절 이야기였고 WAN-297이 담기는 것을 **셋업 행**
+    으로 넓힌 뒤로는 거짓이었다. 하필 버린 것 중 `tap_index`가 **조인 키의 일부**
+    (`live.setup_compare.setup_key`)라 캐시에서 읽은 행은 라이브와 **절대 안 짝지어졌고**,
+    `stop_price`는 손절폭 그 자체라 파리티 비교의 대상이 통째로 없었다.
+
+    필드를 하나씩 세지 않고 **행 전체 동등성**으로 고정한다 — 나중에 칸이 늘어나도 이
+    테스트가 함께 걸려야 같은 사고가 반복되지 않는다.
+    """
+    row = TimelineRow(
+        source=SOURCE_BACKTEST,
+        symbol=_SYMBOL,
+        timeframe=_TF,
+        is_long=False,
+        status="미체결",
+        reserve_ms=1_000,
+        limit_price=100.25,
+        fill_ms=2_000,
+        fill_price=100.5,
+        stop_price=99.75,
+        take_profit_price=101.5,
+        exit_ms=3_000,
+        exit_price=101.5,
+        exit_reason="take_profit",
+        pnl_pct=1.0,
+        pnl_amount=10.0,
+        zone_start_time=10,
+        zone_confirmed_time=20,
+        tap_index=2,
+        is_reentry=True,
+    )
+    fingerprint = cell_fingerprint(_SYMBOL, _TF, _DAY, warmup_days=120, revision=_REV)
+    with TimelineCacheStore(tmp_path / "cache.db") as store:
+        store.save_cell(fingerprint, [row])
+        cell = store.load_cell(fingerprint)
+
+    assert cell is not None
+    assert cell.rows == (row,)
+
+
+def test_setup_row_roundtrip_survives_a_pre_wan335_database(tmp_path: Path) -> None:
+    """옛 DB(좁은 행 테이블)를 열어도 새 열이 ALTER로 붙어 INSERT가 죽지 않는다.
+
+    서버 DB에는 이미 옛 스키마의 `timeline_cache_rows`가 있다 — 마이그레이션이 없으면 배포
+    직후 야간 크론이 통째로 실패한다(옛 적재분 행은 새 열이 NULL이지만 캐시 버전이 갈라져
+    어차피 로드되지 않는다).
+    """
+    import sqlite3
+
+    db = tmp_path / "old.db"
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "CREATE TABLE timeline_cache_rows (run_id TEXT NOT NULL, row_no INTEGER NOT NULL,"
+            " symbol TEXT NOT NULL, timeframe TEXT NOT NULL, is_long INTEGER NOT NULL,"
+            " status TEXT NOT NULL, fill_ms INTEGER, fill_price REAL, exit_ms INTEGER,"
+            " exit_price REAL, exit_reason TEXT, pnl_pct REAL, pnl_amount REAL,"
+            " zone_start_time INTEGER, zone_confirmed_time INTEGER,"
+            " PRIMARY KEY (run_id, row_no))"
+        )
+
+    row = _bt_row(fill_ms=2_000)
+    fingerprint = cell_fingerprint(_SYMBOL, _TF, _DAY, warmup_days=120, revision=_REV)
+    with TimelineCacheStore(db) as store:
+        store.save_cell(fingerprint, [row])
+        cell = store.load_cell(fingerprint)
+
+    assert cell is not None
+    assert cell.rows == (row,)

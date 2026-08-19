@@ -265,6 +265,7 @@ class JoinCensus:
     """
 
     live_rows: int
+    """조인에 실제로 들어간 라이브 셋업 수(좁혔으면 **그 좌표의** 수)."""
     backtest_rows: int
     live_keyed: int
     """존 정체성(조인 키)이 있는 라이브 셋업 수. 재진입 행은 정확 키에서 빠진다(WAN-305)."""
@@ -275,6 +276,13 @@ class JoinCensus:
     live_only_keys: tuple[SetupKey, ...]
     """짝을 못 찾은 라이브 키 표본(진단용, 앞에서부터 몇 개)."""
     backtest_only_keys: tuple[SetupKey, ...]
+    live_rows_total: int | None = None
+    """좁히기 **이전** 창 전체의 라이브 셋업 수. `live_rows`와 다르면 분모를 화면에 밝힌다.
+
+    🚨 이 열이 없던 시절(WAN-333) 인구조사는 「라이브 60건 · 백테 3건 → 짝 없음 라이브 57」을
+    찍었는데, 60은 **48칸 전부**이고 3은 **좁힌 한 칸**이었다 — 정상 좁히기가 배선 오류처럼
+    읽혀 실제로 오독을 만들었다(WAN-335 §2). 지금은 좁히기가 양쪽에 걸리고 분모도 밝힌다.
+    """
 
     @property
     def key_wiring_broken(self) -> bool:
@@ -290,8 +298,13 @@ def join_census(
     comparisons: Sequence[SetupComparison],
     *,
     sample: int = 5,
+    live_rows_total: int | None = None,
 ) -> JoinCensus:
-    """양쪽 입력과 조인 결과를 인구조사한다 (순수 함수, WAN-333)."""
+    """양쪽 입력과 조인 결과를 인구조사한다 (순수 함수, WAN-333 · 분모 WAN-335).
+
+    `live_rows_total`은 **좁히기 이전** 창 전체의 라이브 셋업 수다 — 주면 화면이 분모를
+    밝힌다(안 주면 예전과 같은 줄이 나온다).
+    """
     live_keys = [k for k in (setup_key(r) for r in live_rows) if k is not None]
     bt_keys = [k for k in (setup_key(r) for r in backtest_rows) if k is not None]
     live_only = sorted({k for k in live_keys} - {k for k in bt_keys})
@@ -308,6 +321,7 @@ def join_census(
         ),
         live_only_keys=tuple(live_only[:sample]),
         backtest_only_keys=tuple(bt_only[:sample]),
+        live_rows_total=live_rows_total,
     )
 
 
@@ -324,6 +338,13 @@ class StopWidthReport:
     """백테 대조를 실제로 돌렸는지. 거짓이면 §1 표는 비어 있고 그 사실을 화면이 밝힌다."""
     census: JoinCensus | None = None
     """조인 인구조사(WAN-333). 백테를 돌렸으면 항상 있다 — 짝이 0건이어도 **왜** 0인지 낸다."""
+    narrowed: bool = False
+    """좌표(`--symbol`/`--tf`)를 좁혀 돌렸나 — 참이면 §3이 창 전체를 본다는 사실을 화면이 밝힌다.
+
+    📌 **§3(라이브 체결 분포)은 일부러 좁히지 않는다(WAN-335 §2 결정)** — 좁힌 좌표를 주고도
+    「그날 체결이 어느 TF에 있었나」가 보이는 성질이 실사용에서 유용했다(`--tf 15m`을 줬는데
+    §3이 1h까지 보여줘 체결이 두 TF에만 있음을 알았다). 좁히기는 **조인(§1)에만** 건다.
+    """
 
 
 def build_report(
@@ -334,11 +355,16 @@ def build_report(
     window_label: str,
     backtest_rows: Sequence[TimelineRow] | None = None,
     live_rows: Sequence[TimelineRow] | None = None,
+    live_rows_total: int | None = None,
+    narrowed: bool = False,
 ) -> StopWidthReport:
     """장부(+ 선택적 백테 타임라인)로 손절폭 해부 리포트를 만든다.
 
     `backtest_rows`가 없으면 §3(라이브 분포)만 낸다 — 백테 대조는 채택 좌표 48셀 × 워밍업이라
     무겁고, 「오늘 라이브가 얼마나 걸렸나」만 보고 싶은 호출이 더 흔하다.
+
+    `live_rows`는 호출부가 **좁힌 뒤** 넘기고(WAN-335 §2 — 좁힌 좌표의 조인 표에 다른 칸
+    라이브 행이 섞일 이유가 없다), `live_rows_total`이 그 좁히기 이전 분모다.
     """
     orders = journal.orders_placed_between(start_ms=start_ms, end_ms=end_ms)
     filled = [o for o in orders if o.fill_ms is not None]
@@ -348,7 +374,9 @@ def build_report(
     if backtest_rows is not None and live_rows is not None:
         result = build_setup_comparisons(live_rows, backtest_rows)
         pairs = pair_attributions(result.comparisons)
-        census = join_census(live_rows, backtest_rows, result.comparisons)
+        census = join_census(
+            live_rows, backtest_rows, result.comparisons, live_rows_total=live_rows_total
+        )
     return StopWidthReport(
         window_label=window_label,
         live_orders=len(filled),
@@ -356,6 +384,7 @@ def build_report(
         pairs=tuple(pairs),
         backtest_ran=backtest_rows is not None,
         census=census,
+        narrowed=narrowed,
     )
 
 
@@ -380,6 +409,12 @@ def render_report(report: StopWidthReport) -> str:
         "",
         f"§3 라이브 체결 {report.live_orders}건 중 손절폭이 남은 것 {len(report.live)}건",
     ]
+    if report.narrowed:
+        # 의도된 비대칭이다 — 좁히기는 §1(조인)에만 걸고 §3은 창 전체를 본다(WAN-335 §2).
+        lines.append(
+            "  📌 §3은 좌표 좁히기와 **무관하게 창 전체**를 봅니다(의도) — 좁힌 TF를 주고도"
+            " 그날 체결이 어느 TF에 있었는지가 보입니다. 좁히기는 §1(조인)에만 걸립니다."
+        )
     if len(report.live) < report.live_orders:
         lines.append(
             "  ⚠️ 나머지는 체결가·손절가 열이 없는 옛 행이라 **판별 불가**입니다(WAN-234 이전)."
@@ -454,8 +489,14 @@ def _census_lines(census: JoinCensus | None) -> list[str]:
     """조인 인구조사 블록 — 「짝 0건」이 표본 부족인지 배선 오류인지 가른다 (WAN-333)."""
     if census is None:
         return []
+    # 좁혔으면 분모를 밝힌다 — 「라이브 60건 vs 백테 3건」이 48칸과 1칸의 비교였던 것이
+    # 정상 좁히기를 고장처럼 읽히게 만들었다(WAN-335 §2).
+    live_part = f"라이브 셋업 {census.live_rows}건"
+    if census.live_rows_total is not None and census.live_rows_total != census.live_rows:
+        live_part += f"(창 전체 {census.live_rows_total}건 중 이 좌표)"
+    live_part += f"(키 있음 {census.live_keyed})"
     lines = [
-        f"  조인 인구조사: 라이브 셋업 {census.live_rows}건(키 있음 {census.live_keyed})"
+        f"  조인 인구조사: {live_part}"
         f" · 백테 셋업 {census.backtest_rows}건(키 있음 {census.backtest_keyed})"
         f" → 짝지어짐 {census.paired} · 짝 없음 라이브 {census.unpaired_live_only}"
         f" · 백테 {census.unpaired_backtest_only}",

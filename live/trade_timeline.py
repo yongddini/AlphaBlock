@@ -72,6 +72,7 @@ __all__ = [
     "DayTimeline",
     "TimelineRow",
     "backtest_setup_by_cell",
+    "backtest_setup_by_cells",
     "backtest_setup_rows",
     "backtest_timeline_by_cell",
     "backtest_timeline_rows",
@@ -750,19 +751,50 @@ def backtest_setup_by_cell(
     `backtest_timeline_by_cell`과 같은 로딩·워밍업·평가 규약이되 청산 거래만이 아니라
     라이브 장부와 대칭인 셋업 행을 낸다(`cell_setup_timeline`). 「청산」 행만 추리면
     `backtest_timeline_by_cell`과 비트 동일하다(회귀 테스트 고정).
+
+    좌표(심볼 × TF)의 **데카르트 곱**을 돌린다 — 임의의 칸 목록만 돌리려면
+    `backtest_setup_by_cells`를 직접 쓴다(캐시 미스 칸만 메우는 경로, WAN-335).
     """
     from backtest.harness import DEFAULT_SYMBOLS, DEFAULT_TIMEFRAMES
-    from live.live_vs_backtest import DEFAULT_WARMUP_DAYS
 
     syms = list(symbols) if symbols is not None else list(DEFAULT_SYMBOLS)
     tfs = list(timeframes) if timeframes is not None else list(DEFAULT_TIMEFRAMES)
-    warm = warmup_days if warmup_days is not None else DEFAULT_WARMUP_DAYS
+    cells = [(symbol, tf) for symbol in syms for tf in tfs]
+    return backtest_setup_by_cells(
+        cells,
+        day_start_ms=day_start_ms,
+        day_end_ms=day_end_ms,
+        warmup_days=warmup_days,
+        jobs=jobs,
+    )
 
+
+def backtest_setup_by_cells(
+    cells: Sequence[tuple[str, str]],
+    *,
+    day_start_ms: int,
+    day_end_ms: int,
+    warmup_days: int | None = None,
+    jobs: int = 1,
+) -> dict[tuple[str, str], list[TimelineRow]]:
+    """`backtest_setup_by_cell`과 **같은 계산**이되 돌릴 (심볼, TF) 칸을 낱개로 받는다 (WAN-335).
+
+    캐시가 이미 가진 칸은 다시 굽지 않고 **미스인 칸만** 메우기 위해 있다 — 미스는 좌표의
+    데카르트 곱이 아니라 임의의 부분집합이라(칸마다 지문이 따로다) 심볼·TF 목록으로는
+    표현되지 않는다. 같은 칸 목록을 주면 `backtest_setup_by_cell`과 산출물이 같다(회귀
+    테스트가 고정) — 캐시를 읽어 빨라지는 것이 **숫자를 바꾸면 버그**다(WAN-335 완료 기준 5).
+
+    칸이 없으면 빈 dict를 낸다(빈 풀을 여는 비용도 치르지 않는다).
+    """
+    from live.live_vs_backtest import DEFAULT_WARMUP_DAYS
+
+    warm = warmup_days if warmup_days is not None else DEFAULT_WARMUP_DAYS
     tasks = [
-        _BacktestCellTask(symbol, tf, day_start_ms, day_end_ms, warm)
-        for symbol in syms
-        for tf in tfs
+        _BacktestCellTask(symbol, timeframe, day_start_ms, day_end_ms, warm)
+        for symbol, timeframe in cells
     ]
+    if not tasks:
+        return {}
     if jobs > 1:
         from concurrent.futures import ProcessPoolExecutor
 

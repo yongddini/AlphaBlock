@@ -29,6 +29,7 @@ if TYPE_CHECKING:
     from data.integrity import IntegrityReport
     from data.partial_bars import BarDiscrepancy, SeriesScan
     from data.verify import VerifyReport
+    from live.trade_timeline import TimelineRow
 
 logger = logging.getLogger(__name__)
 
@@ -532,20 +533,33 @@ def cmd_stop_width(args: argparse.Namespace, settings: Settings) -> int:
     낸다: 창 안 라이브 체결의 손절폭·거부 사유 분포(§3)와, 같은 셋업을 백테와 짝지어 «진입가가
     갈렸나 · 무효화 경계가 갈렸나»를 지목하는 표(§1, `--with-backtest`).
 
-    순수 조회라 종료 코드는 항상 0이다. 가드 값은 채택값을 **읽기만** 한다 — 바꾸는 것은
-    WAN-76/79 소관이고 재-베이스라인 = 사용자 결정이다.
+    순수 조회라 종료 코드는 항상 0이고 **DB에 아무것도 쓰지 않는다**(WAN-194 원칙). 가드 값은
+    채택값을 **읽기만** 한다 — 바꾸는 것은 WAN-76/79 소관이고 재-베이스라인 = 사용자 결정이다.
 
     🚨 **백테 쪽은 「셋업 행」을 먹인다(WAN-333)** — 거래 행(`backtest_timeline_rows`)에는
     존 정체성(조인 키)이 실리지 않아 짝이 **영원히 0건**이었다. 조인 인구조사가 그 상태를
     화면에 찍으므로 「짝 0건」이 표본 부족인지 배선 오류인지 구분된다.
 
+    📌 **백테 대조는 야간 캐시를 먼저 읽는다(WAN-335 §1)** — 크론이 담는 것(`persist_day` →
+    `backtest_setup_by_cell`)이 정확히 이 도구가 필요로 하는 셋업 행이라, 디스크에 있는 것을
+    무시하고 다시 굽고 있었다(48칸 → 4칸으로 좁혀도 안 끝나 실사용이 중단됐다). 미스인 칸만
+    계산하고, **몇 칸을 계산하는지 먼저 찍는다**. 캐시를 무시한 재계산은 `--recompute`이고
+    두 경로의 조인 결과는 **같아야 한다**(빨라지는 것이 숫자를 바꾸면 버그 — 완료 기준 5).
+
+    🚨 **옛 엔진 판(stale)은 기본 거부다** — 이건 파리티 측정이라 엔진이 다른 두 판을 빼면
+    「집행 차이」가 아니라 「엔진이 바뀐 몫」이 섞인다(WAN-325가 3열 대조를 끄는 것과 같은
+    이유). `trades`의 `--no-stale`과 **반대로** 엄격이 기본이고 완화가 `--allow-stale`이다.
+
     📌 `--symbol`·`--tf`는 **탐색용 옵트인**이다(WAN-305) — 안 주면 예전처럼 채택 좌표 전부를
-    돈다. 좁힌 표는 그 좌표에서만의 결론이라 헤더가 좌표를 밝힌다.
+    돈다. 좁힌 표는 그 좌표에서만의 결론이라 헤더가 좌표를 밝히고, 좁히기는 **양쪽에**
+    걸린다(WAN-335 §2 — 백테만 좁히면 「48칸 대 1칸」을 비교한 인구조사가 정상 좁히기를
+    고장처럼 보이게 한다). §3(라이브 분포)만은 일부러 창 전체를 본다.
     """
+    from backtest.harness import DEFAULT_SYMBOLS, DEFAULT_TIMEFRAMES
     from live.fill_report import resolve_day_window
     from live.order_journal import OrderJournal
     from live.stop_width_parity import build_report, render_report
-    from live.trade_timeline import backtest_setup_rows, live_timeline_rows
+    from live.trade_timeline import live_timeline_rows
     from paper.store import PaperTradeStore
 
     db_path = args.db if args.db is not None else settings.db_path
@@ -555,7 +569,8 @@ def cmd_stop_width(args: argparse.Namespace, settings: Settings) -> int:
     label = day_key if days == 1 else f"{days}일 창(끝 {day_key})"
     symbols = _split_csv(args.symbol)
     timeframes = _split_csv(args.tf)
-    if symbols is not None or timeframes is not None:
+    narrowed = symbols is not None or timeframes is not None
+    if narrowed:
         label += " · 좌표 " + _coordinate_label(symbols, timeframes)
     if days > 1 and args.with_backtest:
         # 백테 대조는 하루 단위 워밍업 규약(WAN-233/295)에 묶여 있다 — 여러 날을 한 번에
@@ -565,21 +580,31 @@ def cmd_stop_width(args: argparse.Namespace, settings: Settings) -> int:
 
     journal = OrderJournal(db_path)
     try:
-        backtest_rows = None
-        live_rows = None
+        backtest_rows: list[TimelineRow] | None = None
+        live_rows: list[TimelineRow] | None = None
+        live_rows_total: int | None = None
         if args.with_backtest:
+            syms = symbols if symbols is not None else list(DEFAULT_SYMBOLS)
+            tfs = timeframes if timeframes is not None else list(DEFAULT_TIMEFRAMES)
             store = PaperTradeStore(db_path)
             try:
-                live_rows = live_timeline_rows(journal, store, start_ms=start_ms, end_ms=end_end_ms)
+                all_live = live_timeline_rows(journal, store, start_ms=start_ms, end_ms=end_end_ms)
             finally:
                 store.close()
-            backtest_rows = backtest_setup_rows(
+            # 좁히기는 **양쪽에** 건다 — 조인 표에 다른 칸 라이브 행이 섞일 이유가 없다.
+            live_rows_total = len(all_live)
+            wanted_syms, wanted_tfs = set(syms), set(tfs)
+            live_rows = [
+                row for row in all_live if row.symbol in wanted_syms and row.timeframe in wanted_tfs
+            ]
+            backtest_rows = _stop_width_backtest_rows(
+                args,
+                db_path,
+                day_key=day_key,
+                symbols=syms,
+                timeframes=tfs,
                 day_start_ms=start_ms,
                 day_end_ms=end_end_ms,
-                symbols=symbols,
-                timeframes=timeframes,
-                warmup_days=args.warmup_days,
-                jobs=args.jobs,
             )
         report = build_report(
             journal,
@@ -588,11 +613,118 @@ def cmd_stop_width(args: argparse.Namespace, settings: Settings) -> int:
             window_label=label,
             backtest_rows=backtest_rows,
             live_rows=live_rows,
+            live_rows_total=live_rows_total,
+            narrowed=narrowed,
         )
     finally:
         journal.close()
     print(render_report(report))
     return 0
+
+
+def _stop_width_backtest_rows(
+    args: argparse.Namespace,
+    db_path: str,
+    *,
+    day_key: str,
+    symbols: list[str],
+    timeframes: list[str],
+    day_start_ms: int,
+    day_end_ms: int,
+) -> list[TimelineRow]:
+    """`stop-width --with-backtest`의 백테 셋업 행 — **캐시 먼저, 미스만 계산**(WAN-335 §1).
+
+    `alphablock trades`가 즉시 뜨는데 이 도구가 수 분 걸린 이유가 여기였다: 같은 산출물을
+    한쪽은 디스크에서 읽고 한쪽은 매번 처음부터 구웠다. 야간 크론이 담는 셀이 정확히 이
+    함수가 필요로 하는 것(`backtest_setup_by_cell` → `persist_day`)이라 지문만 맞추면 된다.
+
+    ⚠️ **적재하지 않는다** — `stop-width`는 순수 조회이고 DB에 쓰지 않는다(WAN-194). 캐시를
+    채우는 것은 `alphablock trades --persist-cache`(야간 크론)의 일이다.
+    """
+    from live.live_vs_backtest import DEFAULT_WARMUP_DAYS
+    from live.timeline_cache import TimelineCacheStore, current_engine_label, load_cached_day
+    from live.trade_timeline import backtest_setup_by_cells
+
+    cells = [(symbol, tf) for symbol in symbols for tf in timeframes]
+    warm = args.warmup_days if args.warmup_days is not None else DEFAULT_WARMUP_DAYS
+
+    if args.recompute:
+        print(
+            f"백테 대조 즉시 재계산(`--recompute`) — {len(cells)}칸을 계산합니다"
+            " (캐시를 읽지 않습니다).",
+            flush=True,
+        )
+        computed = backtest_setup_by_cells(
+            cells,
+            day_start_ms=day_start_ms,
+            day_end_ms=day_end_ms,
+            warmup_days=args.warmup_days,
+            jobs=args.jobs,
+        )
+        return [row for cell in cells for row in computed.get(cell, [])]
+
+    print(f"백테 대조 엔진: **{current_engine_label()}**", flush=True)
+    if args.warmup_days is not None and args.warmup_days != DEFAULT_WARMUP_DAYS:
+        # 워밍업은 캐시 지문에 들어간다 — 기본값이 아니면 전 칸이 당연히 미스다. 조용히
+        # 느려지면 「왜 안 끝나지」가 반복되므로 화면에 밝힌다(WAN-335 §1-3).
+        print(
+            f"⚠️ 워밍업 {args.warmup_days}일은 캐시 적재값({DEFAULT_WARMUP_DAYS}일)과 달라"
+            " **캐시를 쓸 수 없습니다** — 전 칸을 계산합니다.",
+            flush=True,
+        )
+
+    cache = TimelineCacheStore(db_path)
+    try:
+        result = load_cached_day(
+            cache,
+            day_key=day_key,
+            symbols=symbols,
+            timeframes=timeframes,
+            warmup_days=args.warmup_days,
+            allow_stale=args.allow_stale,
+        )
+    finally:
+        cache.close()
+
+    if result.stale is not None:
+        # 옵트인으로 옛 판을 골랐다 — 여기서 미스를 채우면 **한 표에 두 엔진이 섞인다**.
+        # 채우지 않고, 무엇을 보고 있는지 밝힌다(조용히 내주지 않는다).
+        stale = result.stale
+        print(
+            f"🚨 **옛 엔진 결과입니다({stale.num_cells}칸 · {stale.created_label()} 적재)** —"
+            f" 지금 엔진 캐시가 없어 `--allow-stale`로 옛 판을 읽었습니다: {stale.display_label()}."
+            " 이 표의 라이브↔백테 차이는 **집행 차이가 아니라 엔진이 바뀐 몫이 섞인 값**입니다"
+            " (파리티 측정에서 이건 결론 근거가 못 됩니다). 최신 판은"
+            " `alphablock trades --day … --persist-cache`로 적재하거나 `--recompute`로 계산하세요.",
+            flush=True,
+        )
+        if result.misses:
+            print(f"  (그 판에도 없는 칸 {len(result.misses)}칸은 표에서 빠집니다.)", flush=True)
+        return list(result.rows)
+
+    hits = len(result.hits)
+    if not result.misses:
+        print(f"백테 대조: 캐시 적중 {hits}/{len(cells)}칸 — 계산 없이 읽었습니다.", flush=True)
+        return list(result.rows)
+
+    print(
+        f"백테 대조: 캐시 적중 {hits}/{len(cells)}칸 · **미스 {len(result.misses)}칸을 지금"
+        f" 계산합니다**(워밍업 {warm}일 · 워커 {args.jobs}). 미리 담아 두려면"
+        " `alphablock trades --day … --persist-cache`(야간 크론)."
+        + ("" if args.allow_stale else " 옛 엔진 판으로 대신 보려면 `--allow-stale`."),
+        flush=True,
+    )
+    computed = backtest_setup_by_cells(
+        result.misses,
+        day_start_ms=day_start_ms,
+        day_end_ms=day_end_ms,
+        warmup_days=args.warmup_days,
+        jobs=args.jobs,
+    )
+    rows: list[TimelineRow] = list(result.rows)
+    for cell in result.misses:
+        rows.extend(computed.get(cell, []))
+    return rows
 
 
 def cmd_compare(args: argparse.Namespace, settings: Settings) -> int:
@@ -710,7 +842,6 @@ def cmd_trades(args: argparse.Namespace, settings: Settings) -> int:
     from live.trade_timeline import (
         STATUS_BACKTEST_CLOSED,
         DayTimeline,
-        TimelineRow,
         backtest_timeline_rows,
         live_timeline_rows,
         render_day_timeline,
@@ -1243,7 +1374,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_stop_width.add_argument(
         "--with-backtest",
         action="store_true",
-        help="같은 셋업 백테 대조(§1)까지 낸다 — 채택 좌표 48셀 × 워밍업이라 무겁다",
+        help="같은 셋업 백테 대조(§1)까지 낸다 — 야간 캐시를 읽고 미스인 칸만 계산한다",
+    )
+    p_stop_width.add_argument(
+        "--recompute",
+        action="store_true",
+        help="캐시를 무시하고 전 칸을 다시 계산한다(무겁다). 캐시 경로와 결과가 같아야 한다",
+    )
+    p_stop_width.add_argument(
+        "--allow-stale",
+        action="store_true",
+        help=(
+            "지금 엔진 캐시가 없을 때 옛 엔진 판을 대신 읽는다(기본 거부) — 파리티 측정이라"
+            " 엔진이 다른 두 판의 차이는 집행 차이가 아니다"
+        ),
     )
     p_stop_width.add_argument(
         "--warmup-days",

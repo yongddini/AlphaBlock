@@ -635,3 +635,73 @@ def test_cell_setup_timeline_closed_rows_match_cell_trades(
     # 청산 행은 존 정체성을 실어 나른다(라이브 조인 키).
     for r in closed:
         assert r.zone_start_time is not None and r.tap_index is not None
+
+
+# --- WAN-335: 칸 낱개 경로가 데카르트 곱 경로와 같은 계산이다 -----------------
+
+
+def test_backtest_setup_by_cells_matches_cartesian_product(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`backtest_setup_by_cells`는 **같은 계산**이되 칸 목록을 낱개로 받는다 (WAN-335 §1).
+
+    캐시 미스는 좌표의 데카르트 곱이 아니라 임의의 부분집합이라(칸마다 지문이 따로다)
+    심볼·TF 목록으로는 표현되지 않는다. 그렇다고 **다른 계산**이 되면 캐시 경로와 재계산
+    경로가 갈라져 「빨라졌는데 숫자가 달라지는」 버그가 된다(완료 기준 5) — 두 경로가 같은
+    셀 작업(`_BacktestCellTask`)을 같은 순서로 만드는지를 동작으로 고정한다.
+    """
+    import live.trade_timeline as tt
+
+    seen: list[tuple[str, str, int, int, int]] = []
+
+    def fake_cell(task: object) -> list[TimelineRow]:
+        t = task  # `_BacktestCellTask`(프로즌 데이터클래스)
+        seen.append(
+            (
+                t.symbol,  # type: ignore[attr-defined]
+                t.timeframe,  # type: ignore[attr-defined]
+                t.day_start_ms,  # type: ignore[attr-defined]
+                t.day_end_ms,  # type: ignore[attr-defined]
+                t.warmup_days,  # type: ignore[attr-defined]
+            )
+        )
+        return []
+
+    monkeypatch.setattr(tt, "_backtest_cell_setups", fake_cell)
+
+    grid = tt.backtest_setup_by_cell(
+        day_start_ms=10,
+        day_end_ms=20,
+        symbols=["BTC/USDT:USDT", "ETH/USDT:USDT"],
+        timeframes=["15m", "1h"],
+        warmup_days=7,
+    )
+    tasks_grid = list(seen)
+    seen.clear()
+
+    cells = tt.backtest_setup_by_cells(
+        [
+            ("BTC/USDT:USDT", "15m"),
+            ("BTC/USDT:USDT", "1h"),
+            ("ETH/USDT:USDT", "15m"),
+            ("ETH/USDT:USDT", "1h"),
+        ],
+        day_start_ms=10,
+        day_end_ms=20,
+        warmup_days=7,
+    )
+    assert cells == grid
+    assert seen == tasks_grid  # 같은 칸을 같은 순서로 — 다른 계산이 아니다.
+
+
+def test_backtest_setup_by_cells_with_no_cells_computes_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """캐시가 전 칸을 갖고 있으면(미스 0) 아무것도 굽지 않는다 — 빈 풀도 열지 않는다."""
+    import live.trade_timeline as tt
+
+    def boom(task: object) -> list[TimelineRow]:
+        raise AssertionError("미스가 없는데 백테를 돌렸다")
+
+    monkeypatch.setattr(tt, "_backtest_cell_setups", boom)
+    assert tt.backtest_setup_by_cells([], day_start_ms=0, day_end_ms=1, jobs=4) == {}
