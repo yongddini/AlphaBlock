@@ -480,6 +480,29 @@ def _verdict_word(delta: float | None, *, legacy: float) -> str:
 LEGACY_MDD_DELTA = -0.0484
 
 
+#: 잔존율의 분모 하한 — 기준 증분이 이보다 작으면 비율을 내지 않는다.
+#: 🚨 **WAN-115가 문서화한 함정이다** — 기준 증분이 0 언저리면 비율이 폭발해(391% · 1155%)
+#: 「유지」로 읽히는데 실제로는 **원래 0이었던 것**이다. 그런 셀은 **부호만** 본다.
+_RESIDUAL_FLOOR = 0.005
+
+#: 잔존율을 못 낼 때 판정문에 붙이는 주의 — 안 낸 것과 못 낸 것을 구분해 적는다.
+_RESIDUAL_CAVEAT = " (⚠️ 기준 증분이 0 언저리이거나 부호가 갈려 잔존율은 뜻이 없다 — 부호만 읽는다)"
+
+
+def _residual_ratio(base: float | None, stressed: float | None) -> float | None:
+    """`pen_5bp` 증분 ÷ `baseline` 증분 — 뜻이 설 때만 낸다.
+
+    기준 증분이 `_RESIDUAL_FLOOR`(0.5%p) 미만이거나 두 증분의 **부호가 다르면** `None`이다
+    (후자는 「잔존」이라는 말 자체가 성립하지 않는다 — 이득이 손해로 바뀐 것이라 크기가
+    아니라 부호가 답이다).
+    """
+    if base is None or stressed is None or abs(base) < _RESIDUAL_FLOOR:
+        return None
+    if (base < 0) != (stressed < 0):
+        return None
+    return stressed / base
+
+
 def build_summary(frame: pd.DataFrame) -> str:
     lenses = [lens for lens in DEFAULT_LENSES if lens in set(frame["lens"])]
     scopes = [s for s in (BOTH_SCOPE, BOTH_NO_15M_SCOPE) if s in set(frame["scope"])]
@@ -656,17 +679,14 @@ def _verdict_lines(frame: pd.DataFrame, lenses: Sequence[str]) -> list[str]:
             if base_row is None or pen_row is None or not int(base_row["num_trades"])
             else int(pen_row["num_trades"]) / int(base_row["num_trades"]) - 1.0
         )
-        residual = (
-            None
-            if base_delta is None or pen_delta is None or base_delta == 0.0
-            else pen_delta / base_delta
-        )
+        residual = _residual_ratio(base_delta, pen_delta)
         lines += [
             "### §2 체결 보수화 판정 (완료기준 6)",
             "",
             f"* 4TF `{PRIMARY_OOS}` ΔMDD: `baseline` {_pp(base_delta)} → `pen_5bp` "
             f"{_pp(pen_delta)}"
-            f"{'' if residual is None else f' (잔존 {residual * 100:.1f}%)'}.",
+            f"{'' if residual is None else f' (잔존 {residual * 100:.1f}%)'}"
+            f"{'' if residual is not None else _RESIDUAL_CAVEAT}.",
             f"* 기준선 팔 거래 수 감소율 "
             f"{'—' if drop is None else f'{drop * 100:+.2f}%'} — WAN-96 비대칭 대조용으로 "
             "**반드시 함께** 읽는다.",

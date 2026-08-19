@@ -379,3 +379,18 @@ def test_stress_multiple_only_moves_the_effective_risk_column() -> None:
     assert stressed.num_trades == plain.num_trades
     assert stressed.total_return == plain.total_return
     assert stressed.max_effective_concurrent_risk == pytest.approx(plain.max_concurrent_risk * 1.5)
+
+
+def test_residual_ratio_refuses_meaningless_denominators() -> None:
+    """🚨 WAN-115가 문서화한 함정 — 기준 증분이 0 언저리면 잔존율이 폭발해 「유지」로 읽힌다.
+
+    실제로 이 격자의 `full` 셀에서 기준 ΔMDD가 +0.00%p였고 `pen_5bp`가 +0.01%p라 순진한
+    비율이 **391.9%**를 찍었다. 그 셀은 크기가 아니라 **부호**로만 읽어야 한다.
+    """
+    from backtest.wan330_partial_tp_ladder_4tf import _residual_ratio
+
+    assert _residual_ratio(-0.0381, -0.0260) == pytest.approx(0.6824, abs=1e-3)
+    assert _residual_ratio(0.00003, 0.00013) is None  # 분모가 0 언저리 — 391.9% 함정
+    assert _residual_ratio(-0.0031, -0.0361) is None  # 〃 (0.31%p < 하한)
+    assert _residual_ratio(-0.0381, +0.0100) is None  # 부호가 갈리면 「잔존」이 성립 안 한다
+    assert _residual_ratio(None, -0.02) is None
