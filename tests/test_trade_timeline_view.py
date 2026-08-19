@@ -100,15 +100,15 @@ def test_full_universe_runs_all_12x4_cells_regardless_of_live(
     「어느 셀을 도는가」만 잰다.
     """
     from backtest.harness import DEFAULT_SYMBOLS, DEFAULT_TIMEFRAMES
-    from live.trade_timeline import _BacktestCellTask, backtest_timeline_by_cell
+    from live.trade_timeline import _BacktestSymbolTask, backtest_timeline_by_cell
 
     seen: list[tuple[str, str]] = []
 
-    def _fake_cell(task: _BacktestCellTask) -> list[TimelineRow]:
-        seen.append((task.symbol, task.timeframe))
-        return []
+    def _fake_symbol(task: _BacktestSymbolTask) -> list[list[TimelineRow]]:
+        seen.extend((task.symbol, tf) for tf in task.timeframes)
+        return [[] for _ in task.timeframes]
 
-    monkeypatch.setattr("live.trade_timeline._backtest_cell_trades", _fake_cell)
+    monkeypatch.setattr("live.trade_timeline._backtest_symbol_trades", _fake_symbol)
 
     by_cell = backtest_timeline_by_cell(day_start_ms=0, day_end_ms=86_400_000)
 

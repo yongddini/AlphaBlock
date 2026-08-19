@@ -24,6 +24,7 @@ from config import get_settings
 from config.settings import Settings
 from dashboard.health import HealthLevel, runner_cycle_budget_ms
 from dashboard.health_data import HealthView, build_health_view
+from live.timeline_profile import SHAPE_PER_CELL, SHAPE_SHARED
 
 if TYPE_CHECKING:
     from data.integrity import IntegrityReport
@@ -817,6 +818,40 @@ def cmd_parity(args: argparse.Namespace, settings: Settings) -> int:
     return 0
 
 
+def cmd_timeline_profile(args: argparse.Namespace, settings: Settings) -> int:
+    """`alphablock timeline-profile --day YYYY-MM-DD` — 하루치 적재 단계별 프로파일(WAN-324 §0).
+
+    「6분 23초가 어디서 나가는가」에 답한다 — 상위TF SQL · 1분봉 SQL · 오더블록 탐지 ·
+    서브스텝 평가를 한 단계씩 잰다(펀딩은 이 경로가 `funding=False`라 조회하지 않는다).
+    `--shape per-cell`은 WAN-324 이전 모양(셀마다 1분봉 읽기), `--shape shared`는 지금
+    모양(종목당 1회 읽고 TF가 나눠 씀)이라 **같은 실행에서 두 모양을 비교**할 수 있다.
+
+    ⚠️ **서버에서 재는 것이 정본이다** — 노트북은 디스크가 훨씬 빨라 I/O 비중이 다르게
+    나온다(WAN-318 §1과 같은 성질). 순수 측정이라 DB에 아무것도 쓰지 않고 종료 코드는
+    항상 0이다.
+    """
+    from live.timeline_profile import profile_day, render_profile
+    from live.trade_timeline import resolve_day_window
+
+    start_ms, end_ms, day_key = resolve_day_window(args.day)
+    profile = profile_day(
+        day_start_ms=start_ms,
+        day_end_ms=end_ms,
+        day_key=day_key,
+        symbols=_split_csv(args.symbol),
+        timeframes=_split_csv(args.tf),
+        warmup_days=args.warmup_days,
+        shape=args.shape,
+    )
+    text = render_profile(profile)
+    if args.out is not None:
+        Path(args.out).write_text(text, encoding="utf-8")
+        print(f"프로파일을 {args.out}에 적었습니다.")
+    else:
+        print(text, end="")
+    return 0
+
+
 def cmd_trades(args: argparse.Namespace, settings: Settings) -> int:
     """`alphablock trades [--day YYYY-MM-DD]` — 당일(KST) 거래별 타임라인(WAN-234/239).
 
@@ -1571,6 +1606,46 @@ def build_parser() -> argparse.ArgumentParser:
         "--jobs", type=int, default=1, help="백테스트 (심볼, TF) 병렬 워커 수(기본 1)"
     )
     p_trades.set_defaults(func=cmd_trades)
+
+    p_tlprof = sub.add_parser(
+        "timeline-profile",
+        help="하루치 타임라인 적재의 단계별 소요 시간(SQL·탐지·평가) — 성능 진단(WAN-324)",
+    )
+    p_tlprof.add_argument(
+        "--day",
+        default="today",
+        metavar="YYYY-MM-DD",
+        help="프로파일할 KST 날짜(기본: 오늘)",
+    )
+    p_tlprof.add_argument(
+        "--shape",
+        choices=[SHAPE_PER_CELL, SHAPE_SHARED],
+        default=SHAPE_SHARED,
+        help=(
+            f"적재 모양: {SHAPE_SHARED}=종목당 1분봉 1회(WAN-324 이후·기본) · "
+            f"{SHAPE_PER_CELL}=셀마다 1분봉 읽기(이전 모양)"
+        ),
+    )
+    p_tlprof.add_argument(
+        "--symbol",
+        default=None,
+        metavar="SYM[,SYM...]",
+        help="프로파일 심볼(콤마 목록). 생략 시 채택 좌표 전부",
+    )
+    p_tlprof.add_argument(
+        "--tf",
+        default=None,
+        metavar="TF[,TF...]",
+        help="프로파일 TF(콤마 목록). 생략 시 채택 좌표 전부",
+    )
+    p_tlprof.add_argument(
+        "--warmup-days",
+        type=int,
+        default=None,
+        help="워밍업 길이(일). 생략 시 적재 경로와 같은 기본값",
+    )
+    p_tlprof.add_argument("--out", default=None, help="결과 마크다운을 적을 파일(기본: 표준출력)")
+    p_tlprof.set_defaults(func=cmd_timeline_profile)
 
     p_doctor = sub.add_parser(
         "doctor",

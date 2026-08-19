@@ -1264,10 +1264,12 @@ def _timeline_full_universe_backtest(
     담기고**, 화면은 그 담긴 행을 다시 읽어 그린다 — "화면에는 떴는데 캐시에는 없다"가
     구조적으로 불가능하다. 적재는 야간 크론과 **같은 `persist_day`**다(완료 기준 4).
 
-    ⚠️ **직렬(jobs=1)로 돈다** — 셀마다 120일치 1분봉을 로드하므로 프로세스 풀 병렬은
-    메모리 압박으로 워커가 죽을 수 있다(M1 실측 `BrokenProcessPool`). 화면 버튼은 크래시
-    없이 도는 게 우선이라 직렬을 쓴다. 대량 격자·야간 되채우기는 CLI가 담당한다
-    (`alphablock trades --persist-cache --days N`).
+    ⚠️ **직렬(jobs=1)로 돈다** — 워커마다 120일치 1분봉 사본을 들어 메모리 압박으로 워커가
+    죽을 수 있다(M1 실측 `BrokenProcessPool`). 화면 버튼은 크래시 없이 도는 게 우선이라
+    직렬을 쓴다. 대량 격자·야간 되채우기는 CLI가 담당한다(`alphablock trades
+    --persist-cache --days N`). 📌 WAN-324가 1분봉 로드를 **셀 단위에서 종목 단위로** 올려
+    (같은 종목의 4개 TF가 한 번 읽은 것을 나눠 쓴다) 그 중복이 줄었지만, 직렬 유지 판단은
+    바꾸지 않았다 — 여기서 재는 것은 속도가 아니라 크래시 없이 도는 것이다.
     """
     from backtest.harness import DEFAULT_TIMEFRAMES
 

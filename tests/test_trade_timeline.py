@@ -648,26 +648,29 @@ def test_backtest_setup_by_cells_matches_cartesian_product(
     캐시 미스는 좌표의 데카르트 곱이 아니라 임의의 부분집합이라(칸마다 지문이 따로다)
     심볼·TF 목록으로는 표현되지 않는다. 그렇다고 **다른 계산**이 되면 캐시 경로와 재계산
     경로가 갈라져 「빨라졌는데 숫자가 달라지는」 버그가 된다(완료 기준 5) — 두 경로가 같은
-    셀 작업(`_BacktestCellTask`)을 같은 순서로 만드는지를 동작으로 고정한다.
+    셀 작업(`_BacktestCellTask`)을 같은 순서로 만드는지를 동작으로 고정한다. WAN-324가
+    병렬 단위를 심볼로 올린 뒤에도(1분봉 1회 읽기 공유) **어느 칸을 어떤 순서로 굽는가**는
+    그대로여야 하므로, 심볼 작업을 칸으로 펼쳐 같은 자로 잰다.
     """
     import live.trade_timeline as tt
 
     seen: list[tuple[str, str, int, int, int]] = []
 
-    def fake_cell(task: object) -> list[TimelineRow]:
-        t = task  # `_BacktestCellTask`(프로즌 데이터클래스)
-        seen.append(
-            (
-                t.symbol,  # type: ignore[attr-defined]
-                t.timeframe,  # type: ignore[attr-defined]
-                t.day_start_ms,  # type: ignore[attr-defined]
-                t.day_end_ms,  # type: ignore[attr-defined]
-                t.warmup_days,  # type: ignore[attr-defined]
+    def fake_symbol(task: object) -> list[list[TimelineRow]]:
+        t = task  # `_BacktestSymbolTask`(프로즌 데이터클래스)
+        for cell in t.cells():  # type: ignore[attr-defined]
+            seen.append(
+                (
+                    cell.symbol,
+                    cell.timeframe,
+                    cell.day_start_ms,
+                    cell.day_end_ms,
+                    cell.warmup_days,
+                )
             )
-        )
-        return []
+        return [[] for _ in t.timeframes]  # type: ignore[attr-defined]
 
-    monkeypatch.setattr(tt, "_backtest_cell_setups", fake_cell)
+    monkeypatch.setattr(tt, "_backtest_symbol_setups", fake_symbol)
 
     grid = tt.backtest_setup_by_cell(
         day_start_ms=10,
@@ -700,8 +703,147 @@ def test_backtest_setup_by_cells_with_no_cells_computes_nothing(
     """캐시가 전 칸을 갖고 있으면(미스 0) 아무것도 굽지 않는다 — 빈 풀도 열지 않는다."""
     import live.trade_timeline as tt
 
-    def boom(task: object) -> list[TimelineRow]:
+    def boom(task: object) -> list[list[TimelineRow]]:
         raise AssertionError("미스가 없는데 백테를 돌렸다")
 
-    monkeypatch.setattr(tt, "_backtest_cell_setups", boom)
+    monkeypatch.setattr(tt, "_backtest_symbol_setups", boom)
     assert tt.backtest_setup_by_cells([], day_start_ms=0, day_end_ms=1, jobs=4) == {}
+
+
+# --------------------------------------------------------------------------- #
+# WAN-324: 1분봉 1회 읽기 공유 — 빨라졌는데 숫자가 달라지면 그건 버그다
+# --------------------------------------------------------------------------- #
+
+
+def test_symbol_tasks_group_cells_preserving_order() -> None:
+    """칸 → 심볼 작업 묶기는 **첫 등장 순서**를 보존하고 같은 칸을 두 번 굽지 않는다.
+
+    순서가 흔들리면 `backtest_setup_rows`가 내는 행 순서가 바뀌고, 중복을 안 걸러내면
+    같은 칸을 두 번 계산한다(WAN-324 §1은 성능 작업이라 산출물이 움직이면 실패다).
+    """
+    from live.trade_timeline import _symbol_tasks
+
+    tasks = _symbol_tasks(
+        [
+            ("BTC/USDT:USDT", "15m"),
+            ("ETH/USDT:USDT", "1h"),
+            ("BTC/USDT:USDT", "4h"),
+            ("BTC/USDT:USDT", "15m"),  # 중복 — 한 번만 굽는다.
+        ],
+        day_start_ms=10,
+        day_end_ms=20,
+        warmup_days=7,
+    )
+    assert [(t.symbol, t.timeframes) for t in tasks] == [
+        ("BTC/USDT:USDT", ("15m", "4h")),
+        ("ETH/USDT:USDT", ("1h",)),
+    ]
+    # 심볼 작업을 펼치면 예전 칸 작업과 같은 모양이다(창·워밍업 포함).
+    btc = tasks[0].cells()
+    assert [(c.symbol, c.timeframe) for c in btc] == [
+        ("BTC/USDT:USDT", "15m"),
+        ("BTC/USDT:USDT", "4h"),
+    ]
+    assert {(c.day_start_ms, c.day_end_ms, c.warmup_days) for c in btc} == {(10, 20, 7)}
+
+
+def test_load_market_data_by_timeframe_matches_per_tf(
+    _real_day_window: tuple[int, int],
+) -> None:
+    """공유 로더가 TF마다 `load_market_data`를 부른 것과 **비트 단위로 같다** (WAN-324 §1).
+
+    1분봉 창의 하한은 상위TF 첫 봉의 `open_time`이라 TF마다 다르다 — 가장 넓은 창을 한 번
+    읽어 자르는 것이 좁은 창을 직접 읽은 것과 같아야 이 최적화가 성립한다(완료 기준 2).
+    실데이터로 잰다: 합성 봉으로는 TF별 하한 차이가 재현되지 않는다.
+    """
+    import pandas as pd
+
+    from backtest.harness import load_market_data, load_market_data_by_timeframe
+
+    start_ms, end_ms = _real_day_window
+    warmup_start = start_ms - 30 * _DAY_MS
+    timeframes = ("15m", "1h", "2h", "4h")
+
+    shared = load_market_data_by_timeframe(
+        _SYMBOL, timeframes, start_ms=warmup_start, end_ms=end_ms, need_1m=True, funding=False
+    )
+    assert tuple(shared) == timeframes
+    # TF마다 1분봉 하한이 실제로 다르다 — 안 다르면 이 테스트가 아무것도 안 지킨다.
+    assert len({len(shared[tf].df_1m) for tf in timeframes}) > 1
+
+    for tf in timeframes:
+        ref = load_market_data(
+            _SYMBOL, tf, start_ms=warmup_start, end_ms=end_ms, need_1m=True, funding=False
+        )
+        pd.testing.assert_frame_equal(ref.htf_df, shared[tf].htf_df)
+        pd.testing.assert_frame_equal(ref.df_1m, shared[tf].df_1m)
+
+
+def test_load_market_data_by_timeframe_matches_per_tf_with_funding(
+    _real_day_window: tuple[int, int],
+) -> None:
+    """펀딩 창은 TF마다 다르다(상위TF 첫·마지막 봉) — 공유 로드가 그걸 뭉개지 않는다."""
+    from backtest.harness import load_market_data, load_market_data_by_timeframe
+
+    start_ms, end_ms = _real_day_window
+    warmup_start = start_ms - 30 * _DAY_MS
+    timeframes = ("15m", "4h")
+
+    shared = load_market_data_by_timeframe(
+        _SYMBOL, timeframes, start_ms=warmup_start, end_ms=end_ms, need_1m=False, funding=True
+    )
+    for tf in timeframes:
+        ref = load_market_data(
+            _SYMBOL, tf, start_ms=warmup_start, end_ms=end_ms, need_1m=False, funding=True
+        )
+        assert ref.funding_rates == shared[tf].funding_rates
+
+
+def test_backtest_setup_by_cell_matches_per_cell_loading(
+    _real_day_window: tuple[int, int],
+) -> None:
+    """하루치 셋업 행이 **셀마다 따로 로드하던 예전 모양**과 한 글자도 다르지 않다.
+
+    WAN-324는 순수 성능 작업이다 — 캐시에 담기는 행이 움직이면 「빨라졌는데 숫자가
+    달라지는」 버그이고(완료 기준 2·4), 그건 배포 뒤 화면·CSV가 조용히 갈라진다는 뜻이다.
+    예전 모양을 이 테스트 안에서 **직접 재현해** 대조한다(옛 코드를 남겨 두지 않는다).
+    """
+    from backtest.harness import detect_order_blocks, load_market_data
+    from live.trade_timeline import backtest_setup_by_cell, cell_setup_timeline
+    from strategy.models import OrderBlockParams
+
+    start_ms, end_ms = _real_day_window
+    warmup_days = 30
+    timeframes = ("15m", "1h", "2h", "4h")
+
+    got = backtest_setup_by_cell(
+        day_start_ms=start_ms,
+        day_end_ms=end_ms,
+        symbols=[_SYMBOL],
+        timeframes=list(timeframes),
+        warmup_days=warmup_days,
+    )
+
+    expected: dict[tuple[str, str], list[TimelineRow]] = {}
+    for tf in timeframes:
+        market = load_market_data(
+            _SYMBOL,
+            tf,
+            start_ms=start_ms - warmup_days * _DAY_MS,
+            end_ms=end_ms,
+            need_1m=True,
+            funding=False,
+        )
+        if market.htf_df.empty or market.df_1m.empty:
+            expected[(_SYMBOL, tf)] = []
+            continue
+        expected[(_SYMBOL, tf)] = cell_setup_timeline(
+            market,
+            detect_order_blocks(market, OrderBlockParams()),
+            day_start_ms=start_ms,
+            day_end_ms=end_ms,
+        )
+
+    assert list(got) == list(expected)  # 칸 순서까지 같다(행 순서가 그로부터 나온다).
+    assert got == expected
+    assert any(rows for rows in expected.values()), "행이 하나도 없으면 대조가 공허하다"

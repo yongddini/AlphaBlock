@@ -671,6 +671,111 @@ def load_market_data(
     return MarketData(symbol, timeframe, htf_df, df_1m, rates)
 
 
+def iter_market_data_by_timeframe(
+    symbol: str,
+    timeframes: Sequence[str],
+    *,
+    start_ms: int,
+    end_ms: int,
+    need_1m: bool = True,
+    funding: bool = True,
+    db_path: str = DB_PATH,
+    cache_dir: str = CACHE_DIR,
+) -> Iterator[tuple[str, MarketData]]:
+    """한 심볼의 여러 TF를 **1분봉 한 번만 읽어** 순서대로 산출한다 (WAN-324 §1).
+
+    `load_market_data`를 TF마다 부르면 같은 심볼의 1분봉을 TF 수만큼 다시 읽는다 — 채택
+    좌표(12종목 × 4TF)의 하루치 적재에서 그게 **48회 SQL 읽기**였고, 서버는 CPU가 아니라
+    디스크에서 기다렸다(WAN-322 실측 `real` 6분 23초 / `user` 2분 13초). 1분봉 창의 하한은
+    상위TF 첫 봉의 `open_time`이라 TF마다 조금씩 다르므로, **가장 넓은 창을 한 번 읽어
+    TF별로 잘라 준다**.
+
+    🚨 **결과는 TF마다 `load_market_data`와 비트 단위로 같아야 한다** — 성능 작업이 숫자를
+    바꾸면 그건 버그다(WAN-324 완료 기준 2). 같음이 성립하는 이유는 저장소 조회가
+    `open_time >= start AND open_time < end`를 `ORDER BY open_time ASC`로 내주기
+    때문이다(`OhlcvStore._load_native`): 넓은 창을 읽어 `open_time >= 그 TF의 하한`으로
+    자르면 좁은 창을 직접 읽은 것과 행·순서·dtype이 같다. 회귀 테스트가 **실데이터로**
+    고정한다.
+
+    📌 **지연 산출(제너레이터)인 것은 메모리 때문이다** — 120일치 1분봉은 TF마다 사본이라
+    넷을 한꺼번에 들면 워커가 그만큼 무거워진다. 소비자가 TF를 하나씩 처리하고 넘기면
+    살아 있는 사본은 **공유 원본 + 지금 TF 하나**뿐이다.
+
+    ⚠️ `load_market_data`의 `years`(미끄러지는 창)·`repair_htf_from_1m`(WAN-327 반사실)은
+    싣지 않았다 — 이 헬퍼는 **창을 못 박은 하루치 적재 경로**를 위한 것이고, 두 기능은
+    TF마다 창·교정이 달라 공유 로드의 전제가 깨진다. 필요하면 `load_market_data`를 쓸 것.
+    """
+    store = OhlcvStore(db_path, cache_dir=cache_dir)
+    try:
+        htf_by_tf = {
+            tf: store.load(symbol, tf, start_ms=start_ms, end_ms=end_ms).reset_index(drop=True)
+            for tf in timeframes
+        }
+        # 1분봉 하한은 상위TF 첫 봉의 `open_time`이라 TF마다 다르다(4h 첫 봉 대 15m 첫 봉).
+        window_starts = {
+            tf: int(df["open_time"].iloc[0]) for tf, df in htf_by_tf.items() if not df.empty
+        }
+        shared_1m = pd.DataFrame()
+        if need_1m and window_starts:
+            # 상한은 `load_market_data`와 같이 호출부가 준 `end_ms`만 건다(그 봉 내부의
+            # 1분봉을 잃지 않기 위해 상위TF 마지막 봉으로 자르지 않는다).
+            shared_1m = store.load(
+                symbol, "1m", start_ms=min(window_starts.values()), end_ms=end_ms
+            ).reset_index(drop=True)
+
+        rate_store = FundingRateStore(db_path) if funding else None
+        for tf, htf_df in htf_by_tf.items():
+            if htf_df.empty:
+                yield tf, MarketData(symbol, tf, htf_df, pd.DataFrame(), [])
+                continue
+            window_start = window_starts[tf]
+            df_1m = pd.DataFrame()
+            if need_1m:
+                df_1m = shared_1m[shared_1m["open_time"] >= window_start].reset_index(drop=True)
+            rates: list[FundingRate] = []
+            if rate_store is not None:
+                rates = rate_store.get_rates(
+                    symbol,
+                    start_ms=window_start,
+                    end_ms=int(htf_df["open_time"].iloc[-1]),
+                    include_predicted=True,
+                )
+            yield tf, MarketData(symbol, tf, htf_df, df_1m, rates)
+    finally:
+        store.close()
+
+
+def load_market_data_by_timeframe(
+    symbol: str,
+    timeframes: Sequence[str],
+    *,
+    start_ms: int,
+    end_ms: int,
+    need_1m: bool = True,
+    funding: bool = True,
+    db_path: str = DB_PATH,
+    cache_dir: str = CACHE_DIR,
+) -> dict[str, MarketData]:
+    """`iter_market_data_by_timeframe`을 한 번에 다 받는 판 — TF 슬라이스가 **동시에** 산다.
+
+    ⚠️ 그래서 소비자가 TF를 하나씩 처리할 수 있으면 **반복자 쪽을 쓸 것**: 120일치 1분봉은
+    TF마다 사본이라 넷을 한꺼번에 들면 워커 메모리가 그만큼 는다(적재 경로가 반복자를 쓰는
+    이유). 이 판은 **네 TF를 나란히 놓고 봐야 하는 곳**(프로파일러·테스트)을 위한 것이다.
+    """
+    return dict(
+        iter_market_data_by_timeframe(
+            symbol,
+            timeframes,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            need_1m=need_1m,
+            funding=funding,
+            db_path=db_path,
+            cache_dir=cache_dir,
+        )
+    )
+
+
 # --------------------------------------------------------------------------- #
 # 구간 분할 (IS/OOS · 워크포워드)
 # --------------------------------------------------------------------------- #

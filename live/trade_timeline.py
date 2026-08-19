@@ -31,7 +31,7 @@ WAN-232(`alphablock fills`)가 예약→체결 **여부**를, WAN-233(`alphabloc
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING
@@ -281,6 +281,30 @@ class _BacktestCellTask:
     day_start_ms: int
     day_end_ms: int
     warmup_days: int
+
+
+@dataclass(frozen=True)
+class _BacktestSymbolTask:
+    """한 심볼의 여러 TF를 **한 덩어리로** 돌리는 작업 단위 (WAN-324 §1).
+
+    병렬 단위가 셀에서 심볼로 올라간다 — 그래야 그 심볼의 1분봉을 한 번만 읽어 TF들이
+    나눠 쓴다(`harness.load_market_data_by_timeframe`). 셀 단위로 뿌리면 같은 120일치
+    1분봉을 TF 수만큼 다시 읽고(48회), 워커마다 자기 사본을 들어 메모리도 중복된다.
+    `timeframes`는 **입력 순서를 보존한 중복 없는 튜플**이라 결과를 칸으로 되돌릴 수 있다.
+    """
+
+    symbol: str
+    timeframes: tuple[str, ...]
+    day_start_ms: int
+    day_end_ms: int
+    warmup_days: int
+
+    def cells(self) -> list[_BacktestCellTask]:
+        """이 심볼이 담당하는 셀 작업들 — 평가 함수는 예전과 같은 셀 단위를 본다."""
+        return [
+            _BacktestCellTask(self.symbol, tf, self.day_start_ms, self.day_end_ms, self.warmup_days)
+            for tf in self.timeframes
+        ]
 
 
 def _adopted_day_reentries(
@@ -617,51 +641,127 @@ def _zone_width_skipped_rows(
     return rows
 
 
-def _load_and_detect_cell(task: _BacktestCellTask) -> tuple[MarketData, OrderBlockResult] | None:
-    """한 셀의 데이터를 로드·탐지한다(워밍업 연속·미래 봉 미로드). 데이터 없으면 None.
-
-    창은 `[그날 자정 − warmup_days, 그날 자정]`이라 미래 봉을 애초에 로드하지 않는다
-    (`live.live_vs_backtest.backtest_cell_funnel`과 같은 로딩). 거래·셋업 두 경로가 이 로더를
-    공유해 같은 스냅샷·같은 탐지를 본다.
-    """
-    from backtest.harness import detect_order_blocks, load_market_data
-    from strategy.models import OrderBlockParams
-
-    warmup_start_ms = task.day_start_ms - task.warmup_days * _DAY_MS
-    market = load_market_data(
-        task.symbol,
-        task.timeframe,
-        start_ms=warmup_start_ms,
-        end_ms=task.day_end_ms,
-        need_1m=True,
-        funding=False,
-    )
-    if market.htf_df.empty or market.df_1m.empty:
-        return None
-    return market, detect_order_blocks(market, OrderBlockParams())
-
-
-def _backtest_cell_trades(task: _BacktestCellTask) -> list[TimelineRow]:
+def _cell_trades_from_loaded(
+    task: _BacktestCellTask, loaded: tuple[MarketData, OrderBlockResult] | None
+) -> list[TimelineRow]:
     """한 셀에서 그날 백테스트 **거래(청산)** 행. 순수 평가는 `cell_timeline_trades`가 한다."""
-    loaded = _load_and_detect_cell(task)
     if loaded is None:
         return []
     market, ob_result = loaded
     return cell_timeline_trades(market, ob_result, day_start_ms=task.day_start_ms)
 
 
-def _backtest_cell_setups(task: _BacktestCellTask) -> list[TimelineRow]:
+def _cell_setups_from_loaded(
+    task: _BacktestCellTask, loaded: tuple[MarketData, OrderBlockResult] | None
+) -> list[TimelineRow]:
     """한 셀에서 그날 백테스트 **셋업 전부**(청산·미진입·미체결·건너뜀) 행을 낸다 (WAN-295).
 
     순수 평가는 `cell_setup_timeline`이 한다. 라이브 장부와 셋업 단위로 대칭인 행을 낸다.
     """
-    loaded = _load_and_detect_cell(task)
     if loaded is None:
         return []
     market, ob_result = loaded
     return cell_setup_timeline(
         market, ob_result, day_start_ms=task.day_start_ms, day_end_ms=task.day_end_ms
     )
+
+
+def _symbol_rows(
+    task: _BacktestSymbolTask,
+    evaluate: Callable[
+        [_BacktestCellTask, tuple[MarketData, OrderBlockResult] | None], list[TimelineRow]
+    ],
+) -> list[list[TimelineRow]]:
+    """한 심볼의 TF별 행을 낸다 — **1분봉을 한 번만 읽어** TF들이 나눠 쓴다 (WAN-324 §1).
+
+    창은 `[그날 자정 − warmup_days, 그날 자정]`이라 미래 봉을 애초에 로드하지 않는다
+    (`live.live_vs_backtest.backtest_cell_funnel`과 같은 로딩). 데이터가 없는 TF는 빈 행이다.
+    거래·셋업 두 경로가 이 로더를 공유해 같은 스냅샷·같은 탐지를 본다.
+
+    📌 **TF를 하나씩 소비하고 넘긴다** — `iter_market_data_by_timeframe`이 지연 산출이라
+    살아 있는 1분봉 사본은 «공유 원본 + 지금 TF» 둘뿐이다. 넷을 한꺼번에 들면 워커
+    메모리가 오히려 늘어 이슈가 기대한 방향(`BrokenProcessPool` 완화)과 반대가 된다.
+
+    🚨 TF마다 `load_market_data`를 부르던 예전과 **비트 단위로 같은 입력**을 만든다 —
+    빨라졌는데 숫자가 달라지면 그건 버그다(WAN-324 완료 기준 2·4). 실데이터 회귀 테스트가
+    두 로더의 동치를 고정한다.
+    """
+    from backtest.harness import detect_order_blocks, iter_market_data_by_timeframe
+    from strategy.models import OrderBlockParams
+
+    warmup_start_ms = task.day_start_ms - task.warmup_days * _DAY_MS
+    cells = {cell.timeframe: cell for cell in task.cells()}
+    rows_by_tf: dict[str, list[TimelineRow]] = {}
+    for timeframe, market in iter_market_data_by_timeframe(
+        task.symbol,
+        task.timeframes,
+        start_ms=warmup_start_ms,
+        end_ms=task.day_end_ms,
+        need_1m=True,
+        funding=False,
+    ):
+        if market.htf_df.empty or market.df_1m.empty:
+            rows_by_tf[timeframe] = []
+            continue
+        loaded = (market, detect_order_blocks(market, OrderBlockParams()))
+        rows_by_tf[timeframe] = evaluate(cells[timeframe], loaded)
+    return [rows_by_tf[tf] for tf in task.timeframes]
+
+
+def _backtest_symbol_trades(task: _BacktestSymbolTask) -> list[list[TimelineRow]]:
+    """한 심볼의 TF별 거래 행 — `task.timeframes` 순서대로."""
+    return _symbol_rows(task, _cell_trades_from_loaded)
+
+
+def _backtest_symbol_setups(task: _BacktestSymbolTask) -> list[list[TimelineRow]]:
+    """한 심볼의 TF별 셋업 행 — `task.timeframes` 순서대로."""
+    return _symbol_rows(task, _cell_setups_from_loaded)
+
+
+def _symbol_tasks(
+    cells: Sequence[tuple[str, str]],
+    *,
+    day_start_ms: int,
+    day_end_ms: int,
+    warmup_days: int,
+) -> list[_BacktestSymbolTask]:
+    """칸 목록을 **심볼 단위 작업**으로 묶는다 — 심볼·TF 모두 첫 등장 순서를 보존한다.
+
+    순서를 보존해야 예전(칸 단위)과 **같은 칸을 같은 순서로** 계산한다(WAN-335 회귀
+    테스트가 그 순서를 고정한다). 같은 칸이 두 번 들어와도 한 번만 굽는다.
+    """
+    grouped: dict[str, list[str]] = {}
+    for symbol, timeframe in cells:
+        tfs = grouped.setdefault(symbol, [])
+        if timeframe not in tfs:
+            tfs.append(timeframe)
+    return [
+        _BacktestSymbolTask(symbol, tuple(tfs), day_start_ms, day_end_ms, warmup_days)
+        for symbol, tfs in grouped.items()
+    ]
+
+
+def _run_symbol_tasks(
+    tasks: Sequence[_BacktestSymbolTask],
+    worker: Callable[[_BacktestSymbolTask], list[list[TimelineRow]]],
+    *,
+    jobs: int,
+) -> dict[tuple[str, str], list[TimelineRow]]:
+    """심볼 작업들을 (선택적으로 병렬로) 돌려 칸 단위 결과로 되돌린다."""
+    if not tasks:
+        return {}
+    if jobs > 1:
+        from concurrent.futures import ProcessPoolExecutor
+
+        with ProcessPoolExecutor(max_workers=jobs) as pool:
+            per_symbol = list(pool.map(worker, tasks))
+    else:
+        per_symbol = [worker(task) for task in tasks]
+    return {
+        (task.symbol, timeframe): cell_rows
+        for task, rows_by_tf in zip(tasks, per_symbol, strict=True)
+        for timeframe, cell_rows in zip(task.timeframes, rows_by_tf, strict=True)
+    }
 
 
 def backtest_timeline_by_cell(
@@ -688,22 +788,10 @@ def backtest_timeline_by_cell(
     tfs = list(timeframes) if timeframes is not None else list(DEFAULT_TIMEFRAMES)
     warm = warmup_days if warmup_days is not None else DEFAULT_WARMUP_DAYS
 
-    tasks = [
-        _BacktestCellTask(symbol, tf, day_start_ms, day_end_ms, warm)
-        for symbol in syms
-        for tf in tfs
-    ]
-    if jobs > 1:
-        from concurrent.futures import ProcessPoolExecutor
-
-        with ProcessPoolExecutor(max_workers=jobs) as pool:
-            per_cell = list(pool.map(_backtest_cell_trades, tasks))
-    else:
-        per_cell = [_backtest_cell_trades(task) for task in tasks]
-    return {
-        (task.symbol, task.timeframe): cell_rows
-        for task, cell_rows in zip(tasks, per_cell, strict=True)
-    }
+    cells = [(symbol, tf) for symbol in syms for tf in tfs]
+    tasks = _symbol_tasks(cells, day_start_ms=day_start_ms, day_end_ms=day_end_ms, warmup_days=warm)
+    by_cell = _run_symbol_tasks(tasks, _backtest_symbol_trades, jobs=jobs)
+    return {cell: by_cell[cell] for cell in cells}
 
 
 def backtest_timeline_rows(
@@ -789,23 +877,9 @@ def backtest_setup_by_cells(
     from live.live_vs_backtest import DEFAULT_WARMUP_DAYS
 
     warm = warmup_days if warmup_days is not None else DEFAULT_WARMUP_DAYS
-    tasks = [
-        _BacktestCellTask(symbol, timeframe, day_start_ms, day_end_ms, warm)
-        for symbol, timeframe in cells
-    ]
-    if not tasks:
-        return {}
-    if jobs > 1:
-        from concurrent.futures import ProcessPoolExecutor
-
-        with ProcessPoolExecutor(max_workers=jobs) as pool:
-            per_cell = list(pool.map(_backtest_cell_setups, tasks))
-    else:
-        per_cell = [_backtest_cell_setups(task) for task in tasks]
-    return {
-        (task.symbol, task.timeframe): cell_rows
-        for task, cell_rows in zip(tasks, per_cell, strict=True)
-    }
+    tasks = _symbol_tasks(cells, day_start_ms=day_start_ms, day_end_ms=day_end_ms, warmup_days=warm)
+    by_cell = _run_symbol_tasks(tasks, _backtest_symbol_setups, jobs=jobs)
+    return {cell: by_cell[cell] for cell in cells}
 
 
 def backtest_setup_rows(
