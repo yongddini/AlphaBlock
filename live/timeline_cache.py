@@ -102,7 +102,14 @@ __all__ = [
 #: WAN-295)로 넓어졌다 — 화면 「채택 좌표 전부」 모드가 읽는 것이 셋업 행이라, 한 캐시가 두
 #: 모드를 다 먹이려면 담기는 것이 넓은 쪽이어야 한다(좁은 쪽을 넓은 소비자에게 내주면
 #: 「계산했는데 미체결 행이 없는」 조용한 실패가 된다). 옛 적재분은 버전이 갈라져 자동 미스다.
-TIMELINE_CACHE_VERSION = "wan297.1"
+#: wan335.1: 🚨 **행 스키마가 셋업 행을 다 담지 못하고 있었다** — WAN-297이 담기는 것을 셋업
+#: 전부로 넓히면서 payload는 넓혔는데 열은 거래 행 시절 그대로라 `reserve_ms`(탭 봉 시각) ·
+#: `limit_price` · `stop_price` · `tap_index`가 왕복에서 통째로 사라졌다. 그중 `tap_index`는
+#: **조인 키의 일부**(`live.setup_compare.setup_key`)이고 `stop_price`는 손절폭 그 자체라,
+#: 캐시에서 읽은 행으로는 파리티 조인이 성립하지 않았다(`stop-width --with-backtest`가 캐시를
+#: 읽게 되면서 드러났다 — WAN-335). 열을 넓히고 버전을 올린다: 옛 적재분은 지문이 갈라져 자동
+#: 미스이고 **지워지지 않는다**(배포 뒤 되채우기는 `trades --persist-cache --days N`).
+TIMELINE_CACHE_VERSION = "wan335.1"
 
 
 class DuplicateTimelineCacheError(RuntimeError):
@@ -308,8 +315,13 @@ CREATE TABLE IF NOT EXISTS timeline_cache_rows (
     timeframe          TEXT    NOT NULL,
     is_long            INTEGER NOT NULL,
     status             TEXT    NOT NULL,
+    reserve_ms         INTEGER,
+    limit_price        REAL,
     fill_ms            INTEGER,
     fill_price         REAL,
+    stop_price         REAL,
+    take_profit_price  REAL,
+    tap_index          INTEGER,
     exit_ms            INTEGER,
     exit_price         REAL,
     exit_reason        TEXT,
@@ -429,14 +441,18 @@ class TimelineCacheStore:
         """옛 캐시 DB에 나중에 생긴 열을 덧붙인다(`order_journal._migrate`와 같은 패턴).
 
         `CREATE TABLE IF NOT EXISTS`는 기존 테이블에 열을 늘려 주지 않는다 — WAN-305가
-        `is_reentry`를 추가했으므로 옛 DB에서 새 INSERT가 죽지 않게 ALTER를 건다(옛 적재분
-        행은 NULL로 남지만 캐시 버전이 갈라져 어차피 로드되지 않는다).
+        `is_reentry`를, WAN-335가 셋업 행 다섯 열을 추가했으므로 옛 DB에서 새 INSERT가 죽지
+        않게 ALTER를 건다(옛 적재분 행은 NULL로 남지만 캐시 버전이 갈라져 어차피 로드되지
+        않는다).
         """
         existing = {
             str(row[1]) for row in self._conn.execute("PRAGMA table_info(timeline_cache_rows)")
         }
-        if "is_reentry" not in existing:
-            self._conn.execute("ALTER TABLE timeline_cache_rows ADD COLUMN is_reentry INTEGER")
+        for column, kind in _ADDED_ROW_COLUMNS:
+            if column not in existing:
+                self._conn.execute(
+                    f"ALTER TABLE timeline_cache_rows ADD COLUMN {column} {kind}"  # noqa: S608
+                )
 
     def __enter__(self) -> TimelineCacheStore:
         return self
@@ -508,10 +524,8 @@ class TimelineCacheStore:
                 ),
             )
             self._conn.executemany(
-                "INSERT INTO timeline_cache_rows (run_id, row_no, symbol, timeframe, is_long,"
-                " status, fill_ms, fill_price, exit_ms, exit_price, exit_reason, pnl_pct,"
-                " pnl_amount, zone_start_time, zone_confirmed_time, is_reentry)"
-                " VALUES (" + ", ".join("?" * 16) + ")",
+                f"INSERT INTO timeline_cache_rows ({', '.join(_ROW_COLUMNS)})"
+                " VALUES (" + ", ".join("?" * len(_ROW_COLUMNS)) + ")",
                 [_row_values(run_id, no, row) for no, row in enumerate(rows)],
             )
         return run_id
@@ -547,10 +561,8 @@ class TimelineCacheStore:
     def _rows_locked(self, run_id: str) -> tuple[TimelineRow, ...]:
         """`load_rows`의 알맹이 — **락을 이미 쥔 채** 부른다."""
         row_data = self._conn.execute(
-            "SELECT symbol, timeframe, is_long, status, fill_ms, fill_price, exit_ms, "
-            "exit_price, exit_reason, pnl_pct, pnl_amount, zone_start_time, "
-            "zone_confirmed_time, is_reentry FROM timeline_cache_rows WHERE run_id = ?"
-            " ORDER BY row_no",
+            f"SELECT {', '.join(_ROW_VALUE_COLUMNS)} FROM timeline_cache_rows"  # noqa: S608
+            " WHERE run_id = ? ORDER BY row_no",
             (run_id,),
         ).fetchall()
         return tuple(_row_from_db(r) for r in row_data)
@@ -691,8 +703,50 @@ class TimelineCacheStore:
         return deleted
 
 
+#: 행 테이블의 열 순서 — INSERT·SELECT가 **한 곳에서** 읽는다. 두 벌로 적으면 열을 늘릴 때
+#: 한쪽만 고쳐 값이 옆 칸에 들어간다(WAN-335가 고친 결함의 이웃한 실패 모드다).
+_ROW_VALUE_COLUMNS: tuple[str, ...] = (
+    "symbol",
+    "timeframe",
+    "is_long",
+    "status",
+    "reserve_ms",
+    "limit_price",
+    "fill_ms",
+    "fill_price",
+    "stop_price",
+    "take_profit_price",
+    "exit_ms",
+    "exit_price",
+    "exit_reason",
+    "pnl_pct",
+    "pnl_amount",
+    "zone_start_time",
+    "zone_confirmed_time",
+    "tap_index",
+    "is_reentry",
+)
+_ROW_COLUMNS: tuple[str, ...] = ("run_id", "row_no", *_ROW_VALUE_COLUMNS)
+
+#: 뒤늦게 생긴 열(옛 DB에 ALTER로 덧붙인다) — 이름과 타입만.
+_ADDED_ROW_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("is_reentry", "INTEGER"),
+    ("reserve_ms", "INTEGER"),
+    ("limit_price", "REAL"),
+    ("stop_price", "REAL"),
+    ("take_profit_price", "REAL"),
+    ("tap_index", "INTEGER"),
+)
+
+
 def _row_values(run_id: str, row_no: int, row: TimelineRow) -> tuple[object, ...]:
-    """백테 `TimelineRow` → DB 행. 백테 행은 예약·목표가·손절 칸이 없어 저장하지 않는다."""
+    """백테 `TimelineRow` → DB 행 (열 순서는 `_ROW_COLUMNS`).
+
+    🚨 **셋업 행의 모든 칸을 담는다(WAN-335)** — 옛 판은 「백테 행은 예약·목표가·손절 칸이
+    없다」는 전제로 다섯 열을 버렸는데, 그건 거래 행(`cell_timeline_trades`) 시절 이야기였고
+    WAN-297이 담는 것을 셋업 행(`cell_setup_timeline`)으로 넓힌 뒤로는 거짓이다. 특히
+    `tap_index`는 **조인 키의 일부**라 버리면 캐시에서 읽은 행이 라이브와 절대 안 짝지어진다.
+    """
     return (
         run_id,
         row_no,
@@ -700,8 +754,12 @@ def _row_values(run_id: str, row_no: int, row: TimelineRow) -> tuple[object, ...
         row.timeframe,
         int(row.is_long),
         row.status,
+        row.reserve_ms,
+        row.limit_price,
         row.fill_ms,
         row.fill_price,
+        row.stop_price,
+        row.take_profit_price,
         row.exit_ms,
         row.exit_price,
         row.exit_reason,
@@ -709,6 +767,7 @@ def _row_values(run_id: str, row_no: int, row: TimelineRow) -> tuple[object, ...
         row.pnl_amount,
         row.zone_start_time,
         row.zone_confirmed_time,
+        row.tap_index,
         None if row.is_reentry is None else int(row.is_reentry),
     )
 
@@ -725,20 +784,21 @@ def _row_from_db(r: tuple[Any, ...]) -> TimelineRow:
         timeframe=str(r[1]),
         is_long=bool(r[2]),
         status=str(r[3]),
-        reserve_ms=None,
-        limit_price=None,
-        fill_ms=None if r[4] is None else int(r[4]),
-        fill_price=None if r[5] is None else float(r[5]),
-        stop_price=None,
-        take_profit_price=None,
-        exit_ms=None if r[6] is None else int(r[6]),
-        exit_price=None if r[7] is None else float(r[7]),
-        exit_reason=None if r[8] is None else str(r[8]),
-        pnl_pct=None if r[9] is None else float(r[9]),
-        pnl_amount=None if r[10] is None else float(r[10]),
-        zone_start_time=None if r[11] is None else int(r[11]),
-        zone_confirmed_time=None if r[12] is None else int(r[12]),
-        is_reentry=None if r[13] is None else bool(r[13]),
+        reserve_ms=None if r[4] is None else int(r[4]),
+        limit_price=None if r[5] is None else float(r[5]),
+        fill_ms=None if r[6] is None else int(r[6]),
+        fill_price=None if r[7] is None else float(r[7]),
+        stop_price=None if r[8] is None else float(r[8]),
+        take_profit_price=None if r[9] is None else float(r[9]),
+        exit_ms=None if r[10] is None else int(r[10]),
+        exit_price=None if r[11] is None else float(r[11]),
+        exit_reason=None if r[12] is None else str(r[12]),
+        pnl_pct=None if r[13] is None else float(r[13]),
+        pnl_amount=None if r[14] is None else float(r[14]),
+        zone_start_time=None if r[15] is None else int(r[15]),
+        zone_confirmed_time=None if r[16] is None else int(r[16]),
+        tap_index=None if r[17] is None else int(r[17]),
+        is_reentry=None if r[18] is None else bool(r[18]),
     )
 
 
