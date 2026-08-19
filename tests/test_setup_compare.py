@@ -266,3 +266,80 @@ def test_ltc_fixture_shape_base_plus_reentry() -> None:
     result = build_setup_comparisons([live_base, live_re], [bt_base, bt_re])
     assert result.summary.total == 2
     assert result.summary.diverged == 0
+
+
+# --- WAN-333: 짝 없는 줄을 「일치」로 세지 않는다 -----------------------------
+
+
+def test_unpaired_row_is_not_counted_as_matched() -> None:
+    """🚨 짝이 없는데 양쪽 다 미진입으로 보이는 줄이 「일치」로 집계되면 안 된다 (WAN-333).
+
+    이것이 이 이슈의 핵심이다 — 조인이 실패한 줄은 왼쪽(또는 오른쪽)이 비어 `live_entered ==
+    backtest_entered == False`가 되고, 옛 셈법(`matched = total − diverged`)은 그것을 「판정
+    일치」로 세었다. 즉 **파리티가 깨진 것을 파리티 측정기가 「일치합니다」로 보고**했다.
+    """
+    live = _live(status="건너뜀(존폭)", fill_price=None, pnl_pct=None)
+    result = build_setup_comparisons([live], [])  # 백테 짝 없음.
+    comp = result.comparisons[0]
+    assert comp.paired is False
+    assert comp.live_entered is False and comp.backtest_entered is False
+    assert comp.verdict_differs is False  # 「둘 다 미진입」으로 보인다(그래서 위험하다).
+    assert result.summary.matched == 0  # 🚨 옛 동작은 1이었다.
+    assert result.summary.unpaired == 1
+    assert result.summary.unpaired_live_only == 1
+    assert result.summary.unpaired_backtest_only == 0
+    assert result.summary.paired == 0
+
+
+def test_unpaired_backtest_only_row_is_counted_on_the_other_side() -> None:
+    """백테만 있는 「건너뜀(존폭)」 줄도 같은 규칙 — 짝 없음이지 일치가 아니다."""
+    bt = _bt(status=STATUS_BACKTEST_SKIP_ZONE_WIDTH, fill_price=None, pnl_pct=None)
+    result = build_setup_comparisons([], [bt])
+    assert result.summary.matched == 0
+    assert result.summary.unpaired_backtest_only == 1
+    assert result.summary.unpaired_live_only == 0
+
+
+def test_join_census_counts_both_sides_and_pairs() -> None:
+    """인구조사가 양쪽 셋업 수·키 있는 수·짝 수를 낸다 — 「짝 0」의 이유가 보인다."""
+    from live.stop_width_parity import join_census
+
+    live_rows = [_live(), _live(zone_start=5000, tap_index=0)]
+    bt_rows = [_bt()]
+    result = build_setup_comparisons(live_rows, bt_rows)
+    census = join_census(live_rows, bt_rows, result.comparisons)
+    assert census.live_rows == 2 and census.backtest_rows == 1
+    assert census.live_keyed == 2 and census.backtest_keyed == 1
+    assert census.paired == 1
+    assert census.unpaired_live_only == 1 and census.unpaired_backtest_only == 0
+    assert census.key_wiring_broken is False
+
+
+def test_join_census_flags_missing_join_key_wiring() -> None:
+    """🚨 백테 쪽에 조인 키가 통째로 없으면 「배선 오류」로 지목된다 (WAN-333 §2 원인).
+
+    `backtest_timeline_rows`(거래 행)를 먹이면 실제로 이 상태가 된다 — 그 행은
+    `zone_start_time`·`zone_confirmed_time`·`tap_index`를 아예 싣지 않아 `setup_key`가
+    전부 `None`이고, 짝이 **영원히 0건**이 된다(워밍업·좌표와 무관).
+    """
+    from live.stop_width_parity import join_census
+
+    live_rows = [_live()]
+    bt_rows = [_bt(zone_start=None, zone_confirmed=None, tap_index=None)]
+    result = build_setup_comparisons(live_rows, bt_rows)
+    census = join_census(live_rows, bt_rows, result.comparisons)
+    assert census.backtest_rows == 1 and census.backtest_keyed == 0
+    assert census.paired == 0
+    assert census.key_wiring_broken is True
+
+
+def test_filter_match_mode_excludes_unpaired_rows() -> None:
+    """「일치」 칩은 짝지어진 줄만 낸다 — 요약 카드와 화면이 갈라지지 않게."""
+    paired = build_setup_comparisons([_live()], [_bt()]).comparisons
+    unpaired = build_setup_comparisons(
+        [_live(status="건너뜀(존폭)", fill_price=None, pnl_pct=None)], []
+    ).comparisons
+    both = list(paired) + list(unpaired)
+    assert len(filter_comparisons(both, "match")) == 1
+    assert len(filter_comparisons(both, "unpaired")) == 1
+    assert len(filter_comparisons(both, "all")) == 2

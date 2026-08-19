@@ -18,6 +18,14 @@
 `live.setup_compare`가 이미 그 조인을 소유하므로 **재사용한다**(두 벌로 갈라지면 같은 셋업이
 두 화면에서 다른 짝을 얻는다). 이 모듈이 더하는 것은 **손절폭 해부와 귀속** 하나다.
 
+🚨 **백테 쪽 입력은 반드시 「셋업 행」이어야 한다(WAN-333)** — `backtest_setup_rows`
+(`cell_setup_timeline`)만 존 정체성을 싣는다. 거래 행(`backtest_timeline_rows` ←
+`cell_timeline_trades`)에는 `zone_start_time`·`zone_confirmed_time`·`tap_index`가 **아예
+없어**(전부 `None`) `setup_key`가 `None`을 내고, 그러면 모든 백테 행이 orphan으로 떨어져
+**짝이 영원히 0건**이 된다. 2026-08-18에 사용자가 본 「조인 0건」이 정확히 이것이었고,
+워밍업을 늘려도 좌표를 넓혀도 고쳐지지 않는 부류다. `build_report`가 그 상태를 조용히
+넘기지 않고 **조인 인구조사(`JoinCensus`)로 찍는다**.
+
 ## 귀속(attribution) 규칙
 
 두 쪽 다 체결된 셋업에서 손절폭 차이를 이렇게 가른다(허용 오차는 1bp):
@@ -46,7 +54,7 @@ from dataclasses import dataclass
 from common.timefmt import KST_LABEL, format_kst
 from execution.sizing import PositionSizingParams
 from live.order_journal import ENTRY_STATUS_REJECTED, OrderJournal, PlacedOrder
-from live.setup_compare import SetupComparison, build_setup_comparisons
+from live.setup_compare import SetupComparison, SetupKey, build_setup_comparisons, setup_key
 from live.trade_timeline import TimelineRow
 
 __all__ = [
@@ -54,10 +62,12 @@ __all__ = [
     "ATTRIBUTION_ENTRY",
     "ATTRIBUTION_SAME",
     "GUARD_FRACTION",
+    "JoinCensus",
     "LiveStopWidth",
     "PairAttribution",
     "StopWidthReport",
     "build_report",
+    "join_census",
     "live_stop_widths",
     "pair_attributions",
     "render_report",
@@ -246,6 +256,62 @@ def pair_attributions(comparisons: Sequence[SetupComparison]) -> list[PairAttrib
 
 
 @dataclass(frozen=True)
+class JoinCensus:
+    """조인이 실제로 무엇을 짝지었는지 (WAN-333 §2 진단).
+
+    「짝 0건」이 **셋업이 없어서**인지 **조인이 깨져서**인지를 가른다 — 옛 메시지는 둘을
+    「없거나 한쪽만」으로 뭉뚱그려 고장을 볼 수 없었다. `live_keyed`/`backtest_keyed`가
+    0이면 그쪽 입력에 존 정체성이 없다는 뜻이다(위 🚨 문단의 실패 모드).
+    """
+
+    live_rows: int
+    backtest_rows: int
+    live_keyed: int
+    """존 정체성(조인 키)이 있는 라이브 셋업 수. 재진입 행은 정확 키에서 빠진다(WAN-305)."""
+    backtest_keyed: int
+    paired: int
+    unpaired_live_only: int
+    unpaired_backtest_only: int
+    live_only_keys: tuple[SetupKey, ...]
+    """짝을 못 찾은 라이브 키 표본(진단용, 앞에서부터 몇 개)."""
+    backtest_only_keys: tuple[SetupKey, ...]
+
+    @property
+    def key_wiring_broken(self) -> bool:
+        """한쪽 입력이 조인 키를 통째로 안 실었나 — 「고칠 수 있는 배선 오류」의 지문."""
+        return (self.live_rows > 0 and self.live_keyed == 0) or (
+            self.backtest_rows > 0 and self.backtest_keyed == 0
+        )
+
+
+def join_census(
+    live_rows: Sequence[TimelineRow],
+    backtest_rows: Sequence[TimelineRow],
+    comparisons: Sequence[SetupComparison],
+    *,
+    sample: int = 5,
+) -> JoinCensus:
+    """양쪽 입력과 조인 결과를 인구조사한다 (순수 함수, WAN-333)."""
+    live_keys = [k for k in (setup_key(r) for r in live_rows) if k is not None]
+    bt_keys = [k for k in (setup_key(r) for r in backtest_rows) if k is not None]
+    live_only = sorted({k for k in live_keys} - {k for k in bt_keys})
+    bt_only = sorted({k for k in bt_keys} - {k for k in live_keys})
+    return JoinCensus(
+        live_rows=len(live_rows),
+        backtest_rows=len(backtest_rows),
+        live_keyed=len(live_keys),
+        backtest_keyed=len(bt_keys),
+        paired=sum(1 for c in comparisons if c.paired),
+        unpaired_live_only=sum(1 for c in comparisons if c.live is not None and c.backtest is None),
+        unpaired_backtest_only=sum(
+            1 for c in comparisons if c.backtest is not None and c.live is None
+        ),
+        live_only_keys=tuple(live_only[:sample]),
+        backtest_only_keys=tuple(bt_only[:sample]),
+    )
+
+
+@dataclass(frozen=True)
 class StopWidthReport:
     """한 창의 손절폭 해부 — §1(짝) + §3(라이브 분포)."""
 
@@ -256,6 +322,8 @@ class StopWidthReport:
     pairs: tuple[PairAttribution, ...]
     backtest_ran: bool
     """백테 대조를 실제로 돌렸는지. 거짓이면 §1 표는 비어 있고 그 사실을 화면이 밝힌다."""
+    census: JoinCensus | None = None
+    """조인 인구조사(WAN-333). 백테를 돌렸으면 항상 있다 — 짝이 0건이어도 **왜** 0인지 낸다."""
 
 
 def build_report(
@@ -276,15 +344,18 @@ def build_report(
     filled = [o for o in orders if o.fill_ms is not None]
     live_widths = live_stop_widths(orders)
     pairs: list[PairAttribution] = []
+    census: JoinCensus | None = None
     if backtest_rows is not None and live_rows is not None:
         result = build_setup_comparisons(live_rows, backtest_rows)
         pairs = pair_attributions(result.comparisons)
+        census = join_census(live_rows, backtest_rows, result.comparisons)
     return StopWidthReport(
         window_label=window_label,
         live_orders=len(filled),
         live=tuple(live_widths),
         pairs=tuple(pairs),
         backtest_ran=backtest_rows is not None,
+        census=census,
     )
 
 
@@ -344,9 +415,11 @@ def render_report(report: StopWidthReport) -> str:
     if not report.backtest_ran:
         lines.append("  백테 대조를 돌리지 않았습니다(`--with-backtest`로 켭니다).")
         return "\n".join(lines)
+    lines += _census_lines(report.census)
     if not report.pairs:
         lines.append(
-            "  양쪽 다 가격이 있는 짝이 없습니다 — 조인된 셋업이 없거나 한쪽만 체결했습니다."
+            "  양쪽 다 가격이 있는 짝이 없습니다 — 위 인구조사가 「짝지어짐 0」이면 조인이"
+            " 안 된 것이고, 짝은 있는데 여기가 0이면 한쪽에 가격이 없는 것입니다."
         )
         return "\n".join(lines)
     lines.append(
@@ -371,5 +444,31 @@ def render_report(report: StopWidthReport) -> str:
         "",
         "  ⚠️ 조인은 존 정체성(존 시작·확정·탭 순번)으로만 한다 — 짝이 안 지어진 셋업은 존이",
         "     다르다는 뜻이라 손절폭 비교가 성립하지 않아 표에서 빠진다.",
+        "  ⚠️ 대조 백테는 per-cell 단일 포지션이라 북(공유 자본)의 용량 제약이 없다 — 페이퍼가",
+        "     「자리가 없어서」 못 들어간 셋업을 백테는 그냥 들어간다(WAN-213/234 규약).",
     ]
     return "\n".join(lines)
+
+
+def _census_lines(census: JoinCensus | None) -> list[str]:
+    """조인 인구조사 블록 — 「짝 0건」이 표본 부족인지 배선 오류인지 가른다 (WAN-333)."""
+    if census is None:
+        return []
+    lines = [
+        f"  조인 인구조사: 라이브 셋업 {census.live_rows}건(키 있음 {census.live_keyed})"
+        f" · 백테 셋업 {census.backtest_rows}건(키 있음 {census.backtest_keyed})"
+        f" → 짝지어짐 {census.paired} · 짝 없음 라이브 {census.unpaired_live_only}"
+        f" · 백테 {census.unpaired_backtest_only}",
+    ]
+    if census.key_wiring_broken:
+        lines.append(
+            "  🚨 한쪽 입력에 조인 키(존 시작·확정·탭 순번)가 통째로 없습니다 — 표본 문제가"
+            " 아니라 배선 오류입니다(백테는 셋업 행이어야 합니다: `backtest_setup_rows`)."
+        )
+    if census.paired == 0 and (census.live_only_keys or census.backtest_only_keys):
+        lines.append("  짝을 못 찾은 키 표본(심볼·TF·롱?·존시작·존확정·탭):")
+        for key in census.live_only_keys:
+            lines.append(f"    라이브만 {key}")
+        for key in census.backtest_only_keys:
+            lines.append(f"    백테만  {key}")
+    return lines
