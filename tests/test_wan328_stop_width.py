@@ -451,3 +451,78 @@ def test_build_report_reads_the_journal_and_joins_the_backtest(tmp_path) -> None
     text = render_report(report)
     assert "손절폭 해부" in text
     assert "거부(손절 0.3% 하한 미달 — 진입 스킵)" in text
+
+
+# --------------------------------------------------------------------------- #
+# 6) WAN-333 — 조인 인구조사와 「셋업 행이어야 한다」는 배선 계약
+# --------------------------------------------------------------------------- #
+
+
+def test_backtest_trade_rows_carry_no_join_key_so_pairs_can_never_form() -> None:
+    """🚨 백테 **거래** 행에는 조인 키가 없다 — 이것이 「짝 0건」의 실제 원인이다 (WAN-333).
+
+    `cell_timeline_trades`(→ `backtest_timeline_rows`)는 `zone_start_time`·
+    `zone_confirmed_time`·`tap_index`를 아예 싣지 않는다. 그 행을 조인에 먹이면 `setup_key`가
+    전부 `None`이라 **워밍업을 늘려도 좌표를 넓혀도 짝이 영원히 0건**이다. 셋업 행
+    (`cell_setup_timeline` → `backtest_setup_rows`)만 그 키를 싣는다.
+    """
+    from live.setup_compare import setup_key
+
+    trade_like = TimelineRow(
+        source=SOURCE_BACKTEST,
+        symbol="BTC/USDT:USDT",
+        timeframe="15m",
+        is_long=True,
+        status=STATUS_BACKTEST_CLOSED,
+        reserve_ms=None,
+        limit_price=None,
+        fill_ms=2_000,
+        fill_price=100.0,
+        stop_price=None,
+        take_profit_price=None,
+        exit_ms=3_000,
+        exit_price=101.0,
+        exit_reason="take_profit",
+        pnl_pct=1.0,
+        pnl_amount=1.0,
+        # ⚠️ 거래 행은 존 정체성을 안 싣는다(기본값 None) — 그것이 요점이다.
+    )
+    assert setup_key(trade_like) is None
+    setup_like = _timeline_row(SOURCE_BACKTEST, fill=100.0, stop=99.9)
+    assert setup_key(setup_like) is not None
+
+
+def test_report_census_makes_a_zero_pair_join_legible(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """짝이 0건이면 리포트가 **왜** 0인지 찍는다 — 표본 부족인가 배선 오류인가 (WAN-333)."""
+    from dataclasses import replace as _replace
+
+    from live.order_journal import OrderJournal
+    from live.stop_width_parity import build_report, render_report
+
+    journal = OrderJournal(str(tmp_path / "journal.db"))
+    try:
+        live_rows = [_timeline_row(SOURCE_LIVE, fill=100.0, stop=99.9)]
+        # 백테는 「거래 행」처럼 조인 키가 없는 상태(옛 배선의 재현).
+        keyless = _replace(
+            _timeline_row(SOURCE_BACKTEST, fill=100.5, stop=99.9),
+            zone_start_time=None,
+            zone_confirmed_time=None,
+            tap_index=None,
+        )
+        report = build_report(
+            journal,
+            start_ms=0,
+            end_ms=10_000,
+            window_label="테스트",
+            backtest_rows=[keyless],
+            live_rows=live_rows,
+        )
+    finally:
+        journal.close()
+    assert report.pairs == ()
+    assert report.census is not None
+    assert report.census.key_wiring_broken is True
+    text = render_report(report)
+    assert "조인 인구조사" in text
+    assert "배선 오류" in text
+    assert "per-cell 단일 포지션" not in text  # 짝이 없으면 귀속 표 자체가 안 나온다.

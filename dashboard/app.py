@@ -1512,12 +1512,27 @@ def _render_setup_compare(
     st.markdown("##### 셋업별 대조 (페이퍼 | 차이 | 백테)")
     height = min(_COMPARE_HEADER_PX + _COMPARE_ROW_PX * result.summary.total, _COMPARE_MAX_PX)
     st.iframe(setup_compare_html(result, day_key=day_key), height=height)
+    if result.summary.unpaired:
+        # 🚨 짝 없는 줄은 「일치」가 아니다(WAN-333) — 이 수가 크면 그 판의 파리티 수치
+        # 전체를 믿을 수 없다. 옛 화면은 이것을 조용히 「매칭」으로 세었다.
+        st.warning(
+            f"🟠 **짝 없음 {result.summary.unpaired}건** (페이퍼만 "
+            f"{result.summary.unpaired_live_only} · 백테만 "
+            f"{result.summary.unpaired_backtest_only}) — 한쪽에만 있는 셋업이라 **대조가 "
+            "성립하지 않습니다**. 「일치」로 세지 않습니다(WAN-333). 한쪽만 보는 이유는 "
+            "여럿입니다: 라이브가 데이터 결측으로 그 칸을 건너뛰었거나(Health 탭 카드), "
+            "무효화 봉 안에서 라이브만 체결했거나(탐지가 한 봉 늦는 알려진 근사), 슬롯 점유로 "
+            "라이브만 「건너뜀(슬롯참)」을 남겼을 수 있습니다."
+        )
     st.caption(
         "🔴 **판정 갈림**(한쪽만 진입)이 핵심 신호입니다. 🟠 **가격 벗어남**은 진입가차가 틱 "
         f"오차(측정 임계 {result.price_delta_threshold_bps:.1f}bp)를 넘은 경우입니다 — 가격이 "
         "몇 bp 다른 건 정상이라 표시하지 않습니다. 페이퍼↔백테 차이는 **설계상 알려진 것**"
         "입니다(틱 vs 1분봉 WAN-256 · 신규 3종목 펀딩 대리 · 큐 우선순위 미모델 WAN-98). 전부 "
-        "`baseline`(닿으면 체결) 낙관 렌즈 위 값입니다."
+        "`baseline`(닿으면 체결) 낙관 렌즈 위 값입니다. ⚠️ 대조 백테는 **per-cell 단일 "
+        "포지션**이라 북(칸을 가로지르는 공유 자본, WAN-213)의 용량 제약이 없습니다 — 페이퍼가 "
+        "「자리가 없어서」 못 들어간 셋업을 백테는 그냥 들어갑니다. 셀별 화면이 북을 표현할 수 "
+        "없어 생기는 **알려진 근사**이지 집행 차이가 아닙니다(WAN-234 규약)."
     )
 
 

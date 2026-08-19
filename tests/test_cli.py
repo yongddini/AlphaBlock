@@ -16,6 +16,7 @@ from cli.main import (
     cmd_doctor,
     cmd_live,
     cmd_status,
+    cmd_stop_width,
     format_status,
 )
 from common.heartbeat import HeartbeatStore
@@ -661,3 +662,79 @@ def test_format_partial_bar_scan_clean_says_so() -> None:
     )
     assert "손상 봉 없음" in text
     assert "OK" in text
+
+
+# --- WAN-333: stop-width가 「셋업 행」을 먹이고 좌표를 좁힐 수 있다 -----------
+
+
+def _stop_width_args(tmp_path: Path, **kw: Any) -> argparse.Namespace:
+    base: dict[str, Any] = dict(
+        db=str(tmp_path / "journal.db"),
+        day="2026-08-17",
+        days=1,
+        with_backtest=True,
+        warmup_days=None,
+        jobs=1,
+        symbol=None,
+        tf=None,
+    )
+    base.update(kw)
+    return argparse.Namespace(**base)
+
+
+def test_cmd_stop_width_feeds_setup_rows_not_trade_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """🚨 백테 대조에 **셋업 행**을 먹인다 — 거래 행에는 조인 키가 없어 짝이 영원히 0건이다.
+
+    2026-08-18에 사용자가 본 「조인 0건」의 원인이 정확히 이 배선이었다(WAN-333 §2). 라벨이
+    아니라 **어느 함수가 불리는지**로 고정한다.
+    """
+    import live.trade_timeline as tt
+
+    called: dict[str, Any] = {}
+
+    def fake_setup_rows(**kwargs: Any) -> list[Any]:
+        called["setup"] = kwargs
+        return []
+
+    def fake_trade_rows(**kwargs: Any) -> list[Any]:  # 불리면 실패한다.
+        called["trade"] = kwargs
+        return []
+
+    monkeypatch.setattr(tt, "backtest_setup_rows", fake_setup_rows)
+    monkeypatch.setattr(tt, "backtest_timeline_rows", fake_trade_rows)
+    rc = cmd_stop_width(_stop_width_args(tmp_path), _settings(tmp_path))
+    assert rc == 0
+    assert "setup" in called, "백테 대조가 셋업 행을 쓰지 않았다(조인 키가 없는 거래 행 사용)"
+    assert "trade" not in called
+    out = capsys.readouterr().out
+    assert "조인 인구조사" in out
+
+
+def test_cmd_stop_width_narrowing_is_opt_in_and_labelled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--symbol`·`--tf`는 옵트인이다 — 안 주면 채택 좌표 전부(None), 주면 그 좌표를 밝힌다."""
+    import live.trade_timeline as tt
+
+    seen: list[dict[str, Any]] = []
+
+    def fake_setup_rows(**kwargs: Any) -> list[Any]:
+        seen.append(kwargs)
+        return []
+
+    monkeypatch.setattr(tt, "backtest_setup_rows", fake_setup_rows)
+    settings = _settings(tmp_path)
+
+    assert cmd_stop_width(_stop_width_args(tmp_path), settings) == 0
+    # 인자를 안 주면 예전과 같이 채택 좌표 전부를 돈다(None = 하류 기본값).
+    assert seen[-1]["symbols"] is None and seen[-1]["timeframes"] is None
+    assert "좌표" not in capsys.readouterr().out
+
+    args = _stop_width_args(tmp_path, symbol="BTC/USDT:USDT,ETH/USDT:USDT", tf="1h")
+    assert cmd_stop_width(args, settings) == 0
+    assert seen[-1]["symbols"] == ["BTC/USDT:USDT", "ETH/USDT:USDT"]
+    assert seen[-1]["timeframes"] == ["1h"]
+    out = capsys.readouterr().out
+    assert "좌표 BTC/USDT:USDT,ETH/USDT:USDT × 1h" in out

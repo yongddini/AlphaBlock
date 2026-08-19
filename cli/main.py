@@ -534,11 +534,18 @@ def cmd_stop_width(args: argparse.Namespace, settings: Settings) -> int:
 
     순수 조회라 종료 코드는 항상 0이다. 가드 값은 채택값을 **읽기만** 한다 — 바꾸는 것은
     WAN-76/79 소관이고 재-베이스라인 = 사용자 결정이다.
+
+    🚨 **백테 쪽은 「셋업 행」을 먹인다(WAN-333)** — 거래 행(`backtest_timeline_rows`)에는
+    존 정체성(조인 키)이 실리지 않아 짝이 **영원히 0건**이었다. 조인 인구조사가 그 상태를
+    화면에 찍으므로 「짝 0건」이 표본 부족인지 배선 오류인지 구분된다.
+
+    📌 `--symbol`·`--tf`는 **탐색용 옵트인**이다(WAN-305) — 안 주면 예전처럼 채택 좌표 전부를
+    돈다. 좁힌 표는 그 좌표에서만의 결론이라 헤더가 좌표를 밝힌다.
     """
     from live.fill_report import resolve_day_window
     from live.order_journal import OrderJournal
     from live.stop_width_parity import build_report, render_report
-    from live.trade_timeline import backtest_timeline_rows, live_timeline_rows
+    from live.trade_timeline import backtest_setup_rows, live_timeline_rows
     from paper.store import PaperTradeStore
 
     db_path = args.db if args.db is not None else settings.db_path
@@ -546,6 +553,10 @@ def cmd_stop_width(args: argparse.Namespace, settings: Settings) -> int:
     days = max(1, args.days)
     start_ms = end_start_ms - (days - 1) * 86_400_000
     label = day_key if days == 1 else f"{days}일 창(끝 {day_key})"
+    symbols = _split_csv(args.symbol)
+    timeframes = _split_csv(args.tf)
+    if symbols is not None or timeframes is not None:
+        label += " · 좌표 " + _coordinate_label(symbols, timeframes)
     if days > 1 and args.with_backtest:
         # 백테 대조는 하루 단위 워밍업 규약(WAN-233/295)에 묶여 있다 — 여러 날을 한 번에
         # 돌리면 창마다 다른 워밍업이 섞여 조인이 조용히 어긋난다. 거부한다.
@@ -562,9 +573,11 @@ def cmd_stop_width(args: argparse.Namespace, settings: Settings) -> int:
                 live_rows = live_timeline_rows(journal, store, start_ms=start_ms, end_ms=end_end_ms)
             finally:
                 store.close()
-            backtest_rows = backtest_timeline_rows(
+            backtest_rows = backtest_setup_rows(
                 day_start_ms=start_ms,
                 day_end_ms=end_end_ms,
+                symbols=symbols,
+                timeframes=timeframes,
                 warmup_days=args.warmup_days,
                 jobs=args.jobs,
             )
@@ -588,7 +601,11 @@ def cmd_compare(args: argparse.Namespace, settings: Settings) -> int:
     같은 KST 하루의 진입 깔때기(탭→예약→체결→진입)를 라이브 장부와 백테스트 채택 엔진으로
     나란히 낸다. 어느 단계에서 갈리는지가 "진입이 너무 안 됨"의 진단이다. 순수 조회라 종료
     코드는 항상 0이다. `python -m live.live_vs_backtest`와 같은 산출물.
+
+    📌 `--symbol`·`--tf`는 **탐색용 옵트인**이다(WAN-333 §3b — `trades`·`stop-width`와 같은
+    낱말·같은 규약). 안 주면 채택 좌표 전부를 돈다(WAN-305 원칙).
     """
+    from backtest.harness import DEFAULT_SYMBOLS, DEFAULT_TIMEFRAMES
     from live.live_vs_backtest import (
         DEFAULT_WARMUP_DAYS,
         compare_day,
@@ -600,6 +617,8 @@ def cmd_compare(args: argparse.Namespace, settings: Settings) -> int:
     db_path = args.db if args.db is not None else settings.db_path
     warmup_days = args.warmup_days if args.warmup_days is not None else DEFAULT_WARMUP_DAYS
     start_ms, end_ms, day_key = resolve_day_window(args.day)
+    symbols = _split_csv(args.symbol) or list(DEFAULT_SYMBOLS)
+    timeframes = _split_csv(args.tf) or list(DEFAULT_TIMEFRAMES)
     journal = OrderJournal(db_path)
     try:
         comp = compare_day(
@@ -607,6 +626,8 @@ def cmd_compare(args: argparse.Namespace, settings: Settings) -> int:
             day_start_ms=start_ms,
             day_end_ms=end_ms,
             day_key=day_key,
+            symbols=symbols,
+            timeframes=timeframes,
             warmup_days=warmup_days,
             jobs=args.jobs,
         )
@@ -902,6 +923,13 @@ def _split_csv(value: str | None) -> list[str] | None:
         return None
     items = [part.strip() for part in value.split(",") if part.strip()]
     return items or None
+
+
+def _coordinate_label(symbols: list[str] | None, timeframes: list[str] | None) -> str:
+    """좁힌 좌표를 헤더에 밝힌다 (WAN-333 §3b — 좁힌 표는 그 좌표에서만의 결론이다)."""
+    sym = ",".join(symbols) if symbols else "채택 전부"
+    tfs = ",".join(timeframes) if timeframes else "채택 전부"
+    return f"{sym} × {tfs}"
 
 
 def cmd_doctor(args: argparse.Namespace, settings: Settings) -> int:
@@ -1226,6 +1254,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_stop_width.add_argument(
         "--jobs", type=int, default=1, help="백테스트 (심볼, TF) 병렬 워커 수(기본 1)"
     )
+    p_stop_width.add_argument(
+        "--symbol",
+        default=None,
+        metavar="SYM[,SYM…]",
+        help="백테 대조 좌표를 좁힌다(탐색용 옵트인). 미지정 = 채택 유니버스 전부",
+    )
+    p_stop_width.add_argument(
+        "--tf",
+        default=None,
+        metavar="TF[,TF…]",
+        help="백테 대조 TF를 좁힌다(탐색용 옵트인). 미지정 = 채택 작업 TF 전부",
+    )
     p_stop_width.set_defaults(func=cmd_stop_width)
 
     p_compare = sub.add_parser(
@@ -1246,6 +1286,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="백테스트 워밍업 길이(일). 라이브 전-이력 존 재고 근사 노브 — 길수록 느리다",
     )
     p_compare.add_argument("--by-cell", action="store_true", help="심볼×TF별 대조 표도 출력")
+    p_compare.add_argument(
+        "--symbol",
+        default=None,
+        metavar="SYM[,SYM…]",
+        help="백테 대조 좌표를 좁힌다(탐색용 옵트인). 미지정 = 채택 유니버스 전부",
+    )
+    p_compare.add_argument(
+        "--tf",
+        default=None,
+        metavar="TF[,TF…]",
+        help="백테 대조 TF를 좁힌다(탐색용 옵트인). 미지정 = 채택 작업 TF 전부",
+    )
     p_compare.add_argument(
         "--jobs", type=int, default=1, help="백테스트 (심볼, TF) 병렬 워커 수(기본 1)"
     )

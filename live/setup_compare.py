@@ -25,6 +25,20 @@ WAN-234/290의 타임라인은 라이브·백테 행을 시각순으로 **병기
 * **가격 벗어남(🟠 주황)** — 두 쪽 다 진입했는데 진입가 차이가 틱 오차를 넘는다(`price_off`).
   임계값은 지어내지 않고 `live.tick_parity`의 측정 분포(그날 매칭 체결의 가격차 bp)에서 낸다.
 
+## 짝지어진 줄과 짝 없는 줄은 절대 섞지 않는다 (WAN-333)
+
+조인이 실패한 줄(한쪽만 있는 셋업)은 **양쪽 다 「미진입」으로 보이므로** 옛 `matched =
+total − diverged` 셈법에서는 조용히 **「일치」로 집계됐다** — 파리티가 깨진 것을 파리티
+측정기가 「일치합니다」로 보고하는 상태다(이 저장소가 반복해 이름 붙인 「라벨과 동작이
+어긋남」, WAN-91/95/112/123/159). 그래서 요약을 셋으로 가른다:
+
+* `matched` — **짝지어졌고** 판정이 같다. 「둘 다 미진입 = 매칭」 규칙은 그대로다(정상
+  동작이고 테스트가 고정한다) — 단 **짝지어진 줄에만** 적용된다.
+* `diverged` — 판정 갈림(한쪽만 진입). 뜻은 예전과 같다(짝 없는 줄도 여기 잡힐 수 있다 —
+  라이브만 진입한 줄은 짝이 없어도 갈림이다).
+* `unpaired_live_only` / `unpaired_backtest_only` — **짝이 없다**. 대조가 성립하지 않으므로
+  일치도 갈림도 아니고, 이 수가 크면 그 판의 파리티 수치 전체를 믿을 수 없다.
+
 ## 성격
 
 순수 조인·집계다(화면 없이 테스트된다). 엔진·전략·기본값·토대 불변,
@@ -130,6 +144,25 @@ class SetupComparison:
     """한쪽만 진입 — 🔴 「판정 갈림」(이 도구의 핵심 신호)."""
     price_off: bool
     """두 쪽 다 진입했는데 진입가 차이가 틱 오차 임계를 넘음 — 🟠 「가격 벗어남」."""
+    zone_start_time: int | None = None
+    """근거 존이 시작된 봉 시각(ms). 화면 라벨이 **어느 존인지** 밝히는 데 쓴다(WAN-333 §1)
+    — 존 병합 폐지(`combine_obs=False`, WAN-149) 이후 같은 시각에 겹친 두 존을 동시에
+    탭하면 서로 다른 셋업 2건이 나오므로, 심볼·TF·방향·시각만으로는 두 줄이 복사된 것처럼
+    보인다."""
+    zone_confirmed_time: int | None = None
+    """근거 존이 확정된 봉 시각(ms). `zone_start_time`과 한 쌍으로 존을 유일하게 가리킨다
+    (`live.limit_engine.ZoneId`와 같은 정의)."""
+    tap_index: int | None = None
+    """이 셋업이 그 존의 몇 번째 탭인지(0-based). 같은 존의 여러 탭을 화면에서 가른다."""
+
+    @property
+    def paired(self) -> bool:
+        """양쪽이 다 있는 줄인가 = **대조가 성립하는가**(WAN-333).
+
+        거짓이면 판정 일치/불일치를 말할 수 없다 — 「둘 다 미진입」으로 보이는 것은 한쪽이
+        아예 없기 때문이지 두 쪽이 같은 판정을 내려서가 아니다.
+        """
+        return self.live is not None and self.backtest is not None
 
     @property
     def diverges(self) -> bool:
@@ -150,15 +183,33 @@ class SetupCompareSummary:
 
     total: int
     matched: int
-    """두 쪽 판정(진입 여부)이 같은 셋업 수."""
+    """**짝지어졌고** 두 쪽 판정(진입 여부)이 같은 셋업 수 (WAN-333).
+
+    ⚠️ 옛 정의(`total − diverged`)는 **짝 없는 줄까지 일치로 셌다** — 조인이 통째로
+    실패해도 「전부 일치」가 나왔다. 지금은 `paired`인 줄만 여기 들어온다."""
     diverged: int
-    """판정이 갈린(한쪽만 진입) 셋업 수 = 핵심 신호."""
+    """판정이 갈린(한쪽만 진입) 셋업 수 = 핵심 신호. 짝 없는 줄도 여기 잡힐 수 있다
+    (라이브만 진입한 줄은 짝이 없어도 갈림이다) — `matched`와 달리 짝 여부를 안 본다."""
+    paired: int
+    """양쪽이 다 있는 셋업 수 = 대조가 성립한 줄 (WAN-333)."""
+    unpaired_live_only: int
+    """페이퍼에만 있고 백테 짝이 없는 셋업 수 — 대조 불가."""
+    unpaired_backtest_only: int
+    """백테에만 있고 페이퍼 짝이 없는 셋업 수 — 대조 불가."""
     backtest_only_entered: int
     """백테만 진입(라이브 끊김) — 불일치의 주요 유형."""
     live_only_entered: int
     """라이브만 진입(백테는 미진입) — 반대 유형."""
     price_off: int
     """진입가가 틱 오차를 넘어 벗어난 셋업 수(일치 중에서도 확인 대상)."""
+
+    @property
+    def unpaired(self) -> int:
+        """짝이 없는 셋업 수 = `unpaired_live_only + unpaired_backtest_only` (WAN-333).
+
+        이 수가 크면 그 판의 파리티 수치 전체를 믿을 수 없다 — 조인이 안 된 것이지 두 쪽이
+        같은 판정을 낸 게 아니다."""
+        return self.unpaired_live_only + self.unpaired_backtest_only
 
 
 @dataclass(frozen=True)
@@ -434,6 +485,12 @@ def _make_comparison(
         entry_delta_bps=entry_delta,
         verdict_differs=verdict_differs,
         price_off=price_off,
+        # 화면 라벨이 「어느 존인지」를 밝히도록 존 정체성을 그대로 싣는다(WAN-333 §1).
+        # 키가 아니라 **행**에서 읽는다 — orphan·구제 조인 행은 합성 키를 받아 키에는 존
+        # 정체성이 없다(`_synthetic_key`).
+        zone_start_time=ref.zone_start_time,
+        zone_confirmed_time=ref.zone_confirmed_time,
+        tap_index=ref.tap_index,
     )
 
 
@@ -448,10 +505,19 @@ def _summarize(comparisons: Sequence[SetupComparison]) -> SetupCompareSummary:
     bt_only = sum(1 for c in comparisons if c.backtest_entered and not c.live_entered)
     live_only = sum(1 for c in comparisons if c.live_entered and not c.backtest_entered)
     price_off = sum(1 for c in comparisons if c.price_off)
+    paired = sum(1 for c in comparisons if c.paired)
+    # 🚨 짝 없는 줄을 「일치」로 세지 않는다(WAN-333) — 옛 `total − diverged`는 조인이
+    # 통째로 실패해도 「전부 일치」를 냈다.
+    matched = sum(1 for c in comparisons if c.paired and not c.verdict_differs)
+    unpaired_live = sum(1 for c in comparisons if c.live is not None and c.backtest is None)
+    unpaired_bt = sum(1 for c in comparisons if c.backtest is not None and c.live is None)
     return SetupCompareSummary(
         total=total,
-        matched=total - diverged,
+        matched=matched,
         diverged=diverged,
+        paired=paired,
+        unpaired_live_only=unpaired_live,
+        unpaired_backtest_only=unpaired_bt,
         backtest_only_entered=bt_only,
         live_only_entered=live_only,
         price_off=price_off,
@@ -459,9 +525,16 @@ def _summarize(comparisons: Sequence[SetupComparison]) -> SetupCompareSummary:
 
 
 def filter_comparisons(comparisons: Sequence[SetupComparison], mode: str) -> list[SetupComparison]:
-    """필터 칩(전체/불일치만/일치)으로 행을 거른다. 알 수 없는 모드는 전체."""
+    """필터 칩(전체/불일치만/일치/짝없음)으로 행을 거른다. 알 수 없는 모드는 전체.
+
+    `match`는 **짝지어진** 줄만 낸다(WAN-333) — 요약의 `matched`와 같은 뜻이어야 화면과
+    카드가 갈라지지 않는다. `unpaired`는 대조가 성립하지 않은 줄이고, 그중 판정 갈림으로도
+    잡히는 줄(라이브만 진입 등)은 `diverge`에도 나온다(겹침은 의도된 것 — 숨기지 않는다).
+    """
     if mode == "diverge":
         return [c for c in comparisons if c.verdict_differs]
     if mode == "match":
-        return [c for c in comparisons if not c.verdict_differs]
+        return [c for c in comparisons if c.paired and not c.verdict_differs]
+    if mode == "unpaired":
+        return [c for c in comparisons if not c.paired]
     return list(comparisons)
