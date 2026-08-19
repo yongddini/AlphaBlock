@@ -91,6 +91,12 @@ class BookRunRow(BaseModel):
     return_over_mdd: float | None
     peak_concurrency: int
     max_concurrent_risk: float
+    max_effective_concurrent_risk: float
+    """**실효** 동시 리스크(WAN-312 신설 열) = 계획 동시 리스크 × `stress_risk_multiple`.
+
+    ⚠️ 채택 회계(`stress_risk_multiple=1.0`)에서는 `max_concurrent_risk`와 **정의상 같다** —
+    이 열이 뜻을 갖는 것은 손절이 계획 1R보다 크게 밀리는 스트레스(k>1)를 얹었을 때다
+    (WAN-312/316). 값이 같다고 열이 비어 있는 게 아니라 「계획 = 실효」가 그 축의 답이다."""
     max_open_notional_ratio: float
     liquidation_events: int
     clamped_entries: int
@@ -127,6 +133,7 @@ def _book_row(
         return_over_mdd=over_mdd,
         peak_concurrency=stats.peak_concurrency,
         max_concurrent_risk=stats.max_concurrent_risk_ratio,
+        max_effective_concurrent_risk=stats.max_effective_concurrent_risk_ratio,
         max_open_notional_ratio=stats.max_open_notional_ratio,
         liquidation_events=len(stats.liquidations),
         clamped_entries=stats.clamped_entries,
@@ -147,6 +154,7 @@ def build_book_rows(
     fee_rate: float | None = None,
     maker_fee_rate: float | None = None,
     slippage: float | None = None,
+    stress_risk_multiple: float = 1.0,
 ) -> list[BookRunRow]:
     """이미 만든 칸 후보(payloads)에서 요청 구간별 북 행을 낸다.
 
@@ -162,6 +170,10 @@ def build_book_rows(
     오버라이드한다 — 비용은 후보 집합에 무관하고 시퀀싱(`_to_trade`)에서만 적용되므로
     (BookCell = 「비용 미반영 원가 셋업」) 같은 payloads를 여러 비용으로 재사용할 수 있다.
     전부 None(기본)이면 채택 비용 그대로라 예전과 비트 단위로 같다.
+
+    `stress_risk_multiple`(WAN-312, 옵트인)은 한 포지션의 최악 손실을 계획 1R의 몇 배로 볼지다
+    — 청산 검사와 `max_effective_concurrent_risk`에만 흘러 들고 거래 자체는 안 바꾼다.
+    `1.0`(기본)이면 예전과 비트 단위로 같다.
     """
     unknown = [s for s in segments if s not in SUPPORTED_SEGMENTS]
     if unknown:
@@ -179,7 +191,9 @@ def build_book_rows(
     rows: list[BookRunRow] = []
     for segment in segments:
         cells = _segment_cells(payloads, segment, "", include_reentry=include_reentry)
-        outcome = run_leverage_book(cells, base_cfg, book)
+        outcome = run_leverage_book(
+            cells, base_cfg, book, stress_risk_multiple=stress_risk_multiple
+        )
         result = build_result_from_trades(
             outcome.trades, outcome.effective_config, BOOK_ANNUALIZATION_TF
         )
