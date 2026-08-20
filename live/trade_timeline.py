@@ -38,7 +38,9 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 
+from backtest.models import PositionSide
 from backtest.report import EXIT_REASON_LABELS, format_time_kst
+from backtest.substep import ZoneLimitStatus
 from common.timefmt import KST, KST_LABEL, format_utc, kst_day_bounds_for_date
 from live.limit_orders import LimitOrderStatus
 from live.order_journal import (
@@ -59,15 +61,18 @@ from strategy.models import OrderBlockDirection, OrderBlockResult
 if TYPE_CHECKING:
     from backtest.harness import MarketData
     from backtest.models import BacktestConfig
-    from backtest.zone_limit_backtest import _Candidate
+    from backtest.zone_limit_backtest import SetupDiagnostic, _Candidate
     from strategy.models import ConfluenceParams
 
 __all__ = [
     "SOURCE_BACKTEST",
     "SOURCE_LIVE",
     "STATUS_BACKTEST_CLOSED",
+    "STATUS_BACKTEST_CONDITION_FAILED",
+    "STATUS_BACKTEST_INVALIDATED",
     "STATUS_BACKTEST_SKIP_ZONE_WIDTH",
     "STATUS_BACKTEST_UNFILLED",
+    "STATUS_BACKTEST_UNFILLED_EXPIRED",
     "STATUS_BACKTEST_UNPLACED",
     "DayTimeline",
     "TimelineRow",
@@ -357,7 +362,6 @@ def cell_timeline_trades(
     배치한다. 재진입 행은 `is_reentry=True`로 표기된다.
     """
     from backtest.harness import BASELINE_FILL, build_config, build_params
-    from backtest.models import PositionSide
     from backtest.zone_limit_backtest import (
         build_zone_limit_candidates,
         sequence_with_candidates,
@@ -412,9 +416,49 @@ STATUS_BACKTEST_UNPLACED = "미진입(슬롯·사이징)"
 라이브의 「슬롯참」·「거부(사이징0)」에 대응하되, per-cell 단일 baseline 경로는 둘을 코드에서
 가르지 못하므로(사이징 qty는 진행 자본에 종속) 한 라벨로 병기한다."""
 STATUS_BACKTEST_UNFILLED = "미체결"
-"""지정가가 끝내 체결되지 않은 셋업(닿지 않음/만료/무효화/조건취소). 라이브 「미체결」 대칭."""
+"""걸렸으나 지정가에 **닿지 않은** 셋업(`no_touch`). 라이브 「미체결」과 글자까지 같다.
+
+⚠️ WAN-339 이전에는 이 한 낱말이 닿지 않음/만료/무효화/조건취소 **넷을 뭉갰다** — 백테는
+`SetupDiagnostic.status`로 사유를 이미 들고 있는데 `filled` 참/거짓만 읽었기 때문이다. 그래서
+같은 셋업이 라이브 「무효화」 ↔ 백테 「미체결」로 갈려 보여 「매칭」 집계를 못 믿게 됐다(사용자
+관찰 2026-08-19). 지금은 `_backtest_unfilled_status`가 사유별로 가른다."""
+STATUS_BACKTEST_UNFILLED_EXPIRED = "미체결(만료)"
+"""`limit_valid_bars`(24봉) 경과로 취소된 셋업. **머리 낱말은 라이브와 같고**(`미체결`) 괄호가
+백테만 아는 세부를 살린다 — 라이브 `_live_status`는 만료와 「걸렸다 안 닿음」을 둘 다 「미체결」로
+뭉개므로(`first_rested_ms` 유무로만 밴드기각을 가른다) 여기서만 갈린다(WAN-339 결정 1)."""
+STATUS_BACKTEST_INVALIDATED = "무효화"
+"""오더블록 무효화로 취소된 셋업. 라이브 「무효화」와 글자까지 같다."""
+STATUS_BACKTEST_CONDITION_FAILED = "조건취소"
+"""지정가에 닿았으나 실시간 조건 미충족으로 취소된 셋업. 라이브 「조건취소」와 글자까지 같다."""
 STATUS_BACKTEST_SKIP_ZONE_WIDTH = "건너뜀(존폭)"
 """존폭 필터(1.28)로 아예 주문을 걸지 않은 셋업. 라이브 「건너뜀(존폭)」 대칭."""
+
+#: 미체결로 끝난 백테 셋업의 종료 사유(`ZoneLimitStatus`) → 화면 라벨 (WAN-339). **머리 낱말은
+#: 언제나 라이브(`_live_status`)와 같고, 백테가 더 아는 것만 괄호로 덧붙인다** — `_skip_status`
+#: 의 `건너뜀(사유)`·`거부(사유)`와 같은 저장소 관행이다. 세 코드(`cancelled_*`)는
+#: `LimitOrderStatus`와 **문자열까지 같아** 두 시스템이 같은 사건을 같은 낱말로 낸다(회귀
+#: 테스트가 그 대칭을 동작으로 건다).
+#: ⚠️ `FILLED_*`는 일부러 안 담는다 — 이 표는 `diag.filled`가 거짓인 셋업에만 쓰이고, 그런데도
+#: 상태가 `filled_*`이면 체결 탈락 렌즈(`fill_dropout_rate`)가 켜진 것인데 이 화면은
+#: `BASELINE_FILL`(탈락률 0) 고정이라 일어날 수 없다. 일어난다면 조용히 흡수하지 말고 `?코드`
+#: 로 드러나야 한다.
+_BACKTEST_UNFILLED_STATUS_LABELS = {
+    ZoneLimitStatus.NO_TOUCH.value: STATUS_BACKTEST_UNFILLED,
+    ZoneLimitStatus.CANCELLED_EXPIRED.value: STATUS_BACKTEST_UNFILLED_EXPIRED,
+    ZoneLimitStatus.CANCELLED_INVALIDATED.value: STATUS_BACKTEST_INVALIDATED,
+    ZoneLimitStatus.CANCELLED_CONDITION_FAILED.value: STATUS_BACKTEST_CONDITION_FAILED,
+}
+
+
+def _backtest_unfilled_status(status: str) -> str:
+    """미체결로 끝난 백테 셋업의 라벨 — 종료 사유별로 가른다(미매핑은 `?코드`로 눈에 띄게).
+
+    라이브 `_live_status`의 폴백과 같은 규약이다: 새 상태가 생겼을 때 조용히 「미체결」로
+    흡수되면 WAN-339가 고친 그 혼동이 그대로 재발한다.
+    """
+    label = _BACKTEST_UNFILLED_STATUS_LABELS.get(status)
+    return label if label is not None else f"?{status}"
+
 
 #: 백테 셋업 행 내부 중복 제거 키(존 정체성 + 탭 순번 + 탭 시각). 페이퍼↔백테 **교차** 조인
 #: 키는 탭 시각을 뺀 축(`live.setup_compare`)이지만, 한 셀 안에서 청산·미체결 행이 겹치지
@@ -432,8 +476,9 @@ def cell_setup_timeline(
     """미리 로드·탐지된 한 셀의 그날 백테 **셋업 전부**를 타임라인 행으로 만든다 (WAN-295).
 
     `cell_timeline_trades`가 실제 청산 거래만 낸다면, 이 함수는 라이브 장부와 **대칭**으로
-    그날 탭한 셋업 하나하나를 한 줄로 낸다 — 청산 / 미진입(슬롯·사이징) / 미체결 / 건너뜀
-    (존폭). 각 행에 존 정체성(`zone_start_time`·`zone_confirmed_time`·`tap_index`)과 탭 시각을
+    그날 탭한 셋업 하나하나를 한 줄로 낸다 — 청산 / 미진입(슬롯·사이징) / 미체결(사유별:
+    닿지 않음·만료·무효화·조건취소, WAN-339) / 건너뜀(존폭). 각 행에 존 정체성
+    (`zone_start_time`·`zone_confirmed_time`·`tap_index`)과 탭 시각을
     실어 페이퍼↔백테 셋업 단위 1:1 조인(`live.setup_compare`)이 가능하게 한다 — 체결 시각(틱
     vs 1분봉으로 갈린다)이 아니라 존 정체성으로 짝짓는 것이 이 도구의 핵심이다(WAN-234 노트가
     지적한 존 단위 조인 불안정성을 피한다).
@@ -447,9 +492,7 @@ def cell_setup_timeline(
     입력, `live.setup_compare`).
     """
     from backtest.harness import BASELINE_FILL, build_config, build_params
-    from backtest.models import PositionSide
     from backtest.zone_limit_backtest import (
-        SetupDiagnostic,
         build_zone_limit_candidates,
         sequence_with_candidates,
     )
@@ -525,32 +568,7 @@ def cell_setup_timeline(
         )
         if key in traded_keys:
             continue  # 이미 「청산」 행으로 냈다.
-        status = STATUS_BACKTEST_UNPLACED if diag.filled else STATUS_BACKTEST_UNFILLED
-        rows.append(
-            TimelineRow(
-                source=SOURCE_BACKTEST,
-                symbol=market.symbol,
-                timeframe=market.timeframe,
-                is_long=is_long,
-                status=status,
-                reserve_ms=diag.tap_bar_time,
-                limit_price=diag.limit_price,
-                fill_ms=None,
-                fill_price=None,
-                stop_price=diag.stop_price,
-                take_profit_price=None,
-                exit_ms=None,
-                exit_price=None,
-                exit_reason=None,
-                pnl_pct=None,
-                pnl_amount=None,
-                zone_start_time=diag.zone_start_time,
-                zone_confirmed_time=diag.zone_confirmed_time,
-                tap_index=diag.tap_index,
-                trigger_time=diag.trigger_time,
-                is_reentry=False,
-            )
-        )
+        rows.append(_setup_diagnostic_row(diag, symbol=market.symbol, timeframe=market.timeframe))
     # 존폭 필터로 아예 주문을 안 건 셋업(라이브 「건너뜀·존폭」과 대칭).
     rows.extend(
         _zone_width_skipped_rows(
@@ -563,6 +581,41 @@ def cell_setup_timeline(
         )
     )
     return rows
+
+
+def _setup_diagnostic_row(diag: SetupDiagnostic, *, symbol: str, timeframe: str) -> TimelineRow:
+    """진입까지 못 간 백테 셋업 하나를 라이브 대칭 행으로 (WAN-295 · 라벨은 WAN-339).
+
+    두 갈래다: **체결은 됐는데 포지션이 안 잡힌** 셋업(동시 1포지션 시퀀서·사이징 qty≤0)은
+    「미진입(슬롯·사이징)」이고, **지정가가 끝내 체결되지 않은** 셋업은 `diag.status`가 담고
+    있는 **종료 사유별로** 갈린다(닿지 않음/만료/무효화/조건취소). 사유를 안 읽고 한 낱말로
+    뭉개면 같은 셋업이 라이브 「무효화」 ↔ 백테 「미체결」로 갈려 보여 「매칭」 집계를 못 믿게
+    된다(WAN-339가 고친 고장).
+    """
+    status = STATUS_BACKTEST_UNPLACED if diag.filled else _backtest_unfilled_status(diag.status)
+    return TimelineRow(
+        source=SOURCE_BACKTEST,
+        symbol=symbol,
+        timeframe=timeframe,
+        is_long=diag.side is PositionSide.LONG,
+        status=status,
+        reserve_ms=diag.tap_bar_time,
+        limit_price=diag.limit_price,
+        fill_ms=None,
+        fill_price=None,
+        stop_price=diag.stop_price,
+        take_profit_price=None,
+        exit_ms=None,
+        exit_price=None,
+        exit_reason=None,
+        pnl_pct=None,
+        pnl_amount=None,
+        zone_start_time=diag.zone_start_time,
+        zone_confirmed_time=diag.zone_confirmed_time,
+        tap_index=diag.tap_index,
+        trigger_time=diag.trigger_time,
+        is_reentry=False,
+    )
 
 
 def _zone_width_skipped_rows(

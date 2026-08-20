@@ -109,7 +109,11 @@ __all__ = [
 #: 캐시에서 읽은 행으로는 파리티 조인이 성립하지 않았다(`stop-width --with-backtest`가 캐시를
 #: 읽게 되면서 드러났다 — WAN-335). 열을 넓히고 버전을 올린다: 옛 적재분은 지문이 갈라져 자동
 #: 미스이고 **지워지지 않는다**(배포 뒤 되채우기는 `trades --persist-cache --days N`).
-TIMELINE_CACHE_VERSION = "wan335.1"
+#: wan339.1: 미체결 셋업 행의 **상태 라벨 문자열이 바뀐다** — 넷을 뭉개던 「미체결」이 종료
+#: 사유별로 갈린다(`미체결`/`미체결(만료)`/`무효화`/`조건취소`, WAN-339). 라벨이 `status` 열에
+#: 그대로 저장되므로 안 올리면 **옛 날짜는 「미체결」, 새로 계산한 날은 「무효화」**로 섞여 같은
+#: 화면에서 두 어휘가 공존한다. 옛 적재분은 지문이 갈라져 자동 미스이고 지워지지 않는다.
+TIMELINE_CACHE_VERSION = "wan339.1"
 
 
 class DuplicateTimelineCacheError(RuntimeError):

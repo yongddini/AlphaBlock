@@ -19,6 +19,7 @@ import pandas as pd
 import pytest
 
 from backtest.report import format_time_kst
+from backtest.substep import ZoneLimitStatus
 from common.timefmt import kst_day_bounds_for_date
 from live.limit_orders import LimitFill, LimitOrderStatus, PendingLimitOrder
 from live.order_journal import (
@@ -238,6 +239,135 @@ def test_live_status_never_leaks_raw_english() -> None:
 def test_live_status_unmapped_falls_back_visibly() -> None:
     """미매핑 상태가 새로 생기면 조용히 영어로 새지 않고 눈에 띄게 찍는다(WAN-240)."""
     assert _live_status(_placed("some_new_status"), closed=False) == "?some_new_status"
+
+
+# --- WAN-339: 백테 미체결 라벨이 라이브와 같은 낱말을 쓴다 -------------------
+
+
+def _head_word(label: str) -> str:
+    """`미체결(만료)` → `미체결` — 괄호 세부를 뗀 머리 낱말."""
+    return label.split("(", 1)[0]
+
+
+def test_backtest_unfilled_head_word_matches_live_for_shared_codes() -> None:
+    """두 시스템이 **문자열까지 같은** 상태 코드에서 머리 낱말이 같다(WAN-339 완료 기준 1·2).
+
+    라벨 문자열을 리터럴로 박지 않고 `_live_status`가 실제로 내는 값과 대조한다 — 어느 한쪽만
+    어휘를 바꾸면 이 테스트가 깨진다(그게 이 이슈가 고친 고장이다: 라이브 「무효화」 ↔ 백테
+    「미체결」).
+    """
+    from live.trade_timeline import _backtest_unfilled_status
+
+    shared = [
+        LimitOrderStatus.CANCELLED_INVALIDATED,
+        LimitOrderStatus.CANCELLED_CONDITION_FAILED,
+        LimitOrderStatus.CANCELLED_EXPIRED,
+    ]
+    for status in shared:
+        # 같은 코드가 백테 `ZoneLimitStatus`에도 글자 그대로 있다(대칭의 전제).
+        assert status.value in {s.value for s in ZoneLimitStatus}, status
+        # 라이브는 주문판에 실렸던 건만 「미체결」로 낸다(`first_rested_ms`) — 백테 셋업 행은
+        # 정의상 `order_rested`인 것만 나오므로 그 팔과 대조한다.
+        live = _live_status(_placed(status.value, first_rested_ms=1), closed=False)
+        backtest = _backtest_unfilled_status(status.value)
+        assert _head_word(backtest) == live, (status.value, backtest, live)
+
+
+def test_backtest_unfilled_splits_no_touch_and_expired() -> None:
+    """`no_touch`와 `cancelled_expired`가 갈리되 머리 낱말은 라이브와 같다(완료 기준 2).
+
+    라이브는 둘 다 「미체결」로 뭉갠다(`_live_status`) — 백테만 아는 「24봉 만료」를 괄호로
+    살리고, 좌우 대칭은 머리 낱말이 지킨다.
+    """
+    from live.trade_timeline import _backtest_unfilled_status
+
+    no_touch = _backtest_unfilled_status(ZoneLimitStatus.NO_TOUCH.value)
+    expired = _backtest_unfilled_status(ZoneLimitStatus.CANCELLED_EXPIRED.value)
+    live_unfilled = _live_status(
+        _placed(LimitOrderStatus.CANCELLED_EXPIRED.value, first_rested_ms=1), closed=False
+    )
+
+    assert no_touch != expired  # 갈린다.
+    assert _head_word(no_touch) == _head_word(expired) == live_unfilled  # 머리 낱말은 같다.
+    assert expired != _head_word(expired)  # 만료는 세부를 덧붙인다.
+
+
+def test_backtest_unfilled_covers_every_non_fill_status() -> None:
+    """미체결로 끝날 수 있는 모든 `ZoneLimitStatus`에 라벨이 있다 — 새 상태가 생기면 깨진다.
+
+    `FILLED_*`는 제외한다: 이 표는 `diag.filled`가 거짓인 셋업에만 쓰이고, 화면은
+    `BASELINE_FILL`(탈락률 0) 고정이라 체결 상태가 여기로 오지 않는다.
+    """
+    from live.trade_timeline import _backtest_unfilled_status
+
+    non_fill = [s for s in ZoneLimitStatus if not s.value.startswith("filled")]
+    assert len(non_fill) == 4  # 표가 다루는 사유 넷(닿지 않음·만료·무효화·조건취소).
+    for status in non_fill:
+        label = _backtest_unfilled_status(status.value)
+        assert not label.startswith("?"), status  # 조용한 흡수도, 미매핑도 아니다.
+        assert not label.isascii(), (status.value, label)  # 한글 라벨.
+
+
+def _diag(status: ZoneLimitStatus, *, filled: bool = False) -> object:
+    """진단 레코드 한 건 — 라벨 갈림만 재는 최소 필드."""
+    from backtest.models import PositionSide
+    from backtest.zone_limit_backtest import SetupDiagnostic
+
+    return SetupDiagnostic(
+        trigger_time=1_000,
+        tap_bar_time=900,
+        tap_close=100.0,
+        side=PositionSide.LONG,
+        limit_price=99.0,
+        stop_price=98.0,
+        filled=filled,
+        dropped=False,
+        status=status,
+        tap_index=0,
+        zone_start_time=800,
+        zone_confirmed_time=850,
+    )
+
+
+def test_setup_diagnostic_row_labels_split_by_reason() -> None:
+    """셋업 **행**이 표대로 라벨을 낸다 — 헬퍼가 아니라 화면이 실제로 쓰는 경로다(완료 기준 1).
+
+    `filled=True`(체결됐으나 슬롯·사이징에 밀림)는 예전 그대로 「미진입」이고, 미체결만
+    사유별로 갈린다. 관찰된 SOL 줄(무효화)이 좌우 같은 낱말로 읽히는 자리다.
+    """
+    from live.trade_timeline import (
+        STATUS_BACKTEST_UNPLACED,
+        _backtest_unfilled_status,
+        _setup_diagnostic_row,
+    )
+
+    def _status(diag: object) -> str:
+        row = _setup_diagnostic_row(diag, symbol=_SYMBOL, timeframe=_TF)  # type: ignore[arg-type]
+        assert row.source == SOURCE_BACKTEST
+        # 존 정체성(조인 키)은 그대로 실린다 — 라벨만 바뀐 것이다.
+        assert (row.zone_start_time, row.zone_confirmed_time, row.tap_index) == (800, 850, 0)
+        return row.status
+
+    # 체결됐는데 포지션이 안 잡힌 셋업은 예전 라벨 그대로(이 이슈가 안 건드리는 축).
+    assert _status(_diag(ZoneLimitStatus.NO_TOUCH, filled=True)) == STATUS_BACKTEST_UNPLACED
+
+    labels = {s: _status(_diag(s)) for s in ZoneLimitStatus if not s.value.startswith("filled")}
+    # 넷이 서로 다른 라벨로 갈린다(WAN-339 이전에는 전부 「미체결」이었다).
+    assert len(set(labels.values())) == 4, labels
+    # 행 라벨 == 라벨표 — 화면이 표를 우회하지 않는다.
+    assert labels == {s: _backtest_unfilled_status(s.value) for s in labels}
+
+
+def test_backtest_unfilled_unmapped_falls_back_visibly() -> None:
+    """미매핑 상태는 조용히 「미체결」로 흡수되지 않고 `?코드`로 찍힌다(완료 기준 3).
+
+    조용히 흡수하면 WAN-339가 고친 그 혼동(넷을 한 낱말로 뭉갬)이 그대로 재발한다.
+    """
+    from live.trade_timeline import STATUS_BACKTEST_UNFILLED, _backtest_unfilled_status
+
+    label = _backtest_unfilled_status("some_new_status")
+    assert label == "?some_new_status"
+    assert label != STATUS_BACKTEST_UNFILLED
 
 
 def test_cohort_is_placed_window(tmp_path: Path) -> None:
