@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import dataclasses
+import types
 from collections.abc import Iterator
 
 import pytest
@@ -15,7 +16,10 @@ import pytest
 from data.models import Candle
 from data.partial_bars import (
     PARTIAL_VOLUME_RATIO,
+    PRICE_NOISE_TICKS,
+    BarDiscrepancy,
     classify_bucket,
+    infer_price_tick,
     repair_frame,
     scan_series,
     scan_symbol,
@@ -357,3 +361,134 @@ def test_bit_identical_ratio_is_a_provenance_fingerprint(store: OhlcvStore) -> N
     scan = scan_series(store, SYMBOL, TARGET)
     assert scan.discrepancies == []  # 여전히 「불일치 0」인데
     assert scan.bit_identical_ratio == 0.5  # 지문은 갈린다
+
+
+# --------------------------------------------------------------------------- #
+# 가격 축 「손상 vs 노이즈」 (WAN-337 §2)
+# --------------------------------------------------------------------------- #
+
+
+def test_price_noise_within_tick_grid_is_not_damage(store: OhlcvStore) -> None:
+    """호가 한 칸짜리 차이는 손상이 아니다 — 상시 빨간불을 만들던 부류(WAN-337 §2).
+
+    합성 봉의 값은 소수 한 자리(`100.0`꼴)라 눈금이 `0.1`이고, 한 칸만 옮기면 노이즈다.
+    """
+    bucket = _stored_bucket(store, 0)
+    store.upsert_candles([dataclasses.replace(bucket, close=bucket.close + 0.1)])
+
+    scan = scan_series(store, SYMBOL, TARGET)
+    assert scan.damaged == []
+    assert [d.kind for d in scan.noise] == ["price_noise"]
+    assert scan.noise[0].price_fields == ("close",)
+    assert scan.noise[0].max_price_ticks == pytest.approx(1.0)
+    assert scan.ok  # 노이즈만 있으면 통과다
+
+
+def test_price_tick_threshold_is_defined_once(store: OhlcvStore) -> None:
+    """문턱은 `PRICE_NOISE_TICKS` 한 곳에서만 정의된다 — 바로 안쪽/바깥쪽이 갈린다."""
+    bucket = _stored_bucket(store, 0)
+    tick = 0.1  # 합성 봉의 호가 눈금(소수 한 자리)
+
+    inside = (PRICE_NOISE_TICKS - 1) * tick
+    store.upsert_candles([dataclasses.replace(bucket, close=bucket.close + inside)])
+    assert scan_series(store, SYMBOL, TARGET).damaged == []
+
+    outside = (PRICE_NOISE_TICKS + 1) * tick
+    store.upsert_candles([dataclasses.replace(bucket, close=bucket.close + outside)])
+    assert [d.kind for d in scan_series(store, SYMBOL, TARGET).damaged] == ["price_only"]
+
+
+def test_volume_shortfall_beats_price_noise(store: OhlcvStore) -> None:
+    """가격이 호가 한 칸만 달라도 **거래량이 모자라면 부분 봉이다** — 판정자는 거래량이다.
+
+    가격 문턱이 부분 봉을 조용히 노이즈로 삼키면 WAN-327이 만든 판정자가 무력화된다.
+    """
+    bucket = _stored_bucket(store, 0)
+    store.upsert_candles(
+        [dataclasses.replace(bucket, close=bucket.close + 0.1, volume=bucket.volume * 0.42)]
+    )
+    assert [d.kind for d in scan_series(store, SYMBOL, TARGET).damaged] == ["partial"]
+
+
+def test_verify_agrees_with_scan_on_price_noise(store: OhlcvStore) -> None:
+    """`verify`와 전 이력 스캔의 자가 갈라지지 않는다 — 분류는 `classify_bucket` 한 곳이다."""
+    bucket = _stored_bucket(store, 0)
+    store.upsert_candles([dataclasses.replace(bucket, close=bucket.close + 0.1)])
+
+    parity = verify_resample_parity(store, SYMBOL, "1m", TARGET, sample_buckets=10)
+    assert parity.damaged == []
+    assert [d.kind for d in parity.noise] == ["price_noise"]
+    assert parity.ok  # 하드 실패가 아니다
+
+
+def test_infer_price_tick_reads_the_quote_grid() -> None:
+    """호가 눈금은 값의 소수 자릿수에서 읽는다 — 가장 고운 값이 눈금을 정한다."""
+    assert infer_price_tick([70276.6, 70331.0, 70075.5]) == pytest.approx(0.1)
+    assert infer_price_tick([3584.12, 3587.01]) == pytest.approx(0.01)
+    assert infer_price_tick([0.12064, 0.12069]) == pytest.approx(1e-5)
+    # 한 값만 고와도 그 눈금을 따른다(거친 값이 눈금을 되돌리지 않는다).
+    assert infer_price_tick([100.0, 100.25]) == pytest.approx(0.01)
+    # 정수뿐이면 `repr(float)`가 `'100.0'`이라 눈금이 `0.1`로 잡힌다 — 실제 눈금보다 **고운**
+    # 쪽이라 같은 차이가 더 많은 틱으로 세어진다(= 손상으로 찍히는 쪽). 안전한 방향이다.
+    assert infer_price_tick([100, 101]) == pytest.approx(0.1)
+
+
+# --- 실측 값 회귀 가드 — 문턱이 진짜 손상을 지우지 않는다 (WAN-337 §2 완료기준 3·5) --- #
+
+#: 2024-03-27 12:30 BTC 15m 실측(로컬 DB) — `open`이 **475틱** 어긋난 진짜 손상.
+_REAL_DAMAGE_2024_03_27 = (
+    {"open": 70276.6, "high": 70331.0, "low": 70075.5, "close": 70087.9, "volume": 1749.455},
+    {"open": 70324.1, "high": 70331.0, "low": 70075.5, "close": 70087.9, "volume": 1749.455},
+)
+#: 2026-07-18 02:30 SOL 15m 실측 — `close`가 **1틱**(그런데 **1.33bp**) 어긋난 호가 잔돈.
+_REAL_NOISE_SOL = (
+    {"open": 75.28, "high": 75.42, "low": 75.26, "close": 75.27, "volume": 80922.51},
+    {"open": 75.28, "high": 75.42, "low": 75.26, "close": 75.26, "volume": 80919.99},
+)
+#: 2026-07-16 17:15 BTC 15m 실측 — `close`가 **15틱**(그런데 **0.23bp**) 어긋난 손상.
+_REAL_DAMAGE_BTC_CLOSE = (
+    {"open": 64134.8, "high": 64209.6, "low": 64059.1, "close": 64193.3, "volume": 2057.699},
+    {"open": 64134.8, "high": 64209.6, "low": 64059.1, "close": 64191.8, "volume": 2046.065},
+)
+
+
+def _classify_real(pair: tuple[dict[str, float], dict[str, float]]) -> BarDiscrepancy:
+    resampled, stored = pair
+    found = classify_bucket(
+        SYMBOL, TARGET, 0, types.SimpleNamespace(**resampled), types.SimpleNamespace(**stored)
+    )
+    assert found is not None
+    return found
+
+
+def test_price_threshold_does_not_erase_the_2024_03_27_damage() -> None:
+    """🚨 함정 값 회귀 — 실측 손상이 문턱을 넘어 **손상으로 남는다**(WAN-330 가드와 같은 방식).
+
+    문턱을 올려 경보를 줄이고 싶어지는 자리라, 지어낸 값이 아니라 **그날 그 봉의 실제 값**으로
+    건다. 이 테스트가 깨지면 문턱이 진짜 손상을 삼킨 것이다.
+    """
+    found = _classify_real(_REAL_DAMAGE_2024_03_27)
+    assert found.kind == "price_only"
+    assert found.damaged
+    assert found.price_fields == ("open",)
+    assert found.max_price_ticks == pytest.approx(475.0)
+    assert found.max_price_bp == pytest.approx(6.759, abs=1e-3)
+
+
+def test_tick_ruler_orders_differently_than_bp() -> None:
+    """🚨 자의 근거 — **어떤 bp 문턱도 이 두 실측 봉을 옳게 가를 수 없다.**
+
+    SOL 2026-07-18은 **1.33bp인데 1틱**(호가 잔돈)이고 BTC 2026-07-16은 **0.23bp인데 15틱**
+    (손상)이다. 즉 bp로는 노이즈가 손상보다 **5.7배 크다** — 절대 bp를 자로 삼으면 둘 중
+    하나는 반드시 반대로 찍힌다. 그래서 판정자가 틱 배수다.
+    """
+    noise = _classify_real(_REAL_NOISE_SOL)
+    damage = _classify_real(_REAL_DAMAGE_BTC_CLOSE)
+
+    assert noise.max_price_ticks == pytest.approx(1.0)
+    assert damage.max_price_ticks == pytest.approx(15.0)
+    # bp 축은 순서가 **뒤집혀 있다** — 이것이 절대 bp 문턱을 못 쓰는 이유다.
+    assert noise.max_price_bp > damage.max_price_bp
+
+    assert noise.kind == "price_noise" and not noise.damaged
+    assert damage.kind == "price_only" and damage.damaged

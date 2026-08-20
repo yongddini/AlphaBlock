@@ -311,7 +311,7 @@ def format_verify_report(report: VerifyReport) -> str:
     lines.append(
         f"판정: {verdict} (하드 실패 없음={report.ok}, 정지 {len(report.stale)}건,"
         f" 갭 총 {report.total_gaps}개, 손상 {report.total_damaged}봉,"
-        f" 거래량 노이즈 {report.total_noise}봉)"
+        f" 노이즈(거래량·가격) {report.total_noise}봉)"
     )
     return "\n".join(lines)
 
@@ -323,7 +323,7 @@ def format_partial_bar_scan(scans: Sequence[SeriesScan], *, top: int = 15) -> st
     질문이라(WAN-327 §1) 개별 봉이 아니라 날짜로 뭉쳐 보여 준다.
     """
     lines: list[str] = ["부분 봉 스캔 (저장 상위TF 봉 vs 같은 구간 1분봉 합)", ""]
-    lines.append("시리즈 (비교 버킷 · 손상 · 거래량 노이즈):")
+    lines.append("시리즈 (비교 버킷 · 손상 · 노이즈[거래량·가격]):")
     for sc in scans:
         span = ""
         if sc.damaged_span is not None:
@@ -345,7 +345,11 @@ def format_partial_bar_scan(scans: Sequence[SeriesScan], *, top: int = 15) -> st
     for d in damaged:
         by_day.setdefault(timefmt.format_kst(d.open_time)[:10], []).append(d)
     lines.append(f"손상 봉 일자별(KST) — 총 {len(damaged)}봉, {len(by_day)}일:")
-    lines.append("  날짜        봉수  partial  price_only  최소 거래량%  최대 가격오차bp  종목")
+    # 가격 오차는 **틱 배수**가 판정자다(WAN-337 §2) — bp는 사람이 크기를 가늠하는 참고 열로
+    # 남긴다(두 축은 같은 순서로 정렬되지도 않는다: `PRICE_NOISE_TICKS` 주석의 실측).
+    lines.append(
+        "  날짜        봉수  partial  price_only  최소 거래량%  최대 가격오차틱  (bp)  종목"
+    )
     for day in sorted(by_day):
         items = by_day[day]
         syms = sorted({d.symbol.split("/")[0] for d in items})
@@ -354,7 +358,8 @@ def format_partial_bar_scan(scans: Sequence[SeriesScan], *, top: int = 15) -> st
         lines.append(
             f"  {day}  {len(items):>4}  {partial:>7}  {len(items) - partial:>10}"
             f"  {min(d.volume_ratio for d in items) * 100:>11.1f}"
-            f"  {max(d.max_price_bp for d in items):>15.1f}  {shown}"
+            f"  {max(d.max_price_ticks for d in items):>15.1f}"
+            f"  {max(d.max_price_bp for d in items):>6.1f}  {shown}"
         )
     if len(by_day) > top:
         lines.append(f"  (일자 {len(by_day)}개 전부 표시)")
@@ -418,6 +423,8 @@ def _write_partial_bar_csv(scans: Sequence[SeriesScan], path: str) -> Path:
                 "resampled_volume",
                 "stored_volume",
                 "price_fields",
+                "max_price_ticks",
+                "price_tick",
                 "max_price_bp",
             ]
         )
@@ -434,6 +441,8 @@ def _write_partial_bar_csv(scans: Sequence[SeriesScan], path: str) -> Path:
                         f"{d.resampled_volume:.6f}",
                         f"{d.stored_volume:.6f}",
                         "|".join(d.price_fields),
+                        f"{d.max_price_ticks:.3f}",
+                        f"{d.price_tick:.10g}",
                         f"{d.max_price_bp:.3f}",
                     ]
                 )
@@ -555,6 +564,11 @@ def cmd_stop_width(args: argparse.Namespace, settings: Settings) -> int:
     돈다. 좁힌 표는 그 좌표에서만의 결론이라 헤더가 좌표를 밝히고, 좁히기는 **양쪽에**
     걸린다(WAN-335 §2 — 백테만 좁히면 「48칸 대 1칸」을 비교한 인구조사가 정상 좁히기를
     고장처럼 보이게 한다). §3(라이브 분포)만은 일부러 창 전체를 본다.
+
+    📌 `--unpaired`는 **짝 없는 셋업의 귀속**(WAN-337 §1)을 덧붙인다 — 인구조사가 「짝 없음
+    라이브 14」라고만 말하던 자리에 «(0) 키 없음 / (a) 존 없음 / (b) 확정 시각 / (c) 탭 순번»
+    분해를 낸다. **기본 표는 안 바뀐다**(짝 없는 셋업을 손절폭 표에 넣으면 다른 존의 손절폭을
+    빼는 무의미한 Δ가 나온다 — WAN-333이 고친 부류).
     """
     from backtest.harness import DEFAULT_SYMBOLS, DEFAULT_TIMEFRAMES
     from live.fill_report import resolve_day_window
@@ -573,6 +587,10 @@ def cmd_stop_width(args: argparse.Namespace, settings: Settings) -> int:
     narrowed = symbols is not None or timeframes is not None
     if narrowed:
         label += " · 좌표 " + _coordinate_label(symbols, timeframes)
+    if args.unpaired and not args.with_backtest:
+        # 귀속은 조인 결과 위에서만 나온다 — 조용히 빈 블록을 내지 않고 그 사실을 밝힌다.
+        print("--unpaired는 --with-backtest가 있어야 낼 수 있습니다(조인이 있어야 짝이 없다).")
+        return 0
     if days > 1 and args.with_backtest:
         # 백테 대조는 하루 단위 워밍업 규약(WAN-233/295)에 묶여 있다 — 여러 날을 한 번에
         # 돌리면 창마다 다른 워밍업이 섞여 조인이 조용히 어긋난다. 거부한다.
@@ -616,6 +634,7 @@ def cmd_stop_width(args: argparse.Namespace, settings: Settings) -> int:
             live_rows=live_rows,
             live_rows_total=live_rows_total,
             narrowed=narrowed,
+            with_unpaired=args.unpaired,
         )
     finally:
         journal.close()
@@ -1410,6 +1429,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--with-backtest",
         action="store_true",
         help="같은 셋업 백테 대조(§1)까지 낸다 — 야간 캐시를 읽고 미스인 칸만 계산한다",
+    )
+    p_stop_width.add_argument(
+        "--unpaired",
+        action="store_true",
+        help=(
+            "짝 없는 셋업을 (0)키없음/(a)존없음/(b)확정시각/(c)탭순번으로 귀속시키는 진단"
+            " 블록을 덧붙인다(WAN-337 §1). 기본 표는 그대로다"
+        ),
     )
     p_stop_width.add_argument(
         "--recompute",

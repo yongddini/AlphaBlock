@@ -5,21 +5,31 @@
 
 * **손상** — 봉이 형성 도중에 잘려 저장된 것(거래량이 통째로 모자라고, 잘린 뒤에 찍혔을
   고가·저가·종가가 빠져 있다). WAN-314 §2가 진단·수정한 그 서명이다.
-* **노이즈** — 가격은 완전히 같고 거래량 끝자리만 다른 것(저장이 오히려 **더 크다**).
-  1분봉 쪽이 조금 모자란 것이라 상위TF 봉은 멀쩡하고, **엔진은 거래량을 읽지 않으므로**
-  백테·매매 판단에 영향이 없다.
+* **노이즈** — 두 부류다. (1) **거래량 노이즈**: 가격은 완전히 같고 거래량 끝자리만 다른
+  것(저장이 오히려 **더 크다**). 1분봉 쪽이 조금 모자란 것이라 상위TF 봉은 멀쩡하고,
+  **엔진은 거래량을 읽지 않으므로** 백테·매매 판단에 영향이 없다. (2) **가격 노이즈**
+  (WAN-337 §2): 가격 차이가 **호가 눈금 몇 칸**에 불과한 것 — 다른 가격대가 아니라 같은
+  가격의 다른 표현에 가깝다.
 
 두 부류를 안 가르면 감시가 상시 빨간불이 되어 **진짜 부분 봉이 그 안에 묻힌다**(WAN-318
 §3 「정상 정지가 failed」·WAN-321 「거짓 경보로 진짜가 안 보임」과 같은 부류). 실제로
 WAN-327에서 그 일이 일어났다 — 「BTC 4h 136건」이 두 부류의 합이라 진행 중인 고장으로
 두 번 잘못 읽혔다.
 
-📌 **판정자는 가격이 아니라 거래량이다.** 「가격이 틀렸는가」로 가르면 부분 봉을 놓친다 —
-그 버킷의 고가·저가가 **잘리기 전에 이미 찍혀** 있으면 부분 봉이어도 가격이 맞는다(실측
-반례: 2026-07-21 BNB 4h는 거래량 41.9%인데 high 오차 0.0bp). 그래도 종가·거래량이 틀리고
-극값이 갱신될 구간을 통째로 잃은 손상된 봉이다. 그래서 판정자는
+📌 **부분 봉의 판정자는 가격이 아니라 거래량이다.** 「가격이 틀렸는가」로 가르면 부분 봉을
+놓친다 — 그 버킷의 고가·저가가 **잘리기 전에 이미 찍혀** 있으면 부분 봉이어도 가격이
+맞는다(실측 반례: 2026-07-21 BNB 4h는 거래량 41.9%인데 high 오차 0.0bp). 그래도 종가·
+거래량이 틀리고 극값이 갱신될 구간을 통째로 잃은 손상된 봉이다. 그래서 판정자는
 **`저장 거래량 < 리샘플 × 0.99`**이고, 실측에서 두 부류는 이 선에서 완전히 갈린다
 (손상 ≤70% · 노이즈 ≥100.0%).
+
+📌 **가격 축에도 같은 구분이 필요했다(WAN-337 §2).** 거래량이 멀쩡한데 OHLC만 다른 부류
+(`price_only`)는 옛 판정에서 **크기와 무관하게 전부 손상**이었다. 그래서 **호가 한 칸짜리
+차이도 🚨로 찍혀** 거래량 축에서 겪은 그 상황(상시 빨간불 → 진짜 이상이 그 안에 묻힘)이
+가격 축에서 그대로 재발했다 — 실제로 2026-08-19 ETH 1봉이 「WAN-314 재발 방지 이후의 새
+손상」처럼 읽혔는데 크기를 보니 **0.1bp**였다. 이제 그 자는 **틱 배수**이고
+(`PRICE_NOISE_TICKS`), 그 아래는 `price_noise`로 따로 보고한다. ⚠️ **점검 항목이 준 것이
+아니다** — 무엇을 보는가는 불변이고 **결과를 종료 코드·보고로 옮기는 법**만 바뀐다.
 
 읽기 전용이다 — 이 모듈은 아무것도 쓰지 않는다(고치는 것은 사람이 하는 백필, WAN-194 원칙).
 """
@@ -43,11 +53,69 @@ PARTIAL_VOLUME_RATIO = 0.99
 #: 거래량 비교 허용 상대 오차 — 이 안이면 「같다」로 보고 노이즈로도 세지 않는다.
 VOLUME_REL_TOL = 1e-6
 
+#: 가격 오차가 **호가 단위(틱)의 이 배수 이하**면 손상이 아니라 노이즈로 본다(WAN-337 §2).
+#:
+#: 🚨 **자가 절대 bp가 아니라 틱 배수인 것은 취향이 아니라 실측이다 — 두 축은 같은 순서로
+#: 정렬되지도 않는다.** 로컬 15m 전 이력(6종목 · `price_only` 21건) 실측에서 **1틱짜리가
+#: bp로는 0.0145 ~ 1.3286bp로 91배 흩어지고**(BTC 2024-10-28 0.1/68,900 = 0.0145bp ↔
+#: SOL 2026-07-18 0.01/75.3 = 1.3286bp — **둘 다 정확히 1틱**), 거꾸로 **bp가 작은 쪽이
+#: 틱으로는 큰 경우**가 있다(BTC 2026-07-16은 0.2337bp인데 **15틱**이라 위 SOL 1틱보다
+#: bp는 작고 틱은 15배 크다). 즉 어떤 bp 문턱을 고르든 **같은 현상을 종목·가격대에 따라
+#: 다르게 찍는다** — 「TRX의 1bp와 BTC의 1bp는 뜻이 다르다」.
+#:
+#: 📌 **값의 근거 — 틱 축에서는 분포가 실제로 갈린다.** 같은 21건의 틱 배수는
+#: `1(9건) · 2(3건) · 3 · 5`(호가 잔돈)와 `12 · 15 · 36 · 41`(2026-07-15~21) 그리고
+#: `289 · 314 · 475`(2024-03-27 BTC·ETH·SOL)로 나뉘고, **5와 12 사이가 유일한 빈 구간**이다.
+#: 10은 그 간극 안이라 잔돈 최대(5)의 2배 · 손상 최소(12)의 1/1.2로 양쪽에 여유가 있다.
+#: 📌 중간 무리(12~41틱)가 **손상으로 남는 것이 맞다** — 전부 WAN-327이 지목한 2026-07-12~24
+#: 손상 무리 안이고 전부 `close` 필드다(형성 중에 잘린 봉이 잃는 바로 그 값).
+#:
+#: ⚠️ **자를 느슨하게 해 경보를 줄이려는 값이 아니다** — 회귀 테스트가 2024-03-27의 **실제
+#: 값**으로 「이 문턱이 그 손상을 지우지 않음」을 고정한다(WAN-330의 잔존율 가드가 함정 값으로
+#: 테스트를 건 것과 같은 방식). 점검 항목은 불변이고 **결과를 종료 코드·보고로 옮기는 법**만
+#: 바뀐다(WAN-327 §3 · WAN-318 §3 · WAN-321과 같은 문장).
+PRICE_NOISE_TICKS = 10.0
+
+#: 호가 단위 추정 시 인정하는 최대 소수 자릿수 — 부동소수 표현이 만든 꼬리를 「더 고운
+#: 눈금」으로 오해하지 않도록 한다.
+_MAX_PRICE_DECIMALS = 12
+
 _PRICE_FIELDS: tuple[str, ...] = ("open", "high", "low", "close")
 _ALL_FIELDS: tuple[str, ...] = (*_PRICE_FIELDS, "volume")
 
-#: 불일치의 성격. `partial`·`price_only`는 **손상**(엔진 영향 가능), `volume_noise`는 무해.
-BarKind = Literal["partial", "price_only", "volume_noise"]
+#: 불일치의 성격. `partial`·`price_only`는 **손상**(엔진 영향 가능),
+#: `volume_noise`·`price_noise`는 무해.
+BarKind = Literal["partial", "price_only", "price_noise", "volume_noise"]
+
+#: 손상이 아닌(= 감시를 빨갛게 만들지 않는) 부류. `damaged`가 이 집합을 **읽는다** — 새
+#: 부류를 넣을 때 성격을 고르도록 강제한다(WAN-321이 장부 분류에서 쓴 것과 같은 규약).
+NOISE_KINDS: frozenset[str] = frozenset({"volume_noise", "price_noise"})
+
+
+def infer_price_tick(values: Sequence[float]) -> float:
+    """주어진 가격들이 놓인 **호가 눈금**을 소수 자릿수에서 추정한다(순수 함수).
+
+    ⚠️ **거래소 메타데이터를 쓰지 않는다** — 이 저장소에는 틱 정보가 없고, 있어도 틱 크기는
+    시간에 따라 바뀌므로 「그 시점의 눈금」은 **그 시점의 값**에서 읽는 것이 맞다. 실제로
+    6년 전 이력에서 뽑은 시리즈 단위 추정은 SOL을 `0.0001`로 보는데 2023-09의 SOL 값은
+    `17.979`(= `0.001` 눈금)라, 같은 2틱 차이가 20틱으로 부풀려진다. 그래서 추정은
+    **비교하는 두 봉의 값만** 본다.
+
+    파이썬 `repr`은 왕복 최단 표기라 SQLite REAL로 저장된 십진 호가가 꼬리를 만들지 않는다.
+    지수 표기·과도한 자릿수는 버린다(`_MAX_PRICE_DECIMALS`).
+
+    📌 **틀리는 방향이 안전하다** — 값이 모두 거칠어 눈금을 과대 추정하면 같은 차이가 **더
+    적은** 틱으로 세어져 노이즈로 삼켜질 수 있는데, `repr(float)`가 정수에도 `'100.0'`을
+    내므로 추정 눈금은 실제보다 **고운** 쪽으로 치우친다(= 틱이 더 많이 세어져 손상으로
+    찍힌다). 잔돈을 손상이라 부르는 실수는 보이지만 그 반대는 안 보인다.
+    """
+    decimals = 0
+    for value in values:
+        text = repr(float(value))
+        if "e" in text or "E" in text or "." not in text:
+            continue
+        decimals = max(decimals, min(len(text.split(".")[1]), _MAX_PRICE_DECIMALS))
+    return 10.0**-decimals
 
 
 def _values_match(a: float, b: float, tol: float) -> bool:
@@ -74,6 +142,13 @@ class BarDiscrepancy:
     """허용오차를 벗어난 OHLC 필드 이름(없으면 빈 튜플)."""
     max_price_bp: float
     """OHLC 필드 중 최대 상대 오차(bp). 가격이 전부 맞으면 0.0."""
+    max_price_ticks: float = 0.0
+    """OHLC 필드 중 최대 오차를 **호가 단위(틱)의 배수**로 (WAN-337 §2).
+
+    📌 **판정에 쓰는 자는 bp가 아니라 이것이다** — 두 축은 같은 순서로 정렬되지도 않는다
+    (`PRICE_NOISE_TICKS` 주석의 실측). `max_price_bp`는 사람이 읽는 참고 열로 남는다."""
+    price_tick: float = 0.0
+    """이 버킷의 추정 호가 단위(`infer_price_tick`). 0.0이면 추정하지 않았다(가격이 다 맞음)."""
 
     @property
     def volume_ratio(self) -> float:
@@ -84,8 +159,11 @@ class BarDiscrepancy:
 
     @property
     def damaged(self) -> bool:
-        """엔진에 영향을 줄 수 있는 손상인지(노이즈가 아닌지)."""
-        return self.kind != "volume_noise"
+        """엔진에 영향을 줄 수 있는 손상인지(노이즈가 아닌지).
+
+        🚨 `NOISE_KINDS`를 **읽는다** — 「노이즈가 아니면 손상」을 부류 이름 하나로 적으면
+        새 노이즈 부류를 넣을 때 조용히 손상으로 세어져 감시가 다시 빨개진다."""
+        return self.kind not in NOISE_KINDS
 
     @property
     def price_wrong(self) -> bool:
@@ -111,6 +189,8 @@ def classify_bucket(
     open_time: int,
     resampled: object,
     stored: object,
+    *,
+    price_tick: float | None = None,
 ) -> BarDiscrepancy | None:
     """한 버킷의 리샘플 값과 저장 값을 비교해 분류한다(순수 함수).
 
@@ -118,9 +198,14 @@ def classify_bucket(
 
     * `partial` — 저장 거래량 < 리샘플 × `PARTIAL_VOLUME_RATIO`(형성 중 저장 서명).
       **가격이 맞아도 손상이다**(위 도크스트링 §판정자).
-    * `price_only` — 거래량은 모자라지 않는데 OHLC가 다르다. 원인 미상이지만 엔진이
-      읽는 값이 틀린 것이라 손상으로 센다(조용히 무해로 넘기지 않는다).
+    * `price_only` — 거래량은 모자라지 않는데 OHLC가 **호가 눈금 여러 칸만큼** 다르다.
+      원인 미상이지만 엔진이 읽는 값이 틀린 것이라 손상으로 센다.
+    * `price_noise` — 가격 차이가 `PRICE_NOISE_TICKS`틱 이하다(호가 잔돈 · WAN-337 §2).
     * `volume_noise` — 가격은 같고 거래량만 다르되 모자라지 않다(저장 ≥ 리샘플×0.99).
+
+    🚨 **분류는 여기 한 곳에서만 내린다** — 전 이력 스캔(`scan_symbol`)과 `data.verify`가
+    같은 자를 쓰도록(WAN-327 규약). `price_tick`을 주면 그 눈금을 쓰고, 안 주면 비교하는 두
+    봉의 OHLC에서 추정한다(`infer_price_tick` — 시리즈 단위 추정이 왜 틀리는지는 그 함수).
     """
     price_fields = tuple(
         fld
@@ -128,21 +213,37 @@ def classify_bucket(
         if not _values_match(_field(resampled, fld), _field(stored, fld), PRICE_REL_TOL)
     )
     max_bp = 0.0
+    max_abs = 0.0
     for fld in _PRICE_FIELDS:
         rv = _field(resampled, fld)
         sv = _field(stored, fld)
         max_bp = max(max_bp, 10_000.0 * abs(rv - sv) / max(abs(rv), 1e-12))
+        max_abs = max(max_abs, abs(rv - sv))
     rvol = _field(resampled, "volume")
     svol = _field(stored, "volume")
     volume_differs = not _values_match(rvol, svol, VOLUME_REL_TOL)
     if not price_fields and not volume_differs:
         return None
 
+    tick = 0.0
+    max_ticks = 0.0
+    if price_fields:
+        tick = (
+            price_tick
+            if price_tick is not None and price_tick > 0.0
+            else infer_price_tick(
+                [_field(resampled, f) for f in _PRICE_FIELDS]
+                + [_field(stored, f) for f in _PRICE_FIELDS]
+            )
+        )
+        max_ticks = max_abs / tick
+
     kind: BarKind
     if svol < PARTIAL_VOLUME_RATIO * rvol:
+        # 거래량이 모자라면 가격이 몇 틱이든 **형성 중에 잘린 봉**이다(판정자는 거래량).
         kind = "partial"
     elif price_fields:
-        kind = "price_only"
+        kind = "price_noise" if max_ticks <= PRICE_NOISE_TICKS else "price_only"
     else:
         kind = "volume_noise"
     return BarDiscrepancy(
@@ -154,6 +255,8 @@ def classify_bucket(
         stored_volume=svol,
         price_fields=price_fields,
         max_price_bp=max_bp if price_fields else 0.0,
+        max_price_ticks=max_ticks,
+        price_tick=tick,
     )
 
 
@@ -184,11 +287,15 @@ class SeriesScan:
 
     @property
     def noise(self) -> list[BarDiscrepancy]:
+        """무해한 불일치 — 거래량 잔돈(`volume_noise`)과 호가 잔돈(`price_noise`)."""
         return [d for d in self.discrepancies if not d.damaged]
 
     @property
     def ok(self) -> bool:
-        """손상이 하나도 없으면 참(노이즈는 통과 — 엔진이 거래량을 안 읽는다)."""
+        """손상이 하나도 없으면 참 — 노이즈는 통과한다.
+
+        거래량 노이즈는 엔진이 거래량을 안 읽어서, 가격 노이즈는 차이가 호가 몇 칸이라
+        같은 가격의 다른 표현에 가까워서다(WAN-337 §2)."""
         return not self.damaged
 
     @property
@@ -339,8 +446,9 @@ def repair_frame(stored: pd.DataFrame, resampled: pd.DataFrame) -> tuple[pd.Data
     ⚠️ **DB를 쓰지 않는다** — 「고치기 전후로 같은 좌표를 돌려 본다」(WAN-327 완료기준 2)를
     위한 비파괴 반사실이다. 실제 수정은 거래소 재수집(백필)이고 사람이 한다.
 
-    노이즈 봉은 **건드리지 않는다**(저장이 정본에 더 가깝다 — 1분봉 쪽이 모자란 것이라
-    그 값으로 덮으면 멀쩡한 봉을 미세하게 망친다).
+    노이즈 봉은 **건드리지 않는다** — 거래량 노이즈는 저장이 정본에 더 가깝고(1분봉 쪽이
+    모자란 것이라 그 값으로 덮으면 멀쩡한 봉을 미세하게 망친다), 가격 노이즈는 차이가 호가
+    몇 칸이라 어느 쪽이 정본인지 이 함수가 알 수 없다(WAN-337 §2).
 
     Returns:
         (갈아끼운 사본, 바뀐 봉 수).

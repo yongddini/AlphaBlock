@@ -680,6 +680,7 @@ def _stop_width_args(tmp_path: Path, **kw: Any) -> argparse.Namespace:
         tf=None,
         recompute=False,
         allow_stale=False,
+        unpaired=False,
     )
     base.update(kw)
     return argparse.Namespace(**base)
@@ -789,6 +790,35 @@ def test_cmd_stop_width_reads_the_cache_instead_of_recomputing(
     assert cmd_stop_width(args, _settings(tmp_path)) == 0
     assert calls == [], "캐시에 있는 칸을 다시 계산했다"
     assert "캐시 적중 1/1칸" in capsys.readouterr().out
+
+
+def test_cmd_stop_width_unpaired_block_is_opt_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """짝 없는 셋업 귀속(WAN-337 §1)은 **옵트인**이고 기본 표를 안 바꾼다.
+
+    제외 자체는 옳은 설계다(다른 존의 손절폭을 빼면 무의미한 Δ가 나온다 — WAN-333). 그래서
+    분해는 **덧붙이는 블록**이지 기본 출력의 변경이 아니다.
+    """
+    _stub_cells(monkeypatch)
+    settings = _settings(tmp_path)
+
+    assert cmd_stop_width(_stop_width_args(tmp_path), settings) == 0
+    assert "짝 없는 셋업 귀속" not in capsys.readouterr().out
+
+    assert cmd_stop_width(_stop_width_args(tmp_path, unpaired=True), settings) == 0
+    out = capsys.readouterr().out
+    assert "짝 없는 셋업 귀속" in out
+    assert "조인 인구조사" in out  # 기본 블록은 그대로다
+
+
+def test_cmd_stop_width_unpaired_requires_the_backtest_join(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--unpaired`만 주면 조용히 빈 블록을 내지 않고 **그 사실을 밝힌다**."""
+    args = _stop_width_args(tmp_path, with_backtest=False, unpaired=True)
+    assert cmd_stop_width(args, _settings(tmp_path)) == 0
+    assert "--with-backtest가 있어야" in capsys.readouterr().out
 
 
 def test_cmd_stop_width_computes_only_misses_and_says_how_many_first(
