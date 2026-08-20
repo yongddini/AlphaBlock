@@ -91,6 +91,7 @@ from backtest.zone_limit_backtest import (
     _prepare_htf,
     _to_trade,
     build_zone_limit_candidates,
+    is_same_step_take_profit,
     sequence_with_candidates,
 )
 from data.models import FundingRate
@@ -188,6 +189,7 @@ def _iter_reentries(
     partial_take_profit_r: float | None = None,
     partial_take_profit_fraction: float = 0.5,
     breakeven_after_partial: bool = False,
+    no_same_step_tp: bool = False,
 ) -> Iterator[tuple[_Candidate, _Reentry]]:
     """익절로 닫힌 한 존의 재무장 루프 코어 — `(_Candidate, _Reentry)`를 하나씩 낸다.
 
@@ -274,6 +276,7 @@ def _iter_reentries(
                 partial_take_profit_r=partial_take_profit_r,
                 partial_take_profit_fraction=partial_take_profit_fraction,
                 breakeven_after_partial=breakeven_after_partial,
+                no_same_step_tp=no_same_step_tp,
             )
         else:
             assert static_limit is not None
@@ -303,6 +306,7 @@ def _iter_reentries(
                 partial_take_profit_r=partial_take_profit_r,
                 partial_take_profit_fraction=partial_take_profit_fraction,
                 breakeven_after_partial=breakeven_after_partial,
+                no_same_step_tp=no_same_step_tp,
             )
         if not outcome.filled or outcome.entry_time is None or outcome.entry_price is None:
             break  # NO_TOUCH / CANCELLED_INVALIDATED — 더는 되돌아오지 않았다.
@@ -352,6 +356,9 @@ def _iter_reentries(
             exit_at_breakeven=outcome.exit_at_breakeven,
             # WAN-323: 래더를 켰으면 재진입 거래의 부분 청산도 북 회계로 넘긴다(안 켜면 빈 튜플).
             partial_exits=outcome.partial_exits,
+            # WAN-336 순수 관측: 재진입 거래도 base 후보와 **같은 술어**로 라벨을 단다 —
+            # 한쪽만 달면 「같은 분 익절」 인구조사가 재진입을 통째로 놓친다.
+            same_step_take_profit=is_same_step_take_profit(outcome.entry_time, exit_time, reason),
         )
         # 격리 순손익: 기준자본에서 독립 체결(동시 1포지션·자본 경합 미반영 = 상한).
         trade = _to_trade(re_cand, cfg.initial_capital, cfg, funding_rates)
@@ -422,6 +429,7 @@ def reentry_candidates(
     partial_take_profit_r: float | None = None,
     partial_take_profit_fraction: float = 0.5,
     breakeven_after_partial: bool = False,
+    no_same_step_tp: bool = False,
 ) -> list[_Candidate]:
     """익절 후 재무장 재진입을 **북 시퀀서에 주입할 `_Candidate`로** 낸다(WAN-261).
 
@@ -433,7 +441,20 @@ def reentry_candidates(
     `entry_rule`(WAN-269, 옵트인)은 `_iter_reentries`로 그대로 흘러 재무장 지정가를 정한다 —
     `"freeze"`(기본)면 첫 체결가를 얼려 **기존 wan261/262 북 CSV가 비트 재현**되고, `"band"`면
     재무장 순간의 봉내 라이브 밴드로 지정가를 재산정한다(WAN-267 격리 분해의 리더 팔을 북에
-    얹는 경로). 재무장 루프가 하나뿐이라 census·격리 널·북 주입이 같은 규칙을 공유한다."""
+    얹는 경로). 재무장 루프가 하나뿐이라 census·격리 널·북 주입이 같은 규칙을 공유한다.
+
+    `no_same_step_tp`(WAN-336, 옵트인)도 루프로 그대로 흘러 **재진입 거래가 base 거래와 같은
+    자를 받는다** — 한쪽만 걸면 「base는 진입 스텝 익절 금지, 재진입은 허용」인 잡종 팔을 재게
+    된다. 끄면(기본) 예전과 비트 단위로 같다.
+
+    🚨 **알려진 결함(WAN-336 개발 중 발견 · 여기서 고치지 않는다)**: 바로 위 세 래더 인자
+    (`partial_take_profit_r`·`partial_take_profit_fraction`·`breakeven_after_partial`)는 받기만
+    하고 `_iter_reentries`로 **넘기지 않는다**(WAN-323 커밋 `af1a550`이 시그니처만 넓혔다).
+    즉 래더를 켠 북 팔에서도 **재진입 거래는 전량 익절**로 돌았다 — `_iter_reentries`
+    독스트링이 「팔마다 규칙이 갈리면 잡종 엔진」이라 적어 둔 바로 그 상태다. 고치면
+    WAN-323/330의 공개 CSV·결론이 움직이므로 **별도 이슈**이고, WAN-336의 축(같은 분 익절)과는
+    무관하다(이 이슈의 두 팔은 래더를 안 켠다). 아래에서 `no_same_step_tp`만 넘기는 것은
+    누락이 아니라 **범위 안의 것만 배선**한 것이다."""
     return [
         re_cand
         for re_cand, _event in _iter_reentries(
@@ -447,6 +468,7 @@ def reentry_candidates(
             cfg=cfg,
             funding_rates=funding_rates,
             entry_rule=entry_rule,
+            no_same_step_tp=no_same_step_tp,
         )
     ]
 

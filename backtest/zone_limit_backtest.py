@@ -99,6 +99,16 @@ _EXIT_REASON: dict[SignalExitReason, ExitReason] = {
 }
 
 
+def is_same_step_take_profit(entry_time: int, exit_time: int, reason: ExitReason) -> bool:
+    """진입과 익절이 **같은 1분 스텝**인가 (WAN-336의 단일 정의).
+
+    후보 층(`_Candidate.same_step_take_profit`)과 북 거래 층(`Trade`)이 같은 술어를 써야
+    두 표가 같은 것을 센다 — 두 곳에 따로 쓰면 「같은 이름 다른 정의」로 갈라진다
+    (WAN-91/95/112/123/159가 반복해 경계한 자리).
+    """
+    return reason is ExitReason.TAKE_PROFIT and exit_time == entry_time
+
+
 @dataclass(frozen=True)
 class _Candidate:
     """체결·청산이 확정된 한 셋업(비용 미반영 원가 정보)."""
@@ -116,6 +126,18 @@ class _Candidate:
 
     참이면 가격이 존 근단을 지나 손절선까지 관통한 봉에서 체결됐다는 뜻으로, "좋은
     진입가만 챙기고 손실은 피한" 결과가 아님을 드러낸다.
+    """
+    same_step_take_profit: bool = False
+    """진입과 **익절**이 같은 1분 스텝에서 일어났는지 (WAN-336 · 위 `penetration`의 거울).
+
+    참이면 그 1분 안에서 **저가가 먼저(체결) · 고가가 나중(익절)** 이었다고 가정한 거래다 —
+    1분봉은 봉 안의 순서를 모르므로 이건 측정이 아니라 **가정**이고, 방향은 낙관이다.
+    손절 쪽은 `stop_before_tp`(동시 도달 시 손절 우선)가 반대 방향으로 눌러 두는데 익절
+    쪽에는 그 장치가 없다 — 그래서 이 카운터가 필요하다.
+
+    **순수 관측이다** — 체결·청산·손익 어디에도 쓰이지 않고, 값을 세는 것만으로는 어떤
+    기존 수치도 움직이지 않는다(WAN-90 `mfe_r` · WAN-276 `exit_extreme`과 같은 부류).
+    반사실의 크기는 옵트인 팔 `no_same_step_tp`(WAN-336 §2)가 잰다.
     """
     order_block: OrderBlock | None = None
     """이 셋업의 근거 오더블록(WAN-77). 체결·청산 로직에는 쓰이지 않고, 사후 분석
@@ -174,12 +196,21 @@ class ZoneLimitStats:
     `eligible`는 탭 봉이 1분봉으로 커버돼 실제 시뮬레이션에 들어간 활성 오더블록
     셋업 수, `filled`는 그중 지정가가 체결된 수다. `penetrations`는 체결된 셋업 중
     같은 스텝에서 손절까지 간(관통) 수로, 단일 포지션 시퀀싱으로 최종 거래에서
-    빠진 것도 포함한 원(raw) 감사 수치다.
+    빠진 것도 포함한 원(raw) 감사 수치다. `same_step_take_profits`(WAN-336)는 그 **거울**로,
+    진입과 **익절**이 같은 1분 스텝인 수다 — 두 카운터가 나란히 있어야 「같은 분 청산」의
+    낙관·보수 양쪽이 한 표에서 읽힌다.
     """
 
     eligible: int = 0
     filled: int = 0
     penetrations: int = 0
+    same_step_take_profits: int = 0
+    """진입과 익절이 **같은 1분 스텝**인 체결 수 (WAN-336). `penetrations`의 거울이고
+    같은 원(raw) 규약이다(시퀀싱으로 최종 거래에서 빠진 것도 포함).
+
+    ⚠️ 「그만큼이 부풀려진 수익」이라는 뜻이 **아니다** — 순서가 반대였다면 그 거래는 손실이
+    아니라 **더 오래 보유**이고 결과는 미지다. 이 열은 **노출된 표본의 크기**이지 손익 보정이
+    아니다(크기는 옵트인 팔 `no_same_step_tp`가 잰다)."""
     dropped: int = 0
     """`fill_dropout_rate`(WAN-96)로 탈락시킨 체결 건수. 기본 실행에서는 항상 0이다.
 
@@ -656,6 +687,7 @@ def run_zone_limit_backtest_verbose(
             eligible=len(kept),
             filled=sum(1 for d in kept if d.filled),
             penetrations=sum(1 for c in candidates if c.penetration),
+            same_step_take_profits=sum(1 for c in candidates if c.same_step_take_profit),
             dropped=sum(1 for d in kept if d.dropped),
         )
         times = htf_df["open_time"].astype("int64")
@@ -795,6 +827,7 @@ def build_zone_limit_candidates(
     partial_take_profit_fraction: float = 0.5,
     breakeven_after_partial: bool = False,
     observe_path_fill: bool = False,
+    no_same_step_tp: bool = False,
 ) -> tuple[list[_Candidate], ZoneLimitStats]:
     """B안 셋업 순회 → 1분 서브스텝 시뮬레이션까지(비용 반영 전 원가 후보 목록).
 
@@ -848,7 +881,14 @@ def build_zone_limit_candidates(
     (WAN-323 반익절 래더, 옵트인)은 시뮬레이터로 그대로 흘려보낸다. 래더는 **청산만**
     바꾸므로 진입 결정·체결 판정에는 전혀 안 쓰이고, 따라서 셋업·체결 집합(후보 수·
     `ZoneLimitStats`)은 기본과 **비트 단위로 같다** — 달라지는 건 각 후보의 부분 청산
-    (`partial_exits`)과 잔량의 최종 청산뿐이다. 안 주면(기본) 엔진이 예전과 같다."""
+    (`partial_exits`)과 잔량의 최종 청산뿐이다. 안 주면(기본) 엔진이 예전과 같다.
+
+    `no_same_step_tp`(WAN-336, 옵트인)는 **진입한 그 1분 스텝에서 익절을 판정하지 않는**
+    보수적 반사실이다 — 시뮬레이터로 그대로 흘려보낸다. ⚠️ 위 훅들과 달리 **체결 집합도
+    바뀔 수 있다**: 익절이 미뤄지면 그 셋업이 다음 스텝부터 다른 청산(손절·만료·홀드)을 탈
+    수 있고, 단일 포지션·북 시퀀싱에서는 슬롯 점유 시간이 달라져 **뒤따르는 후보까지**
+    갈린다. 그래서 이건 「청산만 바꾸는 오버라이드」가 아니라 **팔**이다. 끄면(기본) 엔진이
+    예전과 비트 단위로 같다."""
     if overlap is not None and overlap.arm != "A" and zone_provider is None:
         raise ValueError(
             "overlap.arm이 'B'/'C'면 zone_provider가 필요합니다 — 하위TF 겹침 존을 "
@@ -935,6 +975,7 @@ def build_zone_limit_candidates(
     eligible = 0
     filled = 0
     penetrations = 0
+    same_step_take_profits = 0
     dropped = 0
     for signal in entry_candidate_signals(ob_result, params, times, closes, time_to_pos):
         if signal.status != "active":
@@ -1121,6 +1162,7 @@ def build_zone_limit_candidates(
             partial_take_profit_fraction=partial_take_profit_fraction,
             breakeven_after_partial=breakeven_after_partial,
             observe_path_fill=observe_path_fill and live_limit is not None,
+            no_same_step_tp=no_same_step_tp,
         )
 
         if not outcome.order_rested:
@@ -1176,6 +1218,7 @@ def build_zone_limit_candidates(
 
         filled += 1
         penetration = False
+        same_step_tp = False
         if outcome.status is ZoneLimitStatus.FILLED_EXITED:
             assert outcome.exit_time is not None and outcome.exit_price is not None
             exit_time, exit_price = outcome.exit_time, outcome.exit_price
@@ -1186,6 +1229,11 @@ def build_zone_limit_candidates(
             if reason is ExitReason.STOP_LOSS and exit_time == outcome.entry_time:
                 penetration = True
                 penetrations += 1
+            # 그 거울: 같은 1분 스텝에서 진입 + **익절**(WAN-336). 순수 관측이라 아래
+            # `_Candidate`에 라벨로만 실리고 체결·청산·손익 어디에도 안 쓰인다.
+            elif is_same_step_take_profit(outcome.entry_time, exit_time, reason):
+                same_step_tp = True
+                same_step_take_profits += 1
         else:
             # 데이터 종료까지 보유 → 마지막 1분봉 종가로 강제 청산. `setup_substeps`가 끝까지
             # 가는 슬라이스였으므로 그 마지막 원소 = 전체 `substeps[-1]`(WAN-203 무복사 후 동일).
@@ -1203,6 +1251,7 @@ def build_zone_limit_candidates(
                 # 시뮬레이터가 실제로 쓴 값을 돌려주므로 1R 사이징이 그것과 일치한다.
                 stop_price=outcome.stop_price if outcome.stop_price is not None else stop_price,
                 penetration=penetration,
+                same_step_take_profit=same_step_tp,
                 order_block=ob,
                 tap_index=signal.tap_index,
                 zone_key=signal.zone_key,
@@ -1219,7 +1268,11 @@ def build_zone_limit_candidates(
         )
 
     stats = ZoneLimitStats(
-        eligible=eligible, filled=filled, penetrations=penetrations, dropped=dropped
+        eligible=eligible,
+        filled=filled,
+        penetrations=penetrations,
+        same_step_take_profits=same_step_take_profits,
+        dropped=dropped,
     )
     return candidates, stats
 
