@@ -616,6 +616,30 @@ def _verdict_sentence(frame: pd.DataFrame, tf_frame: pd.DataFrame, loo: pd.DataF
     )
 
 
+def _asymmetry_note(frame: pd.DataFrame) -> str:
+    """같은 분 **익절**과 같은 분 **손절**의 비대칭 — 이 표에서 가장 말이 많은 숫자다.
+
+    익절은 1R의 `take_profit_r`배(1.5) 거리, 손절은 1배 거리다. 순진하게 보면 **같은 분
+    손절이 더 흔해야** 하는데 실측은 정반대다. 그 배수를 숫자로 남긴다.
+    """
+    row = _pick(frame, BASE_ARM, PRIMARY_OOS)
+    if row is None:
+        return ""
+    tps, stops = int(row["same_step_tp_trades"]), int(row["same_step_stop_trades"])
+    ratio = f"**{tps / stops:.0f}배**" if stops else "**(같은 분 손절이 0건이라 배수 없음)**"
+    return (
+        f"🚨 **비대칭이 이 표에서 가장 말이 많은 숫자다 — 같은 분 익절 {tps}건 대 같은 분 "
+        f"손절 {stops}건({ratio}).** 익절은 1R의 1.5배 거리이고 손절은 1배 거리라 **순진하게는 "
+        "같은 분 손절이 더 흔해야 한다.** 정반대인 데는 기계적 이유가 보인다 — 봉내 라이브 "
+        "밴드(WAN-132)가 봉 **안에서** 가격을 따라 내려가며 지정가를 재산정하므로 체결가가 그 "
+        "봉의 **저가 근처**에 놓인다. 그러면 `고가 − 진입`은 봉 범위에 가깝고 `진입 − 저가`는 "
+        "거의 0이라, 같은 봉 익절은 쉽고 같은 봉 손절은 사실상 불가능해진다(존폭 필터 1.28이 "
+        "좁은 존만 남겨 1R을 작게 만드는 것이 이를 더 키운다). ⚠️ **이것은 이 표가 증명한 게 "
+        "아니라 이 표와 정합적인 설명**이다 — 가르려면 체결가가 봉 범위 어디에 놓이는지를 직접 "
+        "재야 하고, 그건 별도 이슈다(WAN-328 `path_fill_price`가 인접한 자)."
+    )
+
+
 def _arm_did_something(frame: pd.DataFrame) -> str:
     """검산 (d) — 반사실 팔의 후보 층 카운터는 **정의상 0이어야 한다**.
 
@@ -692,6 +716,8 @@ def build_summary(frame: pd.DataFrame, loo: pd.DataFrame, tf_frame: pd.DataFrame
         "📌 **후보 층 수가 북 층보다 큰 것이 정상이다** — 칸당 1포지션·명목 상한이 후보를 "
         "떨어뜨린다(검산 (b): 두 층이 같은 술어 `is_same_step_take_profit`를 쓴다).",
         "",
+        _asymmetry_note(frame),
+        "",
         _arm_did_something(frame),
         "",
         f"### TF별 귀속 (`{PRIMARY_OOS}` · 팔 `base`)",
@@ -736,8 +762,12 @@ def build_summary(frame: pd.DataFrame, loo: pd.DataFrame, tf_frame: pd.DataFrame
         "⚠️ **이것도 진값이 아니라 반대쪽 극단이다.** 진값은 두 극단 사이에 있고 **그 폭**이 "
         "이 리포트의 산출물이다 — 좁히는 것은 틱·호가(WAN-98, Canceled) 소관이다.",
         "",
-        "| 구간 | 거래 (Δ) | 승률 (Δ) | **MDD (Δ)** | **수익/MDD (Δ)** | 청산 |",
-        "| --- | ---: | ---: | ---: | ---: | ---: |",
+        "🚨 **수익/MDD는 배율(×)로만 싣는다** — 분자가 6년 복리 총수익이라 절댓값이 천문학적이고 "
+        "그 배율도 대부분 총수익이 만든다(WAN-169/213). **판정은 MDD·승률·거래 수로 낸다.**",
+        "",
+        "| 구간 | 거래 (Δ) | 승률 (Δ) | **MDD (Δ)** | 최대 동시 리스크 (Δ) | 청산 "
+        "| 수익/MDD 배율 |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for segment in SEGMENT_ORDER:
         base, arm = _pick(frame, BASE_ARM, segment), _pick(frame, COUNTERFACTUAL_ARM, segment)
@@ -745,17 +775,21 @@ def build_summary(frame: pd.DataFrame, loo: pd.DataFrame, tf_frame: pd.DataFrame
             continue
         trade_delta = int(arm["num_trades"]) - int(base["num_trades"])
         rom_base, rom_arm = base["return_over_mdd"], arm["return_over_mdd"]
+        # 🚨 수익/MDD의 **절댓값**은 여기서 읽을 수 없다 — 분자가 6년 복리 총수익이라 자릿수가
+        # 천문학적이다(WAN-169/213). 배율(×)로만 싣고 판정은 MDD·승률로 낸다.
         rom = (
             "—"
-            if _missing(rom_base) or _missing(rom_arm)
-            else f"{_num(rom_arm)} ({float(rom_arm) - float(rom_base):+.2f})"
+            if _missing(rom_base) or _missing(rom_arm) or float(rom_base) == 0.0
+            else f"×{float(rom_arm) / float(rom_base):.3f}"
         )
         lines.append(
             f"| `{segment}` | {int(arm['num_trades'])} ({trade_delta:+}) "
             f"| {_pct(arm['win_rate'])} ({_pp(arm['win_rate'] - base['win_rate'])}) "
             f"| **{_pct(arm['max_drawdown'])} "
             f"({_pp(arm['max_drawdown'] - base['max_drawdown'])})** "
-            f"| **{rom}** | {int(arm['liquidation_events'])} |"
+            f"| {_pct(arm['max_concurrent_risk'])} "
+            f"({_pp(arm['max_concurrent_risk'] - base['max_concurrent_risk'])}) "
+            f"| {int(arm['liquidation_events'])} | {rom} |"
         )
     lines += [
         "",
