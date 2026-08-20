@@ -56,6 +56,7 @@ from execution.sizing import PositionSizingParams
 from live.order_journal import ENTRY_STATUS_REJECTED, OrderJournal, PlacedOrder
 from live.setup_compare import SetupComparison, SetupKey, build_setup_comparisons, setup_key
 from live.trade_timeline import TimelineRow
+from live.unpaired_setups import UnpairedReport, attribute_unpaired, render_unpaired
 
 __all__ = [
     "ATTRIBUTION_BOUNDARY",
@@ -338,6 +339,13 @@ class StopWidthReport:
     """백테 대조를 실제로 돌렸는지. 거짓이면 §1 표는 비어 있고 그 사실을 화면이 밝힌다."""
     census: JoinCensus | None = None
     """조인 인구조사(WAN-333). 백테를 돌렸으면 항상 있다 — 짝이 0건이어도 **왜** 0인지 낸다."""
+    unpaired: UnpairedReport | None = None
+    """짝 없는 셋업 귀속(WAN-337 §1) — **옵트인 진단**이라 안 켜면 `None`이다.
+
+    📌 **기본 표(§1 짝)는 이것과 무관하다** — 짝 없는 셋업을 그 표에 넣으면 다른 존의
+    손절폭을 빼는 무의미한 Δ가 나온다(WAN-333이 고친 부류). 제외는 그대로 두고 **왜 짝이
+    없는지**를 별도 블록으로 낸다.
+    """
     narrowed: bool = False
     """좌표(`--symbol`/`--tf`)를 좁혀 돌렸나 — 참이면 §3이 창 전체를 본다는 사실을 화면이 밝힌다.
 
@@ -357,6 +365,7 @@ def build_report(
     live_rows: Sequence[TimelineRow] | None = None,
     live_rows_total: int | None = None,
     narrowed: bool = False,
+    with_unpaired: bool = False,
 ) -> StopWidthReport:
     """장부(+ 선택적 백테 타임라인)로 손절폭 해부 리포트를 만든다.
 
@@ -365,18 +374,25 @@ def build_report(
 
     `live_rows`는 호출부가 **좁힌 뒤** 넘기고(WAN-335 §2 — 좁힌 좌표의 조인 표에 다른 칸
     라이브 행이 섞일 이유가 없다), `live_rows_total`이 그 좁히기 이전 분모다.
+
+    `with_unpaired`는 짝 없는 셋업 귀속(WAN-337 §1)을 **덧붙인다** — 조인·짝 표는 그대로이고
+    (같은 `build_setup_comparisons` 결과를 쓴다) 진단 블록 하나가 늘 뿐이다.
     """
     orders = journal.orders_placed_between(start_ms=start_ms, end_ms=end_ms)
     filled = [o for o in orders if o.fill_ms is not None]
     live_widths = live_stop_widths(orders)
     pairs: list[PairAttribution] = []
     census: JoinCensus | None = None
+    unpaired: UnpairedReport | None = None
     if backtest_rows is not None and live_rows is not None:
         result = build_setup_comparisons(live_rows, backtest_rows)
         pairs = pair_attributions(result.comparisons)
         census = join_census(
             live_rows, backtest_rows, result.comparisons, live_rows_total=live_rows_total
         )
+        if with_unpaired:
+            # 같은 조인 결과를 그대로 넘긴다 — 다시 짝지으면 두 블록이 다른 짝을 얻는다.
+            unpaired = attribute_unpaired(live_rows, backtest_rows, result.comparisons)
     return StopWidthReport(
         window_label=window_label,
         live_orders=len(filled),
@@ -384,6 +400,7 @@ def build_report(
         pairs=tuple(pairs),
         backtest_ran=backtest_rows is not None,
         census=census,
+        unpaired=unpaired,
         narrowed=narrowed,
     )
 
@@ -456,7 +473,7 @@ def render_report(report: StopWidthReport) -> str:
             "  양쪽 다 가격이 있는 짝이 없습니다 — 위 인구조사가 「짝지어짐 0」이면 조인이"
             " 안 된 것이고, 짝은 있는데 여기가 0이면 한쪽에 가격이 없는 것입니다."
         )
-        return "\n".join(lines)
+        return "\n".join(lines + _unpaired_lines(report))
     lines.append(
         f"  {'심볼':<14}{'TF':<5}{'시각':<18}{'라이브폭':>9}{'백테폭':>9}{'Δ%p':>9}{'귀속':>8}"
     )
@@ -482,7 +499,14 @@ def render_report(report: StopWidthReport) -> str:
         "  ⚠️ 대조 백테는 per-cell 단일 포지션이라 북(공유 자본)의 용량 제약이 없다 — 페이퍼가",
         "     「자리가 없어서」 못 들어간 셋업을 백테는 그냥 들어간다(WAN-213/234 규약).",
     ]
-    return "\n".join(lines)
+    return "\n".join(lines + _unpaired_lines(report))
+
+
+def _unpaired_lines(report: StopWidthReport) -> list[str]:
+    """짝 없는 셋업 귀속 블록(WAN-337 §1) — 옵트인이라 안 켜면 아무것도 안 붙는다."""
+    if report.unpaired is None:
+        return []
+    return render_unpaired(report.unpaired).split("\n")
 
 
 def _census_lines(census: JoinCensus | None) -> list[str]:
