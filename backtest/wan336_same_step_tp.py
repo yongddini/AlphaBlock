@@ -616,6 +616,31 @@ def _verdict_sentence(frame: pd.DataFrame, tf_frame: pd.DataFrame, loo: pd.DataF
     )
 
 
+def _arm_did_something(frame: pd.DataFrame) -> str:
+    """검산 (d) — 반사실 팔의 후보 층 카운터는 **정의상 0이어야 한다**.
+
+    팔이 「진입 스텝에서는 익절을 판정하지 않는다」이므로 「진입과 익절이 같은 1분」인 후보가
+    하나라도 남아 있으면 팔이 그 자리에서 동작하지 않은 것이다. 라벨만 붙고 기본 엔진이
+    도는 것이 이 저장소가 반복해 겪은 실패라(WAN-91/95/112/123/159), 그 부재를 **숫자로**
+    확인한다.
+    """
+    arm = frame[frame["arm"] == COUNTERFACTUAL_ARM]
+    if arm.empty:
+        return "⚠️ 검산 (d): 반사실 팔 행이 없어 확인하지 못했다."
+    leftover = int(arm["candidate_same_step_tps"].sum())
+    base = frame[frame["arm"] == BASE_ARM]
+    removed = int(base["candidate_same_step_tps"].sum()) if not base.empty else 0
+    if leftover:
+        return (
+            f"🚨 **검산 (d) 실패**: 반사실 팔에 「같은 분 익절」 후보가 {leftover}건 남아 있다 "
+            "— 팔이 라벨만 붙고 동작하지 않았을 수 있다."
+        )
+    return (
+        f"📌 **검산 (d) 통과**: 반사실 팔의 후보 층 카운터가 전 구간 **0**이다(기준선 팔은 "
+        f"{removed}건). 팔이 라벨이 아니라 실제로 그 자리에서 익절을 미뤘다는 직접 증거다."
+    )
+
+
 def build_summary(frame: pd.DataFrame, loo: pd.DataFrame, tf_frame: pd.DataFrame) -> str:
     """md 요약 — §1 관측 · §2 반사실 · 경고를 한 문서로."""
     lines: list[str] = [
@@ -666,6 +691,8 @@ def build_summary(frame: pd.DataFrame, loo: pd.DataFrame, tf_frame: pd.DataFrame
         "",
         "📌 **후보 층 수가 북 층보다 큰 것이 정상이다** — 칸당 1포지션·명목 상한이 후보를 "
         "떨어뜨린다(검산 (b): 두 층이 같은 술어 `is_same_step_take_profit`를 쓴다).",
+        "",
+        _arm_did_something(frame),
         "",
         f"### TF별 귀속 (`{PRIMARY_OOS}` · 팔 `base`)",
         "",

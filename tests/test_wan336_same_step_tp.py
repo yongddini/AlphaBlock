@@ -15,6 +15,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from typing import Any
 
+import pandas as pd
 import pytest
 
 from backtest import book_cli, harness
@@ -31,6 +32,7 @@ from backtest.wan336_same_step_tp import (
     ADOPTED_CELL_KWARGS,
     BASE_ARM,
     COUNTERFACTUAL_ARM,
+    _arm_did_something,
     _loo_rows,
     classify_trades,
     pnl_share,
@@ -263,6 +265,20 @@ def test_arms_are_named_and_the_base_arm_is_the_adopted_book() -> None:
     assert BASE_ARM == "base" and COUNTERFACTUAL_ARM == "no_same_step_tp"
     assert ADOPTED_CELL_KWARGS["reentry"] is True
     assert ADOPTED_CELL_KWARGS["reentry_entry_rule"] == "band"
+
+
+def test_checksum_d_reads_whether_the_arm_actually_fired() -> None:
+    """반사실 팔의 후보 층 카운터는 **정의상 0**이다 — 남아 있으면 팔이 라벨만 붙은 것이다."""
+    passing = pd.DataFrame(
+        [
+            {"arm": BASE_ARM, "candidate_same_step_tps": 12},
+            {"arm": COUNTERFACTUAL_ARM, "candidate_same_step_tps": 0},
+        ]
+    )
+    assert "검산 (d) 통과" in _arm_did_something(passing)
+    failing = passing.copy()
+    failing.loc[failing["arm"] == COUNTERFACTUAL_ARM, "candidate_same_step_tps"] = 3
+    assert "검산 (d) 실패" in _arm_did_something(failing)
 
 
 def test_leave_one_out_dies_when_it_excludes_nothing() -> None:
