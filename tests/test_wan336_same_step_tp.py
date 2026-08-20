@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -30,6 +31,7 @@ from backtest.wan336_same_step_tp import (
     ADOPTED_CELL_KWARGS,
     BASE_ARM,
     COUNTERFACTUAL_ARM,
+    _loo_rows,
     classify_trades,
     pnl_share,
     run_arm,
@@ -261,6 +263,22 @@ def test_arms_are_named_and_the_base_arm_is_the_adopted_book() -> None:
     assert BASE_ARM == "base" and COUNTERFACTUAL_ARM == "no_same_step_tp"
     assert ADOPTED_CELL_KWARGS["reentry"] is True
     assert ADOPTED_CELL_KWARGS["reentry_entry_rule"] == "band"
+
+
+def test_leave_one_out_dies_when_it_excludes_nothing() -> None:
+    """LOO 필터가 아무것도 못 빼면 **모든 행이 기준 행과 같아진다** — 그러면 「한 종목이
+    만드는 결과가 아니다」가 근거 없이 만들어진다. 라벨은 멀쩡한 채 표만 거짓이 되는 부류라
+    조용히 넘기지 않고 죽는다.
+    """
+    payload = SimpleNamespace(symbol="BTC/USDT:USDT")
+    with pytest.raises(AssertionError, match="아무 칸도 빼지 못했습니다"):
+        _loo_rows(
+            arm=BASE_ARM,
+            payloads=[payload],  # type: ignore[list-item]
+            symbols=["BTCUSDT"],  # 정규화 안 된 표기 — payload와 안 맞는다
+            start_ms=0,
+            end_ms=1,
+        )
 
 
 def test_run_arm_matches_the_adopted_book_call(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -364,6 +364,17 @@ def _loo_rows(
     end_ms: int,
 ) -> list[SameStepLooRow]:
     """종목을 하나씩 뺀 **지갑 재배치** — 배치는 싸므로 12종목 LOO가 사실상 공짜다."""
+    # 🚨 조용한 실패 방지 — **북을 돌리기 전에** 표기를 맞춰 본다. 심볼 표기가 어긋나면
+    # 아무것도 안 빠져 **모든 LOO 행이 기준 행과 같아지고**, 그러면 「한 종목이 만드는 결과가
+    # 아니다」라는 결론이 근거 없이 만들어진다(라벨은 멀쩡한 채 표만 거짓이 되는 부류).
+    present = {p.symbol for p in payloads}
+    unmatched = [s for s in symbols if s not in present]
+    if present and unmatched:
+        raise AssertionError(
+            f"leave-one-out이 아무 칸도 빼지 못했습니다: {unmatched} — 심볼 표기가 "
+            f"payload({sorted(present)[0]!r} 형식)와 어긋납니다."
+        )
+
     rows: list[SameStepLooRow] = []
     for excluded in ("-", *symbols):
         scoped = [p for p in payloads if p.symbol != excluded]
