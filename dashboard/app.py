@@ -40,7 +40,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 import streamlit as st
@@ -1124,6 +1124,24 @@ def full_universe_label() -> str:
     return f"채택 {n_symbols}종목×{n_timeframes}TF 전부 (WAN-290)"
 
 
+def default_timeline_day() -> date:
+    """타임라인 탭의 기본 날짜 = **어제(KST)** (WAN-326 §5, 사용자 결정 2026-08-20).
+
+    옛 기본값은 **오늘**이었는데, 캐시를 채우는 야간 크론은 **전일(KST)** 을 KST 00:30에
+    적재한다(`docs/ops/wan239-nightly-timeline-cache.md`). 즉 화면을 열면 **정의상 항상
+    캐시 미스**였다 — 첫인상이 늘 「아직 계산 안 됨」이었던 진짜 원인이 이 날짜 축이다.
+    어제가 맞는 이유가 둘이다: (1) 크론이 채워 둔 날짜라 **버튼 없이 즉시** 뜬다,
+    (2) 오늘은 **진행 중이라 불완전**하다(WAN-334 실측: 당일 08-19가 27셋업으로 전날
+    60건보다 훨씬 적게 잡혔는데 데이터가 아니라 **시각** 때문이었다).
+
+    🚨 **「캐시에 있는 가장 최근 날짜를 찾아서 연다」로 똑똑하게 만들지 않는다**(이슈 명시)
+    — DB 조회가 첫 렌더에 붙고 「왜 어제가 아니라 그저께가 떴지」를 설명할 수 없게 된다.
+    **어제 고정**이고, 크론 전(자정~00:30 KST)의 30분은 WAN-325 폴백(옛 엔진 판)이나 계산
+    버튼이 덮는다. 날짜 위젯 자체는 그대로라 사용자는 오늘·과거 아무 날이나 계속 고른다.
+    """
+    return (datetime.now(tz=KST) - timedelta(days=1)).date()
+
+
 @dataclass(frozen=True)
 class _FullRunResult:
     """임의 날짜 × 채택 좌표 전부 한 판의 세션 캐시 값(WAN-290 · WAN-297).
@@ -1383,8 +1401,7 @@ def _render_trade_timeline(settings: Settings) -> None:
         "줄로 봅니다. 라이브가 주인공, 백테스트는 대조입니다. 시각은 **한국시간(KST)** 입니다."
     )
 
-    default_day = datetime.now(tz=KST).date()
-    day = st.date_input("날짜(KST)", value=default_day, key="timeline_day")
+    day = st.date_input("날짜(KST)", value=default_timeline_day(), key="timeline_day")
     full_universe = full_universe_label()
     target = st.radio(
         "백테스트 대조 대상",

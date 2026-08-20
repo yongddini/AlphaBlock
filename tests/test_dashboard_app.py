@@ -808,3 +808,69 @@ def test_stale_engine_rows_are_shown_with_a_warning_and_no_diff(
     assert any("엔진이 달라 대조하지 않습니다" in i for i in infos), infos
     # (3) 배지도 옛 판을 가리킨다(지금 엔진 이름표를 달고 옛 행을 내주지 않는다).
     assert any(stale_revision in c.value for c in at.caption), [c.value for c in at.caption]
+
+
+def test_timeline_default_day_is_yesterday_kst(seeded_db_path: str) -> None:
+    """WAN-326 §5 완료 기준 6: 타임라인 탭 첫 화면 날짜가 **어제(KST)** 다.
+
+    옛 기본값은 **오늘**이었는데 캐시를 채우는 야간 크론은 **전일(KST)** 을 적재하므로
+    (KST 00:30) 화면을 열면 정의상 항상 캐시 미스였다 — 「아직 계산 안 됨」이 첫인상이던
+    진짜 원인이 이 날짜 축이다.
+
+    ⚠️ **리터럴 날짜가 아니라 「오늘 − 1일」로 잠근다**(이슈 명시) — 리터럴로 박으면
+    테스트가 하루 뒤에 깨지거나, 더 나쁘게는 계산식이 틀려도 통과한다.
+    """
+    from datetime import datetime, timedelta
+
+    from common.timefmt import KST
+    from dashboard.app import default_timeline_day
+
+    at = AppTest.from_file("dashboard/app.py")
+    at.run(timeout=60)
+
+    assert not at.exception
+    # 계산식 자체 — 화면이 읽는 그 함수가 「오늘(KST) − 1일」을 낸다.
+    today_kst = datetime.now(tz=KST).date()
+    assert default_timeline_day() == today_kst - timedelta(days=1)
+    # 위젯이 실제로 그 값으로 그려졌다(함수만 맞고 화면은 옛 값인 상태를 막는다).
+    assert at.date_input(key="timeline_day").value == default_timeline_day()
+
+
+def test_timeline_default_target_is_the_full_universe(seeded_db_path: str) -> None:
+    """WAN-326 완료 기준 1·2·4: 첫 화면 대조 대상이 **「채택 좌표 전부」**이고
+    「라이브 칸만」은 **선택지로 그대로 남아 있다**.
+
+    라벨 문자열이 아니라 **기본 선택이 어느 쪽인지**를 잠근다(이슈 명시) — 라벨은 좌표에서
+    파생되므로(WAN-318 §6) 문자열로 박으면 다음 재-베이스라인에서 또 어긋난다. 그래서
+    `full_universe_label()`이 내는 값과 대조하고, 선택지 개수·존치만 따로 본다.
+    """
+    from dashboard.app import _TARGET_LIVE_CELLS, full_universe_label
+
+    at = AppTest.from_file("dashboard/app.py")
+    at.run(timeout=60)
+
+    assert not at.exception
+    radio = at.radio(key="timeline_target")
+    # (1) 기본 선택이 넓은 쪽이다.
+    assert radio.value == full_universe_label()
+    # (2) 「라이브 칸만」은 지우지 않았다(사용자 결정: 존치).
+    assert set(radio.options) == {full_universe_label(), _TARGET_LIVE_CELLS}
+
+
+def test_timeline_live_cells_option_still_works_unchanged(seeded_db_path: str) -> None:
+    """WAN-326 완료 기준 2: 「라이브 칸만」을 고르면 예전과 똑같이 동작한다(WAN-234 규약).
+
+    기본이 바뀐 뒤에도 그 선택지가 **살아 있는 경로**인지를 동작으로 본다 — 라이브 대조
+    체크박스가 그려지고(옛 화면의 진입점), 예외 없이 렌더된다.
+    """
+    from dashboard.app import _TARGET_LIVE_CELLS
+
+    at = AppTest.from_file("dashboard/app.py")
+    at.run(timeout=60)
+    at.radio(key="timeline_target").set_value(_TARGET_LIVE_CELLS)
+    at.run(timeout=60)
+
+    assert not at.exception
+    checkbox_keys = {c.key for c in at.checkbox}
+    assert "timeline_include_bt" in checkbox_keys
+    assert "timeline_recompute" in checkbox_keys
