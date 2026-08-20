@@ -40,7 +40,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 import streamlit as st
@@ -1124,6 +1124,24 @@ def full_universe_label() -> str:
     return f"채택 {n_symbols}종목×{n_timeframes}TF 전부 (WAN-290)"
 
 
+def default_timeline_day() -> date:
+    """타임라인 탭의 기본 날짜 = **어제(KST)** (WAN-326 §5, 사용자 결정 2026-08-20).
+
+    옛 기본값은 **오늘**이었는데, 캐시를 채우는 야간 크론은 **전일(KST)** 을 KST 00:30에
+    적재한다(`docs/ops/wan239-nightly-timeline-cache.md`). 즉 화면을 열면 **정의상 항상
+    캐시 미스**였다 — 첫인상이 늘 「아직 계산 안 됨」이었던 진짜 원인이 이 날짜 축이다.
+    어제가 맞는 이유가 둘이다: (1) 크론이 채워 둔 날짜라 **버튼 없이 즉시** 뜬다,
+    (2) 오늘은 **진행 중이라 불완전**하다(WAN-334 실측: 당일 08-19가 27셋업으로 전날
+    60건보다 훨씬 적게 잡혔는데 데이터가 아니라 **시각** 때문이었다).
+
+    🚨 **「캐시에 있는 가장 최근 날짜를 찾아서 연다」로 똑똑하게 만들지 않는다**(이슈 명시)
+    — DB 조회가 첫 렌더에 붙고 「왜 어제가 아니라 그저께가 떴지」를 설명할 수 없게 된다.
+    **어제 고정**이고, 크론 전(자정~00:30 KST)의 30분은 WAN-325 폴백(옛 엔진 판)이나 계산
+    버튼이 덮는다. 날짜 위젯 자체는 그대로라 사용자는 오늘·과거 아무 날이나 계속 고른다.
+    """
+    return (datetime.now(tz=KST) - timedelta(days=1)).date()
+
+
 @dataclass(frozen=True)
 class _FullRunResult:
     """임의 날짜 × 채택 좌표 전부 한 판의 세션 캐시 값(WAN-290 · WAN-297).
@@ -1173,6 +1191,19 @@ def _timeline_live_cell_backtest(
 
     기본은 야간 크론 캐시만 읽고(WAN-239), 체크박스로만 즉시 재계산한다(무겁다). 라이브
     예약이 없던 날은 대조 대상 셀이 없다.
+
+    🚨 **이 좁히기는 「표시 필터」다 — 「재구성」이 아니다**(WAN-326 · WAN-340 대비).
+    지금은 대조 백테가 **per-cell 단일 포지션**이라 두 읽는 법이 같은 값을 내서 구분이
+    보이지 않는다:
+
+    * **(a) 표시 필터** — 계산은 채택 좌표 그대로 두고 **화면에 보이는 칸만** 좁힌다.
+    * (b) 재구성 — 그 칸들만으로 회계를 **새로 구성**한다.
+
+    WAN-340이 대조 백테를 **레버리지 북**(칸=(종목,TF)이 한 지갑을 공유 — WAN-213/316)으로
+    옮기는 순간 둘이 갈린다: (b)로 구현하면 **자본 경합이 달라져 다른 지갑이 되어**, 라디오를
+    옮길 때마다 같은 날의 같은 셋업이 다른 숫자로 보인다. 이 저장소가 반복해 겪은 「라벨과
+    동작이 어긋남」(WAN-91/95/112/123/159) 부류다. **(a)를 유지할 것** — 좁히기 인자가
+    계산 범위로 흘러가면 안 된다(WAN-335 §2가 `stop-width`에서 고친 것과 같은 축).
     """
     include_bt = st.checkbox(
         "백테스트 대조 병기 (야간 크론이 미리 계산한 캐시를 읽습니다 — WAN-239)",
@@ -1337,13 +1368,18 @@ def _timeline_full_universe_backtest(
             )
             results[day_key] = result
         else:
+            # WAN-326 §3: 기본이 넓은 쪽이 된 뒤로 이 안내가 **첫인상**이 될 수 있다 —
+            # 막다른 길처럼 읽히지 않게 나갈 길을 함께 준다(버튼 · 다른 날짜 · 좁혀 보기).
             st.info(
-                f"**아직 계산 안 됨** — {len(cached.misses)}/{n_cells}칸 캐시 미스입니다. 위 "
-                "**실행** 버튼을 누르면 계산하고 디스크에 적재합니다(다음 접속엔 버튼 없이 "
-                "바로 뜹니다). 야간 크론이 미리 채우기도 합니다"
-                "(`alphablock trades --day … --persist-cache`). 조회 시 자동 재계산은 "
-                "하지 않습니다(WAN-239). 라이브가 없던 날도 백테만으로 대조할 수 "
-                "있습니다(WAN-290)."
+                f"**아직 계산 안 됨** — {len(cached.misses)}/{n_cells}칸 캐시 미스입니다. "
+                "여기서 할 수 있는 것이 셋입니다: **①** 위 **실행** 버튼을 누르면 이 날짜를 "
+                "계산하고 디스크에 적재합니다(다음 접속엔 버튼 없이 바로 뜹니다). "
+                f"**②** 날짜를 **어제(KST, 기본값)** 나 그 이전으로 바꾸면 야간 크론이 미리 "
+                "채워 둔 날짜라 즉시 뜹니다. **③** 위 **라이브 칸만**을 고르면 그날 라이브가 "
+                "있던 칸으로 좁혀 볼 수 있습니다(대조 대상이 훨씬 적습니다). "
+                "미리 채우기는 `alphablock trades --day … --persist-cache`이고, 조회 시 "
+                "자동 재계산은 하지 않습니다(WAN-239). 라이브가 없던 날도 백테만으로 대조할 "
+                "수 있습니다(WAN-290)."
             )
             return [], None
 
@@ -1369,12 +1405,16 @@ def _timeline_full_universe_backtest(
 def _render_trade_timeline(settings: Settings) -> None:
     """당일(KST) 거래별 타임라인 — 예약→체결가→청산가→손익, 라이브|백테스트(WAN-234/290).
 
-    라이브(주문 장부 + 페이퍼 라운드트립)를 주인공으로 그리고, 백테스트 대조는 무거우니
-    (셀마다 워밍업 연속) **옵트인**이다. 대조 대상을 두 가지로 고른다(WAN-290):
-    「라이브 칸만」(그날 라이브가 있던 셀만 — WAN-234 그대로)과 「채택 좌표 전부」
-    (라이브 유무와 무관하게 임의 날짜의 하루치 백테를 버튼으로 온디맨드 실행). 행을 누르면
-    그 거래 지점으로 차트가 이동한다(저장된 거래 탭 패턴). 뒤쪽 라디오 라벨의 종목 수는
+    라이브(주문 장부 + 페이퍼 라운드트립)를 주인공으로 그리고, 백테스트 대조 대상을 두
+    가지로 고른다(WAN-290): 「채택 좌표 전부」(라이브 유무와 무관하게 그 날짜의 하루치
+    백테)와 「라이브 칸만」(그날 라이브가 있던 셀로 좁혀 보기 — WAN-234 그대로). 행을
+    누르면 그 거래 지점으로 차트가 이동한다(저장된 거래 탭 패턴). 라디오 라벨의 종목 수는
     `full_universe_label()`이 채택 좌표에서 뽑는다(WAN-318 §6 — 하드코딩 금지).
+
+    📌 **기본 선택 = 「채택 좌표 전부」 · 기본 날짜 = 어제(KST)**(WAN-326, 사용자 결정).
+    둘은 서로를 돕는다 — 넓은 좌표를 기본으로 두면서 날짜가 오늘이면 첫 화면이 가장 비어
+    보이는데(넓은 좌표 × 정의상 미스), 어제로 옮기면 그 조합이 **캐시 적중 × 넓은 좌표**가
+    된다. 「라이브 칸만」은 **지우지 않고 옵션으로 존치**한다(사용자 결정).
     """
     db_path = settings.db_path
     st.subheader("당일 거래별 타임라인")
@@ -1383,18 +1423,25 @@ def _render_trade_timeline(settings: Settings) -> None:
         "줄로 봅니다. 라이브가 주인공, 백테스트는 대조입니다. 시각은 **한국시간(KST)** 입니다."
     )
 
-    default_day = datetime.now(tz=KST).date()
-    day = st.date_input("날짜(KST)", value=default_day, key="timeline_day")
+    day = st.date_input("날짜(KST)", value=default_timeline_day(), key="timeline_day")
     full_universe = full_universe_label()
+    # WAN-326 §1: 기본 선택은 **넓은 쪽**(채택 좌표 전부)이다. 좁은 쪽이 기본이던 이유는
+    # 「무거워서」였는데(48셀 온디맨드 · 세션 끊기면 날아감) WAN-297이 두 모드를 같은 디스크
+    # 캐시에 물려 **조회 비용이 사실상 같아졌다** — 그 전제가 사라졌다.
+    # 📌 `index=`를 **명시**한다(순서에 기대지 않는다) — 옛 기본값은 리스트 0번이라는
+    # 사실만으로 정해져 있었고, 그래서 선택지를 재배열하는 것만으로 조용히 뒤집혔다.
+    target_options = [full_universe, _TARGET_LIVE_CELLS]
     target = st.radio(
         "백테스트 대조 대상",
-        [_TARGET_LIVE_CELLS, full_universe],
+        target_options,
+        index=target_options.index(full_universe),
         horizontal=True,
         key="timeline_target",
         help=(
-            "라이브 칸만: 그날 라이브 예약이 있던 (심볼, TF)만 대조합니다(WAN-234).  "
-            f"{full_universe}: 라이브 유무와 무관하게 임의 날짜의 하루치 백테를 버튼으로 "
-            "온디맨드 실행합니다(WAN-290)."
+            f"{full_universe}: 라이브 유무와 무관하게 그 날짜의 하루치 백테를 대조합니다"
+            "(야간 크론 캐시를 읽고, 없으면 버튼으로 온디맨드 실행 — WAN-290).  "
+            "라이브 칸만: 그날 라이브 예약이 있던 (심볼, TF)로 **보는 범위를 좁히는 표시 "
+            "필터**입니다(WAN-234). 계산(지갑)을 좁히는 것이 아닙니다 — 아래 주석 참고."
         ),
     )
 
