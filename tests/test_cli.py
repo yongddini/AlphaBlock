@@ -18,6 +18,7 @@ from cli.main import (
     cmd_live,
     cmd_status,
     cmd_stop_width,
+    cmd_watch,
     format_status,
 )
 from common.heartbeat import HeartbeatStore
@@ -1062,3 +1063,32 @@ def _seed_two_cell_journal(db_path: str) -> None:
             )
     finally:
         journal.close()
+
+
+# -- watch 배선 (WAN-32, 종료 코드 = WAN-344) ---------------------------------
+
+
+def test_parser_routes_watch_with_delivery_flag() -> None:
+    parser = build_parser()
+    args = parser.parse_args(["watch", "--once", "--require-delivery"])
+    assert args.func is cmd_watch
+    assert args.once is True and args.require_delivery is True
+    # 기본값은 꺼짐 — 옛 호출은 예전 동작 그대로다.
+    assert parser.parse_args(["watch"]).require_delivery is False
+
+
+def test_cmd_watch_propagates_the_exit_code(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """🚨 워치가 「보낼 곳이 없다」를 알려도 CLI 가 0을 내면 systemd 는 성공으로 본다."""
+    import live.health_watch as health_watch
+
+    monkeypatch.setattr(health_watch, "build_telegram_client", lambda _s: None)
+    args = argparse.Namespace(once=True, dry_run=False, test_message=False, require_delivery=True)
+    assert cmd_watch(args, _settings(tmp_path)) == health_watch.WATCH_TELEGRAM_UNCONFIGURED
+
+
+def test_cmd_watch_rejects_dry_run_with_require_delivery(tmp_path: Path) -> None:
+    """보내지 않는 모드에 「도착을 요구」를 붙이면 라벨과 동작이 어긋난다 — 거부한다."""
+    args = argparse.Namespace(once=True, dry_run=True, test_message=False, require_delivery=True)
+    assert cmd_watch(args, _settings(tmp_path)) == 2

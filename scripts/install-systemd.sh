@@ -14,6 +14,13 @@
 #   ./scripts/install-systemd.sh live            # 러너만
 #   ./scripts/install-systemd.sh dashboard       # 대시보드만
 #   ./scripts/install-systemd.sh doctor          # DB 점검 타이머 두 쌍(전수 + 싼 점검)
+#   ./scripts/install-systemd.sh watch           # 운영 상태 워치 타이머(러너·수집 정지 경보)
+#
+# 🚨 워치(WAN-344)를 빼먹지 말 것 — 수집기와 러너는 별개 프로세스라 **러너만 죽으면**
+# 봉은 계속 신선하고 대시보드도 정상으로 보인다. doctor 는 DB 무결성만 보지 러너 생존을
+# 안 본다. `alphablock watch` 가 러너 정지를 아는 유일한 장치인데, 서버 실측(2026-08-20)
+# 에서 크론·타이머 어디에도 등록돼 있지 않아 34분·41분 정지를 아무도 몰랐다.
+# 간격은 ALPHABLOCK_WATCH_INTERVAL 로 지정한다(기본 10min).
 #
 # 무결성 점검은 타이머 **두 쌍**으로 돈다(WAN-318 §2):
 #   • alphablock-doctor.timer        전수(`PRAGMA quick_check` 포함)  기본 1d
@@ -53,6 +60,10 @@ DASHBOARD_PORT="${ALPHABLOCK_DASHBOARD_PORT:-8501}"
 DOCTOR_INTERVAL="${ALPHABLOCK_DOCTOR_INTERVAL:-1d}"
 # WAN-318 §2: quick_check 를 뺀 싼 점검은 자주 본다(로컬 7.3GB 실측 90초 → 1h 는 40배 여유).
 DOCTOR_LIGHT_INTERVAL="${ALPHABLOCK_DOCTOR_LIGHT_INTERVAL:-1h}"
+# WAN-344: 러너 정지를 몇 분 만에 알 것인가 = 이 값. 설정 기본값
+# health_watch_interval_seconds(600초)와 같은 10분이다. 실측 정지 공백이 11·34·41분이라
+# 이보다 크게 잡으면 그만큼 늦게 안다.
+WATCH_INTERVAL="${ALPHABLOCK_WATCH_INTERVAL:-10min}"
 RUN_USER="$(id -un)"
 
 # uv 실행 파일 절대 경로(systemd 는 셸 PATH 를 물려받지 않는다).
@@ -106,13 +117,14 @@ render_unit() {
         -e "s|__DASHBOARD_PORT__|${DASHBOARD_PORT}|g" \
         -e "s|__DOCTOR_INTERVAL__|${DOCTOR_INTERVAL}|g" \
         -e "s|__DOCTOR_LIGHT_INTERVAL__|${DOCTOR_LIGHT_INTERVAL}|g" \
+        -e "s|__WATCH_INTERVAL__|${WATCH_INTERVAL}|g" \
         "$template" > "$out"
 }
 
 # DB 점검(WAN-185, 분리 = WAN-318 §2): oneshot 서비스 + 타이머 한 쌍을 설치한다.
 # 서비스는 부팅 자동 시작하지 않고(타이머가 트리거), 타이머만 enable --now 한다.
 install_timer_pair() {
-    local name="$1" interval="$2"
+    local name="$1" interval="$2" log_name="${3:-doctor}"
     local svc="${name}.service"
     local timer="${name}.timer"
     local rendered
@@ -126,7 +138,7 @@ install_timer_pair() {
 
     sudo systemctl daemon-reload
     sudo systemctl enable --now "$timer"
-    echo "✅ 설치·시작: $timer (간격 ${interval} · 로그: $LOG_DIR/doctor.log)"
+    echo "✅ 설치·시작: $timer (간격 ${interval} · 로그: $LOG_DIR/${log_name}.log)"
 }
 
 # 전수 점검(하루 1회) + 싼 점검(자주) 두 쌍을 함께 건다 — 한쪽만 걸면 「무겁지만 드문
@@ -134,6 +146,13 @@ install_timer_pair() {
 install_doctor() {
     install_timer_pair alphablock-doctor "$DOCTOR_INTERVAL"
     install_timer_pair alphablock-doctor-light "$DOCTOR_LIGHT_INTERVAL"
+}
+
+# 운영 상태 워치(WAN-32, 등록 = WAN-344): oneshot + 타이머 한 쌍.
+# 상시 service 가 아니라 timer + `--once` 인 이유는 유닛 템플릿 주석에 적었다(쿨다운
+# 상태가 파일로 영속화돼 있고, 상시 프로세스는 「감시의 감시」가 또 필요하다).
+install_watch() {
+    install_timer_pair alphablock-watch "$WATCH_INTERVAL" watch
 }
 
 TARGET="${1:-all}"
@@ -150,19 +169,27 @@ case "$TARGET" in
     doctor)
         install_doctor
         ;;
+    watch)
+        install_watch
+        ;;
     all)
         install_one collector
         install_one live
         install_one dashboard
         install_doctor
+        install_watch
         ;;
     *)
-        echo "사용법: $0 [collector|live|dashboard|doctor|all]" >&2
+        echo "사용법: $0 [collector|live|dashboard|doctor|watch|all]" >&2
         exit 1
         ;;
 esac
 
 echo
 echo "상태 확인: systemctl status alphablock-collector alphablock-live alphablock-dashboard"
-echo "타이머 확인: systemctl list-timers 'alphablock-doctor*'   (전수 + 싼 점검 = WAN-185/318)"
+echo "타이머 확인: systemctl list-timers 'alphablock-*'   (doctor 두 쌍 = WAN-185/318 · 워치 = WAN-344)"
 echo "수집 확인: uv run -- alphablock status   (웹소켓이 1분봉을 받는지 = WAN-174 완료 기준)"
+echo
+echo "🚨 워치를 등록했으면 경보가 실제로 **도착하는지** 1회 확인하세요(WAN-344 §4-4):"
+echo "   uv run -- alphablock watch --test-message   # 폰에 안 오면 종료 코드 1/2"
+echo "   등록만 하고 도착을 안 보면 「감시는 도는데 아무 데도 안 가는」 그 자리입니다."

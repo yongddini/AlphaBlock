@@ -43,6 +43,13 @@ from dashboard.health_data import HealthView, build_health_view
 
 _logger = logging.getLogger(__name__)
 
+#: 워치 종료 코드(WAN-344) — systemd 가 `systemctl --failed` 로 잡는 신호다.
+WATCH_OK = 0
+#: 보낼 곳은 있는데 전송이 실패했다(네트워크·API 거부).
+WATCH_DELIVERY_FAILED = 1
+#: 보낼 곳 자체가 없다(ALPHABLOCK_TELEGRAM_* 미설정) — 감시가 도는데 아무 데도 안 간다.
+WATCH_TELEGRAM_UNCONFIGURED = 2
+
 
 # -- 경고 판정 (순수 함수) -----------------------------------------------------
 
@@ -195,6 +202,8 @@ class Outbound(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     kind: Literal["alert", "recovery"]
+    key: str
+    """어느 이슈의 메시지인가(`Alert.key`). 전송 실패를 되돌릴 때 쓴다(WAN-344)."""
     text: str
 
 
@@ -219,7 +228,7 @@ def reconcile(
     for key, alert in current.items():
         prev = state.active.get(key)
         if prev is None or now_ms - prev.last_notified_ms >= cooldown_ms:
-            outbound.append(Outbound(kind="alert", text=alert.detail))
+            outbound.append(Outbound(kind="alert", key=key, text=alert.detail))
             new_active[key] = AlertRecord(title=alert.title, last_notified_ms=now_ms)
         else:
             # 쿨다운 이내 — 재전송하지 않고 마지막 발송 시각을 유지한다.
@@ -227,9 +236,40 @@ def reconcile(
 
     for key, prev in state.active.items():
         if key not in current:
-            outbound.append(Outbound(kind="recovery", text=f"✅ *정상 복구* — {prev.title}"))
+            outbound.append(
+                Outbound(kind="recovery", key=key, text=f"✅ *정상 복구* — {prev.title}")
+            )
 
     return outbound, WatchState(active=new_active)
+
+
+def apply_delivery_failures(
+    next_state: WatchState,
+    previous: WatchState,
+    undelivered: list[Outbound],
+) -> WatchState:
+    """전송에 **실패한** 메시지는 「보냈다」로 기록하지 않는다(순수 함수, WAN-344).
+
+    이게 없으면 전송이 실패해도 `reconcile`이 만든 「방금 보냄」 상태가 그대로 저장돼
+    **쿨다운(기본 1시간)이 걸린다** — 즉 경보가 안 갔는데 그 뒤 한 시간은 재시도조차
+    하지 않는다. WAN-321이 고친 「경보가 안 가는데 그 사실도 경보되지 않는」 자리의
+    이웃이라, 실패한 것만 이전 상태로 되돌려 **다음 점검이 다시 보내게** 한다.
+
+    - 실패한 **경고**: 이전 기록이 있으면 그 타임스탬프로 되돌리고(리마인더 재시도),
+      없으면 아예 지운다(다음 점검에 새 경고로 다시 나간다).
+    - 실패한 **복구 알림**: 이전 기록을 되살린다 → 다음 점검에서 다시 「복구」로 잡힌다.
+    """
+    active = dict(next_state.active)
+    for message in undelivered:
+        prev = previous.active.get(message.key)
+        if message.kind == "alert":
+            if prev is None:
+                active.pop(message.key, None)
+            else:
+                active[message.key] = prev
+        elif prev is not None:  # recovery — 복구 알림을 다시 낼 수 있게 되살린다.
+            active[message.key] = prev
+    return WatchState(active=active)
 
 
 # -- 상태 영속화 ---------------------------------------------------------------
@@ -267,9 +307,15 @@ Notify = Callable[[str], bool]
 
 
 def _log_notify(text: str) -> bool:
-    """텔레그램 미설정(드라이런) 시 경고를 로그로만 남긴다."""
+    """텔레그램 미설정(드라이런) 시 경고를 로그로만 남긴다.
+
+    ⚠️ **True 를 낸다** — 「로그에 남겼다」를 전달로 친다. 전송 실패는 쿨다운을 걸지 않는데
+    (WAN-344 `apply_delivery_failures`) 드라이런이 실패로 취급되면 같은 경고가 점검마다
+    로그를 채운다. 드라이런의 쿨다운 거동은 예전 그대로 두는 쪽이 옳다 — 「보낼 곳이
+    없다」는 사실은 종료 코드(`--require-delivery`)가 따로 낸다.
+    """
     _logger.info("[드라이런] Health 경고:\n%s", text)
-    return False
+    return True
 
 
 class HealthWatch:
@@ -293,6 +339,12 @@ class HealthWatch:
         self._interval = interval_seconds
         self._sleep = sleep
         self._now_ms = now_ms
+        self._failed_sends = 0
+
+    @property
+    def failed_sends(self) -> int:
+        """이 워치가 지금까지 보내지 **못한** 메시지 수(WAN-344 종료 코드 근거)."""
+        return self._failed_sends
 
     def check_once(self) -> list[Outbound]:
         """상태를 한 번 점검하고, 보낼 메시지를 전송한 뒤 반환한다.
@@ -310,14 +362,22 @@ class HealthWatch:
         outbound, new_state = reconcile(
             alerts, state, now_ms=self._now_ms(), cooldown_ms=self._cooldown_ms
         )
-        for message in outbound:
-            self._notify(message.text)
-        self._store.save(new_state)
+        undelivered = [m for m in outbound if not self._notify(m.text)]
+        self._failed_sends += len(undelivered)
+        # 실패한 것만 이전 상태로 되돌린다 — 안 그러면 「안 갔는데 쿨다운은 걸린」 상태가
+        # 된다(WAN-344).
+        self._store.save(apply_delivery_failures(new_state, state, undelivered))
         if outbound:
             _logger.info(
-                "Health 점검: 경고 %d건, 복구 %d건",
+                "Health 점검: 경고 %d건, 복구 %d건%s",
                 sum(1 for m in outbound if m.kind == "alert"),
                 sum(1 for m in outbound if m.kind == "recovery"),
+                f", 전송 실패 {len(undelivered)}건" if undelivered else "",
+            )
+        if undelivered:
+            _logger.error(
+                "Health 경고 전송 실패 %d건 — 다음 점검에서 재시도합니다(쿨다운 미적용).",
+                len(undelivered),
             )
         return outbound
 
@@ -355,25 +415,42 @@ def run_health_watch(
     once: bool = False,
     dry_run: bool = False,
     test_message: bool = False,
-) -> None:
-    """헬스 워치를 실행한다(`alphablock watch` / `python -m live.health_watch` 공용).
+    require_delivery: bool = False,
+) -> int:
+    """헬스 워치를 실행하고 **종료 코드**를 낸다(`alphablock watch` 공용).
 
     - `test_message=True`: 텔레그램 연결 확인용 메시지 1건만 보내고 종료.
     - `dry_run=True`: 텔레그램 전송 없이 경고를 로그로만 출력.
     - `once=True`: 한 번만 점검하고 종료(그 외에는 무한 점검 루프).
+    - `require_delivery=True`: 텔레그램이 **없거나** 전송이 실패하면 0이 아닌 코드를 낸다.
+      systemd 타이머로 도는 유닛이 쓰는 모드다 — 이게 없으면 「등록은 됐는데 조용히
+      드라이런」이 성공으로 보인다(WAN-344 · WAN-321이 고친 실패 부류의 이웃).
+
+    종료 코드: `WATCH_OK`(0) · `WATCH_DELIVERY_FAILED`(1) · `WATCH_TELEGRAM_UNCONFIGURED`(2).
+    ⚠️ `require_delivery=False`(기본)면 점검 자체는 예전과 같이 돌고 항상 0을 낸다 —
+    바뀐 것은 `test_message` 뿐이다(연결 확인이 실패했는데 0을 내면 확인이 아니다).
     """
     settings = settings or get_settings()
+    if dry_run and require_delivery:
+        raise ValueError("dry_run 과 require_delivery 는 함께 쓸 수 없습니다(보내지 않는 모드).")
 
     telegram = None if dry_run else build_telegram_client(settings)
     if test_message:
         if telegram is None:
             _logger.error("텔레그램이 설정되지 않았습니다(ALPHABLOCK_TELEGRAM_*).")
-            return
+            return WATCH_TELEGRAM_UNCONFIGURED
         ok = telegram.send_message("✅ AlphaBlock Health 워치 테스트 메시지 (WAN-32)")
         _logger.info("테스트 메시지 전송 %s", "성공" if ok else "실패")
-        return
+        return WATCH_OK if ok else WATCH_DELIVERY_FAILED
 
     if telegram is None and not dry_run:
+        if require_delivery:
+            # 조용히 드라이런으로 접지 않는다 — 그러면 「감시가 도는데 아무 데도 안 가는」
+            # 상태가 systemd 에서 성공으로 보인다(WAN-344).
+            _logger.error(
+                "텔레그램 미설정(ALPHABLOCK_TELEGRAM_*) — 경보를 보낼 곳이 없어 중단합니다."
+            )
+            return WATCH_TELEGRAM_UNCONFIGURED
         _logger.warning(
             "텔레그램 미설정 — 드라이런으로 실행합니다. ALPHABLOCK_TELEGRAM_* 를 설정하세요."
         )
@@ -392,6 +469,9 @@ def run_health_watch(
         settings.health_watch_cooldown_seconds,
     )
     watch.run(max_checks=1 if once else None)
+    if require_delivery and watch.failed_sends:
+        return WATCH_DELIVERY_FAILED
+    return WATCH_OK
 
 
 def main() -> None:
@@ -410,11 +490,25 @@ def main() -> None:
         action="store_true",
         help="텔레그램 전송 없이 경고를 로그로만 출력",
     )
+    parser.add_argument(
+        "--require-delivery",
+        action="store_true",
+        help="텔레그램 미설정·전송 실패를 0이 아닌 종료 코드로 낸다(systemd 감시용, WAN-344)",
+    )
     args = parser.parse_args()
 
     use_kst_logging()  # 로그 시각도 KST(WAN-172)
     logging.basicConfig(level=logging.INFO, format=kst_log_format())
-    run_health_watch(once=args.once, dry_run=args.dry_run, test_message=args.test_message)
+    if args.dry_run and args.require_delivery:
+        parser.error("--dry-run 과 --require-delivery 는 함께 쓸 수 없습니다.")
+    raise SystemExit(
+        run_health_watch(
+            once=args.once,
+            dry_run=args.dry_run,
+            test_message=args.test_message,
+            require_delivery=args.require_delivery,
+        )
+    )
 
 
 if __name__ == "__main__":

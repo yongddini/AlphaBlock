@@ -72,8 +72,8 @@ scp data/ohlcv.db <서버>:~/AlphaBlock/data/ohlcv.db
 
 ```bash
 cd ~/AlphaBlock
-./scripts/install-systemd.sh            # 수집기 + 러너 + 대시보드 + DB 점검 타이머 두 쌍
-# 또는 개별: ./scripts/install-systemd.sh collector|live|dashboard|doctor
+./scripts/install-systemd.sh            # 수집기 + 러너 + 대시보드 + DB 점검 타이머 두 쌍 + 상태 워치
+# 또는 개별: ./scripts/install-systemd.sh collector|live|dashboard|doctor|watch
 ```
 
 systemd 시스템 서비스로 등록되어 **부팅 시 자동 시작 + 크래시 시 10초 후 자동 재시작**된다
@@ -102,11 +102,38 @@ systemd 시스템 서비스로 등록되어 **부팅 시 자동 시작 + 크래�
 이유가 없다. 단 싼 판도 공짜는 아니다 — 인구조사가 6,500만 행 테이블을 세느라 로컬 7.3GB
 실측 **90초**였다(전수는 174초). 그래서 1h 이지 15min 이 아니다.
 
-간격 조정: `ALPHABLOCK_DOCTOR_INTERVAL=12h ./scripts/install-systemd.sh doctor`.
+### 4-1. 상태 워치 — 러너가 죽은 걸 아는 유일한 장치 (WAN-32, 등록 = WAN-344)
+
+`watch` 도 타이머 한 쌍(`alphablock-watch.timer` + `.service`)으로 등록되고 기본 **10분**
+마다 `alphablock watch --once --require-delivery` 를 돌린다(`ALPHABLOCK_WATCH_INTERVAL`).
+
+🚨 **doctor 로는 러너 정지를 못 잡는다.** 수집기와 러너는 **별개 프로세스**라 러너만 죽으면
+봉은 계속 신선하고(→ `stale_series` 백업 경보도 안 울림) 대시보드도 정상으로 보인다. doctor 는
+DB 무결성·인구조사를 보지 **러너 생존을 안 본다**. 실제로 2026-08-20 서버 실측에서 워치가
+크론에도 타이머에도 **아무 데도 등록돼 있지 않았고**, 그 기간 11분·34분·41분 정지 동안 아무
+경보도 가지 않았다(WAN-344).
+
+🚨 **등록만 하고 끝내지 말 것 — 경보가 실제로 도착하는지 1회 보라:**
+
+```bash
+uv run -- alphablock watch --test-message   # 폰에 오면 성공, 안 오면 종료 코드 1(전송 실패)·2(미설정)
+systemctl list-timers alphablock-watch.timer --no-pager
+tail -20 logs/watch.log
+```
+
+`--require-delivery` 덕분에 텔레그램이 미설정이거나 전송이 실패하면 유닛이 `failed` 로 남는다
+(`systemctl --failed`). 이게 없으면 「감시는 도는데 경보는 아무 데도 안 가는」 상태가 성공으로
+보인다 — WAN-321 이 고친 실패 부류와 같은 자리다.
+
+⚠️ 쿨다운(기본 1시간)·복구 알림 상태는 `data/health_watch_state.json` 에 저장되므로 타이머가
+매번 새 프로세스로 돌아도 중복 경고가 나지 않는다. 그 파일을 지우면 발효 중인 경고가 한 번 더 온다.
+
+간격 조정: `ALPHABLOCK_DOCTOR_INTERVAL=12h ./scripts/install-systemd.sh doctor` ·
+`ALPHABLOCK_WATCH_INTERVAL=5min ./scripts/install-systemd.sh watch`.
 설치 후 **서버에서 1회 실측을 확인**하고(아래) 주기가 그보다 충분히 긴지 본다:
 
 ```bash
-systemctl list-timers 'alphablock-doctor*' --no-pager    # 다음 실행·마지막 실행 시각
+systemctl list-timers 'alphablock-*' --no-pager           # doctor 두 쌍 + 워치의 다음/마지막 실행
 systemctl show alphablock-doctor -p ExecMainStartTimestamp -p ExecMainExitTimestamp   # 1회 소요
 tail -20 logs/doctor.log                                  # 판정 출력(전수·싼 점검 공용)
 ```
@@ -150,10 +177,14 @@ cd ~/AlphaBlock && git pull
 # ② doctor 타이머 두 쌍 재설치(옛 15min 타이머를 새 주기로 덮어쓴다)
 ./scripts/install-systemd.sh doctor
 
-# ③ 확인
+# ③ 상태 워치 타이머(WAN-344) — 옛 서버에는 **아예 없다**. 처음 등록하는 셈이다.
+./scripts/install-systemd.sh watch
+uv run -- alphablock watch --test-message      # 🚨 폰에 도착하는지 1회 확인
+
+# ④ 확인
 systemctl cat alphablock-live | grep SuccessExitStatus        # 143 이 보여야 한다
 systemctl cat alphablock-doctor | grep -E 'Nice|IOScheduling' # idle · 19
-systemctl list-timers 'alphablock-doctor*' --no-pager         # 주기 1d / 1h
+systemctl list-timers 'alphablock-*' --no-pager               # doctor 1d / 1h · watch 10min
 ```
 
 ⚠️ **옛 설치본이 남아 있을 수 있다** — 15min 타이머가 이미 돌던 서버라면 ②가 그 파일을
@@ -207,7 +238,10 @@ sudo systemctl start alphablock-live alphablock-collector \
 4. **가동 커버리지**: 며칠 가동 후 `alphablock status`의 신선도/갭으로 "구멍 없이 돈다" 확인.
    갭이 보이면 `uv run -- alphablock backfill`로 1회 복구(WAN-35). 조용히 멈춘 스트림의
    자동 재접속은 WAN-173(워치독)이 담당한다.
-5. **DB 무결성(WAN-185)**: 무결성 타이머가 도는지 `systemctl list-timers alphablock-doctor.timer`,
+5. **러너 정지 감시(WAN-344)**: `systemctl list-timers alphablock-watch.timer` 가 다음 실행을
+   보여야 하고, `alphablock watch --test-message` 가 폰에 도착해야 한다. 이 둘이 아니면
+   **러너가 죽어도 아무도 모른다**(수집기는 별개 프로세스라 봉은 계속 신선하다).
+6. **DB 무결성(WAN-185)**: 무결성 타이머가 도는지 `systemctl list-timers alphablock-doctor.timer`,
    최근 실행 결과는 `systemctl status alphablock-doctor.service`(또는 `logs/doctor.log`).
    한 번 손으로 돌려 초록불 확인: `uv run -- alphablock doctor`(종료 코드 0). ⚠️ `data/`가
    FUSE/네트워크 마운트 위면 07-22 손상이 재발하므로 **로컬 디스크인지 먼저 확인**(WAN-195):
