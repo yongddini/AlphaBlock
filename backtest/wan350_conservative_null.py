@@ -322,6 +322,12 @@ def _row_from(
     )
 
 
+def _from_ms(frame: pd.DataFrame, start_ms: int) -> pd.DataFrame:
+    """평가 경계 이후의 봉만 — 구간별 buy&hold를 그 구간에서 재기 위해서다."""
+    view = frame[frame["open_time"].astype("int64") >= start_ms]
+    return view if not view.empty else frame.iloc[-1:]
+
+
 def run_cell(task: _Task, *, log: bool = True) -> list[NullRow]:
     """한 (심볼, TF)의 `full`·`oos_warm` × 팔 널을 낸다.
 
@@ -335,7 +341,6 @@ def run_cell(task: _Task, *, log: bool = True) -> list[NullRow]:
         return []
 
     ob_result = harness.detect_order_blocks(market, ADOPTED_OB_PARAMS)
-    buy_hold = _buy_hold(market.htf_df)
     warm_from = harness.eval_boundary_ms(market, harness.WARM_OOS_SEGMENT)
     if warm_from is None:  # pragma: no cover - WARM_OOS_SEGMENT는 항상 경계를 갖는다
         raise RuntimeError("따뜻한 OOS 경계를 구하지 못했습니다.")
@@ -343,6 +348,13 @@ def run_cell(task: _Task, *, log: bool = True) -> list[NullRow]:
         (SEGMENT_FULL, None),
         (SEGMENT_OOS_WARM, warm_from),
     )
+    #: 대조용 buy&hold는 **그 구간의 것**이라야 한다 — 전 구간 값을 `oos_warm` 행에 달면
+    #: 「6년 상승분」을 뒷구간 성적 옆에 나란히 두게 되어 베타 비교가 통째로 거짓이 된다.
+    #: 존 재고는 두 창이 공유하지만(따뜻한 규약) 시장 수익률은 공유하지 않는다.
+    buy_hold_by_segment = {
+        SEGMENT_FULL: _buy_hold(market.htf_df),
+        SEGMENT_OOS_WARM: _buy_hold(_from_ms(market.htf_df, warm_from)),
+    }
     cfg = wan151.arm_of(LONG_ARM).config(task.timeframe)
 
     rows: list[NullRow] = []
@@ -371,7 +383,7 @@ def run_cell(task: _Task, *, log: bool = True) -> list[NullRow]:
                 arm=arm,
                 segment=segment,
                 zones=len(ob_result.order_blocks),
-                buy_hold=buy_hold,
+                buy_hold=buy_hold_by_segment[segment],
             )
             rows.append(row)
             if log:

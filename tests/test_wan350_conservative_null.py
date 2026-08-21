@@ -178,6 +178,19 @@ def test_leave_one_out_recounts_without_the_excluded_symbol() -> None:
     assert loo["ETH"].significant == 1 and loo["ETH"].eligible == 1
 
 
+def test_buy_hold_is_scoped_to_its_own_segment() -> None:
+    """🚨 전 구간 buy&hold를 `oos_warm` 행에 달면 베타 비교가 통째로 거짓이 된다.
+
+    존 재고는 두 창이 공유하지만(따뜻한 규약) **시장 수익률은 공유하지 않는다**.
+    """
+    frame = pd.DataFrame({"open_time": [0, 100, 200, 300], "close": [100.0, 200.0, 400.0, 800.0]})
+    assert wan350._from_ms(frame, 0).equals(frame)
+    tail = wan350._from_ms(frame, 200)
+    assert list(tail["close"]) == [400.0, 800.0]
+    # 경계 뒤에 봉이 없으면 마지막 봉 하나 — 0으로 나누지 않고 수익률 0을 낸다.
+    assert len(wan350._from_ms(frame, 10_000)) == 1
+
+
 # --------------------------------------------------------------- 4. 이어붙이기
 
 
