@@ -121,6 +121,18 @@ class _Candidate:
     reason: ExitReason
     stop_price: float
     """리스크 사이징의 손절 참조가(존 원단, 무효화 경계)."""
+    take_profit_price: float | None = None
+    """이 셋업에 적용된 익절 목표가(WAN-346, 순수 관측 — 시뮬레이터가 낸 값 그대로).
+
+    체결·청산·손익 어디에도 쓰이지 않는다. 북 거래별 CSV(WAN-346 §0)가 「익절가」 열을
+    지어내지 않게 하려고 싣는다 — 손절가는 `stop_price`가 이미 그렇게 하고 있었다."""
+    is_reentry: bool = False
+    """이 후보가 「익절 후 존 내 재진입」인지(WAN-346 · 라벨 전용).
+
+    재진입 후보는 별도 경로(`wan228_reentry_census.reentry_candidates`)에서 만들어져
+    `_segment_cells`가 base 재탭 후보와 **합쳐** 북에 넣는데(WAN-273 채택), 합쳐진 뒤에는
+    둘을 되가를 방법이 없었다. 순수 라벨이라 체결·청산·손익·후보 집합 어디에도 안 쓰이고,
+    기본 `False`라 예전과 비트 단위로 같다(라이브 장부 `live_limit_orders.origin`의 백테 판)."""
     penetration: bool = False
     """진입과 손절이 **같은 1분 스텝**에서 일어났는지(관통). 낙관 편향 감사용(WAN-46).
 
@@ -1250,6 +1262,8 @@ def build_zone_limit_candidates(
                 # WAN-143: live 밴드는 손절도 체결 순간에 정해질 수 있다(오버라이드).
                 # 시뮬레이터가 실제로 쓴 값을 돌려주므로 1R 사이징이 그것과 일치한다.
                 stop_price=outcome.stop_price if outcome.stop_price is not None else stop_price,
+                # WAN-346: 익절 목표도 시뮬레이터가 실제로 쓴 값 그대로(순수 관측).
+                take_profit_price=outcome.take_profit_price,
                 penetration=penetration,
                 same_step_take_profit=same_step_tp,
                 order_block=ob,

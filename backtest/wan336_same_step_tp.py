@@ -276,11 +276,15 @@ def book_segments_for_payloads(
     start_ms: int,
     end_ms: int,
     segments: Sequence[str] = SEGMENT_ORDER,
+    compound_sizing: bool = True,
 ) -> list[BookSegment]:
     """채택 북 배치 — `book_cli.run_book`의 마지막 두 단계와 **같은 함수·같은 인자**다.
 
     `apply_funding_proxy`를 여기서 거치는 것이 요점이다(WAN-305: 기본이 채택 규칙). 12종목이
     전부 자기 확정 펀딩을 갖는 오늘 좌표에서는 **무동작**이고, 검산 (a)가 그 사실을 숫자로 남긴다.
+
+    `compound_sizing=False`(WAN-346 §2, 옵트인)는 베팅 크기를 초기 자본에 못 박은 판을 낸다 —
+    `True`(기본)면 채택 북 그대로라 예전과 비트 단위로 같다.
     """
     proxied, _note = apply_funding_proxy(payloads)
     return iter_book_segments(
@@ -290,6 +294,7 @@ def book_segments_for_payloads(
         start_ms=start_ms,
         end_ms=end_ms,
         include_reentry=True,
+        compound_sizing=compound_sizing,
     )
 
 

@@ -68,7 +68,7 @@ import argparse
 import bisect
 from collections.abc import Iterator, Sequence
 from concurrent.futures import ProcessPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
 
@@ -458,8 +458,12 @@ def reentry_candidates(
     🚨 **WAN-323 §2 · WAN-330의 공개 CSV는 이 결함 위에서 산출됐다** — 그 표들의 재진입
     거래는 래더를 안 받았다. 고친 엔진으로 재산출할지는 **사용자 결정**이라(팔당 66분 ×
     6팔 = 7시간+) WAN-345는 재산출 대신 두 리포트 md와 CLAUDE.md에 시점 배너를 달았다."""
+    # WAN-346: 재진입 후보에 라벨을 단다(`is_reentry=True`) — `_segment_cells`가 base
+    # 재탭 후보와 합친 뒤에는 둘을 되가를 방법이 없었다. 순수 라벨이라 체결·청산·손익·
+    # 후보 집합 어디에도 안 쓰이고, 라벨을 다는 **한 곳**이 여기다(합류 지점에서 달면
+    # 다른 호출부가 라벨 없는 재진입을 흘린다).
     return [
-        re_cand
+        replace(re_cand, is_reentry=True)
         for re_cand, _event in _iter_reentries(
             cand,
             parent_exit_time=parent_exit_time,

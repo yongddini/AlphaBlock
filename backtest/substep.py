@@ -190,6 +190,17 @@ class ZoneLimitOutcome:
     `stop_loss_override`가 걸려 있으면 손절이 **체결 순간**에 정해지므로, 호출부가
     1R 사이징에 쓸 값을 여기로 돌려준다 — 지어내지 않게 하려는 것이다.
     """
+    take_profit_price: float | None = None
+    """이 거래에 **실제로 적용된** 익절 목표가 (WAN-346). 체결됐을 때만 값이 있다.
+
+    위 `stop_price`의 거울이다 — 1R이 체결가에서야 정해지므로(WAN-143 `resolve_exits`)
+    익절 목표도 체결 순간에 확정되고, 그 값을 지어내지 않고 그대로 돌려준다. 익절이 꺼진
+    변형(`take_profit_price=None`)에서는 체결돼도 `None`이다.
+
+    **순수 관측이다** — 체결·청산·손익 어디에도 쓰이지 않고, 값을 싣는 것만으로는 어떤
+    기존 수치도 움직이지 않는다(WAN-90 `mfe_r` · WAN-276 `exit_extreme`과 같은 부류).
+    북 거래별 CSV(WAN-346 §0)가 「손절가·익절가」 열을 지어내지 않게 하려는 것이다.
+    """
     exit_extreme: float | None = None
     """손절로 청산된 봉의 **불리 극값**(롱=저가, 숏=고가) (WAN-276). 손절 체결 시에만 값이
     있고 익절·데이터종료 청산이면 `None`이다.
@@ -571,6 +582,8 @@ def simulate_zone_limit_trade(
     # WAN-323 래더 상태. 래더를 안 켜면 `partial_price`가 끝까지 None이라 전부 비활성이다.
     entry_stop: float | None = None
     """진입 시점 손절 참조가 — 1R 사이징·MFE/MAE의 자. 본절 이동이 이 값을 바꾸지 않는다."""
+    entry_tp: float | None = None
+    """진입 시점 익절 목표가(WAN-346, 순수 관측). 익절이 꺼져 있으면 체결돼도 None이다."""
     entry_risk: float | None = None
     partial_price: float | None = None
     partials: list[PartialExit] = []
@@ -663,6 +676,9 @@ def simulate_zone_limit_trade(
                     entry_rsi = live_rsi
                     # WAN-323: 1R과 분할 지점을 **체결 순간에** 못 박는다(룩어헤드 없음).
                     entry_stop = active_stop
+                    # WAN-346: 익절 목표도 체결 순간에 확정된다(손절과 같은 자리) — 순수
+                    # 관측이라 아래 판정은 여전히 `active_tp`를 본다.
+                    entry_tp = active_tp
                     entry_risk = abs(entry_price - entry_stop)
                     if partial_take_profit_r is not None and entry_risk > 0.0:
                         offset = partial_take_profit_r * entry_risk
@@ -744,6 +760,7 @@ def simulate_zone_limit_trade(
                     mfe_r=mfe_r,
                     mae_r=mae_r,
                     stop_price=_entry_stop(),
+                    take_profit_price=entry_tp,
                     path_fill_price=path_fill_price,
                     exit_extreme=stop_extreme,
                     exit_at_breakeven=entry_stop is not None and active_stop != entry_stop,
@@ -780,6 +797,7 @@ def simulate_zone_limit_trade(
                     mfe_r=mfe_r,
                     mae_r=mae_r,
                     stop_price=_entry_stop(),
+                    take_profit_price=entry_tp,
                     path_fill_price=path_fill_price,
                     partial_exits=tuple(partials),
                     order_rested=order_rested,
@@ -795,6 +813,7 @@ def simulate_zone_limit_trade(
             mfe_r=mfe_r,
             mae_r=mae_r,
             stop_price=_entry_stop(),
+            take_profit_price=entry_tp,
             path_fill_price=path_fill_price,
             partial_exits=tuple(partials),
             order_rested=order_rested,
