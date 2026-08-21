@@ -447,14 +447,17 @@ def reentry_candidates(
     자를 받는다** — 한쪽만 걸면 「base는 진입 스텝 익절 금지, 재진입은 허용」인 잡종 팔을 재게
     된다. 끄면(기본) 예전과 비트 단위로 같다.
 
-    🚨 **알려진 결함(WAN-336 개발 중 발견 · 여기서 고치지 않는다)**: 바로 위 세 래더 인자
-    (`partial_take_profit_r`·`partial_take_profit_fraction`·`breakeven_after_partial`)는 받기만
-    하고 `_iter_reentries`로 **넘기지 않는다**(WAN-323 커밋 `af1a550`이 시그니처만 넓혔다).
-    즉 래더를 켠 북 팔에서도 **재진입 거래는 전량 익절**로 돌았다 — `_iter_reentries`
-    독스트링이 「팔마다 규칙이 갈리면 잡종 엔진」이라 적어 둔 바로 그 상태다. 고치면
-    WAN-323/330의 공개 CSV·결론이 움직이므로 **별도 이슈**이고, WAN-336의 축(같은 분 익절)과는
-    무관하다(이 이슈의 두 팔은 래더를 안 켠다). 아래에서 `no_same_step_tp`만 넘기는 것은
-    누락이 아니라 **범위 안의 것만 배선**한 것이다."""
+    래더 셋(`partial_take_profit_r`·`partial_take_profit_fraction`·`breakeven_after_partial`,
+    WAN-323 옵트인)도 마찬가지로 루프를 그대로 탄다 — **재진입 거래도 base 거래와 같은 래더
+    규칙**을 받는다. ⚠️ **여기는 고쳐진 자리다(WAN-345)**: WAN-323 커밋 `af1a550`이 시그니처만
+    넓히고 배선을 빠뜨려, 래더를 켠 북 팔에서도 **재진입 거래만 조용히 전량 익절**로 돌았다
+    (`_iter_reentries` 독스트링이 「팔마다 규칙이 갈리면 잡종 엔진」이라 적어 둔 바로 그 상태).
+    회귀 테스트는 인자 전달 여부가 아니라 **재진입 거래에 부분 청산이 실제로 생기는지**로
+    건다 — 넘기는 줄만 보는 테스트는 같은 실패를 또 통과시킨다.
+
+    🚨 **WAN-323 §2 · WAN-330의 공개 CSV는 이 결함 위에서 산출됐다** — 그 표들의 재진입
+    거래는 래더를 안 받았다. 고친 엔진으로 재산출할지는 **사용자 결정**이라(팔당 66분 ×
+    6팔 = 7시간+) WAN-345는 재산출 대신 두 리포트 md와 CLAUDE.md에 시점 배너를 달았다."""
     # WAN-346: 재진입 후보에 라벨을 단다(`is_reentry=True`) — `_segment_cells`가 base
     # 재탭 후보와 합친 뒤에는 둘을 되가를 방법이 없었다. 순수 라벨이라 체결·청산·손익·
     # 후보 집합 어디에도 안 쓰이고, 라벨을 다는 **한 곳**이 여기다(합류 지점에서 달면
@@ -472,6 +475,9 @@ def reentry_candidates(
             cfg=cfg,
             funding_rates=funding_rates,
             entry_rule=entry_rule,
+            partial_take_profit_r=partial_take_profit_r,
+            partial_take_profit_fraction=partial_take_profit_fraction,
+            breakeven_after_partial=breakeven_after_partial,
             no_same_step_tp=no_same_step_tp,
         )
     ]
