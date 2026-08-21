@@ -1821,7 +1821,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="백테스트 워밍업 길이(일). 라이브 전-이력 존 재고 근사 노브 — 길수록 느리다",
     )
     p_stop_width.add_argument(
-        "--jobs", type=int, default=1, help="백테스트 (심볼, TF) 병렬 워커 수(기본 1)"
+        "--jobs",
+        type=int,
+        default=None,
+        help=(
+            "백테스트 (심볼, TF) 병렬 워커 수. 미지정이면 설정 기본값"
+            "(ALPHABLOCK_BACKTEST_JOBS, 기본 4 · WAN-294/354). 결과는 --jobs 값과 무관하게 동일하다"
+        ),
     )
     p_stop_width.add_argument(
         "--symbol",
@@ -1868,7 +1874,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="백테 대조 TF를 좁힌다(탐색용 옵트인). 미지정 = 채택 작업 TF 전부",
     )
     p_compare.add_argument(
-        "--jobs", type=int, default=1, help="백테스트 (심볼, TF) 병렬 워커 수(기본 1)"
+        "--jobs",
+        type=int,
+        default=None,
+        help=(
+            "백테스트 (심볼, TF) 병렬 워커 수. 미지정이면 설정 기본값"
+            "(ALPHABLOCK_BACKTEST_JOBS, 기본 4 · WAN-294/354). 결과는 --jobs 값과 무관하게 동일하다"
+        ),
     )
     p_compare.set_defaults(func=cmd_compare)
 
@@ -1893,7 +1905,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_parity.add_argument("--tf", default=None, help="대조 TF(콤마, 기본: 장부에 있는 셀)")
     p_parity.add_argument("--by-cell", action="store_true", help="심볼×TF별 대조 표도 출력")
     p_parity.add_argument(
-        "--jobs", type=int, default=1, help="백테스트 (심볼, TF) 병렬 워커 수(기본 1)"
+        "--jobs",
+        type=int,
+        default=None,
+        help=(
+            "백테스트 (심볼, TF) 병렬 워커 수. 미지정이면 설정 기본값"
+            "(ALPHABLOCK_BACKTEST_JOBS, 기본 4 · WAN-294/354). 결과는 --jobs 값과 무관하게 동일하다"
+        ),
     )
     p_parity.set_defaults(func=cmd_parity)
 
@@ -1993,7 +2011,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="백테스트 워밍업 길이(일). 라이브 전-이력 존 재고 근사 노브 — 길수록 느리다",
     )
     p_trades.add_argument(
-        "--jobs", type=int, default=1, help="백테스트 (심볼, TF) 병렬 워커 수(기본 1)"
+        "--jobs",
+        type=int,
+        default=None,
+        help=(
+            "백테스트 (심볼, TF) 병렬 워커 수. 미지정이면 설정 기본값"
+            "(ALPHABLOCK_BACKTEST_JOBS, 기본 4 · WAN-294/354). 결과는 --jobs 값과 무관하게 동일하다"
+        ),
     )
     p_trades.set_defaults(func=cmd_trades)
 
@@ -2088,11 +2112,54 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def resolve_jobs_arg(jobs: int | None) -> tuple[int, str]:
+    """`--jobs` 값을 워커 수 + **그 값이 어디서 왔는지**로 푼다 (WAN-354).
+
+    미지정(`None`)이면 설정 기본값(`harness.default_jobs()` = `ALPHABLOCK_BACKTEST_JOBS`,
+    기본 4)을 쓰고, 명시적으로 준 값은 그대로 이긴다 — `backtest.run`의 `jobs_from_arg`와
+    **같은 규약**이다.
+
+    🚨 이 함수가 생긴 이유가 이 이슈의 본문이다(WAN-354 §1): 이 CLI의 백테를 부르는 네
+    하위 명령(`trades`·`compare`·`stop-width`·`parity`)은 `--jobs` 기본값을 **리터럴 1로
+    박아** 두고 있어서, 설정을 아무리 덮어도 그 경로에는 **닿지 않았다**. 즉 야간 크론
+    (`alphablock trades --persist-cache`, 인자 없음)은 4-way 오버서브가 아니라 **직렬**로
+    돌았고, `ALPHABLOCK_BACKTEST_JOBS`를 서버 `.env`에 넣어도 **아무 일도 일어나지 않았다**.
+    「덮어쓰기 자리가 안 쓰였다」의 한 겹 아래에 「그 자리가 이 경로에는 배선조차 안 돼
+    있었다」가 있었다.
+
+    ⚠️ 화면 버튼(대시보드)은 여기 오지 않는다 — 거기는 의도적으로 직렬(`jobs=1`)이다
+    (워커마다 1분봉 사본을 들어 `BrokenProcessPool`이 났다, WAN-324). 이 함수는 CLI 전용이다.
+
+    ⚠️ `--jobs`는 결과를 안 바꾸는 **순수 성능 노브**다(WAN-121: 직렬 = 병렬 비트 동일).
+    이 배선으로 측정값·재현성은 하나도 안 움직인다.
+    """
+    if jobs is not None:
+        return jobs, f"--jobs {jobs} 명시"
+    # 지연 임포트 — 이 모듈은 백테 패키지를 함수 안에서만 부른다(CLI 기동 비용).
+    from backtest.harness import default_jobs
+
+    resolved = default_jobs()
+    return resolved, f"--jobs 미지정 → 설정 ALPHABLOCK_BACKTEST_JOBS={resolved}"
+
+
 def main(argv: list[str] | None = None) -> int:
     """콘솔 스크립트 진입점(`alphablock`)."""
     _configure_logging()
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    # WAN-354: 워커 수를 **한 곳에서** 푼다. 하위 명령마다 각자 풀면 「하나는 설정을 읽고
+    # 하나는 1로 박힌」 지금 상태가 다시 만들어진다. 하위 명령은 예전처럼 `args.jobs`를
+    # 정수로 읽으면 된다.
+    if hasattr(args, "jobs") and args.jobs is None:
+        args.jobs, origin = resolve_jobs_arg(None)
+        # 서버에서 「설정이 먹었나」를 로그로 확인할 근거다(WAN-354 완료 기준 2).
+        # stdout은 표/CSV 전용이라 stderr로 간다.
+        # ⚠️ **「설정」이라고 밝힌다** — 캐시가 다 맞으면 fan-out 자체가 없어 워커가 한
+        # 개도 안 뜬다. 실제로 뜬 수를 뜻하는 것처럼 적으면 그것이야말로 이 이슈가
+        # 잡으려는 「라벨과 동작이 어긋남」이다.
+        print(f"병렬 설정: 워커 {args.jobs}개 ({origin})", file=sys.stderr)
+
     settings = get_settings()
     func = args.func
     result: int = func(args, settings)

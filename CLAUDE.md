@@ -3109,6 +3109,33 @@ uv run python -m backtest.run --symbol BTCUSDT --tf 15m --persist         # DB �
 크게 잡힌다. 격자가 작으면 프로세스 기동 비용(spawn 재임포트)이 이득을 넘겨 **오히려
 느리다**(600봉 합성 6심볼에서 2.3s → 4.5s). 조합이 많은 스윕일수록 유리하다.
 
+🚨 **그 설정이 `alphablock` CLI에는 배선조차 안 돼 있었다(WAN-354)** —
+[`docs/decisions/wan354.md`](docs/decisions/wan354.md). 백테를 부르는 네 하위 명령
+(`trades`·`compare`·`stop-width`·`parity`)이 `--jobs` 기본값을 **리터럴 1로 박아** 둬서
+`ALPHABLOCK_BACKTEST_JOBS`를 아무리 덮어도 그 경로에는 **닿지 않았다**. 함의 둘:
+(1) **야간 크론(`trades --persist-cache`, 인자 없음)은 오버서브가 아니라 직렬로 돌았다** —
+「2코어에서 4-way로 돈다」는 그 경로에 대해선 **사실이 아니었다**(WAN-322/324 서버 실측
+6분 23초도 직렬 값이고, `user`가 2분 13초뿐이라 **병목은 CPU가 아니라 디스크**다).
+(2) 서버 `.env`에 값을 넣어도 아무 일도 안 일어났을 것이다. 이제 네 명령이 미지정 시
+`harness.default_jobs()`를 쓰고(명시 `--jobs N`이 이긴다) **그 값을 stderr 첫 줄에** 찍는다(`병렬 설정: 워커 N개 (…)`). 격자도 **요청값이 아니라 셀 수로 캡된 실제 값**을
+찍는다. ⚠️ **대시보드 화면 버튼은 여전히 직렬이다**(워커마다 1분봉 사본 → `BrokenProcessPool`,
+WAN-324) — 이 설정을 안 읽는다.
+- 📌 **`.env`는 이제 CWD 기준 + 저장소 루트 기준 둘 다 읽는다**(뒤가 이기므로 CWD 판이
+  여전히 최우선 · 순수 추가). 옛 코드는 CWD 상대 하나뿐이라 저장소 밖 실행이 조용히
+  기본값으로 돌았다 — 서버가 맞았던 건 크론이 `cd`를 하고 유닛이 `WorkingDirectory`를
+  두기 **때문**이지 설계 덕이 아니었다.
+- 📌 **서버 설정은 `.env` 한 자리가 세 경로(크론·systemd·손 CLI)를 전부 덮는다** — 코어
+  수에 맞춘다(서버 실측 **2코어** → `ALPHABLOCK_BACKTEST_JOBS=2`). 절차는
+  [`docs/ops/server-migration.md`](docs/ops/server-migration.md) §2a, 확인은
+  `./scripts/wan354-server-jobs-check.sh`(읽기 전용) · `python -m scripts.wan354_jobs_probe`
+  (워커가 정말 그 수만큼 뜨는지 = **라벨이 아니라 동작**). 🚨 **크론 줄에만 숫자를 박지
+  말 것** — 화면 버튼·`stop-width`·손으로 치는 실행이 각자 다른 값으로 돈다.
+- ⚠️ **유닛 템플릿에 `EnvironmentFile=`을 일부러 넣지 않았다** — 유닛이 이미
+  `WorkingDirectory=<저장소>`로 그 `.env`를 읽고, 두 자리에 같은 값을 두면 갈라진다
+  (게다가 `.env`에는 API 키·텔레그램 토큰이 있어 `systemctl show`로 샌다).
+- ⚠️ **코드 기본값 4는 안 바꿨다**(M1 성능 코어 수) · **측정값·재현성·캐시 지문 불변**
+  (`--jobs`는 순수 성능 노브) — 옛 표 재산출·캐시 되채우기 **불필요**.
+
 공통 골격은 `backtest/harness.py`(데이터 로딩·파라미터 조립·경로 스위치·구간 분할·렌더)다.
 새 `wanNN_*.py` 리포트는 **CLI로 답이 안 나오는 것**(사후 분해·편향 진단·결론 문장이
 필요한 분석)에만 만들고, 그때도 골격은 harness에서 가져다 쓴다. 일회성 스크립트

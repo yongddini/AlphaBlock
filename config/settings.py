@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from pydantic import Field
@@ -107,11 +108,25 @@ def _default_paper_trade_notify_events() -> list[str]:
     return ["filled", "exit", "daily_summary"]
 
 
+#: 저장소 루트(= 이 패키지의 부모 디렉터리).
+#:
+#: WAN-354: `env_file=".env"`는 **CWD 기준 상대 경로**라, 저장소 밖에서 실행하면 `.env`가
+#: 조용히 무시되고 코드 기본값으로 돈다(실측: `cd /tmp` → `backtest_jobs` 4). 서버에서
+#: 크론은 `cd <저장소>`를 하고 systemd 유닛은 `WorkingDirectory=<저장소>`를 두므로 오늘은
+#: 우연히 맞지만, 그 우연이 깨지는 순간 **「설정했다고 믿으면서 기본값으로 도는」** 상태가
+#: 된다(WAN-91/95/112/123/159와 같은 부류의 조용한 실패). 그래서 저장소 루트의 `.env`를
+#: **폴백으로** 함께 읽는다.
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
 class Settings(BaseSettings):
     """환경변수/.env 기반 설정 값."""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        # 뒤쪽 파일이 이긴다(pydantic-settings 규약) — 즉 **CWD의 `.env`가 여전히 최우선**
+        # 이고 저장소 루트 판은 그것이 없을 때만 쓰인다. 기존 동작은 그대로 두고 구멍만
+        # 막는 순수 추가다(WAN-354 §1). 실제 환경변수는 어느 `.env`보다도 이긴다.
+        env_file=(_REPO_ROOT / ".env", ".env"),
         env_file_encoding="utf-8",
         env_prefix="ALPHABLOCK_",
         env_nested_delimiter="__",

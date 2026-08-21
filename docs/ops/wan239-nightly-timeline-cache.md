@@ -47,16 +47,24 @@ YESTERDAY=$(TZ=Asia/Seoul date -d 'yesterday' +%F)   # GNU date(리눅스 서버
 
 ```cron
 # 매일 KST 00:30(= UTC 15:30) — 전일(KST) 하루치 백테 타임라인 캐시 적재
-30 15 * * *  cd /path/to/AlphaBlock && /usr/bin/env TZ=Asia/Seoul bash -lc 'uv run python -m cli.main trades --day "$(TZ=Asia/Seoul date -d yesterday +%F)" --persist-cache --jobs 8' >> /var/log/alphablock/timeline-cache.log 2>&1
+30 15 * * *  cd /path/to/AlphaBlock && /usr/bin/env TZ=Asia/Seoul bash -lc 'uv run python -m cli.main trades --day "$(TZ=Asia/Seoul date -d yesterday +%F)" --persist-cache' >> /var/log/alphablock/timeline-cache.log 2>&1
 ```
+
+🚨 **`--jobs`를 크론 줄에 박지 않는다(WAN-354).** 워커 수는 `.env`의
+`ALPHABLOCK_BACKTEST_JOBS`가 정하고, 그 값은 **서버 코어 수에 맞춘다**
+(`docs/ops/server-migration.md` §2a). 옛 예시의 `--jobs 8`을 2코어 서버에 그대로 옮기면
+4-way 오버서브가 된다 — 이 크론은 페이퍼 러너·수집기가 **살아 있는 시각**에 돈다.
+크론 줄에만 숫자를 박으면 화면 버튼·`stop-width`·손으로 치는 실행이 각자 다른 값으로
+도는 「고쳤다고 믿으면서 다른 경로는 그대로인」 상태가 된다(WAN-91/95/112/123/159 부류).
+그 실행이 무슨 값으로 돌았는지는 로그 첫 줄에 남는다: `grep -m1 '^병렬 설정:' <로그>`.
 
 - **먼저 서버 시간대를 확인한다**: `date` (또는 `timedatectl`). 두 경우를 다 적어 뒀으므로
   읽는 사람이 골라야 한다 — 지금 서버는 **KST**다(사용자 확인 2026-08-17).
 - 서버 시간대가 이미 KST면 `30 15`를 `30 0`으로 바꾼다.
 - 로그 디렉터리(`/var/log/alphablock/`)는 미리 만들어 둔다(`mkdir -p`).
 - 백테 격자는 서버(1GB 박스)에서 OOM 위험이 있다(WAN-174 런북) — 이 캐시 적재는 **하루치
-  1일 창**이라 6년 격자보다 훨씬 가볍지만, 메모리가 빠듯하면 `--jobs`를 낮추거나 맥에서
-  돌려 캐시 DB를 서버로 동기화한다.
+  1일 창**이라 6년 격자보다 훨씬 가볍지만, 메모리가 빠듯하면 `ALPHABLOCK_BACKTEST_JOBS`를
+  낮추거나(= 그 실행에만 `--jobs 1`) 맥에서 돌려 캐시 DB를 서버로 동기화한다.
 
 ## 실측 소요 시간 (완료 기준 5)
 
@@ -86,8 +94,11 @@ YESTERDAY=$(TZ=Asia/Seoul date -d 'yesterday' +%F)   # GNU date(리눅스 서버
 
 - 6년 측정 격자(셀당 ~37분, `intrabar_live` 밴드 비용)와 달리 이 캐시는 **하루 창 + 120일
   워밍업**이라 셀당 초 단위다 — 야간 크론에 충분히 가볍다.
-- 서버(오라클 무료 티어 x86 1 OCPU)는 코어가 적어 더 걸리지만, 전 칸 × 초 단위라 분 단위를
-  넘지 않을 것으로 본다(서버 실측은 등록 후 로그로 확인).
+- 서버(오라클 무료 티어 x86)는 코어가 적어 더 걸린다 — **실측 2코어**(사용자 확인
+  2026-08-21)이고 하루치 적재가 **6분 23초**였다(WAN-322/324 서버 실측). 그 실행의
+  `user`가 2분 13초뿐이라 **병목은 CPU가 아니라 디스크 I/O**이므로, 워커 수를 만져도
+  크게 빨라지지 않는다 — `ALPHABLOCK_BACKTEST_JOBS`를 코어 수에 맞추는 것은 속도가
+  아니라 **러너·수집기와 자원을 다투지 않게 하는** 조치다(WAN-354).
 
 ## 조회(캐시만 읽음)
 

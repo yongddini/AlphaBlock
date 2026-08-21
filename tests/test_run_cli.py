@@ -608,6 +608,26 @@ def test_jobs_explicit_arg_beats_settings(monkeypatch: pytest.MonkeyPatch) -> No
     assert jobs_from_arg("1") == 1
 
 
+def test_run_grid_logs_the_worker_count_actually_used(
+    synthetic_db: tuple[str, str], capsys: pytest.CaptureFixture[str]
+) -> None:
+    """격자가 **실제로 풀에 넘어간 워커 수**를 남긴다 (WAN-354).
+
+    요청값이 아니라 셀 수로 캡된 값이라야 로그로 「설정이 먹었나」를 판정할 수 있다 —
+    서버에서 사후에 확인할 근거가 이 줄이다(WAN-354 완료 기준 2). stdout 은 표/CSV
+    전용이라 stderr 로 간다.
+    """
+    grid = _grid_from(["--symbol", "BTCUSDT", "--tf", "1h", "--max-zone-width-atr", "none"])
+    options = _parallel_options(synthetic_db)
+    run_grid(grid, options, log=True, jobs=4)
+    # 셀이 1개뿐이라 4를 요청해도 실제로 쓰는 워커는 1이다 — 로그가 그 사실을 말해야 한다.
+    assert "병렬: 워커 1개 (1셀)" in capsys.readouterr().err
+
+    grid = _grid_from(list(_PARALLEL_ARGV))
+    run_grid(grid, options, log=True, jobs=4)
+    assert "병렬: 워커 2개 (2셀)" in capsys.readouterr().err
+
+
 def test_run_grid_jobs_produces_identical_rows_to_serial(synthetic_db: tuple[str, str]) -> None:
     """완료기준: `N>1`의 결과 행이 직렬과 **순서까지** 완전히 동일하다.
 
@@ -668,7 +688,18 @@ def test_main_jobs_keeps_stdout_and_stderr_identical(
     parallel = capsys.readouterr()
 
     assert parallel.out == serial.out
-    assert parallel.err == serial.err
+
+    # WAN-354: 워커 수를 알리는 첫 줄 **하나만** 일부러 다르다 — 그 줄이 재는 것은 계산이
+    # 아니라 「지금 몇 개로 도나」라는 성능 노브 자체다(서버에서 설정이 먹었는지 확인하는
+    # 근거). 나머지 진행 로그는 여전히 비트 단위로 같아야 한다: 그것이 WAN-121 불변이다.
+    def _progress(err: str) -> list[str]:
+        return [line for line in err.splitlines() if not line.startswith("병렬: 워커 ")]
+
+    assert _progress(parallel.err) == _progress(serial.err)
+    assert "병렬: 워커 1개 (2셀)" in serial.err
+    assert "병렬: 워커 2개 (2셀)" in parallel.err
+    # 그 한 줄 말고는 차이가 없다(위 비교가 통과했으니 줄 수 차이도 1줄 이내여야 한다).
+    assert len(parallel.err.splitlines()) == len(serial.err.splitlines())
     assert "[run]" in serial.err
 
 
