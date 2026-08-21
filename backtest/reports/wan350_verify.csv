@@ -1,0 +1,3 @@
+check,reference,rows_compared,max_abs_diff,status,note
+armA-filter-on-vs-wan176,backtest/reports/wan176_null.csv,18,7.105427357601002e-15,잡음,최대 절대차 7.11e-15 — 부동소수 끝자리(메모리 원값 대 CSV 왕복).
+armA-filter-off-vs-wan201,backtest/reports/wan201_matched_null.csv,18,7.105427357601002e-15,잡음,최대 절대차 7.11e-15 — 부동소수 끝자리(메모리 원값 대 CSV 왕복).
