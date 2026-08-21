@@ -1,0 +1,44 @@
+# AlphaBlock 운영 상태 워치 oneshot (WAN-32, 등록 = WAN-344).
+#
+# scripts/install-systemd.sh 가 __PLACEHOLDER__ 를 치환해
+# /etc/systemd/system/alphablock-watch.service 로 설치한다. 부팅 시 자동 시작하지
+# 않는다 — 짝인 alphablock-watch.timer 가 주기적으로 트리거한다.
+#
+# 왜 필요한가(WAN-344): 수집기와 러너는 **별개 프로세스**라 러너만 죽으면 봉은 계속
+# 신선하고(→ stale_series 경보 안 울림) 대시보드도 정상으로 보인다. doctor(1d·1h)는
+# DB 무결성·인구조사를 보지 **러너 생존을 안 본다**. 러너 정지를 아는 장치는
+# `alphablock watch`(live.health_watch) 하나뿐인데 서버 실측(2026-08-20) 결과 크론에도
+# 타이머에도 **아무 데도 등록돼 있지 않았다** — 34분·41분 정지 동안 아무도 몰랐다.
+#
+# 왜 상시 service 가 아니라 timer + --once 인가:
+#   • 쿨다운·복구 상태가 JSON 파일(health_watch_state_path)로 영속화돼 있어 매번 새
+#     프로세스로 돌아도 중복 경고가 나지 않는다(WAN-32 설계, 테스트가 동작으로 고정).
+#   • 상시 프로세스는 죽으면 그 사실을 알 장치가 또 필요하다(감시의 감시). 타이머는
+#     프로세스가 죽어도 다음 주기에 그냥 다시 뜬다 — doctor 와 같은 패턴이다.
+#
+# 🚨 --require-delivery 가 이 유닛의 핵심이다(WAN-344 §4-4): 텔레그램이 미설정이거나
+# 전송이 실패하면 종료 코드 2/1 을 내 systemd 가 이 유닛을 "failed" 로 기록한다
+# (`systemctl --failed` 감시). 이게 없으면 「감시는 도는데 경보는 아무 데도 안 가는」
+# 상태가 성공으로 보인다 — WAN-321 이 고친 실패 부류(경보가 안 가는데 그 사실도
+# 경보되지 않음)와 정확히 같은 자리다.
+# ⚠️ 그래서 이 유닛에도 SuccessExitStatus 를 넣지 않는다(doctor 와 같은 이유).
+
+[Unit]
+Description=AlphaBlock health watch, one check with Telegram alerts (WAN-32, WAN-344)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=__RUN_USER__
+WorkingDirectory=__WORKDIR__
+Environment=PATH=__PATH__
+ExecStart=__UV_BIN__ run -- alphablock watch --once --require-delivery
+
+# 점검은 DB 를 읽는다 — 수집기·러너와 디스크를 두고 싸우지 않게 물러선다(WAN-318 §1).
+Nice=19
+IOSchedulingClass=idle
+
+# 수집기·러너·대시보드·doctor 와 같은 파일 로그 규약. journald 보존이 짧아(서버 실측
+# 3시간) 과거 조사는 사실상 이 파일로만 된다(WAN-344 부수 발견).
+StandardOutput=append:__LOG_DIR__/watch.log
+StandardError=append:__LOG_DIR__/watch.log

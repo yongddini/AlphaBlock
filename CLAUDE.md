@@ -2177,6 +2177,51 @@ DB 풀스캔이 상시 걸려 있었다 · 정상 정지가 `failed`로 보였�
 - 📌 **템플릿 변경은 `deploy.sh`로 반영되지 않는다** — 유닛 파일은 `install-systemd.sh`를
   다시 돌려야 갱신된다(절차: `docs/ops/server-migration.md` §4b, 백업은 §4c).
 
+📌 **러너 정지 감시를 등록했다(WAN-344 §4 — §1~§3은 「크래시 아님」으로 닫힘): 러너가 죽은 걸
+아는 유일한 장치(`alphablock watch`)가 서버 어디에도 안 돌고 있었다.**
+[`docs/decisions/wan344.md`](docs/decisions/wan344.md) · 런북
+[`docs/ops/wan344-runner-watch.md`](docs/ops/wan344-runner-watch.md). 운영/도구 전용 —
+**전략·엔진·기본값·토대 불변**(`ConfluenceParams()`·`LeverageBookParams()` 그대로) · DB 불변
+(WAN-194) · 실거래 보류 유지(`ALPHABLOCK_LIVE_TRADING=false`).
+- 🚨 **왜 조용한 위험인가** — 수집기와 러너는 **별개 프로세스**라 러너만 죽으면 봉은 계속
+  신선하고(→ `stale_series` 백업 경보도 안 울림) 대시보드도 정상으로 보인다. **doctor(1d·1h)는
+  DB 무결성·인구조사를 보지 러너 생존을 안 본다.** 서버 실측(2026-08-20): `crontab`·
+  `systemctl list-timers`·`scripts/systemd/` **세 곳 전부에 watch 경로 없음** — 그 기간 정지
+  공백 11분·34분·41분 동안 아무 경보도 안 갔다.
+- 📌 **§1~§3은 조사로 닫혔다 — 재시작 10회는 크래시가 아니다**(크래시 증거가 앱 로그·journald·
+  커널 로그 **세 축 전부 0** · 정지 로그는 `Deactivated successfully` = 정상 SIGTERM · 그 기간
+  배포 다수). 34·41분 공백은 **(b) 사람이 정지 후 늦게 시작**이다(`Restart=always`는 **정상
+  정지에는 재시작하지 않는다**). 🚨 **그래서 유닛의 `Restart`·`StartLimit*`를 손대지 않았다** —
+  원인이 크래시가 아닌데 재시작 정책을 늘리면 증상만 가린다.
+- 📌 **상주 service 가 아니라 timer + `--once`**(`alphablock-watch.timer`, 기본 10min =
+  `health_watch_interval_seconds` 600초와 같은 값 · `ALPHABLOCK_WATCH_INTERVAL`): (1) 쿨다운·복구
+  상태가 `health_watch_state_path` JSON 으로 **이미 영속화**돼 매번 새 프로세스로 돌아도 중복
+  경고가 없고(= 이슈 §4-3의 답), (2) **상주 프로세스는 죽으면 그 사실을 알 장치가 또 필요하다**
+  (감시의 감시) — 타이머는 다음 주기에 그냥 다시 뜬다(doctor 패턴). `install-systemd.sh watch` ·
+  `all` 포함이고 회귀 테스트가 **`all` 분기의 실제 호출**로 잠근다(이 이슈의 본문이 정확히
+  「목록에 없어서 안 돌았다」이므로 라벨이 아니라 동작으로).
+- 🚨 **`--require-delivery`(신설 옵트인)가 유닛의 핵심** — 종료 코드 **0** 정상 · **1** 전송
+  실패 · **2** 텔레그램 미설정. 이게 없으면 미설정 시 워치가 **조용히 드라이런으로 접고 0을
+  낸다** = 「감시는 도는데 아무 데도 안 가는」 상태가 systemd 에서 성공으로 보인다(WAN-321이
+  고친 실패 부류와 같은 자리). ⚠️ 그래서 이 유닛에도 **`SuccessExitStatus`를 넣지 않는다**
+  (doctor와 같은 이유 — 넣으면 `systemctl --failed` 감시가 조용히 죽는다).
+- ⚠️ **기본 동작은 안 바뀐다** — 플래그 없이는 예전처럼 미설정 시 드라이런 + 0. 딱 하나 바뀐
+  것은 **`--test-message`가 실패 시 1/2를 낸다**는 것이다(**확인이 실패했는데 0을 내면 그건
+  확인이 아니다** — 이슈 §4-4).
+- 📌 **부수 수리: 전송 실패가 쿨다운을 걸고 있었다**(`apply_delivery_failures`, 순수 함수).
+  옛 동작은 `reconcile` 결과를 그대로 저장해 **실패해도 「방금 보냄」으로 기록** → 그 뒤 1시간
+  동안 **재시도조차 안 했다**. 이제 실패한 것만 되돌린다(첫 경고는 지우고 · 리마인더는 옛
+  타임스탬프 유지 · 복구 알림은 기록을 되살림). WAN-321의 평문 폴백은 **서식** 실패를 구제할
+  뿐 네트워크 실패는 남는다.
+- ⚠️ **남은 것은 서버 1회 실증**(세션에 SSH 없음, WAN-195/314와 같은 제약):
+  `./scripts/install-systemd.sh watch` → `alphablock watch --test-message`로 **폰에 실제로
+  도착하는지**. **등록만 하고 도착을 안 보면 같은 자리다.** ⚠️ 유닛 템플릿은 `deploy.sh`로
+  반영되지 않는다(`install-systemd.sh` 재실행 — WAN-318 §7).
+- ⚠️ **WAN-343의 원인이 아니다**(거기서 재시작 가설은 실측으로 기각 — 클러스터 3개 중 1개만
+  겹침). 두 이슈의 결론을 섞지 말 것. **부수 발견: journald 보존이 3시간**이라 과거 재시작
+  조사가 막혔다(파일 로그 덕분에만 과거를 봤다) — `journald.conf` 조정은 **별도 조각**이고
+  런북에 확인 명령만 적었다.
+
 📌 **doctor 경보 두 겹 수리(WAN-321 = WAN-320 서버 확인 중 발견): 「정상이 실패로 보임」 +
 「경보가 아예 안 감」.** [`docs/decisions/wan321.md`](docs/decisions/wan321.md). 운영/알림
 전용 — **전략·엔진·기본값·토대 불변**(`ConfluenceParams()`·`LeverageBookParams()` 그대로 ·

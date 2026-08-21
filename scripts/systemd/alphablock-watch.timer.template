@@ -1,0 +1,28 @@
+# AlphaBlock 운영 상태 워치 타이머 (WAN-32, 등록 = WAN-344).
+#
+# 부팅 2분 뒤 첫 실행 + 이후 __WATCH_INTERVAL__ 마다 alphablock-watch.service 를
+# 트리거한다. 간격은 install-systemd.sh 실행 시 ALPHABLOCK_WATCH_INTERVAL 로 조정한다
+# (기본 10min = 설정 기본값 health_watch_interval_seconds=600 과 같은 값).
+#
+# 부팅 오프셋을 doctor(5min)·doctor-light(10min)와 어긋나게 2분에 둔 이유: 부팅 직후
+# 셋이 동시에 디스크를 물지 않게 하기 위해서다. 워치를 가장 앞에 두는 것은 「무엇이
+# 안 뜬다」를 가장 먼저 알아야 하기 때문이다.
+#
+# 🚨 이 주기는 「러너가 죽고 몇 분 만에 알 것인가」다. 늘리면 그만큼 늦게 안다 —
+# 서버 실측 정지 공백이 11분·34분·41분이었다(WAN-344). 10분보다 크게 잡지 말 것.
+# ⚠️ 점검 자체는 가볍다(Health 뷰 = 시리즈별 최신 봉 조회 + 하트비트 파일 읽기) —
+# doctor 처럼 「주기 < 실행 시간」이 될 위험이 없다.
+#
+# Persistent=true: 서버가 꺼져 있어 놓친 실행이 있으면 부팅 후 한 번 만회한다.
+
+[Unit]
+Description=AlphaBlock health watch timer (WAN-32, WAN-344)
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=__WATCH_INTERVAL__
+Persistent=true
+Unit=alphablock-watch.service
+
+[Install]
+WantedBy=timers.target

@@ -919,9 +919,14 @@ uv run alphablock status                                     # 상태 요약
 
 ```bash
 ./scripts/setup-server.sh               # 서버 1회 셋업(스왑 2GB + uv + 의존성)
-./scripts/install-systemd.sh            # 셋 다 설치·시작(부팅 시 자동 시작 포함)
+./scripts/install-systemd.sh            # 다섯 다 설치·시작(부팅 시 자동 시작 포함)
 ./scripts/uninstall-systemd.sh          # 해제(로그는 남김)
 ```
+
+설치되는 유닛: 서비스 셋(`collector`·`live`·`dashboard`) + 타이머 셋
+(`doctor` 전수 1d · `doctor-light` 1h · **`watch` 10분** = 러너 정지 경보, WAN-344).
+🚨 **`watch` 를 빼지 말 것** — 수집기와 러너는 별개 프로세스라 **러너만 죽으면** 봉은 계속
+신선하고 대시보드도 정상으로 보인다. doctor 는 DB 무결성만 보지 러너 생존을 안 본다.
 
 서버 프로비저닝·`.env`/DB 이전(WAL 체크포인트)·검증 절차·DB 배치 설계(수집=서버 /
 백테스트=로컬)는 [docs/ops/server-migration.md](docs/ops/server-migration.md) 참고.
@@ -939,7 +944,17 @@ uv run alphablock watch                 # 상주(기본 10분마다 점검)
 uv run alphablock watch --once          # 1회 점검 후 종료(점검용)
 uv run alphablock watch --dry-run       # 텔레그램 전송 없이 경고를 로그로만 출력
 uv run alphablock watch --test-message  # 텔레그램 연결 확인용 메시지 1건 전송
+uv run alphablock watch --once --require-delivery   # 미설정·전송 실패를 종료 코드로(systemd 판)
 ```
+
+📌 **서버에서는 상주가 아니라 systemd 타이머로 돈다**(`alphablock-watch.timer`, 10분 —
+WAN-344). 등록은 `./scripts/install-systemd.sh watch`, 절차·확인은
+[docs/ops/wan344-runner-watch.md](docs/ops/wan344-runner-watch.md).
+
+**종료 코드**(WAN-344): `0` 정상 · `1` 전송 실패 · `2` 텔레그램 미설정. 점검 모드에서 그
+구분이 코드로 나오려면 `--require-delivery` 가 필요하다(없으면 예전처럼 미설정 시 드라이런으로
+접고 0). `--test-message` 는 연결 확인이 목적이라 플래그 없이도 실패를 코드로 낸다 — **확인이
+실패했는데 0을 내면 그건 확인이 아니다.**
 
 **경고 대상** — 각 항목이 WAN-30 기준으로 stale(빨강)이면 경고한다:
 
@@ -950,8 +965,12 @@ uv run alphablock watch --test-message  # 텔레그램 연결 확인용 메시�
 
 **플래핑 방지**: 동일 이상은 쿨다운(기본 60분) 내 1회만 보내고, 계속되면 쿨다운마다 1회씩
 리마인더를 보낸다. 이상이 사라지면 **"✅ 정상 복구"** 알림을 1회 보낸다. 발효 중인 경고
-상태는 `data/health_watch_state.json`에 남겨, 워치를 재시작해도 중복 경고를 보내거나 복구
-알림을 놓치지 않는다.
+상태는 `data/health_watch_state.json`에 남겨, 워치를 재시작해도(=타이머가 매번 새 프로세스로
+돌아도) 중복 경고를 보내거나 복구 알림을 놓치지 않는다.
+
+⚠️ **전송에 실패한 메시지는 「보냈다」로 기록하지 않는다**(WAN-344) — 안 그러면 경보가 안
+갔는데 쿨다운(1시간)이 걸려 그동안 재시도조차 하지 않는다. 실패한 것만 이전 상태로 되돌려
+다음 점검이 다시 보낸다.
 
 **설정**(`.env`):
 

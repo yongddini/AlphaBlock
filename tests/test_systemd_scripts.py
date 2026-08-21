@@ -23,6 +23,8 @@ _SETUP = _REPO / "scripts" / "setup-server.sh"
 _LABELS = ("collector", "live", "dashboard")
 #: 타이머로 도는 oneshot 점검 쌍(WAN-185 전수 + WAN-318 §2 싼 점검).
 _DOCTOR_UNITS = ("alphablock-doctor", "alphablock-doctor-light")
+#: 운영 상태 워치(WAN-32) — 등록은 WAN-344.
+_WATCH_UNIT = "alphablock-watch"
 
 
 @pytest.mark.parametrize("label", _LABELS)
@@ -218,3 +220,82 @@ def test_setup_server_creates_swap_and_installs_uv() -> None:
 def test_scripts_are_executable() -> None:
     for script in (_INSTALL, _UNINSTALL, _SETUP):
         assert script.stat().st_mode & 0o111, f"{script.name} 에 실행 권한이 없다"
+
+
+# -- 운영 상태 워치 (WAN-344) --------------------------------------------------
+
+
+def test_watch_timer_pair_exists() -> None:
+    for suffix in (".service", ".timer"):
+        assert (_SYSTEMD / f"{_WATCH_UNIT}{suffix}.template").is_file()
+
+
+def test_watch_runs_one_check_and_demands_delivery() -> None:
+    """🚨 WAN-344 §4-4: 「감시는 도는데 경보는 아무 데도 안 가는」 상태가 성공이면 안 된다.
+
+    `--require-delivery` 가 있어야 텔레그램 미설정·전송 실패가 종료 코드로 나오고
+    systemd 가 `failed` 로 기록한다. `--once` 는 타이머 판이라는 뜻이다.
+    """
+    text = (_SYSTEMD / f"{_WATCH_UNIT}.service.template").read_text()
+    assert "Type=oneshot" in text
+    assert "alphablock watch --once --require-delivery" in text
+
+
+def test_watch_keeps_failure_monitoring() -> None:
+    """doctor 와 같은 이유로 SuccessExitStatus 를 넣지 않는다 — 넣으면 감시가 죽는다."""
+    text = (_SYSTEMD / f"{_WATCH_UNIT}.service.template").read_text()
+    assert "SuccessExitStatus" not in _directives(text)
+
+
+def test_watch_yields_disk_to_collector_and_runner() -> None:
+    text = (_SYSTEMD / f"{_WATCH_UNIT}.service.template").read_text()
+    assert "IOSchedulingClass=idle" in text
+    assert "Nice=19" in text
+
+
+def test_watch_logs_to_its_own_file() -> None:
+    """journald 보존이 짧아(서버 실측 3시간) 과거 조사는 파일 로그로만 된다(WAN-344)."""
+    text = (_SYSTEMD / f"{_WATCH_UNIT}.service.template").read_text()
+    assert "append:__LOG_DIR__/watch.log" in text
+
+
+def test_watch_timer_is_installed_and_removable() -> None:
+    """설치·해제 양쪽에 있어야 한다 — 한쪽만 있으면 유닛이 남거나 영영 안 걸린다."""
+    install = _INSTALL.read_text()
+    uninstall = _UNINSTALL.read_text()
+    assert f"install_timer_pair {_WATCH_UNIT}" in install
+    assert f"uninstall_timer_pair {_WATCH_UNIT}" in uninstall
+    assert "    watch)" in install
+    assert "    watch)" in uninstall
+
+
+def test_install_all_includes_the_watch() -> None:
+    """🚨 이 이슈의 본문 — 워치가 `all` 에 없으면 「등록돼 있지 않다」가 그대로 재발한다.
+
+    수집기와 러너는 별개 프로세스라 러너만 죽으면 봉은 계속 신선하고 doctor 도 조용하다
+    (WAN-344). 라벨이 아니라 `all` 분기의 실제 호출로 잠근다.
+    """
+    install = _INSTALL.read_text()
+    all_branch = install.split("    all)", 1)[1].split(";;", 1)[0]
+    assert "install_watch" in all_branch
+    uninstall = _UNINSTALL.read_text()
+    all_removed = uninstall.split("    all)", 1)[1].split(";;", 1)[0]
+    assert "uninstall_watch" in all_removed
+
+
+def test_install_substitutes_the_watch_interval() -> None:
+    install = _INSTALL.read_text()
+    assert "s|__WATCH_INTERVAL__|" in install
+    assert "__WATCH_INTERVAL__" in (_SYSTEMD / f"{_WATCH_UNIT}.timer.template").read_text()
+    assert "ALPHABLOCK_WATCH_INTERVAL" in install
+
+
+def test_watch_interval_default_is_not_slower_than_the_settings_default() -> None:
+    """주기 = 「러너가 죽고 몇 분 만에 아는가」. 실측 정지 공백이 11·34·41분이었다(WAN-344).
+
+    설정 기본값 `health_watch_interval_seconds`(600초 = 10분)보다 느슨해지지 않게 잠근다.
+    """
+    install = _INSTALL.read_text()
+    match = re.search(r"WATCH_INTERVAL=\"\$\{ALPHABLOCK_WATCH_INTERVAL:-([0-9a-z]+)\}\"", install)
+    assert match is not None, "워치 간격 기본값을 찾지 못했다"
+    assert _to_minutes(match.group(1)) <= 10

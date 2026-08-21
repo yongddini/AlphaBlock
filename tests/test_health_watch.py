@@ -1,9 +1,13 @@
-"""live.health_watch 경고 판정·쿨다운·복구 로직 테스트 (WAN-32)."""
+"""live.health_watch 경고 판정·쿨다운·복구 로직 테스트 (WAN-32, 전송 실패·종료 코드 = WAN-344)."""
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
+import pytest
+
+from config.settings import Settings
 from dashboard.health import (
     CollectorStatus,
     FundingFreshness,
@@ -13,14 +17,21 @@ from dashboard.health import (
     SeriesFreshness,
 )
 from dashboard.health_data import HealthView
+from live import health_watch
 from live.health_watch import (
+    WATCH_DELIVERY_FAILED,
+    WATCH_OK,
+    WATCH_TELEGRAM_UNCONFIGURED,
     Alert,
     AlertRecord,
     HealthWatch,
+    Outbound,
     WatchState,
     WatchStateStore,
+    apply_delivery_failures,
     evaluate_alerts,
     reconcile,
+    run_health_watch,
 )
 
 _HOUR = 3_600_000
@@ -358,3 +369,222 @@ def test_evaluate_alerts_cycle_stall_gets_distinct_message() -> None:
     assert "완주 지연" in alert.title
     assert "KST" in alert.detail
     assert "하트비트 끊김" not in alert.detail
+
+
+# -- 전송 실패 처리 (WAN-344) --------------------------------------------------
+
+
+class _FailingNotify:
+    """전송이 실패하는 알림자(텔레그램 400·네트워크 소진)."""
+
+    def __init__(self, *, fail_first: int = 1) -> None:
+        self.sent: list[str] = []
+        self._fail_first = fail_first
+
+    def __call__(self, text: str) -> bool:
+        self.sent.append(text)
+        return len(self.sent) > self._fail_first
+
+
+def _stale_watch(
+    tmp_path: Path,
+    notify: Callable[[str], bool],
+    now_ms: int,
+    *,
+    view: HealthView | None = None,
+) -> HealthWatch:
+    return HealthWatch(
+        view_provider=lambda: view or _view(runner=_runner(ran=True, level=HealthLevel.STALE)),
+        notify=notify,
+        store=WatchStateStore(tmp_path / "watch.json"),
+        cooldown_seconds=3600,
+        interval_seconds=0,
+        now_ms=lambda: now_ms,
+    )
+
+
+def test_apply_delivery_failures_forgets_a_brand_new_alert() -> None:
+    """실패한 첫 경고는 「보냈다」로 남지 않는다 → 다음 점검에 새 경고로 다시 나간다."""
+    sent = WatchState(active={"runner": AlertRecord(title=_TITLE, last_notified_ms=_HOUR)})
+    undelivered = [Outbound(kind="alert", key="runner", text="…")]
+    assert apply_delivery_failures(sent, WatchState(), undelivered).active == {}
+
+
+def test_apply_delivery_failures_keeps_the_old_timestamp_for_a_reminder() -> None:
+    """실패한 리마인더는 쿨다운 시계를 앞당기지 않는다(옛 타임스탬프 유지 → 즉시 재시도)."""
+    previous = _active(0, key="runner")
+    sent = WatchState(active={"runner": AlertRecord(title=_TITLE, last_notified_ms=2 * _HOUR)})
+    undelivered = [Outbound(kind="alert", key="runner", text="…")]
+    result = apply_delivery_failures(sent, previous, undelivered)
+    assert result.active["runner"].last_notified_ms == 0
+
+
+def test_apply_delivery_failures_revives_a_failed_recovery() -> None:
+    """복구 알림이 실패하면 기록을 되살려 다음 점검에서 다시 복구로 잡히게 한다."""
+    previous = _active(0, key="runner")
+    undelivered = [Outbound(kind="recovery", key="runner", text="…")]
+    assert apply_delivery_failures(WatchState(), previous, undelivered).active == previous.active
+
+
+def test_failed_alert_is_retried_on_the_next_check_despite_cooldown(tmp_path: Path) -> None:
+    """🚨 핵심 회귀: 전송 실패가 쿨다운을 걸어 「안 갔는데 1시간 침묵」이 되면 안 된다.
+
+    옛 동작은 `reconcile` 결과를 그대로 저장해 실패해도 「방금 보냄」으로 남겼다.
+    """
+    notify = _FailingNotify(fail_first=1)
+    _stale_watch(tmp_path, notify, 0).check_once()
+    assert len(notify.sent) == 1  # 시도했으나 실패
+
+    # 쿨다운(1시간) 한참 이내인데도 다시 보낸다 — 실패는 발송으로 치지 않는다.
+    _stale_watch(tmp_path, notify, _MIN).check_once()
+    assert len(notify.sent) == 2
+
+    # 이번엔 성공했으므로 그다음 점검은 쿨다운이 정상적으로 억제한다.
+    _stale_watch(tmp_path, notify, 2 * _MIN).check_once()
+    assert len(notify.sent) == 2
+
+
+def test_failed_sends_are_counted(tmp_path: Path) -> None:
+    notify = _FailingNotify(fail_first=1)
+    watch = _stale_watch(tmp_path, notify, 0)
+    watch.check_once()
+    assert watch.failed_sends == 1
+
+
+def test_successful_send_leaves_no_failure(tmp_path: Path) -> None:
+    watch = _stale_watch(tmp_path, _FakeNotify(), 0)
+    watch.check_once()
+    assert watch.failed_sends == 0
+
+
+# -- 종료 코드 (WAN-344) -------------------------------------------------------
+
+
+class _FakeTelegram:
+    def __init__(self, *, ok: bool = True) -> None:
+        self.ok = ok
+        self.sent: list[str] = []
+
+    def send_message(self, text: str) -> bool:
+        self.sent.append(text)
+        return self.ok
+
+
+def _patch_telegram(
+    monkeypatch: pytest.MonkeyPatch, client: _FakeTelegram | None
+) -> _FakeTelegram | None:
+    monkeypatch.setattr(health_watch, "build_telegram_client", lambda _s: client)
+    return client
+
+
+def _watch_settings(tmp_path: Path) -> Settings:
+    return Settings(
+        db_path=str(tmp_path / "ohlcv.db"),
+        live_runtime_state_path=str(tmp_path / "runtime.json"),
+        collector_heartbeat_path=str(tmp_path / "hb.json"),
+        health_watch_state_path=str(tmp_path / "watch.json"),
+    )
+
+
+def test_test_message_reports_success_as_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _patch_telegram(monkeypatch, _FakeTelegram(ok=True))
+    code = run_health_watch(_watch_settings(tmp_path), test_message=True)
+    assert code == WATCH_OK
+    assert client is not None and len(client.sent) == 1
+
+
+def test_test_message_reports_a_failed_send(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """🚨 WAN-344 §4-4: 연결 확인이 실패했는데 0을 내면 그건 확인이 아니다."""
+    _patch_telegram(monkeypatch, _FakeTelegram(ok=False))
+    assert run_health_watch(_watch_settings(tmp_path), test_message=True) == WATCH_DELIVERY_FAILED
+
+
+def test_test_message_reports_missing_telegram(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_telegram(monkeypatch, None)
+    code = run_health_watch(_watch_settings(tmp_path), test_message=True)
+    assert code == WATCH_TELEGRAM_UNCONFIGURED
+
+
+def test_require_delivery_refuses_to_run_without_telegram(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """조용히 드라이런으로 접지 않는다 — 그 상태가 systemd 에서 성공으로 보이면 안 된다."""
+    _patch_telegram(monkeypatch, None)
+    code = run_health_watch(_watch_settings(tmp_path), once=True, require_delivery=True)
+    assert code == WATCH_TELEGRAM_UNCONFIGURED
+
+
+def test_without_require_delivery_missing_telegram_still_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """기본 동작은 예전 그대로 — 미설정이면 드라이런으로 돌고 0을 낸다."""
+    _patch_telegram(monkeypatch, None)
+    assert run_health_watch(_watch_settings(tmp_path), once=True) == WATCH_OK
+
+
+def test_require_delivery_reports_a_failed_alert_send(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_telegram(monkeypatch, _FakeTelegram(ok=False))
+    stale = _view(runner=_runner(ran=True, level=HealthLevel.STALE))
+    monkeypatch.setattr(health_watch, "build_view_provider", lambda _s: lambda: stale)
+    code = run_health_watch(_watch_settings(tmp_path), once=True, require_delivery=True)
+    assert code == WATCH_DELIVERY_FAILED
+
+
+def test_require_delivery_is_zero_when_everything_is_fine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_telegram(monkeypatch, _FakeTelegram(ok=True))
+    monkeypatch.setattr(health_watch, "build_view_provider", lambda _s: lambda: _view())
+    code = run_health_watch(_watch_settings(tmp_path), once=True, require_delivery=True)
+    assert code == WATCH_OK
+
+
+def test_dry_run_and_require_delivery_are_rejected(tmp_path: Path) -> None:
+    """보내지 않는 모드에 「도착을 요구」를 붙이면 라벨과 동작이 어긋난다 — 거부한다."""
+    with pytest.raises(ValueError):
+        run_health_watch(_watch_settings(tmp_path), once=True, dry_run=True, require_delivery=True)
+
+
+def test_timer_mode_does_not_duplicate_alerts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """systemd 타이머 판(매번 새 프로세스 = `--once`)에서도 쿨다운이 산다(WAN-344 §4-3).
+
+    상태가 `health_watch_state_path` JSON 으로 영속화되므로 상시 프로세스가 아니어도
+    중복 경고가 나지 않는다 — 이 성질이 timer + `--once` 선택의 근거다.
+    """
+    client = _FakeTelegram(ok=True)
+    _patch_telegram(monkeypatch, client)
+    stale = _view(runner=_runner(ran=True, level=HealthLevel.STALE))
+    monkeypatch.setattr(health_watch, "build_view_provider", lambda _s: lambda: stale)
+    settings = _watch_settings(tmp_path)
+
+    for _ in range(3):  # 타이머가 세 번 트리거 = 프로세스 세 번
+        assert run_health_watch(settings, once=True, require_delivery=True) == WATCH_OK
+    assert len(client.sent) == 1  # 쿨다운(1시간) 이내라 첫 경고 1건뿐
+
+
+def test_dry_run_keeps_the_cooldown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """드라이런은 「로그에 남겼다」를 전달로 친다 — 안 그러면 점검마다 같은 경고가 쌓인다."""
+    stale = _view(runner=_runner(ran=True, level=HealthLevel.STALE))
+    monkeypatch.setattr(health_watch, "build_view_provider", lambda _s: lambda: stale)
+    logged: list[str] = []
+
+    def _record(text: str) -> bool:
+        logged.append(text)
+        return True
+
+    monkeypatch.setattr(health_watch, "_log_notify", _record)
+    settings = _watch_settings(tmp_path)
+
+    for _ in range(3):
+        assert run_health_watch(settings, once=True, dry_run=True) == WATCH_OK
+    assert len(logged) == 1  # 쿨다운 이내라 1건뿐

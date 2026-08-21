@@ -24,6 +24,10 @@
 # 이 스크립트로 바뀌지 않는다 — 실주문을 유발하지 않는다. DB 도 손대지 않는다(수집기가
 # 잠깐 멈췄다 재시작될 뿐이며, WAL 정합성 있는 이전은 docs/ops/server-migration.md §3).
 #
+# ⚠️ 타이머로 도는 유닛(doctor 두 쌍 · watch)은 여기서 재시작하지 않는다 — oneshot 이라
+# 다음 주기에 새 코드로 그냥 뜬다. 단 scripts/systemd/*.template 이 바뀐 배포는 코드만으로
+# 반영되지 않으니 install-systemd.sh 를 다시 돌릴 것(WAN-318 §7, WAN-344).
+#
 # 최초 설치는 scripts/install-systemd.sh, 서버 준비는 scripts/setup-server.sh,
 # 전체 절차는 docs/ops/server-migration.md 참고.
 set -euo pipefail

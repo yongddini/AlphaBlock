@@ -12,6 +12,10 @@
 #   ./scripts/uninstall-systemd.sh live          # 러너만
 #   ./scripts/uninstall-systemd.sh dashboard     # 대시보드만
 #   ./scripts/uninstall-systemd.sh doctor        # DB 점검 타이머 두 쌍(전수 + 싼 점검)
+#   ./scripts/uninstall-systemd.sh watch         # 운영 상태 워치 타이머(WAN-344)
+#
+# ⚠️ 워치를 지우면 **러너 정지를 알 장치가 하나도 남지 않는다**(수집기와 러너는 별개
+# 프로세스라 러너만 죽으면 봉은 계속 신선하다 — WAN-344).
 set -euo pipefail
 
 if [[ "$(uname -s)" != "Linux" ]] || ! command -v systemctl >/dev/null; then
@@ -53,6 +57,11 @@ uninstall_doctor() {
     uninstall_timer_pair alphablock-doctor-light
 }
 
+# 운영 상태 워치(WAN-344) 해제.
+uninstall_watch() {
+    uninstall_timer_pair alphablock-watch
+}
+
 TARGET="${1:-all}"
 case "$TARGET" in
     collector)
@@ -67,14 +76,18 @@ case "$TARGET" in
     doctor)
         uninstall_doctor
         ;;
+    watch)
+        uninstall_watch
+        ;;
     all)
         uninstall_one collector
         uninstall_one live
         uninstall_one dashboard
         uninstall_doctor
+        uninstall_watch
         ;;
     *)
-        echo "사용법: $0 [collector|live|dashboard|doctor|all]" >&2
+        echo "사용법: $0 [collector|live|dashboard|doctor|watch|all]" >&2
         exit 1
         ;;
 esac

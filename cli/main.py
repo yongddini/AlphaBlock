@@ -504,16 +504,26 @@ def cmd_status(args: argparse.Namespace, settings: Settings) -> int:
 
 
 def cmd_watch(args: argparse.Namespace, settings: Settings) -> int:
-    """`alphablock watch` — 운영 상태 워치(이상 시 텔레그램 경고, WAN-32)."""
+    """`alphablock watch` — 운영 상태 워치(이상 시 텔레그램 경고, WAN-32).
+
+    종료 코드(WAN-344): 0 정상 · 1 전송 실패 · 2 텔레그램 미설정. `--require-delivery`
+    가 있어야 점검 모드에서 그 구분이 코드로 나온다(systemd 타이머가 쓰는 모드) —
+    없으면 예전처럼 미설정 시 드라이런으로 접고 0을 낸다. `--test-message` 는 연결
+    확인이 목적이라 플래그 없이도 실패를 코드로 낸다.
+    """
     from live.health_watch import run_health_watch
 
-    run_health_watch(
+    if args.dry_run and args.require_delivery:
+        print("--dry-run 과 --require-delivery 는 함께 쓸 수 없습니다.", file=sys.stderr)
+        return 2
+
+    return run_health_watch(
         settings,
         once=args.once,
         dry_run=args.dry_run,
         test_message=args.test_message,
+        require_delivery=args.require_delivery,
     )
-    return 0
 
 
 def cmd_fills(args: argparse.Namespace, settings: Settings) -> int:
@@ -1395,6 +1405,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--test-message",
         action="store_true",
         help="테스트 메시지를 한 번 보내고 종료(텔레그램 연결 확인)",
+    )
+    p_watch.add_argument(
+        "--require-delivery",
+        action="store_true",
+        help="텔레그램 미설정·전송 실패를 0이 아닌 종료 코드로 낸다(systemd 감시용, WAN-344)",
     )
     p_watch.set_defaults(func=cmd_watch)
 
