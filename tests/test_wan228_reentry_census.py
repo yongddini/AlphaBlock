@@ -28,6 +28,7 @@ from backtest.wan228_reentry_census import (
     aggregate_symbol_mean,
     cells_from_csv,
     cells_to_frame,
+    reentry_candidates,
     reentry_events,
     verdict,
 )
@@ -171,6 +172,93 @@ def test_invalidation_cuts_rearm() -> None:
 def test_direction_mapping() -> None:
     assert _direction(PositionSide.LONG) is OrderBlockDirection.BULLISH
     assert _direction(PositionSide.SHORT) is OrderBlockDirection.BEARISH
+
+
+# --------------------------------------------------------------------------- #
+# 재진입 × 반익절 래더 배선 (WAN-345)
+# --------------------------------------------------------------------------- #
+#
+# 🚨 **라벨이 아니라 동작으로 건다.** WAN-323 커밋 `af1a550`이 `reentry_candidates`의
+# 시그니처만 넓히고 `_iter_reentries` 호출에 세 인자를 안 넘겨, 래더를 켠 북 팔에서도
+# **재진입 거래만 조용히 전량 익절**로 돌았다. 「인자를 넘기는가」만 보는 테스트는 같은
+# 실패를 또 통과시키므로, 여기서는 **재진입 거래에 부분 청산이 실제로 생기는지** ·
+# **본절 스탑이 실제로 움직이는지**로 잠근다.
+
+# 재진입 시나리오: 부모가 t=0에 익절(115) → 지정가 100으로 재무장.
+#   t=10  100 터치 → 재진입 체결(1R = 100−90 = 10)
+#   t=20  110 도달 → 분할 지점(1.0R). 익절 115는 아직 안 닿았다.
+#   t=30  진입가 100까지 되돌림(저가 99.5) — 손절 90은 안 닿는다.
+#   t=40  115 도달
+# 래더 off면 t=40에 전량 익절이고, `breakeven_after_partial`을 켜면 t=30에 본절로 끝난다.
+_LADDER_BARS = [
+    (1, 116.0, 114.0, 115.0),
+    (10, 101.0, 99.0, 100.5),
+    (20, 111.0, 105.0, 110.5),
+    (30, 105.0, 99.5, 100.0),
+    (40, 116.0, 108.0, 115.0),
+]
+
+
+def _ladder_candidates(**ladder: object) -> list[_Candidate]:
+    substeps = _substeps(_LADDER_BARS)
+    return reentry_candidates(
+        _long_candidate(break_time=None),
+        parent_exit_time=0,
+        substeps=substeps,
+        substep_times=[s.time for s in substeps],
+        htf_times=[0],
+        htf_closes=[100.0],
+        params=_params(),
+        cfg=_cfg(),
+        funding_rates=None,
+        **ladder,  # type: ignore[arg-type]
+    )
+
+
+def test_reentry_trades_actually_get_the_ladder() -> None:
+    """래더를 켜면 재진입 거래에 **부분 청산이 실제로 생긴다**(WAN-345 회귀).
+
+    고치기 전에는 `partial_exits`가 빈 튜플이라 북이 전량 익절로 배치했다.
+    """
+    cands = _ladder_candidates(partial_take_profit_r=1.0, partial_take_profit_fraction=0.5)
+    assert len(cands) == 1
+    partials = cands[0].partial_exits
+    assert len(partials) == 1, "재진입 거래가 래더를 못 받았다 — 전량 익절로 돌고 있다"
+    assert partials[0].price == 110.0  # 진입 100 + 1.0R(=10)
+    assert partials[0].fraction == 0.5
+    assert partials[0].time == 20 * 60_000
+    # 잔량은 목표까지 끌려가 t=40에 익절한다(분할이 청산 시각을 안 당긴다).
+    assert cands[0].exit_price == 115.0
+    assert cands[0].exit_time == 40 * 60_000
+
+
+def test_ladder_off_is_the_old_behaviour() -> None:
+    """기본값(래더 끔)에서는 부분 청산이 없다 — 래더를 안 쓰는 북 CSV가 비트 재현된다."""
+    default = _ladder_candidates()
+    explicit_off = _ladder_candidates(partial_take_profit_r=None)
+    assert [c.partial_exits for c in default] == [()]
+    assert default == explicit_off
+    assert default[0].exit_price == 115.0  # 전량 익절 = 예전 그대로
+
+
+def test_breakeven_after_partial_moves_the_reentry_stop() -> None:
+    """분할 후 본절 스탑도 재진입 거래에 걸린다 — 켜고 끄면 **청산 자체가 달라진다**.
+
+    비율(`fraction`)과 달리 본절은 청산 시각·가격을 바꾸므로, 이 팔이 갈리지 않으면
+    세 인자 중 `breakeven_after_partial`만 조용히 버려져도 안 걸린다.
+    """
+    on = _ladder_candidates(partial_take_profit_r=1.0, breakeven_after_partial=True)
+    off = _ladder_candidates(partial_take_profit_r=1.0, breakeven_after_partial=False)
+
+    # 켜면 t=20 분할 → t=30 진입가(100)로 옮긴 손절에 걸려 본절 청산.
+    assert len(on) == 1
+    assert on[0].exit_time == 30 * 60_000
+    assert on[0].exit_price == 100.0
+    assert on[0].exit_at_breakeven is True
+    # 끄면 손절이 90에 남아 t=30을 버티고 t=40에 익절한다.
+    assert off[0].exit_time == 40 * 60_000
+    assert off[0].exit_price == 115.0
+    assert off[0].exit_at_breakeven is False
 
 
 # --------------------------------------------------------------------------- #
