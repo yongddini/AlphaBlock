@@ -362,6 +362,7 @@ def simulate_zone_limit_trade(
     partial_take_profit_fraction: float = 0.5,
     breakeven_after_partial: bool = False,
     observe_path_fill: bool = False,
+    no_same_step_tp: bool = False,
 ) -> ZoneLimitOutcome:
     """한 오더블록 셋업의 존-지정가 진입·청산을 1분 서브스텝으로 시뮬레이션한다.
 
@@ -438,6 +439,30 @@ def simulate_zone_limit_trade(
       거부한다(라벨만 붙는 조용한 실패 방지 — WAN-95/112/123 관행).
     * **MFE/MAE·`stop_price`·사이징 기준 1R은 진입 시점 값으로 고정**된다 — 본절 이동이
       그 자를 갈아치우면 R 단위 지표가 팔마다 다른 것을 재게 된다.
+
+    ## 진입 스텝 익절 금지 (WAN-336, 옵트인 · 기본은 현행과 비트 동일)
+
+    `no_same_step_tp`를 켜면 **체결된 바로 그 1분 스텝에서는 익절(과 분할 지점)을 판정하지
+    않는다** — 다음 스텝부터 평소대로 본다.
+
+    왜 축이 되나: 1분봉은 그 1분의 시·고·저·종 **네 숫자만** 알려 주고 **그 안의 순서는
+    모른다**. 롱 지정가 진입은 가격이 **내려와야** 체결되고 고정 R 익절은 **올라가야** 닿으므로,
+    「같은 1분에 진입 + 익절」이 성립하려면 **저가가 먼저 · 고가가 나중**이어야 한다. 기본
+    엔진은 그렇다고 **가정**한다(체결 직후 같은 스텝에서 곧바로 청산을 재판정한다). 반대로
+    손절 쪽에는 이미 보수성이 있다 — 같은 스텝에서 손절·익절이 함께 닿으면 `stop_before_tp`
+    가 손절을 이기게 하고, 진입과 손절이 같은 1분인 건수는 WAN-46 감사(`penetrations`)가
+    센다. **익절 쪽에는 그 장치가 없었다.**
+
+    * ⚠️ **이것도 진값이 아니라 반대쪽 극단이다.** 순서가 실제로 반대였다면 그 거래는
+      「손실」이 아니라 **더 오래 보유**이고 결과는 미지다 — 이 팔은 그 미지를 「그 스텝에는
+      익절 없음」으로 눌러 본 것뿐이다. 진값은 두 극단 사이에 있고 **그 폭**이 산출물이다.
+      해상도로 좁히는 것은 틱·호가(WAN-98, Canceled) 소관이다.
+    * 🚨 **체결 보수화(`penetration_bps`)로는 이 축이 안 잡힌다** — 그쪽은 *「주문이 채워지느냐」*
+      (큐 우선순위)를 묻고 이건 *「채워진 뒤 그 1분 안의 순서」*를 묻는다. 다른 질문이라 이
+      저장소의 모든 체결 보수화 관문이 이 낙관을 통과시켜 왔다.
+    * **손절은 그대로 진입 스텝에서 판정한다** — 익절만 미루는 것이 이 팔의 정의다(양쪽을
+      다 미루면 그냥 진입을 한 스텝 늦춘 것이 되어 다른 실험이 된다).
+    * 끄면(기본) `just_entered` 가지가 통째로 죽어 **예전과 비트 단위로 같다**.
     """
     if not substeps:
         # 서브스텝이 없으면 live 밴드는 값을 낼 기회조차 없었다 = 주문이 걸린 적 없다.
@@ -556,6 +581,9 @@ def simulate_zone_limit_trade(
         return entry_stop if entry_stop is not None else active_stop
 
     for step in islice(substeps, start, None):
+        # WAN-336: 이 스텝에서 방금 체결됐는가 — `no_same_step_tp`가 익절 판정을 미루는
+        # 단 하나의 조건이다. 매 스텝 초기화하므로 체결 다음 스텝부터는 거짓이다.
+        just_entered = False
         # 상위TF 봉 경계: 직전 봉을 확정 종가로 커밋하고 경과 봉 수를 늘린다.
         if step.htf_bar_time != current_htf:
             if running_close is not None:
@@ -629,6 +657,7 @@ def simulate_zone_limit_trade(
                         # 체결 여부·가격·손익은 이 값을 보지 않는다(순수 관측).
                         path_fill_price = _path_fill_price(live_limit, step, is_long=is_long)
                     position_open = True
+                    just_entered = True
                     entry_time = step.time
                     entry_price = current_limit
                     entry_rsi = live_rsi
@@ -657,8 +686,19 @@ def simulate_zone_limit_trade(
             # 청산을 판정한다 — 청산 봉의 범위까지가 보유 구간이고 그 이후는 보지 않는다.
             hold_high = step.high if hold_high is None else max(hold_high, step.high)
             hold_low = step.low if hold_low is None else min(hold_low, step.low)
-            tp_hit = active_tp is not None and (
-                step.high >= active_tp if is_long else step.low <= active_tp
+            # WAN-336(옵트인): 진입 스텝에서는 익절을 판정하지 않는다. 1분봉은 그 1분
+            # **안의 순서**를 모르는데, 「같은 1분에 진입도 하고 익절도 했다」가 성립하려면
+            # 롱 기준 **저가가 먼저 · 고가가 나중**이어야 한다 — 기본값은 그렇다고 가정한다
+            # (낙관). 켜면 그 가정을 반대쪽 극단으로 미뤄 익절을 **다음 스텝부터** 판정한다.
+            # 손절은 이 스텝에서 그대로 판정하므로(관통 감사 WAN-46의 그 자리) 켠 팔에서는
+            # 「손절만 같은 분에 인정」이 되어 `stop_before_tp`와 방향이 대칭이 된다.
+            # ⚠️ 이것도 진값이 아니라 **반대쪽 극단**이다 — 진값은 두 극단 사이에 있고 그
+            # 폭이 WAN-336의 산출물이다(틱 해상도는 WAN-98 소관, Canceled).
+            same_step_tp_blocked = no_same_step_tp and just_entered
+            tp_hit = (
+                not same_step_tp_blocked
+                and active_tp is not None
+                and (step.high >= active_tp if is_long else step.low <= active_tp)
             )
             # WAN-276: 손절 체결을 두 모델 중 하나로 판정한다. 기본(둘 다 끔)은 현행 그대로
             # "손절가 터치 즉시 손절가 체결"이라 예전과 비트 단위로 같다.
@@ -710,7 +750,9 @@ def simulate_zone_limit_trade(
                     partial_exits=tuple(partials),
                     order_rested=order_rested,
                 )
-            if partial_price is not None:
+            if partial_price is not None and not same_step_tp_blocked:
+                # 분할 지점도 **위쪽** 목표라 같은 가정 위에 선다 — 익절만 미루고
+                # 분할은 인정하면 한 팔 안에서 자가 갈린다(WAN-336).
                 # WAN-323 분할 지점 도달 — 진입 수량의 일부를 먼저 청산하고 잔량을 끌고
                 # 간다. 지점은 한 번만 쓰이므로 곧바로 비활성화한다(2단 래더).
                 partial_hit = step.high >= partial_price if is_long else step.low <= partial_price

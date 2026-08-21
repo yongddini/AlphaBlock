@@ -230,6 +230,11 @@ class _Task:
     partial_take_profit_fraction: float = 0.5
     breakeven_after_partial: bool = False
     """첫 부분 청산 뒤 손절을 진입가로(WAN-323 · 옵트인). 래더 없이 켜면 엔진이 거부한다."""
+    no_same_step_tp: bool = False
+    """WAN-336(옵트인): 진입한 **그 1분 스텝에서는 익절을 판정하지 않는다**. base 후보와
+    재진입 후보 **양쪽에** 같은 규칙이 걸린다. 1분봉은 봉 안의 순서를 모르는데 「같은 1분에
+    진입 + 익절」은 롱 기준 「저가 먼저 · 고가 나중」을 가정한 것이라, 이 팔이 그 가정을
+    반대쪽 극단으로 눌러 본 반사실이다. `False`(기본)면 예전과 **비트 단위로 같다**."""
     reentry_entry_rule: ReentryEntryRule = "band"
     """재진입 후보의 재무장 지정가 규칙 — 기본 `"band"`(봉내 라이브 밴드 재산정) = 채택 규칙
     (WAN-273, WAN-305가 기본값으로 승격). `"freeze"`(첫 체결가 고정)는 옵트인으로 존치 —
@@ -328,6 +333,7 @@ def reentry_candidates_for_window(
     partial_take_profit_r: float | None = None,
     partial_take_profit_fraction: float = 0.5,
     breakeven_after_partial: bool = False,
+    no_same_step_tp: bool = False,
 ) -> list[_Candidate]:
     """이 창의 base 후보에서 「익절 후 존 내 재진입」 후보를 만든다(WAN-261, 옵트인).
 
@@ -376,6 +382,7 @@ def reentry_candidates_for_window(
                 partial_take_profit_r=partial_take_profit_r,
                 partial_take_profit_fraction=partial_take_profit_fraction,
                 breakeven_after_partial=breakeven_after_partial,
+                no_same_step_tp=no_same_step_tp,
             )
         )
     return out
@@ -444,6 +451,7 @@ def run_cell(task: _Task, *, log: bool = True) -> CellPayload:
             partial_take_profit_r=task.partial_take_profit_r,
             partial_take_profit_fraction=task.partial_take_profit_fraction,
             breakeven_after_partial=task.breakeven_after_partial,
+            no_same_step_tp=task.no_same_step_tp,
         )
         candidates[segment_name] = tuple(cands)
         funding[segment_name] = tuple(window.funding_rates)
@@ -461,6 +469,7 @@ def run_cell(task: _Task, *, log: bool = True) -> CellPayload:
                     partial_take_profit_r=task.partial_take_profit_r,
                     partial_take_profit_fraction=task.partial_take_profit_fraction,
                     breakeven_after_partial=task.breakeven_after_partial,
+                    no_same_step_tp=task.no_same_step_tp,
                 )
             )
 
@@ -552,6 +561,7 @@ def run_cells(
     partial_take_profit_fraction: float = 0.5,
     breakeven_after_partial: bool = False,
     repair_partial_bars: bool = False,
+    no_same_step_tp: bool = False,
 ) -> list[CellPayload]:
     """전 칸을 돈다. `jobs`는 성능 노브이지 결과 축이 아니다(WAN-121).
 
@@ -592,6 +602,12 @@ def run_cells(
     쓰는 실행에서 셀 비용을 절반 아래로 줄인다. 둘 다 기본 `True`면 예전과 비트 단위로 같다
     (자세한 규약은 `_Task` 필드 docstring).
 
+    `no_same_step_tp`(WAN-336, 옵트인)를 켜면 base·재진입 후보 **양쪽**이 「진입 스텝 익절
+    금지」 반사실로 생성된다 — 끄면(기본) 예전과 비트 단위로 같다. ⚠️ 다른 옵트인 훅과 달리
+    **후보 집합 자체가 바뀔 수 있다**(익절이 미뤄지면 그 셋업이 다른 청산을 타고, 북에서는
+    슬롯 점유 시간이 달라져 뒤따르는 후보까지 갈린다) — 그래서 이건 오버라이드가 아니라 **팔**
+    이고, 기준선 팔과 나란히 놓고 **차이의 폭**으로만 읽는다.
+
     `repair_partial_bars`(WAN-327, 옵트인 · **비파괴**)를 켜면 저장 상위TF 손상 봉을 1분봉
     합으로 갈아끼운 사본에서 후보를 만든다 — 부분 봉의 백테 영향 크기를 재는 반사실이다.
     끄면(기본) 저장 봉 그대로라 예전과 비트 단위로 같다. **DB는 쓰지 않는다.**
@@ -617,6 +633,7 @@ def run_cells(
             partial_take_profit_fraction=partial_take_profit_fraction,
             breakeven_after_partial=breakeven_after_partial,
             repair_partial_bars=repair_partial_bars,
+            no_same_step_tp=no_same_step_tp,
         )
         for symbol in symbols
         for timeframe in timeframes

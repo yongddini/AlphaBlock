@@ -35,13 +35,19 @@ from __future__ import annotations
 
 import io
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 import pandas as pd
 from pydantic import BaseModel, ConfigDict
 
 from backtest import harness
-from backtest.leverage_book import BookOutcome, LeverageBookParams, run_leverage_book
-from backtest.models import BacktestResult
+from backtest.leverage_book import (
+    BookOutcome,
+    LeverageBookParams,
+    PlacedSetup,
+    run_leverage_book,
+)
+from backtest.models import BacktestResult, Trade
 from backtest.wan169_leverage_book import (
     BOOK_ANNUALIZATION_TF,
     CellPayload,
@@ -175,6 +181,83 @@ def build_book_rows(
     — 청산 검사와 `max_effective_concurrent_risk`에만 흘러 들고 거래 자체는 안 바꾼다.
     `1.0`(기본)이면 예전과 비트 단위로 같다.
     """
+    return [
+        seg.row
+        for seg in iter_book_segments(
+            payloads,
+            book=book,
+            segments=segments,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            include_reentry=include_reentry,
+            fee_rate=fee_rate,
+            maker_fee_rate=maker_fee_rate,
+            slippage=slippage,
+            stress_risk_multiple=stress_risk_multiple,
+        )
+    ]
+
+
+@dataclass(frozen=True)
+class BookSegment:
+    """한 구간의 북 실행 결과 전체 — 집계 행 + 그 행을 만든 원자료 (WAN-336).
+
+    `build_book_rows`는 `row`만 돌려주므로 「이 지갑이 실제로 한 거래 하나하나」를 볼 수 없다.
+    거래 단위 귀속(예: 「같은 분 익절이 순손익의 몇 %인가」)을 재는 리포트는 `outcome`이
+    필요하다 — 그 리포트가 자기 배치 루프를 따로 짜면 두 경로가 갈라지므로(WAN-95/112/123의
+    조용한 실패) 같은 함수에서 한 번에 낸다.
+    """
+
+    segment: str
+    row: BookRunRow
+    outcome: BookOutcome
+    result: BacktestResult
+
+    def trades_with_placements(self) -> list[tuple[Trade, PlacedSetup]]:
+        """거래를 그 거래의 배치 스냅샷(칸·진입 시점 자본·리스크 금액)과 짝지어 돌려준다.
+
+        북은 한 지갑이라 `Trade`에 심볼·TF가 없다 — 칸은 `BookStats.placed_records`에만 있고,
+        시퀀서가 두 리스트에 **같은 순서로** append하므로 위치가 곧 짝이다. 그 계약이 조용히
+        깨지면 귀속이 통째로 어긋나므로(라벨은 멀쩡한 채) 여기서 **길이와 손익 둘 다** 대조해
+        어긋나면 시끄럽게 죽는다. 회귀 테스트가 이 계약을 동작으로 고정한다.
+
+        `PlacedSetup.risk_amount`가 함께 나오는 것이 요점이다 — 복리 지갑에서 USD 손익을 그냥
+        더하면 **뒤쪽 거래가 표를 지배**하므로(WAN-169/213 복리 착시), 크기를 정규화한 자
+        (net R = 실현손익 ÷ 그 거래의 리스크 금액)로도 같은 질문을 물을 수 있어야 한다.
+        """
+        placed = self.outcome.stats.placed_records
+        trades = self.outcome.trades
+        if len(placed) != len(trades):
+            raise AssertionError(
+                f"북 배치 기록과 거래 목록의 길이가 다릅니다({len(placed)} != {len(trades)}) — "
+                "시퀀서가 두 리스트를 짝으로 append한다는 계약이 깨졌습니다(WAN-336 귀속 전제)."
+            )
+        for index, (trade, record) in enumerate(zip(trades, placed, strict=True)):
+            if record.realized_pnl != trade.realized_pnl:
+                raise AssertionError(
+                    f"북 배치 기록 {index}번의 손익이 같은 자리 거래와 다릅니다 — 두 리스트가 "
+                    "같은 순서라는 계약이 깨졌습니다(WAN-336 귀속 전제)."
+                )
+        return list(zip(trades, placed, strict=True))
+
+
+def iter_book_segments(
+    payloads: Sequence[CellPayload],
+    *,
+    book: LeverageBookParams,
+    segments: Sequence[str],
+    start_ms: int,
+    end_ms: int,
+    include_reentry: bool = True,
+    fee_rate: float | None = None,
+    maker_fee_rate: float | None = None,
+    slippage: float | None = None,
+    stress_risk_multiple: float = 1.0,
+) -> list[BookSegment]:
+    """`build_book_rows`의 속 — 집계 행뿐 아니라 그 행을 만든 `BookOutcome`까지 돌려준다.
+
+    행만 필요하면 `build_book_rows`를 쓴다(그쪽이 이 함수의 얇은 래퍼라 **같은 숫자**다).
+    """
     unknown = [s for s in segments if s not in SUPPORTED_SEGMENTS]
     if unknown:
         raise ValueError(
@@ -188,7 +271,7 @@ def build_book_rows(
         slippage=slippage,
     )
     num_symbols = len({p.symbol for p in payloads})
-    rows: list[BookRunRow] = []
+    out: list[BookSegment] = []
     for segment in segments:
         cells = _segment_cells(payloads, segment, "", include_reentry=include_reentry)
         outcome = run_leverage_book(
@@ -197,10 +280,9 @@ def build_book_rows(
         result = build_result_from_trades(
             outcome.trades, outcome.effective_config, BOOK_ANNUALIZATION_TF
         )
-        rows.append(
-            _book_row(segment, len(cells), num_symbols, start_ms, end_ms, outcome, result, book)
-        )
-    return rows
+        row = _book_row(segment, len(cells), num_symbols, start_ms, end_ms, outcome, result, book)
+        out.append(BookSegment(segment=segment, row=row, outcome=outcome, result=result))
+    return out
 
 
 def run_book(
