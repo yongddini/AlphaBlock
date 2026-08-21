@@ -25,6 +25,7 @@ from backtest.harness import (
 from backtest.leverage_book import LeverageBookParams
 from backtest.run import (
     ADOPTED_BOOK,
+    _book_detail_segment,
     _book_from_args,
     _book_segments,
     _resolve_reentry,
@@ -373,3 +374,146 @@ def test_book_warm_and_cold_oos_parity() -> None:
     by_seg = {r.segment: r for r in rows}
     assert set(by_seg) == {SEGMENT_FULL, SEGMENT_IS, SEGMENT_OOS_WARM, SEGMENT_OOS}
     assert by_seg[SEGMENT_IS].num_trades <= by_seg[SEGMENT_FULL].num_trades
+
+
+# --------------------------------------------------------------------------- #
+# 북 거래별 내역 — 구간 고르기 (WAN-346 §0)
+# --------------------------------------------------------------------------- #
+
+
+def test_trades_no_longer_reject_the_book_but_still_fold_when_positions_is_unset() -> None:
+    """거부는 풀렸는데(`--positions book --trades` 가능) **접기 규칙은 그대로**다.
+
+    두 규칙을 가른 이유는 하나다 — `--positions` 없이 `--trades`만 준 실행까지 북으로
+    옮기면 CLAUDE.md에 적힌 per-cell 레시피가 **말없이 다른 회계의 파일**을 내놓는다.
+    per-cell 거래별은 칸마다 독립 자본이고 북 거래별은 한 지갑이다(WAN-213/341).
+    """
+    from backtest.run import _book_rejected_flags
+
+    args = build_parser().parse_args(["--positions", "book", "--trades", "x.csv"])
+    assert "--trades" not in _book_rejected_flags(args)
+    assert _book_from_args(args) == ADOPTED_BOOK
+    # 미지정이면 예전 그대로 per-cell로 접힌다(기존 명령이 비트 재현된다).
+    assert _book_from_args(build_parser().parse_args(["--trades", "x.csv"])) is None
+    assert _book_from_args(build_parser().parse_args(["--equity", "s.csv"])) is None
+
+
+def test_book_detail_segment_defaults_to_the_only_segment() -> None:
+    args = build_parser().parse_args(["--positions", "book", "--trades", "x.csv"])
+    assert _book_detail_segment(args, (SEGMENT_FULL,)) == SEGMENT_FULL
+
+
+def test_book_detail_segment_refuses_to_guess_among_many() -> None:
+    """조용히 마지막 구간만 내보내면 그 파일이 나중에 「채택 북의 거래」로 인용된다."""
+    args = build_parser().parse_args(["--positions", "book", "--oos-warm", "--trades", "x.csv"])
+    with pytest.raises(ValueError, match="--trades-segment"):
+        _book_detail_segment(args, (SEGMENT_FULL, SEGMENT_IS, SEGMENT_OOS_WARM, SEGMENT_OOS))
+
+
+def test_book_detail_segment_honours_an_explicit_choice() -> None:
+    args = build_parser().parse_args(
+        ["--positions", "book", "--oos-warm", "--trades", "x.csv", "--trades-segment", "oos_warm"]
+    )
+    assert _book_detail_segment(args, (SEGMENT_FULL, SEGMENT_OOS_WARM)) == SEGMENT_OOS_WARM
+
+
+def test_book_detail_segment_rejects_a_segment_this_run_does_not_have() -> None:
+    args = build_parser().parse_args(
+        ["--positions", "book", "--trades", "x.csv", "--trades-segment", "oos_warm"]
+    )
+    with pytest.raises(ValueError, match="이번 실행의 구간이 아닙니다"):
+        _book_detail_segment(args, (SEGMENT_FULL,))
+
+
+def test_book_detail_segment_rejects_a_lonely_flag() -> None:
+    """`--trades-segment`만 주고 `--trades`를 안 주면 아무 일도 안 일어난다 — 거부한다."""
+    args = build_parser().parse_args(["--positions", "book", "--trades-segment", "full"])
+    with pytest.raises(ValueError, match="함께 써야"):
+        _book_detail_segment(args, (SEGMENT_FULL,))
+
+
+def test_trades_segment_is_book_only(capsys: pytest.CaptureFixture[str]) -> None:
+    """per-cell 경로에는 「구간 고르기」가 없다 — 조용히 무시하면 라벨만 붙는다(WAN-95)."""
+    code = main(
+        ["--positions", "single", "--trades", "x.csv", "--trades-segment", "full", "--quiet"]
+    )
+    assert code == 2
+    assert "북 모드 전용" in capsys.readouterr().err
+
+
+def test_run_book_is_a_thin_wrapper_over_run_book_segments(monkeypatch: pytest.MonkeyPatch) -> None:
+    """두 진입점이 **같은 숫자**여야 한다 — 갈라지면 요약과 거래별 CSV가 다른 경기가 된다."""
+    sentinel = object()
+    calls: list[dict[str, object]] = []
+
+    class _Seg:
+        row = sentinel
+
+    def _fake(*_args: object, **kwargs: object) -> list[_Seg]:
+        calls.append(kwargs)
+        return [_Seg()]
+
+    monkeypatch.setattr(book_cli, "run_book_segments", _fake)
+    rows = book_cli.run_book(
+        ["BTCUSDT"],
+        ["1h"],
+        start="2024-01-01",
+        end="2024-02-01",
+        book=LeverageBookParams(),
+        segments=[SEGMENT_FULL],
+    )
+    assert rows == [sentinel]
+    assert calls and calls[0]["segments"] == [SEGMENT_FULL]
+
+
+def test_book_trade_csv_is_the_adopted_books_own_trades() -> None:
+    """완료기준 1 — 거래별 CSV가 **그 집계 행을 만든 바로 그 거래**여야 한다(WAN-346 §0).
+
+    「빠른 재현」을 위해 CSV 경로가 자기 배치 루프를 따로 짜면 두 경로가 갈라진다
+    (WAN-95/112/123의 조용한 실패). 여기서는 같은 `BookSegment`에서 행과 표가 함께 나오는지를
+    **실데이터 위에서** 못 박는다 — 행의 거래 수 = 표의 행 수 = 손익 합.
+    """
+    _require_real_data()
+    segments = book_cli.run_book_segments(
+        _SYMBOLS,
+        _TFS,
+        start=_START,
+        end=_END,
+        book=ADOPTED_BOOK,
+        segments=[SEGMENT_FULL],
+        jobs=1,
+        log=False,
+    )
+    segment = segments[0]
+    assert segment.row.num_trades > 0, "이 창에서 거래가 안 나오면 검산이 공회전한다"
+    frame = book_cli.book_trades_to_display_frame(segment)
+    assert len(frame) == segment.row.num_trades
+    assert set(frame["칸(종목)"]) <= {normalize_symbol(s) for s in _SYMBOLS}
+    assert set(frame["칸(TF)"]) <= set(_TFS)
+    # 시드(후) 마지막 값 = 엔진 최종 자본. 표가 다른 장부를 그리고 있지 않다는 증거다.
+    assert float(frame["시드(후)"].iloc[-1]) == pytest.approx(segment.result.metrics.final_equity)
+    equity = book_cli.book_equity_to_display_frame(segment)
+    assert len(equity) == len(segment.result.equity_curve)
+
+
+def test_cli_help_renders() -> None:
+    """`--help`가 실제로 뜬다 — argparse는 help 문자열에 `%` 치환을 걸므로 리터럴 퍼센트가
+    하나만 있어도 **CLI 전체의 도움말이 ValueError로 죽는다**(WAN-346 개발 중 발견:
+    `0.5% ADV`). 새 인자를 넣을 때마다 사람이 눈으로 확인하지 않게 동작으로 고정한다."""
+    import io
+    from contextlib import redirect_stdout
+
+    buffer = io.StringIO()
+    with redirect_stdout(buffer), pytest.raises(SystemExit) as exc:
+        build_parser().parse_args(["--help"])
+    assert exc.value.code == 0
+    assert "--trades-segment" in buffer.getvalue()
+
+
+def test_trades_segment_choices_match_the_book_supported_segments() -> None:
+    """CLI 선택지와 북이 실제로 낼 수 있는 구간이 갈라지면, 고를 수 없는 구간이 생기거나
+    고를 수 있는데 북이 거부하는 구간이 생긴다(`run.py`는 사이클 때문에 런타임 import를
+    못 해 목록을 따로 들고 있다)."""
+    from backtest.run import BOOK_SEGMENT_CHOICES
+
+    assert set(BOOK_SEGMENT_CHOICES) == set(book_cli.SUPPORTED_SEGMENTS)

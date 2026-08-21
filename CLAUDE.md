@@ -2788,7 +2788,8 @@ uv run python -m backtest.run --tf 15m,1h --combine-obs true,false --oos  # 존 
 uv run python -m backtest.run --tf 1h --max-zone-width-atr none,1.28 --oos # 존폭 필터 off/on(WAN-159 기본 1.28)
 uv run python -m backtest.run --tf 1h --max-zone-width-atr none,1.28 --tp-r 1.0,1.5,2.0,3.0 --oos  # 문턱×배수(WAN-161)
 uv run python -m backtest.run --tf 1h --limit-valid-bars 6,12,24,48,none --oos-warm  # 지정가 유효기간 스윕(WAN-222)
-uv run python -m backtest.run --symbol BTCUSDT --tf 15m --trades t.csv --equity s.csv  # 거래별(WAN-106)
+uv run python -m backtest.run --symbol BTCUSDT --tf 15m --trades t.csv --equity s.csv  # per-cell 거래별(WAN-106)
+uv run python -m backtest.run --positions book --oos-warm --trades b.csv --trades-segment oos_warm  # 북 거래별(WAN-346)
 uv run python -m backtest.run --symbol BTCUSDT --tf 15m --persist         # DB 적재 → 대시보드 조회(WAN-106)
 ```
 
@@ -2807,6 +2808,17 @@ uv run python -m backtest.run --symbol BTCUSDT --tf 15m --persist         # DB �
 - ⚠️ **지표의 정본은 적재된 요약이지 복원 결과가 아니다** — 종가(A안) 엔진의 자본곡선은 **봉
   단위**라 거래 단위로 다시 만든 곡선과 **MDD·Sharpe가 다르다**(최종 시드·거래 수·수익률은 같다).
   화면도 요약 지표를 쓴다.
+- 📌 **북도 이제 거래별 내역을 낸다(WAN-346 §0)** — `--positions book --trades/--equity`.
+  북은 칸을 가로지르는 한 지갑이라 per-cell 표에 없는 열이 붙는다(**칸(종목·TF) · 손절가 ·
+  익절가 · 리스크금액 · net R · 재진입 · 같은 분 익절 · 탭 시각**). 값은 전부 시퀀서의 배치
+  기록(`PlacedSetup`)에서 그대로 오고, 짝이 어긋나면 **시끄럽게 죽는다**(칸 라벨이 다른 거래에
+  붙은 표가 조용히 나가면 안 된다).
+  - ⚠️ **구간을 여럿 요청하면 거부한다** — 북은 구간마다 **다른 거래 집합**이라
+    `--trades-segment {full,is,oos_warm,oos}`로 **고르게 한다**(조용히 마지막 것을 내보내지
+    않는다 — WAN-106/95의 교훈). 구간이 하나면 생략 가능.
+  - ⚠️ **`--positions`를 생략하면 예전처럼 per-cell로 접힌다** — 위 WAN-106 레시피가 말없이
+    다른 회계의 파일을 내놓지 않게 한 것이다. **두 회계는 다른 경기다**(per-cell 거래별은 칸마다
+    독립 자본 · 북 거래별은 한 지갑, WAN-213/341). 북의 거래를 보려면 `--positions book`을 콕 집는다.
 - 컬럼은 **WAN-146이 만든 `backtest.report.trades_to_display_frame`을 그대로 재사용**한다
   (`include_utc=True`가 파일·DB용 옵트인) — 화면·CSV·DB가 두 벌로 갈라지면 같은 거래가 세 곳에서
   다른 숫자로 보인다.

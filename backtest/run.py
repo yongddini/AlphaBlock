@@ -107,6 +107,7 @@ from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     # 런타임 import는 사이클(run → wan228 → run)이라 타입 검사에만 들인다.
+    from backtest.book_cli import BookSegment
     from backtest.wan228_reentry_census import ReentryEntryRule
 
 from backtest.harness import (
@@ -886,7 +887,10 @@ def build_parser() -> argparse.ArgumentParser:
     costs.add_argument(
         "--max-notional-adv-fraction",
         help=(
-            "유동성 한도(WAN-279 채택 기본값 0.005 = 0.5% ADV). 포지션 명목을 이 값×ADV_usd로 "
+            # argparse는 help 문자열에 `%` 치환을 걸므로(`%(default)s`) 리터럴 퍼센트는
+            # **`%%`로 이스케이프**해야 한다 — 안 하면 `--help` 전체가 ValueError로 죽는다
+            # (WAN-346 개발 중 발견: `0.5% ADV`의 ` A`가 포맷 지시자로 읽혔다).
+            "유동성 한도(WAN-279 채택 기본값 0.005 = 0.5%% ADV). 포지션 명목을 이 값×ADV_usd로 "
             "자른다(자본에 안 비례하는 절대 상한 → 북 복리 착시 제거). none = 끄기(옛 상한-끔 "
             "CSV 재현). 안 주면 채택 기본값(0.005). 단위는 ADV 대비 분수지 퍼센트가 아니다. "
             "예: --max-notional-adv-fraction none"
@@ -943,6 +947,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="거래별 CSV 저장(KST·UTC 병기, 시드 변화 포함). 단일 조합일 때만",
     )
     detail.add_argument("--equity", metavar="PATH", help="시드곡선 CSV 저장. 단일 조합일 때만")
+    detail.add_argument(
+        "--trades-segment",
+        metavar="SEG",
+        choices=list(BOOK_SEGMENT_CHOICES),
+        help=(
+            "북 모드에서 --trades/--equity가 내보낼 구간(full·is·oos_warm·oos, WAN-346). "
+            "구간을 하나만 요청했으면 생략 가능. per-cell 경로에는 쓸 수 없다"
+        ),
+    )
     detail.add_argument(
         "--persist",
         action="store_true",
@@ -1073,10 +1086,21 @@ def _book_from_args(args: argparse.Namespace) -> LeverageBookParams | None:
                 )
             return ADOPTED_BOOK
         return None
-    # 미지정: 북이 못 표현하는 축(전략·비용·거래별)이 있으면 per-cell 단일 포지션으로 접는다.
-    if _book_rejected_flags(args):
+    # 미지정: 북이 못 표현하는 축(전략·비용)과 per-cell 거래별 출력이 있으면 접는다.
+    if _book_fallback_flags(args):
         return None
     return ADOPTED_BOOK
+
+
+#: `--trades-segment`가 받는 구간 이름 — `book_cli.SUPPORTED_SEGMENTS`와 같은 집합이어야
+#: 한다. 문자열은 같은 `SEGMENT_*` 상수를 쓰므로 표기가 갈릴 수 없고(오타 불가), 집합이
+#: 갈라지는지는 회귀 테스트가 두 목록을 대조해 본다(런타임 import는 사이클이라 못 쓴다).
+BOOK_SEGMENT_CHOICES: tuple[str, ...] = (
+    SEGMENT_FULL,
+    SEGMENT_IS,
+    SEGMENT_OOS_WARM,
+    SEGMENT_OOS,
+)
 
 
 def _book_segments(*, oos: bool, warm_oos: bool) -> tuple[str, ...]:
@@ -1110,11 +1134,78 @@ def _book_rejected_flags(args: argparse.Namespace) -> list[str]:
         (not args.funding, "--no-funding"),
         (args.years is not None, "--years"),
         (args.walkforward, "--walkforward"),
-        (args.trades, "--trades"),
-        (args.equity, "--equity"),
+        # ⚠️ `--trades`/`--equity`는 **더 이상 여기 없다**(WAN-346 §0) — 북이 거래별
+        # 내역을 낼 수 있게 배선했다. 대신 구간이 여럿이면 `_book_detail_segment`가
+        # 거부한다(조용히 마지막 구간만 내보내면 그 파일이 나중에 「채택 북의 거래」로
+        # 인용된다 — WAN-106/95의 교훈).
         (args.persist, "--persist"),
     ]
     return [name for value, name in checks if value]
+
+
+def _book_fallback_flags(args: argparse.Namespace) -> list[str]:
+    """`--positions` **미지정** 실행을 per-cell로 접는 인자들 (WAN-346에서 거부 목록과 분리).
+
+    거부 목록(`_book_rejected_flags`)과 갈라진 이유는 하나다 — `--trades`/`--equity`는 이제
+    북에서 **돌지만**, `--positions` 없이 그것만 준 실행까지 북으로 옮기면 CLAUDE.md에
+    적힌 per-cell 거래별 레시피(`--symbol X --tf 15m --trades t.csv`)가 **말없이 다른 회계의
+    파일**을 내놓는다. 그래서 접기 규칙은 예전 그대로 두고(기존 명령은 비트 재현), 북의
+    거래별 내역은 `--positions book`을 **콕 집었을 때만** 나온다.
+
+    ⚠️ 두 회계는 다른 경기다 — per-cell 거래별은 칸마다 독립 자본(동시 1포지션)이고, 북
+    거래별은 칸을 가로지르는 한 지갑이다(WAN-213/341).
+    """
+    detail: list[tuple[object, str]] = [(args.trades, "--trades"), (args.equity, "--equity")]
+    return [*_book_rejected_flags(args), *[name for value, name in detail if value]]
+
+
+def _book_detail_segment(args: argparse.Namespace, segments: Sequence[str]) -> str | None:
+    """`--trades`/`--equity`가 내보낼 북 구간. 요청이 없으면 None.
+
+    per-cell 경로가 「격자면 거부」인 것과 같은 방어다(WAN-106) — 북은 구간마다 **다른
+    거래 집합**을 내므로, 여러 구간을 요청한 채 파일 하나를 내보내면 그 파일이 어느
+    구간인지 이름으로 알 수 없다. 구간이 하나면 그것을 쓰고, 여럿이면 `--trades-segment`로
+    **고르게 한다**(조용히 마지막 것을 내보내지 않는다).
+    """
+    if not (args.trades or args.equity):
+        if args.trades_segment:
+            raise ValueError("--trades-segment는 --trades/--equity와 함께 써야 합니다.")
+        return None
+    if args.trades_segment:
+        if args.trades_segment not in segments:
+            raise ValueError(
+                f"--trades-segment {args.trades_segment!r}는 이번 실행의 구간이 아닙니다"
+                f"(요청된 구간: {', '.join(segments)})."
+            )
+        return str(args.trades_segment)
+    if len(segments) == 1:
+        return segments[0]
+    raise ValueError(
+        f"북 모드에서 --trades/--equity는 구간 하나만 내보냅니다 — 이번 실행은 "
+        f"{len(segments)}개 구간({', '.join(segments)})이라 --trades-segment로 골라야 "
+        "합니다(정본 OOS는 oos_warm — WAN-166)."
+    )
+
+
+def _write_book_detail(
+    args: argparse.Namespace,
+    segments: Sequence[BookSegment],
+    segment_name: str,
+    *,
+    log: bool,
+) -> None:
+    """북 거래별 CSV·시드곡선 저장 (WAN-346 §0). 열 정의는 `book_cli`가 낸다."""
+    from backtest import book_cli  # 지연 import(사이클 회피).
+
+    chosen = next(seg for seg in segments if seg.segment == segment_name)
+    if args.trades:
+        frame = book_cli.book_trades_to_display_frame(chosen)
+        path = write_output(str(frame.to_csv(index=False)), args.trades)
+        _log(log, f"[run] 북 거래별 CSV 저장: {path} ({len(frame)}건 · 구간 {segment_name})")
+    if args.equity:
+        frame = book_cli.book_equity_to_display_frame(chosen)
+        path = write_output(str(frame.to_csv(index=False)), args.equity)
+        _log(log, f"[run] 북 시드곡선 CSV 저장: {path} ({len(frame)}점 · 구간 {segment_name})")
 
 
 def run_book_main(args: argparse.Namespace, book: LeverageBookParams) -> int:
@@ -1144,8 +1235,9 @@ def run_book_main(args: argparse.Namespace, book: LeverageBookParams) -> int:
 
     reentry_on, reentry_rule = _resolve_reentry(args.reentry)
     try:
+        detail_segment = _book_detail_segment(args, segments)
         jobs = jobs_from_arg(args.jobs)
-        rows = book_cli.run_book(
+        book_segments = book_cli.run_book_segments(
             symbols,
             timeframes,
             start=start,
@@ -1158,6 +1250,9 @@ def run_book_main(args: argparse.Namespace, book: LeverageBookParams) -> int:
             reentry_entry_rule=reentry_rule,
             adv_fraction=_adv_fraction_from_args(args),
         )
+        rows = [seg.row for seg in book_segments]
+        if detail_segment is not None:
+            _write_book_detail(args, book_segments, detail_segment, log=not args.quiet)
     except ValueError as exc:
         print(f"오류: {exc}", file=sys.stderr)
         return 2
@@ -1412,6 +1507,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     if book is not None:
         return run_book_main(args, book)
+    if args.trades_segment:
+        # per-cell 경로에는 「구간 고르기」가 없다 — 격자면 `_single_artifact`가 이미
+        # 거부하고 단일 조합이면 구간도 하나다. 조용히 무시하면 라벨만 붙는다(WAN-95).
+        print(
+            "오류: --trades-segment는 북 모드 전용입니다(WAN-346) — per-cell 경로에서는 "
+            "--oos/--oos-warm 없이 단일 조합으로 좁혀 --trades를 쓰세요.",
+            file=sys.stderr,
+        )
+        return 2
 
     try:
         grid = grid_from_args(args)

@@ -156,6 +156,18 @@ class PlacedSetup:
     risk_amount: float
     """손절까지 갔을 때의 손실(수수료·펀딩 제외) — 거래당 net R의 분모."""
     realized_pnl: float
+    notional: float = 0.0
+    """진입 명목(체결가 × 수량) — 거래별 CSV의 「진입금액」(WAN-346 §0)."""
+    stop_price: float = 0.0
+    """이 거래의 손절 참조가(후보가 실은 값 그대로)."""
+    take_profit_price: float | None = None
+    """이 거래의 익절 목표가(WAN-346 순수 관측). 익절이 꺼진 변형이면 None."""
+    is_reentry: bool = False
+    """「익절 후 존 내 재진입」 후보였는지(WAN-273 채택 규칙, 라벨 전용)."""
+    same_step_take_profit: bool = False
+    """진입과 익절이 **같은 1분**인 거래인지(WAN-336 낙관 축의 라벨)."""
+    trigger_time: int = 0
+    """이 셋업의 탭이 난 상위TF 봉 시각 — 진단 조인 키(`_Candidate.trigger_time` 그대로)."""
 
 
 @dataclass
@@ -397,6 +409,7 @@ def run_leverage_book(
     *,
     eval_from_ms: int | None = None,
     stress_risk_multiple: float = 1.0,
+    compound_sizing: bool = True,
 ) -> BookOutcome:
     """칸별 후보를 하나의 공통 시간축에서 공유 자본으로 배치한다.
 
@@ -417,6 +430,15 @@ def run_leverage_book(
     `1.0`(기본)이면 `Σrisk × 1.0 == Σrisk`라 예전과 **비트 단위로 같다**. 이 노브는 손절
     **체결가**를 바꾸지 않는다 — 실현 손익 쪽은 후보 변환(`wan312.apply_stop_multiple`)이
     담당하고, 이 노브는 「아직 안 났지만 날 수 있는 손실」의 자 하나만 바꾼다.
+
+    `compound_sizing=False`(WAN-346 §2, 옵트인)는 **베팅 크기를 초기 자본에 못 박는다** —
+    사이징이 보는 자본만 `initial_capital`로 고정하고(거래당 리스크·명목 천장·북 상한 전부),
+    지갑 현금은 예전처럼 실현손익을 쌓는다. 6년·수천 거래의 복리는 작은 우위를 기하급수로
+    부풀려 총수익 %를 읽을 수 없게 만드는데(WAN-169/213 복리 착시), 크기를 고정하면 총수익이
+    우위에 **선형**이라 읽힌다. ⚠️ **성과를 좋게 만드는 장치가 아니라 다른 자다** — 상승
+    구간에서는 총수익이 크게 줄어든다(베팅이 안 커지므로). 청산 검사·동시 리스크 비율은
+    **실제 현금** 기준 그대로다(고정 사이징에서 현금이 불면 비율이 자연히 작아진다).
+    `True`(기본)면 예전과 **비트 단위로 같다**.
 
     반환 거래 목록은 **배치(진입 시각) 순**이다 — 자본곡선은 청산 시각 순으로 다시
     정렬해 만든다(`build_result_from_trades`가 그렇게 한다).
@@ -503,27 +525,30 @@ def run_leverage_book(
             stats.skip_records.append(SkippedSetup(cell.key, "cell_busy", cand, cash))
             continue
         open_notional = sum(p.notional for p in open_by_cell.values())
+        # WAN-346 §2: 복리를 끈 팔은 **사이징이 보는 자본**만 초기 자본에 못 박는다 —
+        # 현금(`cash`)은 그대로 손익을 쌓으므로 자본곡선·MDD·청산 검사는 진짜 장부다.
+        sizing_equity = cash if compound_sizing else eff_cfg.initial_capital
         # 사이징 결정(배수·북 상한·cap-only 합성 여유)은 라이브 집행과 **공유하는**
         # `resolve_book_sizing`이 낸다 — 두 경로가 상한식을 복제하면 갈라진다(WAN-171,
         # WAN-95/112/123의 조용한 실패 방지). combined는 합성 여유 = 실제 open_notional이라
         # 기존 CSV와 비트 일치하고, cap-only는 `min(거래당 천장, 북 여유)`를 합성한다.
         assert cfg.risk_sizing is not None  # apply_book_leverage가 보장.
         sizing = resolve_book_sizing(
-            cfg.risk_sizing, book, equity=cash, open_notional=open_notional
+            cfg.risk_sizing, book, equity=sizing_equity, open_notional=open_notional
         )
         if sizing.cap_exhausted:
             stats.skipped_notional += 1
             stats.skip_records.append(SkippedSetup(cell.key, "notional", cand, cash))
             continue
         rates = funding_index[cell.key].window(cand.entry_time, cand.exit_time)
-        trade = _to_trade(cand, cash, size_cfg, rates, sizing.synthetic_open)
+        trade = _to_trade(cand, sizing_equity, size_cfg, rates, sizing.synthetic_open)
         if trade is None:
             stats.skipped_sizing += 1
             stats.skip_records.append(SkippedSetup(cell.key, "sizing", cand, cash))
             continue
 
         notional = trade.entry_price * trade.quantity
-        wanted = _unclamped_notional(cand, size_cfg, cash)
+        wanted = _unclamped_notional(cand, size_cfg, sizing_equity)
         if wanted > 0.0 and notional < wanted * (1.0 - 1e-9):
             stats.clamped_entries += 1
         # WAN-244 유동성 한도가 **구속 제약**이었는지: 희망 명목이 `k×ADV_usd`를 넘었고
@@ -556,6 +581,13 @@ def run_leverage_book(
                 equity=cash,
                 risk_amount=risk_amount,
                 realized_pnl=trade.realized_pnl,
+                # WAN-346 §0: 거래별 CSV가 지어내지 않도록 후보가 실은 값을 그대로 옮긴다.
+                notional=notional,
+                stop_price=cand.stop_price,
+                take_profit_price=cand.take_profit_price,
+                is_reentry=cand.is_reentry,
+                same_step_take_profit=cand.same_step_take_profit,
+                trigger_time=cand.trigger_time,
             )
         )
         _observe(stats, cand.entry_time, cash, open_by_cell, book, stress_risk_multiple)

@@ -57,6 +57,7 @@ from backtest.wan169_leverage_book import (
 from backtest.wan180_leverage_book_nine import apply_funding_proxy
 from backtest.wan228_reentry_census import ReentryEntryRule
 from backtest.zone_limit_backtest import build_result_from_trades
+from common.timefmt import format_kst
 
 #: 채택 재진입 규칙(WAN-273 = 사용자 결정 2026-08-09) — 「익절 후 존 내 재진입」의 재무장
 #: 지정가를 봉내 라이브 밴드(볼린저)로 재산정한다. `"freeze"`(첫 체결가 고정)·`"zone"`(존
@@ -161,6 +162,7 @@ def build_book_rows(
     maker_fee_rate: float | None = None,
     slippage: float | None = None,
     stress_risk_multiple: float = 1.0,
+    compound_sizing: bool = True,
 ) -> list[BookRunRow]:
     """이미 만든 칸 후보(payloads)에서 요청 구간별 북 행을 낸다.
 
@@ -180,6 +182,9 @@ def build_book_rows(
     `stress_risk_multiple`(WAN-312, 옵트인)은 한 포지션의 최악 손실을 계획 1R의 몇 배로 볼지다
     — 청산 검사와 `max_effective_concurrent_risk`에만 흘러 들고 거래 자체는 안 바꾼다.
     `1.0`(기본)이면 예전과 비트 단위로 같다.
+
+    `compound_sizing=False`(WAN-346 §2, 옵트인)는 베팅 크기를 **초기 자본에 못 박아** 복리
+    착시 없이 읽는 팔을 낸다 — `True`(기본)면 예전과 비트 단위로 같다.
     """
     return [
         seg.row
@@ -194,6 +199,7 @@ def build_book_rows(
             maker_fee_rate=maker_fee_rate,
             slippage=slippage,
             stress_risk_multiple=stress_risk_multiple,
+            compound_sizing=compound_sizing,
         )
     ]
 
@@ -253,6 +259,7 @@ def iter_book_segments(
     maker_fee_rate: float | None = None,
     slippage: float | None = None,
     stress_risk_multiple: float = 1.0,
+    compound_sizing: bool = True,
 ) -> list[BookSegment]:
     """`build_book_rows`의 속 — 집계 행뿐 아니라 그 행을 만든 `BookOutcome`까지 돌려준다.
 
@@ -275,7 +282,11 @@ def iter_book_segments(
     for segment in segments:
         cells = _segment_cells(payloads, segment, "", include_reentry=include_reentry)
         outcome = run_leverage_book(
-            cells, base_cfg, book, stress_risk_multiple=stress_risk_multiple
+            cells,
+            base_cfg,
+            book,
+            stress_risk_multiple=stress_risk_multiple,
+            compound_sizing=compound_sizing,
         )
         result = build_result_from_trades(
             outcome.trades, outcome.effective_config, BOOK_ANNUALIZATION_TF
@@ -322,6 +333,46 @@ def run_book(
     자른다(자본에 안 비례하는 절대 상한이라 복리 착시를 깬다, WAN-90/213). `adv_fraction=None`은
     **WAN-279 이전의 상한-끔 북**이다(옛 CSV 비트 재현) — 미지정(`UNSET`)과 다르다(WAN-159 규약).
     """
+    return [
+        seg.row
+        for seg in run_book_segments(
+            symbols,
+            timeframes,
+            start=start,
+            end=end,
+            book=book,
+            segments=segments,
+            funding_proxy=funding_proxy,
+            jobs=jobs,
+            log=log,
+            reentry=reentry,
+            reentry_entry_rule=reentry_entry_rule,
+            adv_fraction=adv_fraction,
+        )
+    ]
+
+
+def run_book_segments(
+    symbols: Sequence[str],
+    timeframes: Sequence[str],
+    *,
+    start: str,
+    end: str,
+    book: LeverageBookParams,
+    segments: Sequence[str],
+    funding_proxy: bool = True,
+    jobs: int = 1,
+    log: bool = True,
+    reentry: bool = True,
+    reentry_entry_rule: ReentryEntryRule = ADOPTED_REENTRY_ENTRY_RULE,
+    adv_fraction: harness.AdvCapArg = harness.UNSET,
+) -> list[BookSegment]:
+    """`run_book`의 속 — 집계 행뿐 아니라 그 행을 만든 거래·배치 기록까지 돌려준다.
+
+    행만 필요하면 `run_book`을 쓴다(그쪽이 이 함수의 얇은 래퍼라 **같은 숫자**다). 거래별
+    CSV(WAN-346 §0)처럼 「이 지갑이 실제로 한 거래 하나하나」가 필요한 호출부가 자기 배치
+    루프를 따로 짜면 두 경로가 갈라지므로(WAN-95/112/123의 조용한 실패) 여기서 한 번에 낸다.
+    """
     from backtest.run import parse_date_ms  # 지연 import(사이클 회피)
 
     payloads = run_cells(
@@ -338,7 +389,7 @@ def run_book(
         payloads, note = apply_funding_proxy(payloads)
         if note and log:
             print(f"[book] 펀딩 대리: {note}", flush=True)
-    return build_book_rows(
+    return iter_book_segments(
         payloads,
         book=book,
         segments=segments,
@@ -390,3 +441,105 @@ def _render_table(rows: Sequence[BookRunRow]) -> str:
             f"{r.liquidation_events:>3}  {r.num_cells:>2}"
         )
     return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- #
+# 거래별 내역 · 시드곡선 (WAN-346 §0)
+# --------------------------------------------------------------------------- #
+
+#: 북 거래별 CSV가 per-cell 표(`report.trades_to_display_frame`) 위에 **덧붙이는** 열.
+#: 북은 칸을 가로지르는 한 지갑이라 per-cell 표에 없는 정보가 셋 있다 — 어느 칸인가,
+#: 그 거래가 건 리스크가 얼마인가(net R의 분모), 그리고 채택 규칙의 라벨(재진입·같은 분 익절).
+COL_CELL_SYMBOL = "칸(종목)"
+COL_CELL_TF = "칸(TF)"
+COL_STOP_PRICE = "손절가"
+COL_TAKE_PROFIT_PRICE = "익절가"
+COL_RISK_AMOUNT = "리스크금액"
+COL_NET_R = "net R"
+COL_IS_REENTRY = "재진입"
+COL_SAME_STEP_TP = "같은분익절"
+COL_TRIGGER_KST = "탭시각(KST)"
+
+BOOK_TRADE_COLUMNS: tuple[str, ...] = (
+    COL_CELL_SYMBOL,
+    COL_CELL_TF,
+    COL_STOP_PRICE,
+    COL_TAKE_PROFIT_PRICE,
+    COL_RISK_AMOUNT,
+    COL_NET_R,
+    COL_IS_REENTRY,
+    COL_SAME_STEP_TP,
+    COL_TRIGGER_KST,
+)
+
+
+def _ordered_pairs(segment: BookSegment) -> list[tuple[Trade, PlacedSetup]]:
+    """거래·배치 짝을 **청산 시각 순**으로 — `build_result_from_trades`와 같은 순열.
+
+    `BookSegment.result.trades`는 `sorted(outcome.trades, key=exit_time)`이고 이쪽도 같은
+    원본 리스트를 같은 키로 정렬하므로(파이썬 정렬은 안정) **두 순열은 정의상 같다**.
+    객체 동일성(`id()`)에 기대지 않는 이유는 그것이 pydantic의 재검증 정책에 달려 있어
+    조용히 깨질 수 있기 때문이다 — 대신 아래에서 값으로 대조한다.
+    """
+    return sorted(segment.trades_with_placements(), key=lambda pair: pair[0].exit_time)
+
+
+def book_trades_to_display_frame(segment: BookSegment) -> pd.DataFrame:
+    """북 한 구간의 **거래별 내역** 표 (WAN-346 §0 · KST/UTC 병기).
+
+    표시 열은 `report.trades_to_display_frame`을 **재사용**한다(WAN-146/106 관행) — 화면·
+    CSV·DB가 각자 표를 만들면 같은 거래가 세 곳에서 다른 숫자로 보인다. 그 위에
+    `BOOK_TRADE_COLUMNS`(칸·손절가·익절가·리스크 금액·net R·재진입·같은 분 익절·탭 시각)를
+    덧붙인다 — 북에만 있는 정보이고, 값은 전부 배치 기록(`PlacedSetup`)에서 그대로 온다.
+
+    🚨 두 리스트가 같은 순서라는 계약은 **값으로** 확인한다(진입/청산 시각·손익 3중 대조).
+    어긋나면 칸 라벨이 다른 거래에 붙은 표가 조용히 나가므로, 시끄럽게 죽는 쪽을 고른다.
+    """
+    from backtest.report import trades_to_display_frame  # 지연 import(사이클 회피)
+
+    pairs = _ordered_pairs(segment)
+    frame = trades_to_display_frame(segment.result, include_utc=True)
+    if len(frame) != len(pairs):
+        raise AssertionError(
+            f"북 거래 표와 배치 짝의 길이가 다릅니다({len(frame)} != {len(pairs)}) — "
+            "`build_result_from_trades`의 정렬과 어긋났습니다(WAN-346 §0 전제)."
+        )
+    for index, ((trade, _placement), engine_trade) in enumerate(
+        zip(pairs, segment.result.trades, strict=True)
+    ):
+        if (
+            trade.entry_time != engine_trade.entry_time
+            or trade.exit_time != engine_trade.exit_time
+            or trade.realized_pnl != engine_trade.realized_pnl
+        ):
+            raise AssertionError(
+                f"북 거래 표 {index}번이 배치 기록과 다른 거래입니다 — 두 정렬이 같은 "
+                "순열이라는 계약이 깨졌습니다(WAN-346 §0 전제)."
+            )
+    frame[COL_CELL_SYMBOL] = [p.cell[0] for _t, p in pairs]
+    frame[COL_CELL_TF] = [p.cell[1] for _t, p in pairs]
+    frame[COL_STOP_PRICE] = [p.stop_price for _t, p in pairs]
+    frame[COL_TAKE_PROFIT_PRICE] = [p.take_profit_price for _t, p in pairs]
+    frame[COL_RISK_AMOUNT] = [p.risk_amount for _t, p in pairs]
+    frame[COL_NET_R] = [net_r(t, p) for t, p in pairs]
+    frame[COL_IS_REENTRY] = [p.is_reentry for _t, p in pairs]
+    frame[COL_SAME_STEP_TP] = [p.same_step_take_profit for _t, p in pairs]
+    frame[COL_TRIGGER_KST] = [format_kst(p.trigger_time) for _t, p in pairs]
+    return frame
+
+
+def book_equity_to_display_frame(segment: BookSegment) -> pd.DataFrame:
+    """북 한 구간의 **시드곡선** 표 (WAN-346 §0) — per-cell과 같은 함수·같은 열."""
+    from backtest.report import equity_to_display_frame  # 지연 import(사이클 회피)
+
+    return equity_to_display_frame(segment.result, include_utc=True)
+
+
+def net_r(trade: Trade, placement: PlacedSetup) -> float:
+    """거래당 실현 net R = 실현손익 ÷ **그 거래의** 리스크 금액(WAN-154 `mean_net_r`와 같은 자).
+
+    복리 지갑에서 USD를 그냥 더하면 뒤쪽 거래가 표를 지배하므로(WAN-169/213), 크기를
+    정규화한 이 자를 항상 나란히 낸다. 리스크가 0이면(사이징이 그런 거래를 내지 않지만
+    방어적으로) 0으로 본다.
+    """
+    return trade.realized_pnl / placement.risk_amount if placement.risk_amount > 0 else 0.0

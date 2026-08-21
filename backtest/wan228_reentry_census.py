@@ -68,7 +68,7 @@ import argparse
 import bisect
 from collections.abc import Iterator, Sequence
 from concurrent.futures import ProcessPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
 
@@ -455,8 +455,12 @@ def reentry_candidates(
     WAN-323/330의 공개 CSV·결론이 움직이므로 **별도 이슈**이고, WAN-336의 축(같은 분 익절)과는
     무관하다(이 이슈의 두 팔은 래더를 안 켠다). 아래에서 `no_same_step_tp`만 넘기는 것은
     누락이 아니라 **범위 안의 것만 배선**한 것이다."""
+    # WAN-346: 재진입 후보에 라벨을 단다(`is_reentry=True`) — `_segment_cells`가 base
+    # 재탭 후보와 합친 뒤에는 둘을 되가를 방법이 없었다. 순수 라벨이라 체결·청산·손익·
+    # 후보 집합 어디에도 안 쓰이고, 라벨을 다는 **한 곳**이 여기다(합류 지점에서 달면
+    # 다른 호출부가 라벨 없는 재진입을 흘린다).
     return [
-        re_cand
+        replace(re_cand, is_reentry=True)
         for re_cand, _event in _iter_reentries(
             cand,
             parent_exit_time=parent_exit_time,
