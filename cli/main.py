@@ -11,10 +11,13 @@ import argparse
 import asyncio
 import csv
 import logging
+import os
+import shutil
 import socket
 import sys
+import tempfile
 from collections.abc import Sequence
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -24,11 +27,13 @@ from config import get_settings
 from config.settings import Settings
 from dashboard.health import HealthLevel, runner_cycle_budget_ms
 from dashboard.health_data import HealthView, build_health_view
+from data.tick_probe import MARKET_LABEL, SOURCE_LABEL
 from live.timeline_profile import SHAPE_PER_CELL, SHAPE_SHARED
 
 if TYPE_CHECKING:
     from data.integrity import IntegrityReport
     from data.partial_bars import BarDiscrepancy, SeriesScan
+    from data.tick_probe import ProbeResult, Projection, RestAvailability
     from data.verify import VerifyReport
     from live.trade_timeline import TimelineRow
 
@@ -447,6 +452,252 @@ def _write_partial_bar_csv(scans: Sequence[SeriesScan], path: str) -> Path:
                     ]
                 )
     return out
+
+
+def _fmt_bytes(value: float) -> str:
+    """사람이 읽는 크기. `data.integrity._fmt_bytes`와 같은 자(표를 나란히 읽는다)."""
+    size = float(value)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if abs(size) < 1024.0 or unit == "TB":
+            return f"{int(size)}B" if unit == "B" else f"{size:,.1f}{unit}"
+        size /= 1024.0
+    return f"{size:,.1f}TB"
+
+
+def format_tick_probe_grid(results: Sequence[ProbeResult]) -> str:
+    """§0 격자 표 — 없는 칸도 「없음」으로 남긴다(조용히 빼지 않는다)."""
+    lines = ["## §0-A 하루치 실측 (칸 = 종목 × 시장 × 자료)", ""]
+    if not results:
+        return "\n".join([*lines, "(잰 칸 없음)"])
+    lines.append(
+        f"{'종목':<10} {'시장':<12} {'자료':<8} {'행 수':>12} {'받은(zip)':>11}"
+        f" {'푼 CSV':>11} {'gzip(최소열)':>12} {'SQLite':>11} {'받기s':>7} {'넣기s':>7}"
+    )
+    lines.append("-" * 118)
+    for res in results:
+        if not res.available:
+            lines.append(
+                f"{res.spec.symbol:<10} {MARKET_LABEL[res.spec.market]:<12}"
+                f" {SOURCE_LABEL[res.spec.source]:<8} {'— 없음':>12}   {res.note}"
+            )
+            continue
+        lines.append(
+            f"{res.spec.symbol:<10} {MARKET_LABEL[res.spec.market]:<12}"
+            f" {SOURCE_LABEL[res.spec.source]:<8} {res.rows:>12,}"
+            f" {_fmt_bytes(res.download_bytes):>11} {_fmt_bytes(res.raw_bytes):>11}"
+            f" {_fmt_bytes(res.gzip_bytes):>12} {_fmt_bytes(res.sqlite_bytes):>11}"
+            f" {res.download_s:>7.1f} {res.ingest_s:>7.1f}"
+        )
+    return "\n".join(lines)
+
+
+def format_tick_probe_ratios(results: Sequence[ProbeResult]) -> str:
+    """같은 종목에서 「체결내역 ÷ 1초봉」 배수 — 추정이 아니라 잰 값이다."""
+    by_symbol: dict[str, dict[tuple[str, str], ProbeResult]] = {}
+    for res in results:
+        if res.available:
+            by_symbol.setdefault(res.spec.symbol, {})[(res.spec.market, res.spec.source)] = res
+    lines = ["## §0-B 종목별 배수 (체결내역 ÷ 1초봉 · SQLite 기준)", ""]
+    any_row = False
+    for symbol, cells in by_symbol.items():
+        agg = cells.get(("future", "agg_trades"))
+        kline = cells.get(("spot", "klines_1s"))
+        if agg is None or kline is None or kline.sqlite_bytes == 0:
+            continue
+        any_row = True
+        ratio = agg.sqlite_bytes / kline.sqlite_bytes
+        lines.append(
+            f"  {symbol:<10} 체결내역 {_fmt_bytes(agg.sqlite_bytes):>10}"
+            f" / 1초봉 {_fmt_bytes(kline.sqlite_bytes):>10} = {ratio:>6.2f}배"
+            f"   (행 {agg.rows:,} vs {kline.rows:,})"
+        )
+    if not any_row:
+        lines.append("  (두 자료가 함께 잰 종목이 없어 배수를 못 낸다)")
+    else:
+        lines.append("")
+        lines.append(
+            "  ⚠️ 1초봉은 거래가 없어도 초마다 한 행이라 **바닥이 고정**이다"
+            "(종목·일 86,400행). 한산한 종목일수록 배수가 1에 가까워지고 역전될 수도 있다."
+        )
+    return "\n".join(lines)
+
+
+def format_tick_probe_rest(rows: Sequence[RestAvailability]) -> str:
+    """REST로 그 과거 하루를 받을 수 있나 — 거래소 응답 그대로."""
+    lines = ["## §0-C REST 가용성 (거래소 응답 그대로)", ""]
+    if not rows:
+        return "\n".join([*lines, "(찔러 보지 않았다 — `--skip-rest`)"])
+    for row in rows:
+        mark = "OK" if row.ok else "✗"
+        lines.append(
+            f"  {mark:<3} {row.spec.symbol:<10} {MARKET_LABEL[row.spec.market]:<12}"
+            f" {SOURCE_LABEL[row.spec.source]:<8} HTTP {row.status:<4} {row.message}"
+        )
+    return "\n".join(lines)
+
+
+def format_tick_probe_projection(
+    projections: Sequence[Projection],
+    *,
+    universe: int,
+    db_bytes: int,
+    disk_free_bytes: int,
+    disk_total_bytes: int,
+) -> str:
+    """유니버스 환산 + 이 박스의 여유 — 완료기준 2(범위 판정)의 입력이다."""
+    from data.tick_probe import days_until_full
+
+    lines = [
+        f"## §0-D {universe}종목 환산과 서버 여유",
+        "",
+        f"  현재 DB {_fmt_bytes(db_bytes)} · 디스크 여유 {_fmt_bytes(disk_free_bytes)}"
+        f" / {_fmt_bytes(disk_total_bytes)}",
+        "",
+    ]
+    if not projections:
+        lines.append("  (환산할 칸이 없다)")
+        return "\n".join(lines)
+    for proj in projections:
+        daily = proj.projected_daily_sqlite
+        days = days_until_full(disk_free_bytes, daily)
+        span = f"띠 {_fmt_bytes(proj.projected_daily_low)}~{_fmt_bytes(proj.projected_daily_high)}"
+        horizon = "∞" if days is None else f"{days:,.0f}일"
+        yearly = _fmt_bytes(proj.projected_yearly_sqlite)
+        lines.append(
+            f"  {MARKET_LABEL[proj.market]} {SOURCE_LABEL[proj.source]}:"
+            f" 하루 ≈ {_fmt_bytes(daily)} ({span}) · 1년 ≈ {yearly}"
+            f" · 이 여유로 {horizon}"
+        )
+        lines.append(
+            f"      (실측 {proj.measured_symbols}종목 합 {_fmt_bytes(proj.measured_sqlite_bytes)}"
+            f" · 받은 바이트 합 {_fmt_bytes(proj.measured_download_bytes)})"
+        )
+    lines.append("")
+    lines.append(
+        "  🚨 하루 수치는 **평균×N 추정**이고 띠가 그 폭이다 — 체결내역은 종목별로 자릿수가"
+        " 갈린다. 정확한 값이 필요하면 `--symbols`로 12종목을 그냥 다 재라(종목당 요청 한 번)."
+    )
+    return "\n".join(lines)
+
+
+def _write_tick_probe_csv(results: Sequence[ProbeResult], path: str) -> Path:
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with out.open("w", newline="", encoding="utf-8") as fh:
+        writer = csv.writer(fh)
+        writer.writerow(
+            [
+                "symbol",
+                "market",
+                "source",
+                "day",
+                "available",
+                "note",
+                "rows",
+                "download_bytes",
+                "raw_bytes",
+                "gzip_bytes",
+                "sqlite_bytes",
+                "download_s",
+                "ingest_s",
+            ]
+        )
+        for res in results:
+            writer.writerow(
+                [
+                    res.spec.symbol,
+                    res.spec.market,
+                    res.spec.source,
+                    res.day,
+                    int(res.available),
+                    res.note,
+                    res.rows,
+                    res.download_bytes,
+                    res.raw_bytes,
+                    res.gzip_bytes,
+                    res.sqlite_bytes,
+                    f"{res.download_s:.3f}",
+                    f"{res.ingest_s:.3f}",
+                ]
+            )
+    return out
+
+
+def _lower_priority(nice_level: int) -> str:
+    """수집기·러너에 CPU를 양보한다(WAN-318 §1 관행 · 완료기준 4).
+
+    ⚠️ 이것만으로 디스크 경합이 사라지지 않는다 — 런북이 `ionice -c 3`을 함께 건다.
+    """
+    if nice_level <= 0:
+        return "적용 안 함"
+    try:
+        current = os.nice(nice_level)
+    except (OSError, PermissionError, AttributeError) as exc:  # pragma: no cover - OS 의존
+        return f"실패({exc})"
+    return f"nice={current}"
+
+
+def cmd_tick_probe(args: argparse.Namespace, settings: Settings) -> int:
+    """`alphablock tick-probe` — 1분보다 잘게 보는 데이터의 하루치 실측(WAN-347 §0).
+
+    읽기 전용이다: 프로덕션 DB를 **열지도 않고**(파일 크기만 stat) 잰 파일은 스크래치에
+    두었다 지운다(`--keep`으로 남긴다). 완료기준 3이 「§0만 하고 감당 안 되면 거기서
+    닫는다」라 이 명령은 **표를 찍는 데서 끝난다** — 수집기를 만들지 않는다.
+    """
+    from data.tick_probe import (
+        DEFAULT_PROBE_SYMBOLS,
+        default_specs,
+        measured_required_kinds,
+        probe_all,
+        probe_rest_availability,
+        project,
+    )
+
+    nice_note = _lower_priority(args.nice)
+    symbols = args.symbols or list(DEFAULT_PROBE_SYMBOLS)
+    day = args.day or (date.today() - timedelta(days=1)).isoformat()
+    universe = args.universe or len(settings.symbols)
+    specs = default_specs(symbols)
+
+    scratch = Path(args.scratch) if args.scratch else Path(tempfile.mkdtemp(prefix="tick-probe-"))
+    print(f"# WAN-347 §0 — {day}(UTC) 하루치 실측 · {nice_note} · 스크래치 {scratch}")
+    print(f"# 대표 종목 {', '.join(symbols)} · 유니버스 {universe}종목 기준 환산\n")
+
+    results = probe_all(
+        specs,
+        day,
+        scratch_dir=scratch,
+        with_sqlite=not args.no_sqlite,
+        keep=args.keep,
+    )
+    print(format_tick_probe_grid(results))
+    print()
+    print(format_tick_probe_ratios(results))
+    print()
+    rest_rows = [] if args.skip_rest else probe_rest_availability(specs, day)
+    print(format_tick_probe_rest(rest_rows))
+    print()
+
+    db_path = Path(settings.db_path)
+    db_bytes = db_path.stat().st_size if db_path.exists() else 0
+    usage = shutil.disk_usage(db_path.parent if str(db_path.parent) else Path("."))
+    print(
+        format_tick_probe_projection(
+            project(results, universe=universe),
+            universe=universe,
+            db_bytes=db_bytes,
+            disk_free_bytes=usage.free,
+            disk_total_bytes=usage.total,
+        )
+    )
+
+    if args.csv:
+        print(f"\nCSV: {_write_tick_probe_csv(results, args.csv)}")
+    if args.keep:
+        print(f"\n스크래치를 남겼다: {scratch} — 다 보고 지울 것(1GB 박스다).")
+
+    # 이슈가 물은 두 자료 중 **하나라도** 재지 못했으면 종료 코드 1(표가 반쪽이면 판정 불가).
+    return 0 if measured_required_kinds(results) else 1
 
 
 def cmd_verify(args: argparse.Namespace, settings: Settings) -> int:
@@ -1380,6 +1631,47 @@ def build_parser() -> argparse.ArgumentParser:
     p_partial.add_argument("--csv", default=None, help="봉 단위 결과를 이 경로에 CSV로 저장")
     p_partial.set_defaults(func=cmd_partial_bars)
 
+    p_tick = sub.add_parser(
+        "tick-probe",
+        help="1분보다 잘게 보는 데이터의 하루치 실측(읽기 전용) — WAN-347 §0",
+    )
+    p_tick.add_argument(
+        "--day",
+        default=None,
+        metavar="YYYY-MM-DD",
+        help="잴 날짜(UTC · 기본 어제 — 오늘치 아카이브는 아직 없다)",
+    )
+    p_tick.add_argument(
+        "--symbols",
+        nargs="+",
+        default=None,
+        help="대표 종목(기본 BTCUSDT SOLUSDT TRXUSDT = 활발·중간·한산)",
+    )
+    p_tick.add_argument(
+        "--universe",
+        type=int,
+        default=None,
+        help="환산에 쓸 종목 수(기본: 설정 symbols 개수 — 하드코딩하지 않는다)",
+    )
+    p_tick.add_argument(
+        "--no-sqlite",
+        action="store_true",
+        help="SQLite 적재를 건너뛴다(행 수·압축 크기만 — 훨씬 빠르지만 DB 비용은 못 잰다)",
+    )
+    p_tick.add_argument(
+        "--keep", action="store_true", help="잰 스크래치 파일을 지우지 않는다(기본: 지움)"
+    )
+    p_tick.add_argument("--scratch", default=None, help="스크래치 디렉터리(기본: 임시 디렉터리)")
+    p_tick.add_argument("--skip-rest", action="store_true", help="REST 가용성 찔러보기를 건너뛴다")
+    p_tick.add_argument(
+        "--nice",
+        type=int,
+        default=19,
+        help="자기 우선순위를 이만큼 낮춘다(기본 19 — 러너·수집기 양보. 0이면 안 낮춤)",
+    )
+    p_tick.add_argument("--csv", default=None, help="칸 단위 결과를 이 경로에 CSV로 저장")
+    p_tick.set_defaults(func=cmd_tick_probe)
+
     p_live = sub.add_parser("live", help="실시간 시그널 러너(페이퍼)")
     p_live.add_argument("--once", action="store_true", help="한 번만 폴링하고 종료")
     p_live.add_argument("--dry-run", action="store_true", help="텔레그램 전송 없이 로그로만 출력")
@@ -1428,7 +1720,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_stop_width = sub.add_parser(
         "stop-width",
-        help="손절폭(1R) 해부 — 가드 0.3%에 걸린 체결의 분포·라이브 대 백테 귀속(WAN-328)",
+        help="손절폭(1R) 해부 — 가드 0.3%%에 걸린 체결의 분포·라이브 대 백테 귀속(WAN-328)",
     )
     p_stop_width.add_argument("--db", default=None, help="장부 DB 경로(기본: 설정의 db_path)")
     p_stop_width.add_argument(

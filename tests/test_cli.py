@@ -18,6 +18,7 @@ from cli.main import (
     cmd_live,
     cmd_status,
     cmd_stop_width,
+    cmd_tick_probe,
     cmd_watch,
     format_status,
 )
@@ -65,6 +66,36 @@ def test_parser_routes_subcommands() -> None:
 def test_parser_requires_subcommand() -> None:
     with pytest.raises(SystemExit):
         build_parser().parse_args([])
+
+
+def test_parser_routes_tick_probe() -> None:
+    parser = build_parser()
+    args = parser.parse_args(["tick-probe", "--day", "2026-08-19", "--symbols", "TRXUSDT"])
+    assert args.func is cmd_tick_probe
+    assert args.symbols == ["TRXUSDT"]
+    # 러너·수집기 양보가 기본값이다(WAN-318 §1 관행 · 완료기준 4).
+    assert args.nice == 19
+    # 유니버스는 하드코딩하지 않는다 — 미지정이면 설정 symbols 개수를 쓴다(WAN-318 §6 교훈).
+    assert args.universe is None
+
+
+def test_help_renders_for_every_subcommand() -> None:
+    """`--help`가 실제로 그려지는지.
+
+    🚨 회귀 방지: argparse는 help 문자열에 `%` 서식을 적용하므로 `가드 0.3%`처럼 리터럴
+    퍼센트가 들어가면 **`alphablock --help`가 통째로 죽는다**(실제로 죽어 있었다 — 이
+    PR의 범위 밖 수리). 파서를 만드는 것만으로는 안 잡히고 **그려 봐야** 잡힌다.
+    """
+    parser = build_parser()
+    assert parser.format_help()
+    subparsers = [
+        action
+        for action in parser._actions  # noqa: SLF001 - argparse가 공개 API를 안 준다
+        if isinstance(action, argparse._SubParsersAction)
+    ]
+    assert subparsers, "하위 명령이 없다"
+    for name, sub in subparsers[0].choices.items():
+        assert sub.format_help(), f"{name} help가 비었다"
 
 
 # --- 상태 요약 포맷 ----------------------------------------------------------
