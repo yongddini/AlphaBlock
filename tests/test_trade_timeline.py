@@ -977,3 +977,73 @@ def test_backtest_setup_by_cell_matches_per_cell_loading(
     assert list(got) == list(expected)  # 칸 순서까지 같다(행 순서가 그로부터 나온다).
     assert got == expected
     assert any(rows for rows in expected.values()), "행이 하나도 없으면 대조가 공허하다"
+
+
+# --------------------------------------------------------------------------- #
+# WAN-343 §2: 존 대장 감사 입력 — 셋업 행과 **같은 탐지**를 봐야 한다
+# --------------------------------------------------------------------------- #
+
+
+#: 존 대장 감사 검사용 못 박은 칸·하루 — 실제로 셋업이 나는 자리여야 검사가 공허하지 않다
+#: (BTC 1h는 이 주간에 셋업이 0건이라 쓸 수 없다).
+_ZONE_AUDIT_SYMBOL = "ETH/USDT:USDT"
+_ZONE_AUDIT_TF = "1h"
+_ZONE_AUDIT_DAY = "2026-07-20"
+
+
+def test_zone_facts_and_setup_rows_come_from_the_same_detection() -> None:
+    """셋업 행의 존 정체성은 **전부** 그 칸의 존 대장에 있어야 한다 (WAN-343 §2).
+
+    감사가 답하는 질문은 「라이브가 보는 존을 백테 대장이 아는가」다. 대장과 셋업 행이 서로
+    다른 탐지에서 오면 그 질문 자체가 무의미해지고, 하필 실패 모양이 조용하다(감사가 「존
+    미탐지」를 무더기로 찍어 **없는 파리티 결함**을 만들어 낸다). 두 산출물이 같은
+    `OrderBlockResult`를 소비하는지를 **동작으로** 고정한다.
+    """
+    from backtest.harness import detect_order_blocks, load_market_data
+    from live.trade_timeline import _BacktestCellTask as _Task
+    from live.trade_timeline import _cell_zone_facts_from_loaded, cell_setup_timeline
+
+    start_ms, end_ms, _ = resolve_day_window(_ZONE_AUDIT_DAY)
+    warmup_start = start_ms - 30 * _DAY_MS
+    market = load_market_data(
+        _ZONE_AUDIT_SYMBOL,
+        _ZONE_AUDIT_TF,
+        start_ms=warmup_start,
+        end_ms=end_ms,
+        need_1m=True,
+        funding=False,
+    )
+    if market.empty:
+        pytest.skip("실데이터가 없어 존 대장 감사 검사를 건너뜁니다(CI 기본).")
+    ob_result = detect_order_blocks(market)
+    setups = cell_setup_timeline(market, ob_result, day_start_ms=start_ms, day_end_ms=end_ms)
+    task = _Task(_ZONE_AUDIT_SYMBOL, _ZONE_AUDIT_TF, start_ms, end_ms, 30)
+    facts = _cell_zone_facts_from_loaded(task, (market, ob_result))
+    assert facts is not None
+
+    # 창은 요청 하한이 아니라 **실제로 탐지에 들어간 첫 봉**이다.
+    assert facts.window_start_ms == int(market.htf_df["open_time"].iloc[0])
+    assert facts.window_end_ms == int(market.htf_df["open_time"].iloc[-1])
+
+    known = {(z.is_long, z.start_time, z.confirmed_time) for z in facts.zones}
+    identified = [
+        (r.is_long, r.zone_start_time, r.zone_confirmed_time)
+        for r in setups
+        if r.zone_start_time is not None and r.zone_confirmed_time is not None
+    ]
+    assert identified, "그날 셋업이 하나도 없어 공허한 검사입니다(창을 바꾸세요)."
+    assert all(key in known for key in identified)
+
+
+def test_zone_facts_are_absent_for_cells_without_data(monkeypatch: pytest.MonkeyPatch) -> None:
+    """데이터가 없는 칸은 **키가 없다** — 빈 대장을 실으면 「미탐지」로 오분류된다."""
+    import live.trade_timeline as tt
+
+    def fake_symbol(task: object) -> list[object]:
+        return [None for _ in task.timeframes]  # type: ignore[attr-defined]
+
+    monkeypatch.setattr(tt, "_backtest_symbol_zone_facts", fake_symbol)
+    out = tt.backtest_zone_facts_by_cells(
+        [(_SYMBOL, "15m")], day_start_ms=10, day_end_ms=20, warmup_days=7
+    )
+    assert out == {}

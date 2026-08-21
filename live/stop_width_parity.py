@@ -48,8 +48,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
 
 from common.timefmt import KST_LABEL, format_kst
 from execution.sizing import PositionSizingParams
@@ -57,6 +57,8 @@ from live.order_journal import ENTRY_STATUS_REJECTED, OrderJournal, PlacedOrder
 from live.setup_compare import SetupComparison, SetupKey, build_setup_comparisons, setup_key
 from live.trade_timeline import TimelineRow
 from live.unpaired_setups import UnpairedReport, attribute_unpaired, render_unpaired
+from live.zone_audit import ZoneAuditReport, audit_unpaired, render_zone_audit
+from live.zone_facts import CellZoneFacts
 
 __all__ = [
     "ATTRIBUTION_BOUNDARY",
@@ -67,11 +69,13 @@ __all__ = [
     "LiveStopWidth",
     "PairAttribution",
     "StopWidthReport",
+    "attach_zone_audit",
     "build_report",
     "join_census",
     "live_stop_widths",
     "pair_attributions",
     "render_report",
+    "unpaired_live_cells",
 ]
 
 #: 손절폭 가드 = 채택값을 **읽는다**(리터럴을 다시 적지 않는다 — 값이 바뀌면 이 표가 조용히
@@ -346,6 +350,13 @@ class StopWidthReport:
     손절폭을 빼는 무의미한 Δ가 나온다(WAN-333이 고친 부류). 제외는 그대로 두고 **왜 짝이
     없는지**를 별도 블록으로 낸다.
     """
+    zone_audit: ZoneAuditReport | None = None
+    """짝 없는 라이브 셋업 × 백테 존 대장 감사(WAN-343 §2) — **옵트인**이라 안 켜면 `None`.
+
+    📌 `unpaired`(부류 (0)/(a)/(b)/(c))가 **조인 키의 어느 조각이 갈렸는지**를 말한다면 이
+    블록은 그중 `(a) 존 없음`이 **왜** 없는지를 가른다(창 · 미탐지 · 무효화 선행 · 탭 판정).
+    갈래마다 후속이 완전히 다르다 — 무효화 선행은 문서화된 근사, 미탐지는 파리티 결함이다.
+    """
     narrowed: bool = False
     """좌표(`--symbol`/`--tf`)를 좁혀 돌렸나 — 참이면 §3이 창 전체를 본다는 사실을 화면이 밝힌다.
 
@@ -366,6 +377,7 @@ def build_report(
     live_rows_total: int | None = None,
     narrowed: bool = False,
     with_unpaired: bool = False,
+    zone_facts: Mapping[tuple[str, str], CellZoneFacts] | None = None,
 ) -> StopWidthReport:
     """장부(+ 선택적 백테 타임라인)로 손절폭 해부 리포트를 만든다.
 
@@ -377,6 +389,10 @@ def build_report(
 
     `with_unpaired`는 짝 없는 셋업 귀속(WAN-337 §1)을 **덧붙인다** — 조인·짝 표는 그대로이고
     (같은 `build_setup_comparisons` 결과를 쓴다) 진단 블록 하나가 늘 뿐이다.
+
+    `zone_facts`를 함께 주면 그 위에 존 대장 감사(WAN-343 §2)를 한 겹 더 얹는다 — 같은
+    `attribute_unpaired` 결과를 **그대로** 넘기므로 두 블록이 다른 분류를 얻지 않는다.
+    `with_unpaired` 없이 주면 감사할 입력이 없으므로 아무 일도 하지 않는다.
     """
     orders = journal.orders_placed_between(start_ms=start_ms, end_ms=end_ms)
     filled = [o for o in orders if o.fill_ms is not None]
@@ -384,6 +400,7 @@ def build_report(
     pairs: list[PairAttribution] = []
     census: JoinCensus | None = None
     unpaired: UnpairedReport | None = None
+    zone_audit: ZoneAuditReport | None = None
     if backtest_rows is not None and live_rows is not None:
         result = build_setup_comparisons(live_rows, backtest_rows)
         pairs = pair_attributions(result.comparisons)
@@ -393,6 +410,8 @@ def build_report(
         if with_unpaired:
             # 같은 조인 결과를 그대로 넘긴다 — 다시 짝지으면 두 블록이 다른 짝을 얻는다.
             unpaired = attribute_unpaired(live_rows, backtest_rows, result.comparisons)
+            if zone_facts is not None:
+                zone_audit = audit_unpaired(unpaired.setups, zone_facts)
     return StopWidthReport(
         window_label=window_label,
         live_orders=len(filled),
@@ -401,8 +420,42 @@ def build_report(
         backtest_ran=backtest_rows is not None,
         census=census,
         unpaired=unpaired,
+        zone_audit=zone_audit,
         narrowed=narrowed,
     )
+
+
+def unpaired_live_cells(report: StopWidthReport) -> tuple[tuple[str, str], ...]:
+    """감사할 칸 목록 — 짝 없는 **라이브** 셋업이 실제로 있는 (심볼, TF)만 (WAN-343 §2).
+
+    존 대장을 굽는 비용이 칸당이라(채택 좌표 48칸을 다 구우면 하루치 6분+, WAN-322) 감사에
+    필요한 칸만 고른다. 부류 (0)(존 정체성 없음) 행은 어차피 `대상 아님`이라 뺀다 — 그 칸에
+    다른 감사 대상이 없으면 굽지 않는다.
+    """
+    if report.unpaired is None:
+        return ()
+    cells: list[tuple[str, str]] = []
+    for one in report.unpaired.setups:
+        if one.side != "라이브" or one.zone_start_time is None:
+            continue
+        cell = (one.symbol, one.timeframe)
+        if cell not in cells:
+            cells.append(cell)
+    return tuple(cells)
+
+
+def attach_zone_audit(
+    report: StopWidthReport, zone_facts: Mapping[tuple[str, str], CellZoneFacts]
+) -> StopWidthReport:
+    """이미 만든 리포트에 존 대장 감사를 얹는다 (WAN-343 §2).
+
+    감사할 **칸을 알려면 조인이 먼저 끝나야** 하므로 `build_report`에 한 번에 넘길 수 없다 —
+    두 번 부르면 조인이 두 번 돌고(같은 결과여도 낭비) 두 결과가 갈릴 여지가 생긴다. 여기서는
+    **이미 나온 그 분류**(`report.unpaired.setups`)를 그대로 감사한다.
+    """
+    if report.unpaired is None:
+        return report
+    return replace(report, zone_audit=audit_unpaired(report.unpaired.setups, zone_facts))
 
 
 def _quantile(values: Sequence[float], q: float) -> float | None:
@@ -506,7 +559,10 @@ def _unpaired_lines(report: StopWidthReport) -> list[str]:
     """짝 없는 셋업 귀속 블록(WAN-337 §1) — 옵트인이라 안 켜면 아무것도 안 붙는다."""
     if report.unpaired is None:
         return []
-    return render_unpaired(report.unpaired).split("\n")
+    lines = render_unpaired(report.unpaired).split("\n")
+    if report.zone_audit is not None:
+        lines += render_zone_audit(report.zone_audit).split("\n")
+    return lines
 
 
 def _census_lines(census: JoinCensus | None) -> list[str]:

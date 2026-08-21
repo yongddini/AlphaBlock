@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -526,3 +527,95 @@ def test_report_census_makes_a_zero_pair_join_legible(tmp_path) -> None:  # type
     assert "조인 인구조사" in text
     assert "배선 오류" in text
     assert "per-cell 단일 포지션" not in text  # 짝이 없으면 귀속 표 자체가 안 나온다.
+
+
+# --------------------------------------------------------------------------- #
+# WAN-343 §2: 존 대장 감사가 리포트에 얹힌다 (옵트인)
+# --------------------------------------------------------------------------- #
+
+
+def test_zone_audit_attaches_without_changing_the_join(tmp_path: Path) -> None:
+    """`attach_zone_audit`는 **덧붙이기**다 — 짝·인구조사·귀속 분류를 하나도 안 바꾼다.
+
+    조인을 다시 돌리면 두 블록이 다른 짝을 얻을 수 있다(WAN-333/335가 고친 부류). 이미 나온
+    분류를 그대로 감사하는지를 동작으로 고정한다.
+    """
+    from dataclasses import replace as _replace
+
+    from live.order_journal import OrderJournal
+    from live.stop_width_parity import (
+        attach_zone_audit,
+        build_report,
+        render_report,
+        unpaired_live_cells,
+    )
+    from live.zone_audit import REASON_INVALIDATED, REASON_NOT_APPLICABLE
+    from live.zone_facts import CellZoneFacts, ZoneFact
+
+    journal = OrderJournal(str(tmp_path / "journal.db"))
+    try:
+        live = _timeline_row(SOURCE_LIVE, fill=100.0, stop=99.9)
+        # 백테는 **다른 존**이라 짝이 안 지어진다 — (a) 존 없음.
+        other = _replace(
+            _timeline_row(SOURCE_BACKTEST, fill=100.5, stop=99.9),
+            zone_start_time=10_000_000,
+            zone_confirmed_time=10_100_000,
+        )
+        report = build_report(
+            journal,
+            start_ms=0,
+            end_ms=10_000,
+            window_label="테스트",
+            backtest_rows=[other],
+            live_rows=[live],
+            with_unpaired=True,
+        )
+    finally:
+        journal.close()
+
+    assert report.unpaired is not None
+    assert report.zone_audit is None  # 옵트인 — 안 주면 안 붙는다.
+    cells = unpaired_live_cells(report)
+    assert cells == (("BTC/USDT:USDT", "15m"),)
+
+    facts = CellZoneFacts(
+        symbol="BTC/USDT:USDT",
+        timeframe="15m",
+        window_start_ms=0,
+        window_end_ms=10_000_000,
+        # 라이브가 본 그 존을 백테도 알지만 탭 전에 이미 무효화했다.
+        zones=(
+            ZoneFact(
+                is_long=True,
+                start_time=10,
+                confirmed_time=20,
+                break_time=0,  # 라이브 탭 봉(0)과 같은 봉 — 「한 봉 늦는 근사」의 서명.
+                swept_time=None,
+                tapped_times=(),
+            ),
+        ),
+    )
+    attached = attach_zone_audit(report, {("BTC/USDT:USDT", "15m"): facts})
+    assert attached.zone_audit is not None
+    # 라이브 쪽은 무효화 선행, 백테만 있는 행은 대상 아님(라이브 존 대장이 없다).
+    assert [v.reason for v in attached.zone_audit.verdicts] == [
+        REASON_INVALIDATED,
+        REASON_NOT_APPLICABLE,
+    ]
+    assert attached.zone_audit.audited == 1
+    assert attached.zone_audit.same_bar_invalidations == 1
+    # 덧붙이기: 조인 산출물이 하나도 안 바뀐다.
+    assert attached.pairs == report.pairs
+    assert attached.census == report.census
+    assert attached.unpaired == report.unpaired
+    text = render_report(attached)
+    assert "짝 없는 라이브 셋업 × 백테 존 대장" in text
+
+
+def test_cli_stop_width_zone_audit_implies_unpaired() -> None:
+    """`--zone-audit`은 `--unpaired`를 함축하고 `--with-backtest` 없이는 거부한다."""
+    from cli.main import build_parser
+
+    ns = build_parser().parse_args(["stop-width", "--day", "2026-08-17", "--zone-audit"])
+    assert ns.zone_audit is True
+    assert ns.unpaired is False  # 함축은 파서가 아니라 명령이 한다(플래그는 그대로 읽힌다).

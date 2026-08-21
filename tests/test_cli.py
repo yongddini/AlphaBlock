@@ -713,6 +713,7 @@ def _stop_width_args(tmp_path: Path, **kw: Any) -> argparse.Namespace:
         recompute=False,
         allow_stale=False,
         unpaired=False,
+        zone_audit=False,
     )
     base.update(kw)
     return argparse.Namespace(**base)
@@ -1123,3 +1124,73 @@ def test_cmd_watch_rejects_dry_run_with_require_delivery(tmp_path: Path) -> None
     """보내지 않는 모드에 「도착을 요구」를 붙이면 라벨과 동작이 어긋난다 — 거부한다."""
     args = argparse.Namespace(once=True, dry_run=True, test_message=False, require_delivery=True)
     assert cmd_watch(args, _settings(tmp_path)) == 2
+
+
+def test_cmd_stop_width_zone_audit_implies_unpaired_and_needs_backtest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--zone-audit`은 `--unpaired`를 함축하고 `--with-backtest` 없이는 **거부한다** (WAN-343 §2).
+
+    조용히 빈 블록을 내면 「감사했는데 아무 일도 안 일어난 것」과 「감사 자체가 못 돈 것」이
+    화면에서 같아 보인다 — 이 저장소가 반복해 경계한 실패 모양이다.
+    """
+    from cli.main import cmd_stop_width
+    from config.settings import Settings
+
+    settings = Settings(db_path=str(tmp_path / "journal.db"))
+    printed: list[str] = []
+    monkeypatch.setattr("builtins.print", lambda *a, **k: printed.append(" ".join(map(str, a))))
+    args = _stop_width_args(tmp_path, with_backtest=False, unpaired=False, zone_audit=True)
+    assert cmd_stop_width(args, settings) == 0
+    assert any("--with-backtest" in line for line in printed)
+
+
+def test_cmd_stop_width_zone_audit_bakes_only_the_affected_cells(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """감사는 **짝 없는 라이브 셋업이 있는 칸만** 굽고, 몇 칸인지 먼저 찍는다 (WAN-343 §2).
+
+    채택 좌표 48칸을 다 구우면 하루치 6분+다(WAN-322) — 감사에 필요한 것은 그 칸들뿐이다.
+    조용히 느려지면 「왜 안 끝나지」가 반복되므로 굽기 전에 칸 수를 밝힌다(WAN-335 §1-3 규약).
+    """
+    import live.trade_timeline as tt
+    from live.zone_facts import CellZoneFacts, ZoneFact
+
+    db = str(tmp_path / "journal.db")
+    _seed_two_cell_journal(db)
+    _stub_cells(monkeypatch)  # 백테 셋업 행 0건 → 라이브 두 칸이 전부 짝 없음.
+
+    baked: list[list[tuple[str, str]]] = []
+
+    def fake_zone_facts(cells: Any, **kw: Any) -> dict[tuple[str, str], CellZoneFacts]:
+        baked.append(list(cells))
+        return {
+            cell: CellZoneFacts(
+                symbol=cell[0],
+                timeframe=cell[1],
+                window_start_ms=0,
+                window_end_ms=10**13,
+                zones=(
+                    ZoneFact(
+                        is_long=True,
+                        start_time=-1,  # 라이브가 본 존이 아니다 → 존 미탐지.
+                        confirmed_time=-1,
+                        break_time=None,
+                        swept_time=None,
+                        tapped_times=(),
+                    ),
+                ),
+            )
+            for cell in cells
+        }
+
+    monkeypatch.setattr(tt, "backtest_zone_facts_by_cells", fake_zone_facts)
+    args = _stop_width_args(tmp_path, db=db, zone_audit=True)
+    assert cmd_stop_width(args, _settings(tmp_path)) == 0
+    out = capsys.readouterr().out
+    # 라이브 두 칸만 굽는다(채택 좌표 전부가 아니다).
+    assert len(baked) == 1
+    assert sorted(baked[0]) == [("BTC/USDT:USDT", "15m"), ("ETH/USDT:USDT", "1h")]
+    assert "2칸의 존 대장을 계산합니다" in out
+    assert "짝 없는 라이브 셋업 × 백테 존 대장" in out
+    assert "존 미탐지" in out
