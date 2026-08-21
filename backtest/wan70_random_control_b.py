@@ -99,7 +99,11 @@ _YEAR_MS = int(365.25 * 24 * 60 * 60 * 1000)
 _RSI_GATE_DISABLED_OVERSOLD = 100.0
 _RSI_GATE_DISABLED_OVERBOUGHT = 0.0
 
-Segment = Literal["IS", "OOS"]
+#: 구간 라벨. `"IS"`/`"OOS"`는 **차가운 절단**(창을 먼저 자르고 그 안에서 다시 탐지)의
+#: 두 조각이고, `"full"`/`"oos_warm"`은 **따뜻한 연속 규약**(WAN-166)의 두 창이다
+#: (WAN-350이 후자를 더했다 — 그 전 코드 경로는 앞의 둘만 만들므로 옛 CSV는 그대로다).
+#: ⚠️ 두 규약의 OOS 수치는 **다른 질문의 답**이라 나란히 인용하면 안 된다(CLAUDE.md).
+Segment = Literal["IS", "OOS", "full", "oos_warm"]
 
 #: WAN-68이 도입한 세 게이트를 끈/켠 대표 프리셋(WAN-70). "켠" 값은 그리드 최적화
 #: 결과가 아니라 방향성 검증용 대표값이다(모듈 docstring 참고).
@@ -175,59 +179,36 @@ def _bucket_key(side: PositionSide, entry_time_ms: int) -> tuple[PositionSide, i
     return (side, _hour_bucket(entry_time_ms))
 
 
-def run_random_control_b_segment(
+def _evaluated_from(candidates: list[_Candidate], eval_from_ms: int | None) -> list[_Candidate]:
+    """따뜻한 연속 OOS(WAN-166): 탭이 평가 경계 이후인 후보만 남긴다.
+
+    경계 판정을 **진입 시각이 아니라 탭 시각(`trigger_time`)** 으로 하는 것이 규약이다
+    (`run_leverage_book`·`wan206`과 같은 자) — 경계를 걸쳐 사는 주문이 평가 초입의
+    자리를 점유하지 않게 한다. `None`이면 항등이라 기존 CSV가 비트 재현된다.
+    """
+    if eval_from_ms is None:
+        return candidates
+    return [c for c in candidates if c.trigger_time >= eval_from_ms]
+
+
+def _build_both_pools(
     htf_seg: pd.DataFrame,
     one_min_seg: pd.DataFrame,
     timeframe: str,
     *,
-    symbol: str,
-    segment: Segment,
-    gate: str,
     confluence_params: ConfluenceParams,
-    order_block_params: OrderBlockParams | None = None,
-    backtest_config: BacktestConfig | None = None,
-    order_block_result: OrderBlockResult | None = None,
-    iterations: int = _BOOTSTRAP_ITERATIONS,
-    seed: int = 70,
-    funding_rates: Sequence[FundingRate] | None = None,
-    pool_params: ConfluenceParams | None = None,
-) -> RandomControlBResult:
-    """한 구간에서 실제 결과와 매칭 널 부트스트랩을 비교한다.
+    pool_params: ConfluenceParams | None,
+    cfg: BacktestConfig,
+    order_block_params: OrderBlockParams | None,
+    ob_result: OrderBlockResult,
+    no_same_step_tp: bool,
+) -> tuple[list[_Candidate], list[_Candidate]]:
+    """실제 팔과 무력화 풀의 후보를 **같은 가정으로** 만든다(생성 지점을 한 곳에 묶는다).
 
-    `htf_seg`/`one_min_seg`는 이미 구간·워밍업 창으로 잘려 있어야 한다(IS/OOS 분할은
-    `run_experiment`가 담당). `order_block_result`를 주면 실제 경로와 무력화 풀
-    경로가 같은 오더블록 유니버스를 공유한다.
-
-    `funding_rates`(WAN-88)를 주면 실제·널 **양쪽 시퀀싱에 똑같이** 펀딩비가 붙는다.
-    안 넘기면(기본) 펀딩 0으로 계산된다 — `cfg.funding_enabled`가 True여도 그렇다.
-    이 모듈의 `main()`은 넘기지 않으므로 WAN-70 CSV는 그대로 재현된다.
-
-    ## `pool_params` — 무력화 축을 호출부가 고르게 한다 (WAN-124)
-
-    기본(`None`)은 **RSI 게이트 무력화**다: `confluence_params`에 `rsi_oversold=100`/
-    `rsi_overbought=0`만 덮어써 풀을 만든다(이 모듈 docstring의 정의 그대로). WAN-70/84/88
-    CSV는 이 경로를 타므로 비트 단위로 재현된다.
-
-    ⚠️ **그 기본 축은 채택 기본값에서 죽었다.** [WAN-123](../docs/decisions/wan123.md)이
-    게이트를 뺀 뒤(`rsi_gate_mode="unconditional"`) 시뮬레이터가 RSI를 **읽지도 않으므로**
-    (`backtest/substep.py`의 단락 평가), 위 두 오버라이드는 **아무것도 하지 않는다** — 풀이
-    실제 후보 집합과 **글자 그대로 같아진다**. 그러면 널은 자기 자신과 비교하면서도 p값을
-    멀쩡히 뱉는다(= 이 저장소가 반복해 겪은 조용한 실패). 그래서 게이트가 없는 엔진의 널은
-    **남은 선별 규칙**(볼린저)을 무력화한 `pool_params`를 넘겨야 한다 —
-    `backtest/wan123_matched_null.py`가 그 호출부이고, 근거·수치는
-    [`docs/decisions/wan124.md`](../docs/decisions/wan124.md)에 있다.
-
-    `pool_params`를 주면 RSI 오버라이드는 **걸지 않는다**(그 파라미터가 자기 완결적인
-    풀 정의다). 실제와 **같은 파라미터**를 주면 널이 정의상 퇴화하므로 거부한다.
+    두 호출이 떨어져 있으면 한쪽에만 새 축(렌즈·`no_same_step_tp` 등)이 붙어 「실제는 보수,
+    널은 낙관」인 잡종 대조가 조용히 생긴다 — 이 저장소가 반복해 겪은 실패 부류(WAN-91/95/
+    112/123/159)의 널 축 변종이다. 그래서 두 생성은 한 함수 안에 나란히 둔다.
     """
-    if pool_params is not None and pool_params == confluence_params:
-        raise ValueError(
-            "pool_params가 confluence_params와 같습니다 — 무력화 풀이 실제 후보 집합과 "
-            "같아져 널이 자기 자신을 검정하게 됩니다. 무력화할 규칙을 실제로 끄세요."
-        )
-    cfg = backtest_config or default_backtest_config(timeframe)
-    ob_result = order_block_result or OrderBlockDetector(order_block_params).run(htf_seg)
-
     real_candidates, _ = build_zone_limit_candidates(
         htf_seg,
         one_min_seg,
@@ -236,7 +217,50 @@ def run_random_control_b_segment(
         cfg=cfg,
         order_block_params=order_block_params,
         order_block_result=ob_result,
+        no_same_step_tp=no_same_step_tp,
     )
+    # 무력화 풀: 셋업당 시뮬레이션 정확히 1회(성능 — 모듈 docstring).
+    # `pool_params`가 없으면 RSI 게이트 무력화(WAN-70 기본 축), 있으면 호출부가 정의한
+    # 풀 그대로다(WAN-124) — 후자에 RSI 오버라이드를 겹쳐 걸지 않는 이유는 위 docstring.
+    pool_candidates, _ = build_zone_limit_candidates(
+        htf_seg,
+        one_min_seg,
+        timeframe,
+        params=confluence_params if pool_params is None else pool_params,
+        cfg=cfg,
+        order_block_params=order_block_params,
+        order_block_result=ob_result,
+        rsi_oversold=_RSI_GATE_DISABLED_OVERSOLD if pool_params is None else None,
+        rsi_overbought=_RSI_GATE_DISABLED_OVERBOUGHT if pool_params is None else None,
+        no_same_step_tp=no_same_step_tp,
+    )
+    return real_candidates, pool_candidates
+
+
+def _null_from_candidates(
+    real_candidates: list[_Candidate],
+    pool_candidates: list[_Candidate],
+    *,
+    symbol: str,
+    timeframe: str,
+    segment: Segment,
+    gate: str,
+    cfg: BacktestConfig,
+    funding_rates: Sequence[FundingRate] | None,
+    iterations: int,
+    seed: int,
+    eval_from_ms: int | None,
+) -> RandomControlBResult:
+    """미리 만든 두 후보 목록에서 매칭 널 통계를 낸다 — 시뮬레이션은 하지 않는다.
+
+    `run_random_control_b_segment`의 후반부를 그대로 뺀 것이다. 후보 생성이 이 함수 **밖**
+    으로 나온 덕에 **한 번 만든 후보를 여러 평가창(`eval_from_ms`)이 나눠 쓸 수 있다**
+    (`run_random_control_b_evals`) — 창이 달라도 존·지표·후보는 같은 연속 실행의 산물이라
+    다시 태울 이유가 없다. 통계·시드·표본추출은 한 곳(이 함수)에만 있어 두 진입점이
+    갈라질 수 없다.
+    """
+    real_candidates = _evaluated_from(real_candidates, eval_from_ms)
+    pool_candidates = _evaluated_from(pool_candidates, eval_from_ms)
     real_trades = _sequence_and_cost(real_candidates, cfg, funding_rates)
     real_result = build_result_from_trades(real_trades, cfg, timeframe)
     real_long = sum(1 for t in real_trades if t.side is PositionSide.LONG)
@@ -260,21 +284,6 @@ def run_random_control_b_segment(
             iterations=0,
             bucket_fallback_count=0,
         )
-
-    # 무력화 풀: 셋업당 시뮬레이션 정확히 1회(성능 — 모듈 docstring).
-    # `pool_params`가 없으면 RSI 게이트 무력화(WAN-70 기본 축), 있으면 호출부가 정의한
-    # 풀 그대로다(WAN-124) — 후자에 RSI 오버라이드를 겹쳐 걸지 않는 이유는 위 docstring.
-    pool_candidates, _ = build_zone_limit_candidates(
-        htf_seg,
-        one_min_seg,
-        timeframe,
-        params=confluence_params if pool_params is None else pool_params,
-        cfg=cfg,
-        order_block_params=order_block_params,
-        order_block_result=ob_result,
-        rsi_oversold=_RSI_GATE_DISABLED_OVERSOLD if pool_params is None else None,
-        rsi_overbought=_RSI_GATE_DISABLED_OVERBOUGHT if pool_params is None else None,
-    )
 
     pool_by_bucket: dict[tuple[PositionSide, int], list[_Candidate]] = defaultdict(list)
     pool_by_side: dict[PositionSide, list[_Candidate]] = defaultdict(list)
@@ -338,6 +347,170 @@ def run_random_control_b_segment(
         iterations=n,
         bucket_fallback_count=bucket_fallback_count,
     )
+
+
+def run_random_control_b_segment(
+    htf_seg: pd.DataFrame,
+    one_min_seg: pd.DataFrame,
+    timeframe: str,
+    *,
+    symbol: str,
+    segment: Segment,
+    gate: str,
+    confluence_params: ConfluenceParams,
+    order_block_params: OrderBlockParams | None = None,
+    backtest_config: BacktestConfig | None = None,
+    order_block_result: OrderBlockResult | None = None,
+    iterations: int = _BOOTSTRAP_ITERATIONS,
+    seed: int = 70,
+    funding_rates: Sequence[FundingRate] | None = None,
+    pool_params: ConfluenceParams | None = None,
+    no_same_step_tp: bool = False,
+    eval_from_ms: int | None = None,
+) -> RandomControlBResult:
+    """한 구간에서 실제 결과와 매칭 널 부트스트랩을 비교한다.
+
+    `htf_seg`/`one_min_seg`는 이미 구간·워밍업 창으로 잘려 있어야 한다(IS/OOS 분할은
+    `run_experiment`가 담당). `order_block_result`를 주면 실제 경로와 무력화 풀
+    경로가 같은 오더블록 유니버스를 공유한다.
+
+    `funding_rates`(WAN-88)를 주면 실제·널 **양쪽 시퀀싱에 똑같이** 펀딩비가 붙는다.
+    안 넘기면(기본) 펀딩 0으로 계산된다 — `cfg.funding_enabled`가 True여도 그렇다.
+    이 모듈의 `main()`은 넘기지 않으므로 WAN-70 CSV는 그대로 재현된다.
+
+    ## `pool_params` — 무력화 축을 호출부가 고르게 한다 (WAN-124)
+
+    기본(`None`)은 **RSI 게이트 무력화**다: `confluence_params`에 `rsi_oversold=100`/
+    `rsi_overbought=0`만 덮어써 풀을 만든다(이 모듈 docstring의 정의 그대로). WAN-70/84/88
+    CSV는 이 경로를 타므로 비트 단위로 재현된다.
+
+    ⚠️ **그 기본 축은 채택 기본값에서 죽었다.** [WAN-123](../docs/decisions/wan123.md)이
+    게이트를 뺀 뒤(`rsi_gate_mode="unconditional"`) 시뮬레이터가 RSI를 **읽지도 않으므로**
+    (`backtest/substep.py`의 단락 평가), 위 두 오버라이드는 **아무것도 하지 않는다** — 풀이
+    실제 후보 집합과 **글자 그대로 같아진다**. 그러면 널은 자기 자신과 비교하면서도 p값을
+    멀쩡히 뱉는다(= 이 저장소가 반복해 겪은 조용한 실패). 그래서 게이트가 없는 엔진의 널은
+    **남은 선별 규칙**(볼린저)을 무력화한 `pool_params`를 넘겨야 한다 —
+    `backtest/wan123_matched_null.py`가 그 호출부이고, 근거·수치는
+    [`docs/decisions/wan124.md`](../docs/decisions/wan124.md)에 있다.
+
+    `pool_params`를 주면 RSI 오버라이드는 **걸지 않는다**(그 파라미터가 자기 완결적인
+    풀 정의다). 실제와 **같은 파라미터**를 주면 널이 정의상 퇴화하므로 거부한다.
+
+    ## `no_same_step_tp` — 보수 축을 **양쪽에 똑같이** 건다 (WAN-336 팔 · WAN-350)
+
+    `no_same_step_tp`(옵트인)는 진입한 그 1분 스텝에서 익절을 판정하지 않는 보수적
+    반사실이고, 실제 팔과 무력화 풀 **양쪽** 후보 생성에 똑같이 걸린다. 한쪽만 걸면
+    「실제는 보수, 널은 낙관」인 잡종 대조가 되어 p값이 규칙이 아니라 **가정 차이**를
+    재게 된다. 끄면(기본) 예전과 비트 단위로 같다.
+
+    ⚠️ 체결 렌즈(`pen_5bp` 등)는 여기에 인자가 없다 — `ConfluenceParams`의
+    `fill_penetration_bps`/`fill_dropout_rate`에 실려 있으므로 `confluence_params`와
+    (그것에서 파생되는) `pool_params`가 **자동으로 같은 렌즈**를 쓴다.
+
+    ## `eval_from_ms` — 따뜻한 연속 OOS (WAN-166 규약 · WAN-350)
+
+    `eval_from_ms`를 주면 창 전체를 연속으로 태워 존·지표를 데운 뒤 **탭(`trigger_time`)이
+    그 시각 이후인 후보만** 평가한다 — `run_zone_limit_backtest_verbose(eval_from_ms=)`·
+    `run_leverage_book(eval_from_ms=)`·`wan206`과 **같은 규약**이다. 실제 팔과 풀에
+    똑같이 걸어야 두 집합이 같은 기간을 본다. `None`이면(기본) 예전처럼 넘겨받은 창
+    전체를 평가하므로 차가운 절단(`slice_market`) 계열 CSV가 비트 재현된다.
+    """
+    if pool_params is not None and pool_params == confluence_params:
+        raise ValueError(
+            "pool_params가 confluence_params와 같습니다 — 무력화 풀이 실제 후보 집합과 "
+            "같아져 널이 자기 자신을 검정하게 됩니다. 무력화할 규칙을 실제로 끄세요."
+        )
+    cfg = backtest_config or default_backtest_config(timeframe)
+    ob_result = order_block_result or OrderBlockDetector(order_block_params).run(htf_seg)
+    real_candidates, pool_candidates = _build_both_pools(
+        htf_seg,
+        one_min_seg,
+        timeframe,
+        confluence_params=confluence_params,
+        pool_params=pool_params,
+        cfg=cfg,
+        order_block_params=order_block_params,
+        ob_result=ob_result,
+        no_same_step_tp=no_same_step_tp,
+    )
+    return _null_from_candidates(
+        real_candidates,
+        pool_candidates,
+        symbol=symbol,
+        timeframe=timeframe,
+        segment=segment,
+        gate=gate,
+        cfg=cfg,
+        funding_rates=funding_rates,
+        iterations=iterations,
+        seed=seed,
+        eval_from_ms=eval_from_ms,
+    )
+
+
+def run_random_control_b_evals(
+    htf_seg: pd.DataFrame,
+    one_min_seg: pd.DataFrame,
+    timeframe: str,
+    *,
+    symbol: str,
+    evals: Sequence[tuple[Segment, int | None]],
+    gate: str,
+    confluence_params: ConfluenceParams,
+    order_block_params: OrderBlockParams | None = None,
+    backtest_config: BacktestConfig | None = None,
+    order_block_result: OrderBlockResult | None = None,
+    iterations: int = _BOOTSTRAP_ITERATIONS,
+    seed: int = 70,
+    funding_rates: Sequence[FundingRate] | None = None,
+    pool_params: ConfluenceParams | None = None,
+    no_same_step_tp: bool = False,
+) -> dict[Segment, RandomControlBResult]:
+    """같은 창을 한 번만 태우고 **여러 평가창**의 널을 낸다 (WAN-350).
+
+    `evals`는 `(구간 라벨, eval_from_ms)` 쌍이다 — `None`이면 창 전체(= `full`), 값이 있으면
+    탭이 그 시각 이후인 후보만(= `oos_warm`, WAN-166 규약). 두 구간이 **같은 후보 집합**에서
+    나오므로 「따뜻한 OOS는 전 구간의 뒷부분」이라는 관계가 정의상 성립하고, 무거운 서브스텝
+    시뮬레이션(후보 생성 2회 = 실제 + 무력화 풀)을 구간 수만큼 반복하지 않는다.
+
+    ⚠️ 이 진입점은 **따뜻한 규약 전용**이다 — 차가운 절단(`slice_market`으로 창을 먼저 자르는
+    WAN-89/145/151/164/201 계열)은 구간마다 존 탐지부터 다시 해야 하므로 후보를 공유할 수
+    없다. 그 축은 예전처럼 `run_random_control_b_segment`를 구간마다 부른다.
+    """
+    if pool_params is not None and pool_params == confluence_params:
+        raise ValueError(
+            "pool_params가 confluence_params와 같습니다 — 무력화 풀이 실제 후보 집합과 "
+            "같아져 널이 자기 자신을 검정하게 됩니다. 무력화할 규칙을 실제로 끄세요."
+        )
+    cfg = backtest_config or default_backtest_config(timeframe)
+    ob_result = order_block_result or OrderBlockDetector(order_block_params).run(htf_seg)
+    real_candidates, pool_candidates = _build_both_pools(
+        htf_seg,
+        one_min_seg,
+        timeframe,
+        confluence_params=confluence_params,
+        pool_params=pool_params,
+        cfg=cfg,
+        order_block_params=order_block_params,
+        ob_result=ob_result,
+        no_same_step_tp=no_same_step_tp,
+    )
+    return {
+        segment: _null_from_candidates(
+            real_candidates,
+            pool_candidates,
+            symbol=symbol,
+            timeframe=timeframe,
+            segment=segment,
+            gate=gate,
+            cfg=cfg,
+            funding_rates=funding_rates,
+            iterations=iterations,
+            seed=seed,
+            eval_from_ms=eval_from_ms,
+        )
+        for segment, eval_from_ms in evals
+    }
 
 
 # --------------------------------------------------------------------------- #
