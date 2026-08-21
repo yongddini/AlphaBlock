@@ -34,7 +34,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
 import pandas as pd
 
@@ -55,6 +55,7 @@ from live.order_journal import (
     OrderJournal,
     PlacedOrder,
 )
+from live.zone_facts import CellZoneFacts, ZoneFact
 from paper.store import PaperTradeRecord, PaperTradeStore
 from strategy.models import OrderBlockDirection, OrderBlockResult
 
@@ -79,6 +80,7 @@ __all__ = [
     "backtest_setup_by_cell",
     "backtest_setup_by_cells",
     "backtest_setup_rows",
+    "backtest_zone_facts_by_cells",
     "backtest_timeline_by_cell",
     "backtest_timeline_rows",
     "cell_setup_timeline",
@@ -275,6 +277,10 @@ def _rec_tp(rec: PaperTradeRecord | None) -> float | None:
 
 #: 하루(ms). KST는 서머타임이 없어 하루가 정확히 24h다(`live.live_vs_backtest`와 같은 상수).
 _DAY_MS = 86_400_000
+
+#: `_symbol_rows`/`_run_symbol_tasks`가 칸마다 내는 값의 타입 — 셋업/거래 행 목록이거나
+#: 존 대장 사실(WAN-343)이다. 기계는 하나이고 **무엇을 뽑아 오는지만** 다르다.
+_CellOut = TypeVar("_CellOut")
 
 
 @dataclass(frozen=True)
@@ -721,10 +727,8 @@ def _cell_setups_from_loaded(
 
 def _symbol_rows(
     task: _BacktestSymbolTask,
-    evaluate: Callable[
-        [_BacktestCellTask, tuple[MarketData, OrderBlockResult] | None], list[TimelineRow]
-    ],
-) -> list[list[TimelineRow]]:
+    evaluate: Callable[[_BacktestCellTask, tuple[MarketData, OrderBlockResult] | None], _CellOut],
+) -> list[_CellOut]:
     """한 심볼의 TF별 행을 낸다 — **1분봉을 한 번만 읽어** TF들이 나눠 쓴다 (WAN-324 §1).
 
     창은 `[그날 자정 − warmup_days, 그날 자정]`이라 미래 봉을 애초에 로드하지 않는다
@@ -744,7 +748,7 @@ def _symbol_rows(
 
     warmup_start_ms = task.day_start_ms - task.warmup_days * _DAY_MS
     cells = {cell.timeframe: cell for cell in task.cells()}
-    rows_by_tf: dict[str, list[TimelineRow]] = {}
+    rows_by_tf: dict[str, _CellOut] = {}
     for timeframe, market in iter_market_data_by_timeframe(
         task.symbol,
         task.timeframes,
@@ -754,7 +758,7 @@ def _symbol_rows(
         funding=False,
     ):
         if market.htf_df.empty or market.df_1m.empty:
-            rows_by_tf[timeframe] = []
+            rows_by_tf[timeframe] = evaluate(cells[timeframe], None)
             continue
         loaded = (market, detect_order_blocks(market, OrderBlockParams()))
         rows_by_tf[timeframe] = evaluate(cells[timeframe], loaded)
@@ -764,6 +768,74 @@ def _symbol_rows(
 def _backtest_symbol_trades(task: _BacktestSymbolTask) -> list[list[TimelineRow]]:
     """한 심볼의 TF별 거래 행 — `task.timeframes` 순서대로."""
     return _symbol_rows(task, _cell_trades_from_loaded)
+
+
+def _cell_zone_facts_from_loaded(
+    task: _BacktestCellTask, loaded: tuple[MarketData, OrderBlockResult] | None
+) -> CellZoneFacts | None:
+    """한 셀의 백테 **존 대장**을 감사용 사실로 축약한다 (WAN-343 §2).
+
+    셋업 행이 소비하는 그 `OrderBlockResult`(같은 로드·같은 탐지)에서 뽑으므로 **다른 탐지를
+    다시 돌리지 않는다** — 두 벌로 갈라지면 「셋업 표의 존」과 「감사 표의 존」이 달라진다.
+    데이터가 없으면 `None`이고, 감사는 그 칸을 `대상 아님`으로 남긴다(빈 대장을 「존이 없다」로
+    읽으면 탐지 결함으로 오분류된다 — WAN-95 부류).
+
+    창(`window_start_ms`)은 요청 하한이 아니라 **실제로 탐지에 들어간 첫 봉**이다. 요청 하한을
+    쓰면 데이터가 그보다 늦게 시작하는 칸에서 「창 안인데 미탐지」로 잘못 찍힌다.
+    """
+    if loaded is None:
+        return None
+    market, ob_result = loaded
+    if market.htf_df.empty:
+        return None
+    times = market.htf_df["open_time"].astype("int64")
+    return CellZoneFacts(
+        symbol=task.symbol,
+        timeframe=task.timeframe,
+        window_start_ms=int(times.iloc[0]),
+        window_end_ms=int(times.iloc[-1]),
+        zones=tuple(
+            ZoneFact(
+                is_long=ob.direction is OrderBlockDirection.BULLISH,
+                start_time=ob.start_time,
+                confirmed_time=ob.confirmed_time,
+                break_time=ob.break_time,
+                swept_time=ob.swept_time,
+                tapped_times=tuple(ob.tapped_times),
+            )
+            for ob in ob_result.order_blocks
+        ),
+    )
+
+
+def _backtest_symbol_zone_facts(task: _BacktestSymbolTask) -> list[CellZoneFacts | None]:
+    """한 심볼의 TF별 존 대장 — `task.timeframes` 순서대로."""
+    return _symbol_rows(task, _cell_zone_facts_from_loaded)
+
+
+def backtest_zone_facts_by_cells(
+    cells: Sequence[tuple[str, str]],
+    *,
+    day_start_ms: int,
+    day_end_ms: int,
+    warmup_days: int | None = None,
+    jobs: int = 1,
+) -> dict[tuple[str, str], CellZoneFacts]:
+    """감사할 칸들의 백테 존 대장을 낸다 (WAN-343 §2).
+
+    📌 **짝 없는 셋업이 있는 칸만** 주는 것이 이 함수의 사용법이다 — 채택 좌표 48칸을 다 구우면
+    비싸고(WAN-322 실측 하루치 6분+), 감사에 필요한 것은 그 칸들뿐이다. 로드·탐지·창은
+    `backtest_setup_by_cells`와 **같은 기계**(`_symbol_rows`)라 같은 스냅샷을 본다.
+
+    데이터가 없는 칸은 **키가 없다** — 빈 대장을 실으면 「존이 하나도 없다 = 미탐지」로 읽혀
+    탐지 결함으로 오분류된다(감사는 키가 없으면 `대상 아님`을 찍는다).
+    """
+    from live.live_vs_backtest import DEFAULT_WARMUP_DAYS
+
+    warm = warmup_days if warmup_days is not None else DEFAULT_WARMUP_DAYS
+    tasks = _symbol_tasks(cells, day_start_ms=day_start_ms, day_end_ms=day_end_ms, warmup_days=warm)
+    by_cell = _run_symbol_tasks(tasks, _backtest_symbol_zone_facts, jobs=jobs)
+    return {cell: facts for cell in cells if (facts := by_cell.get(cell)) is not None}
 
 
 def _backtest_symbol_setups(task: _BacktestSymbolTask) -> list[list[TimelineRow]]:
@@ -796,10 +868,10 @@ def _symbol_tasks(
 
 def _run_symbol_tasks(
     tasks: Sequence[_BacktestSymbolTask],
-    worker: Callable[[_BacktestSymbolTask], list[list[TimelineRow]]],
+    worker: Callable[[_BacktestSymbolTask], list[_CellOut]],
     *,
     jobs: int,
-) -> dict[tuple[str, str], list[TimelineRow]]:
+) -> dict[tuple[str, str], _CellOut]:
     """심볼 작업들을 (선택적으로 병렬로) 돌려 칸 단위 결과로 되돌린다."""
     if not tasks:
         return {}

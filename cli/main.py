@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from data.partial_bars import BarDiscrepancy, SeriesScan
     from data.tick_probe import ProbeResult, Projection, RestAvailability
     from data.verify import VerifyReport
+    from live.stop_width_parity import StopWidthReport
     from live.trade_timeline import TimelineRow
 
 logger = logging.getLogger(__name__)
@@ -830,6 +831,11 @@ def cmd_stop_width(args: argparse.Namespace, settings: Settings) -> int:
     라이브 14」라고만 말하던 자리에 «(0) 키 없음 / (a) 존 없음 / (b) 확정 시각 / (c) 탭 순번»
     분해를 낸다. **기본 표는 안 바뀐다**(짝 없는 셋업을 손절폭 표에 넣으면 다른 존의 손절폭을
     빼는 무의미한 Δ가 나온다 — WAN-333이 고친 부류).
+
+    📌 `--zone-audit`은 그 위에 한 겹 더 얹는다(WAN-343 §2) — `(a) 존 없음`이 **왜** 없는지를
+    백테 **존 대장**과 대조해 «창 밖 / 존 미탐지 / 무효화 선행 / 탭 기록 없음»으로 가른다.
+    갈래마다 후속이 완전히 다르다: 무효화 선행은 `limit_engine.on_htf_bars`가 적어 둔 알려진
+    근사이고, 존 미탐지는 엔진 파리티 결함이다. `--unpaired`를 함축한다.
     """
     from backtest.harness import DEFAULT_SYMBOLS, DEFAULT_TIMEFRAMES
     from live.fill_report import resolve_day_window
@@ -848,9 +854,11 @@ def cmd_stop_width(args: argparse.Namespace, settings: Settings) -> int:
     narrowed = symbols is not None or timeframes is not None
     if narrowed:
         label += " · 좌표 " + _coordinate_label(symbols, timeframes)
-    if args.unpaired and not args.with_backtest:
+    # `--zone-audit`은 귀속 결과 위에서만 나온다 — 조용히 아무것도 안 하지 않고 함축한다.
+    unpaired = args.unpaired or args.zone_audit
+    if unpaired and not args.with_backtest:
         # 귀속은 조인 결과 위에서만 나온다 — 조용히 빈 블록을 내지 않고 그 사실을 밝힌다.
-        print("--unpaired는 --with-backtest가 있어야 낼 수 있습니다(조인이 있어야 짝이 없다).")
+        print("--unpaired/--zone-audit은 --with-backtest가 있어야 냅니다(조인이 있어야 짝이 없다).")
         return 0
     if days > 1 and args.with_backtest:
         # 백테 대조는 하루 단위 워밍업 규약(WAN-233/295)에 묶여 있다 — 여러 날을 한 번에
@@ -895,12 +903,52 @@ def cmd_stop_width(args: argparse.Namespace, settings: Settings) -> int:
             live_rows=live_rows,
             live_rows_total=live_rows_total,
             narrowed=narrowed,
-            with_unpaired=args.unpaired,
+            with_unpaired=unpaired,
         )
+        if args.zone_audit:
+            report = _attach_stop_width_zone_audit(
+                args, report, day_start_ms=start_ms, day_end_ms=end_end_ms
+            )
     finally:
         journal.close()
     print(render_report(report))
     return 0
+
+
+def _attach_stop_width_zone_audit(
+    args: argparse.Namespace,
+    report: StopWidthReport,
+    *,
+    day_start_ms: int,
+    day_end_ms: int,
+) -> StopWidthReport:
+    """짝 없는 라이브 셋업이 있는 칸만 존 대장을 구워 감사를 얹는다 (WAN-343 §2).
+
+    🚨 **캐시가 이 계층을 대신하지 못한다** — 야간 캐시에 담기는 것은 셋업 **행**이지 존
+    대장이 아니다(캐시 스키마는 `live.timeline_cache`가 정한 열이고 존 아카이브는 거기 없다).
+    그래서 감사는 그 칸을 다시 굽는다. 몇 칸을 굽는지 **먼저 찍는다** — 조용히 느려지면
+    「왜 안 끝나지」가 반복된다(WAN-335 §1-3과 같은 규약).
+    """
+    from live.stop_width_parity import attach_zone_audit, unpaired_live_cells
+    from live.trade_timeline import backtest_zone_facts_by_cells
+
+    cells = unpaired_live_cells(report)
+    if not cells:
+        print("존 대장 감사: 감사할 짝 없는 라이브 셋업이 없습니다 — 굽지 않습니다.", flush=True)
+        return report
+    print(
+        f"존 대장 감사(`--zone-audit`): 짝 없는 라이브 셋업이 있는 {len(cells)}칸의 존 대장을"
+        " 계산합니다(캐시에는 존 대장이 없습니다).",
+        flush=True,
+    )
+    facts = backtest_zone_facts_by_cells(
+        list(cells),
+        day_start_ms=day_start_ms,
+        day_end_ms=day_end_ms,
+        warmup_days=args.warmup_days,
+        jobs=args.jobs,
+    )
+    return attach_zone_audit(report, facts)
 
 
 def _stop_width_backtest_rows(
@@ -1743,6 +1791,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "짝 없는 셋업을 (0)키없음/(a)존없음/(b)확정시각/(c)탭순번으로 귀속시키는 진단"
             " 블록을 덧붙인다(WAN-337 §1). 기본 표는 그대로다"
+        ),
+    )
+    p_stop_width.add_argument(
+        "--zone-audit",
+        action="store_true",
+        help=(
+            "짝 없는 라이브 셋업을 백테 **존 대장**과 대조해 「존 없음」의 갈래를 가른다"
+            "(WAN-343 §2: 창 밖/미탐지/무효화 선행/탭 판정). --unpaired를 함축한다"
         ),
     )
     p_stop_width.add_argument(
