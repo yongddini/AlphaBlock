@@ -548,3 +548,17 @@ def test_summary_axis_note_is_silent_without_the_middle_arms() -> None:
     """팔 B·C가 없으면 「어느 축이 비싼가」를 물을 수 없다 — 지어내지 않는다."""
     frame = pd.DataFrame([_row("A", COMPOUND_ON), _row("D", COMPOUND_ON)])
     assert "어느 축이 더 비싼가" not in build_summary(frame, pd.DataFrame())
+
+
+def test_summary_warns_against_reading_the_uncompounded_mdd_as_safety() -> None:
+    """복리 끈 판의 MDD가 작은 것은 **분모가 커져서**다 — 그 경고가 표 옆에 없으면 요약 md만
+    본 사람이 정반대로 읽는다(요약은 혼자 돌아다니는 문서다)."""
+    frame = pd.DataFrame(
+        [
+            _row("A", COMPOUND_ON, max_drawdown=0.229),
+            _row("A", COMPOUND_OFF, total_return=1.2, max_drawdown=0.092),
+        ]
+    )
+    text = build_summary(frame, pd.DataFrame())
+    assert "분모만 커진다" in text
+    assert "복리 켠 판(= 채택 회계)의 MDD" in text
