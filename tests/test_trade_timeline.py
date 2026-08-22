@@ -537,13 +537,18 @@ def test_build_day_timeline_live_only(tmp_path: Path) -> None:
 
 def test_cli_trades_routes(tmp_path: Path) -> None:
     """`alphablock trades`가 `cmd_trades`로 라우팅되고 기본 인자를 갖는다."""
-    from cli.main import build_parser, cmd_trades
+    from cli.main import build_parser, cmd_trades, resolve_jobs_arg
 
     ns = build_parser().parse_args(["trades", "--day", "2026-08-02"])
     assert ns.func is cmd_trades
     assert ns.day == "2026-08-02"
     assert ns.no_backtest is False
-    assert ns.jobs == 1
+    # WAN-354: 옛 기본값은 **리터럴 1**이었다 — 그래서 `ALPHABLOCK_BACKTEST_JOBS`가 이
+    # 경로에 닿지 못했고(야간 크론이 설정과 무관하게 직렬로 돌았다) 「덮어쓰기 자리가 안
+    # 쓰였다」의 한 겹 아래가 그것이었다. 이제 파서는 **미지정**을 남기고 `main()`이 설정
+    # 기본값으로 푼다. 여기서 다시 리터럴을 박으면 그 배선이 조용히 되돌아간다.
+    assert ns.jobs is None
+    assert resolve_jobs_arg(ns.jobs)[0] >= 1
 
 
 # --------------------------------------------------------------------------- #

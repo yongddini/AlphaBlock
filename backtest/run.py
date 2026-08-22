@@ -748,7 +748,11 @@ def run_grid_full(
     ]
     rows: list[RunRow] = []
     artifacts: list[RunArtifact] = []
-    for outcome in _iter_outcomes(tasks, resolve_jobs(jobs, len(tasks))):
+    # WAN-354: **실제로 풀에 넘어간 워커 수**를 남긴다(요청값이 아니라 셀 수로 캡된 값).
+    # 서버에서 「설정이 진짜 먹었나」를 로그로 확인할 수 있어야 한다 — 라벨이 아니라 동작이다.
+    workers = resolve_jobs(jobs, len(tasks))
+    _log(log, f"병렬: 워커 {workers}개 ({len(tasks)}셀)")
+    for outcome in _iter_outcomes(tasks, workers):
         rows.extend(outcome.rows)
         artifacts.extend(outcome.artifacts)
         for message in outcome.logs:
