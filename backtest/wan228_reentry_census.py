@@ -190,6 +190,7 @@ def _iter_reentries(
     partial_take_profit_fraction: float = 0.5,
     breakeven_after_partial: bool = False,
     no_same_step_tp: bool = False,
+    no_same_step_tp_minutes: frozenset[int] | None = None,
 ) -> Iterator[tuple[_Candidate, _Reentry]]:
     """익절로 닫힌 한 존의 재무장 루프 코어 — `(_Candidate, _Reentry)`를 하나씩 낸다.
 
@@ -277,6 +278,7 @@ def _iter_reentries(
                 partial_take_profit_fraction=partial_take_profit_fraction,
                 breakeven_after_partial=breakeven_after_partial,
                 no_same_step_tp=no_same_step_tp,
+                no_same_step_tp_minutes=no_same_step_tp_minutes,
             )
         else:
             assert static_limit is not None
@@ -307,6 +309,7 @@ def _iter_reentries(
                 partial_take_profit_fraction=partial_take_profit_fraction,
                 breakeven_after_partial=breakeven_after_partial,
                 no_same_step_tp=no_same_step_tp,
+                no_same_step_tp_minutes=no_same_step_tp_minutes,
             )
         if not outcome.filled or outcome.entry_time is None or outcome.entry_price is None:
             break  # NO_TOUCH / CANCELLED_INVALIDATED — 더는 되돌아오지 않았다.
@@ -430,6 +433,7 @@ def reentry_candidates(
     partial_take_profit_fraction: float = 0.5,
     breakeven_after_partial: bool = False,
     no_same_step_tp: bool = False,
+    no_same_step_tp_minutes: frozenset[int] | None = None,
 ) -> list[_Candidate]:
     """익절 후 재무장 재진입을 **북 시퀀서에 주입할 `_Candidate`로** 낸다(WAN-261).
 
@@ -479,6 +483,7 @@ def reentry_candidates(
             partial_take_profit_fraction=partial_take_profit_fraction,
             breakeven_after_partial=breakeven_after_partial,
             no_same_step_tp=no_same_step_tp,
+            no_same_step_tp_minutes=no_same_step_tp_minutes,
         )
     ]
 

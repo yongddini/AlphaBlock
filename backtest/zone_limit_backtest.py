@@ -840,6 +840,7 @@ def build_zone_limit_candidates(
     breakeven_after_partial: bool = False,
     observe_path_fill: bool = False,
     no_same_step_tp: bool = False,
+    no_same_step_tp_minutes: frozenset[int] | None = None,
 ) -> tuple[list[_Candidate], ZoneLimitStats]:
     """B안 셋업 순회 → 1분 서브스텝 시뮬레이션까지(비용 반영 전 원가 후보 목록).
 
@@ -1175,6 +1176,7 @@ def build_zone_limit_candidates(
             breakeven_after_partial=breakeven_after_partial,
             observe_path_fill=observe_path_fill and live_limit is not None,
             no_same_step_tp=no_same_step_tp,
+            no_same_step_tp_minutes=no_same_step_tp_minutes,
         )
 
         if not outcome.order_rested:
