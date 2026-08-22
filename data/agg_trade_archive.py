@@ -36,7 +36,7 @@ import io
 import logging
 import time
 import zipfile
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -164,3 +164,26 @@ def iter_ticks(path: Path, start_ms: int, end_ms: int) -> Iterator[Tick]:
 def minute_ticks(path: Path, minute_ms: int) -> list[Tick]:
     """그 1분(`[분, 분+60초)`)의 체결 목록."""
     return list(iter_ticks(path, minute_ms, minute_ms + 60_000))
+
+
+def minutes_ticks(path: Path, minutes: Iterable[int]) -> dict[int, list[Tick]]:
+    """여러 분을 **파일 한 번 훑기로** 꺼낸다 — 결과는 `minute_ticks`와 같다.
+
+    `minute_ticks`는 부를 때마다 zip을 처음부터 다시 읽으므로, 하루에서 여러 분을 보는
+    실행(WAN-359 모집단 전수: 파일 257개에 거래 467건)에서는 같은 파일을 몇 번씩 판다.
+    이 함수는 필요한 분들의 **마지막 분까지** 한 번만 훑는다.
+
+    ⚠️ **여기서도 정렬하지 않는다** — 이 자료의 존재 이유가 순서다(`iter_ticks` 참고).
+    요청한 분에 체결이 없으면 빈 목록이 담긴다(키는 언제나 전부 있다 — 「없음」과
+    「안 물어봄」이 호출부에서 구분돼야 한다).
+    """
+    wanted = sorted(set(minutes))
+    out: dict[int, list[Tick]] = {minute: [] for minute in wanted}
+    if not wanted:
+        return out
+    buckets = {minute: out[minute] for minute in wanted}
+    for tick in iter_ticks(path, wanted[0], wanted[-1] + 60_000):
+        bucket = buckets.get(tick.time_ms - tick.time_ms % 60_000)
+        if bucket is not None:
+            bucket.append(tick)
+    return out

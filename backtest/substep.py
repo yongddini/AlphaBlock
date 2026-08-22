@@ -374,6 +374,7 @@ def simulate_zone_limit_trade(
     breakeven_after_partial: bool = False,
     observe_path_fill: bool = False,
     no_same_step_tp: bool = False,
+    no_same_step_tp_minutes: frozenset[int] | None = None,
 ) -> ZoneLimitOutcome:
     """한 오더블록 셋업의 존-지정가 진입·청산을 1분 서브스텝으로 시뮬레이션한다.
 
@@ -464,6 +465,18 @@ def simulate_zone_limit_trade(
     가 손절을 이기게 하고, 진입과 손절이 같은 1분인 건수는 WAN-46 감사(`penetrations`)가
     센다. **익절 쪽에는 그 장치가 없었다.**
 
+    ## 표적 반사실 (WAN-359, 옵트인 · 위와 함께 줄 수 없다)
+
+    `no_same_step_tp_minutes`에 **1분 스텝 `open_time`의 집합**을 주면 그 분에 체결된
+    셋업에서만 같은 스텝 익절을 막는다 — `no_same_step_tp`가 「전부 끔」(반대쪽 극단)이라면
+    이쪽은 「틱이 지지하지 않는 그 거래들만 끔」이다(WAN-348이 잰 판정을 실제 회계에 얹는다).
+
+    * **표적 단위가 (칸, 1분)인 이유는 증거의 단위가 그것**이기 때문이다 — 자료는 그 1분의
+      체결내역이고, 같은 분에 여러 번 체결하는 재진입 사슬은 진입가·익절가가 같아 틱으로
+      갈리지 않는다. 집합은 **칸(종목·TF)별로 걸러서** 줘야 한다(이 시뮬레이터는 자기가 어느
+      칸인지 모른다).
+    * `None`(기본)이면 이 검사를 아예 하지 않아 **비트 단위로 예전과 같다**.
+
     * ⚠️ **이것도 진값이 아니라 반대쪽 극단이다.** 순서가 실제로 반대였다면 그 거래는
       「손실」이 아니라 **더 오래 보유**이고 결과는 미지다 — 이 팔은 그 미지를 「그 스텝에는
       익절 없음」으로 눌러 본 것뿐이다. 진값은 두 극단 사이에 있고 **그 폭**이 산출물이다.
@@ -501,6 +514,14 @@ def simulate_zone_limit_trade(
         raise ValueError(
             "breakeven_after_partial은 partial_take_profit_r 없이는 아무 동작도 하지 "
             "않습니다(WAN-323)."
+        )
+    if no_same_step_tp and no_same_step_tp_minutes is not None:
+        # 「전부 끔」과 「이 분들만 끔」은 같은 스위치의 두 값이라 함께 주면 어느 쪽이
+        # 이겼는지 결과만 보고는 알 수 없다 — 조용히 하나를 고르지 않고 거부한다
+        # (WAN-95/112/123/159 관행).
+        raise ValueError(
+            "no_same_step_tp(전부)와 no_same_step_tp_minutes(표적)는 같은 축의 두 값이라 "
+            "함께 줄 수 없습니다(WAN-359)."
         )
     if (limit_price is None) == (live_limit is None):
         raise ValueError("limit_price와 live_limit 중 정확히 하나를 줘야 합니다.")
@@ -710,7 +731,14 @@ def simulate_zone_limit_trade(
             # 「손절만 같은 분에 인정」이 되어 `stop_before_tp`와 방향이 대칭이 된다.
             # ⚠️ 이것도 진값이 아니라 **반대쪽 극단**이다 — 진값은 두 극단 사이에 있고 그
             # 폭이 WAN-336의 산출물이다(틱 해상도는 WAN-98 소관, Canceled).
-            same_step_tp_blocked = no_same_step_tp and just_entered
+            # WAN-359(옵트인): 「전부」가 아니라 **틱이 지지하지 않는 그 분들만** 끈다.
+            # 표적 단위가 (칸, 1분)인 이유는 증거의 단위가 그것이기 때문이다 — 그 1분의
+            # 체결내역이 자료이고, 같은 분에 여러 번 체결한 재진입 사슬은 진입가·익절가가
+            # 같아 틱으로 갈리지 않는다(WAN-359 §1). 호출부가 **칸별로** 거른 집합을 준다.
+            same_step_tp_blocked = just_entered and (
+                no_same_step_tp
+                or (no_same_step_tp_minutes is not None and step.time in no_same_step_tp_minutes)
+            )
             tp_hit = (
                 not same_step_tp_blocked
                 and active_tp is not None

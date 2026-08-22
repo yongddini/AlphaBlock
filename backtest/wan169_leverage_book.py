@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import argparse
 import math
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -235,6 +235,12 @@ class _Task:
     재진입 후보 **양쪽에** 같은 규칙이 걸린다. 1분봉은 봉 안의 순서를 모르는데 「같은 1분에
     진입 + 익절」은 롱 기준 「저가 먼저 · 고가 나중」을 가정한 것이라, 이 팔이 그 가정을
     반대쪽 극단으로 눌러 본 반사실이다. `False`(기본)면 예전과 **비트 단위로 같다**."""
+    no_same_step_tp_minutes: frozenset[int] = frozenset()
+    """WAN-359(옵트인): **이 칸의** 「틱이 지지하지 않는」 1분 `open_time` 집합.
+
+    비어 있으면(기본) 시뮬레이터에 `None`으로 내려가 **비트 단위로 예전과 같다**. 위
+    `no_same_step_tp`(전부 끔)와 같은 축의 두 값이라 함께 켜면 엔진이 거부한다 — 「전부」와
+    「이것만」이 섞이면 어느 쪽이 이겼는지 결과만 보고는 알 수 없다."""
     reentry_entry_rule: ReentryEntryRule = "band"
     """재진입 후보의 재무장 지정가 규칙 — 기본 `"band"`(봉내 라이브 밴드 재산정) = 채택 규칙
     (WAN-273, WAN-305가 기본값으로 승격). `"freeze"`(첫 체결가 고정)는 옵트인으로 존치 —
@@ -334,6 +340,7 @@ def reentry_candidates_for_window(
     partial_take_profit_fraction: float = 0.5,
     breakeven_after_partial: bool = False,
     no_same_step_tp: bool = False,
+    no_same_step_tp_minutes: frozenset[int] | None = None,
 ) -> list[_Candidate]:
     """이 창의 base 후보에서 「익절 후 존 내 재진입」 후보를 만든다(WAN-261, 옵트인).
 
@@ -383,6 +390,7 @@ def reentry_candidates_for_window(
                 partial_take_profit_fraction=partial_take_profit_fraction,
                 breakeven_after_partial=breakeven_after_partial,
                 no_same_step_tp=no_same_step_tp,
+                no_same_step_tp_minutes=no_same_step_tp_minutes,
             )
         )
     return out
@@ -452,6 +460,7 @@ def run_cell(task: _Task, *, log: bool = True) -> CellPayload:
             partial_take_profit_fraction=task.partial_take_profit_fraction,
             breakeven_after_partial=task.breakeven_after_partial,
             no_same_step_tp=task.no_same_step_tp,
+            no_same_step_tp_minutes=task.no_same_step_tp_minutes or None,
         )
         candidates[segment_name] = tuple(cands)
         funding[segment_name] = tuple(window.funding_rates)
@@ -470,6 +479,7 @@ def run_cell(task: _Task, *, log: bool = True) -> CellPayload:
                     partial_take_profit_fraction=task.partial_take_profit_fraction,
                     breakeven_after_partial=task.breakeven_after_partial,
                     no_same_step_tp=task.no_same_step_tp,
+                    no_same_step_tp_minutes=task.no_same_step_tp_minutes or None,
                 )
             )
 
@@ -562,6 +572,7 @@ def run_cells(
     breakeven_after_partial: bool = False,
     repair_partial_bars: bool = False,
     no_same_step_tp: bool = False,
+    no_same_step_tp_minutes: Mapping[tuple[str, str], frozenset[int]] | None = None,
 ) -> list[CellPayload]:
     """전 칸을 돈다. `jobs`는 성능 노브이지 결과 축이 아니다(WAN-121).
 
@@ -611,7 +622,27 @@ def run_cells(
     `repair_partial_bars`(WAN-327, 옵트인 · **비파괴**)를 켜면 저장 상위TF 손상 봉을 1분봉
     합으로 갈아끼운 사본에서 후보를 만든다 — 부분 봉의 백테 영향 크기를 재는 반사실이다.
     끄면(기본) 저장 봉 그대로라 예전과 비트 단위로 같다. **DB는 쓰지 않는다.**
+
+    `no_same_step_tp_minutes`(WAN-359, 옵트인)는 그 반사실을 **전부가 아니라 「틱이 지지하지
+    않는 그 분들」에만** 거는 표적 팔이다 — 칸 `(정규화 심볼, TF)`마다 1분 `open_time` 집합을
+    준다. `None`(기본)이면 비트 단위로 예전과 같다. 🚨 **아무 칸과도 안 맞는 키가 있으면
+    거부한다** — 심볼 표기가 어긋나면 아무것도 안 걸린 채 「표적 팔」 라벨만 붙어 기준선과
+    같은 수가 나오고, 그러면 「보간이 맞았다」가 근거 없이 만들어진다(WAN-91/95/112/123/159가
+    반복해 경계한 자리 · `_loo_rows`의 같은 가드와 같은 부류).
     """
+    targeted: Mapping[tuple[str, str], frozenset[int]] = no_same_step_tp_minutes or {}
+    if no_same_step_tp and targeted:
+        raise ValueError(
+            "no_same_step_tp(전부)와 no_same_step_tp_minutes(표적)는 같은 축의 두 값이라 "
+            "함께 줄 수 없습니다(WAN-359)."
+        )
+    cells = {(harness.normalize_symbol(s), tf) for s in symbols for tf in timeframes}
+    unmatched = sorted(key for key in targeted if key not in cells)
+    if unmatched:
+        raise AssertionError(
+            f"no_same_step_tp_minutes에 이 실행의 칸과 안 맞는 키가 있습니다: {unmatched} — "
+            "심볼 표기(정규화)나 TF를 확인하세요(안 걸린 채 라벨만 붙는 것을 막습니다)."
+        )
     tasks = [
         _Task(
             symbol=harness.normalize_symbol(symbol),
@@ -634,6 +665,9 @@ def run_cells(
             breakeven_after_partial=breakeven_after_partial,
             repair_partial_bars=repair_partial_bars,
             no_same_step_tp=no_same_step_tp,
+            no_same_step_tp_minutes=targeted.get(
+                (harness.normalize_symbol(symbol), timeframe), frozenset()
+            ),
         )
         for symbol in symbols
         for timeframe in timeframes
