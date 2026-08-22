@@ -652,9 +652,13 @@ def run_arm(
     end: str,
     jobs: int,
     segments: Sequence[str] = SEGMENT_ORDER,
+    on_rows: Callable[[list[BookRow]], None] | None = None,
     log: bool = True,
 ) -> tuple[list[BookRow], list[ExitRow], float | None]:
-    """한 팔의 후보를 **한 번** 만들고 구간별 북 행과 §3 청산 분포를 낸다."""
+    """한 팔의 후보를 **한 번** 만들고 구간별 북 행과 §3 청산 분포를 낸다.
+
+    `on_rows`는 북 행이 나오는 **즉시** 불린다(§3 귀속 **전**) — 아래 주석 참고.
+    """
     start_ms, end_ms = parse_date_ms(start), parse_date_ms(end)
     payloads = run_cells(
         symbols,
@@ -678,6 +682,11 @@ def run_arm(
 
     book = book_segments_for_payloads(payloads, start_ms=start_ms, end_ms=end_ms, segments=segments)
     rows = [_to_row(arm=arm, segment=seg, payloads=payloads) for seg in book]
+    # 🚨 **북 행을 먼저 넘긴다** — 후보 생성이 이 팔의 비용 전부(~70분)이고 §3 귀속은 그 위의
+    # 값싼 집계다. 귀속이 죽으면 그 70분이 같이 죽는데, 실제로 한 번 그렇게 잃었다. 호출부가
+    # 여기서 적재하면 뒤가 어떻게 되든 팔은 보존된다.
+    if on_rows is not None:
+        on_rows(rows)
     exits = [row for seg in book for row in artifact_exit_rows(arm=arm, segment=seg, blocks=blocks)]
     return rows, exits, identity
 
@@ -715,6 +724,7 @@ def run_report(
             end=end,
             jobs=jobs,
             segments=segments,
+            on_rows=(None if on_arm is None else lambda r: on_arm(r, [])),
             log=log,
         )
         rows.extend(arm_rows)
