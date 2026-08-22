@@ -372,3 +372,54 @@ def test_population_verdicts_cover_every_target() -> None:
 def test_harness_default_jobs_is_a_perf_knob_only() -> None:
     """`--jobs` 기본값을 이 모듈이 자기 상수로 복사하지 않았는지(WAN-121/294)."""
     assert harness.default_jobs() >= 1
+
+
+# ------------------------------------------------ 실데이터 — 표적 팔이 실제로 후보를 바꾼다
+
+_REAL_CELL = ("BTC/USDT:USDT", "4h")
+_REAL_START, _REAL_END = "2024-01-01", "2026-07-22"
+
+
+@pytest.mark.skipif(not VERDICT_CSV.exists(), reason="§1 판정 표가 아직 없다")
+def test_targeted_arm_removes_same_minute_candidates_on_real_data() -> None:
+    """켠 팔이 **실제로 같은 분 익절 후보를 지우는지** — 라벨이 아니라 동작으로 고정한다.
+
+    합성 데이터로는 「집합에 담긴 분이 막힌다」까지만 보인다. 이 테스트는 §1이 낸 **진짜
+    목록**을 채택 엔진에 걸어, 그 분의 같은 분 익절이 **후보 층에서 사라지는지**를 본다 —
+    심볼 표기·정규화·재진입 배선 중 하나만 어긋나도 아무것도 안 막히고 표만 나온다
+    (이 이슈가 가장 경계하는 실패다).
+
+    칸 하나(4h)로 좁혀 로컬에서 ~40초다. 전 격자는 `--part book`이 돈다.
+    """
+    from backtest.wan169_leverage_book import run_cells
+    from backtest.wan359_tick_targeted_tp import build_block_set
+
+    blocks = build_block_set(pd.read_csv(VERDICT_CSV))
+    minutes = blocks.minutes.get(_REAL_CELL)
+    if not minutes:
+        pytest.skip(f"{_REAL_CELL}에 막을 분이 없다")
+
+    shared: dict[str, object] = {
+        "start": _REAL_START,
+        "end": _REAL_END,
+        "jobs": 1,
+        "cold_segments": False,
+        "engine_check": False,
+        "adv_fraction": harness.UNSET,
+        "reentry": True,
+    }
+    base = run_cells([_REAL_CELL[0]], [_REAL_CELL[1]], **shared)  # type: ignore[arg-type]
+    if not base or not base[0].candidates.get("full"):
+        pytest.skip("실데이터가 없어 후보가 비었다(CI 기본)")
+    targeted = run_cells(
+        [_REAL_CELL[0]],
+        [_REAL_CELL[1]],
+        no_same_step_tp_minutes={_REAL_CELL: minutes},
+        **shared,  # type: ignore[arg-type]
+    )
+
+    def _same_minute(payloads: list) -> int:  # type: ignore[type-arg]
+        return sum(1 for c in payloads[0].candidates["full"] if c.same_step_take_profit)
+
+    before, after = _same_minute(base), _same_minute(targeted)
+    assert after < before, "표적 팔이 실데이터에서 아무것도 막지 못했다"

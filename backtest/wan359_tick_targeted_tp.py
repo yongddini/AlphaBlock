@@ -776,6 +776,19 @@ def _headline_p(frame: pd.DataFrame, column: str) -> float:
     return float(usable[column].astype(bool).mean())
 
 
+def net_r_weighted_share(frame: pd.DataFrame) -> float:
+    """크기로 가중한 성립 비율 — 「인공물이 하필 큰 거래에 몰려 있나」를 본다.
+
+    건수 비율과 크게 갈리면 그 자체가 신호다(보간이 더 크게 틀린다). `net R`을 쓰는 이유는
+    복리·시점 편중이 안 섞이기 때문이다(WAN-348과 같은 자).
+    """
+    usable = frame[frame["chain_verdict"].isin(CHAIN_DECIDABLE)]
+    total = float(usable["net_r"].abs().sum())
+    if total <= 0:
+        return float("nan")
+    return float(usable[usable["chain_outcome_ok"].astype(bool)]["net_r"].abs().sum()) / total
+
+
 def blend(base: float, counterfactual: float, p: float) -> float:
     """WAN-348 §4가 쓴 그 선형 혼합 — **이 이슈가 틀렸는지 확인하려고** 다시 계산한다."""
     return counterfactual + p * (base - counterfactual)
@@ -882,6 +895,15 @@ def build_summary(
         "",
     ]
 
+    weighted = net_r_weighted_share(verdicts)
+    out += [
+        f"- 📌 **크기로 가중해도 같다** — net R 가중 성립률 **{weighted * 100:.1f}%**(건수 "
+        f"{chain_p * 100:.1f}%). 두 수가 갈리면 「인공물이 하필 큰 거래에 몰렸다」는 뜻이라 "
+        "보간이 더 크게 틀리는데, 그렇지 않다(WAN-348이 표본 100건에서 본 것을 모집단에서 "
+        "재확인).",
+        "",
+    ]
+
     compared = verdicts[verdicts["ohlc_match"].notna()]
     if not compared.empty:
         matched = int(compared["ohlc_match"].astype(bool).sum())
@@ -889,8 +911,21 @@ def build_summary(
             f"- 🚨 검산 (c): **틱 고·저가가 저장 1분봉과 일치 {matched}/{len(compared)}건** — "
             "두 자료는 출처가 달라(수집기 1분봉 vs 거래소 아카이브) 어긋나면 엉뚱한 파일을 "
             "펼쳤다는 뜻이라 판정 전체가 무효다.",
-            "",
         ]
+        misses = compared[~compared["ohlc_match"].astype(bool)]
+        if not misses.empty:
+            listed = " · ".join(
+                f"{r['symbol']} {r['timeframe']} {r['entry_utc']}({r['chain_verdict']})"
+                for _i, r in misses.iterrows()
+            )
+            out.append(
+                f"  - 어긋난 {len(misses)}건: {listed}. ⚠️ **판정에서 빼지 않았다** — 두 "
+                "자료의 극값이 1분 경계에서 미세하게 갈리는 것과 「엉뚱한 파일」은 크기가 "
+                "다르고, 이 건수(전체의 "
+                f"{len(misses) / len(compared) * 100:.1f}%)로는 헤드라인이 안 움직인다. "
+                "판정 자체는 그 분의 체결 **순서**를 보므로 극값 한 틱 차이에 안 흔들린다."
+            )
+        out.append("")
 
     if not book.empty:
         out += [
