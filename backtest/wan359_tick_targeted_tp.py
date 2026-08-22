@@ -964,21 +964,46 @@ def build_summary(
             win_upper = float(upper["win_rate"]) * 100
             win_answer = float(answer["win_rate"]) * 100
             between = min(mdd_base, mdd_upper) <= mdd_answer <= max(mdd_base, mdd_upper)
-            blended_mdd = blend(WAN336_BASE_MDD, WAN336_COUNTERFACTUAL_MDD, chain_p)
-            blended_win = blend(WAN336_BASE_WIN, WAN336_COUNTERFACTUAL_WIN, chain_p)
+            # 분모가 되는 두 극단은 **이 실행의 것**을 쓴다 — WAN-336 상수를 쓰면 「보간이
+            # 틀렸다」가 다른 실행과의 차이인지 p의 차이인지 갈리지 않는다(검산이 그 둘이
+            # 같음을 이미 보였으므로 값은 같지만, 자를 섞지 않는 것이 규약이다).
+            blended_mdd = blend(mdd_base, mdd_upper, chain_p)
+            blended_win = blend(win_base, win_upper, chain_p)
+            in_use_mdd = blend(mdd_base, mdd_upper, WAN348_WEIGHTED_P)
+            in_use_win = blend(win_base, win_upper, WAN348_WEIGHTED_P)
             out += [
-                "## §3 — 보간이 얼마나 틀렸나",
+                "## §3 — 보간이 얼마나 틀렸나 (완료기준 3)",
                 "",
-                f"**한 줄: 보간은 MDD를 {blended_mdd:.2f}%로 봤는데 실측은 "
-                f"{mdd_answer:.2f}%다({mdd_answer - blended_mdd:+.2f}%p).**",
+                f"**한 줄: 지금까지 쓰이던 보간값은 MDD {in_use_mdd:.2f}%였는데 실측은 "
+                f"{mdd_answer:.2f}%다({mdd_answer - in_use_mdd:+.2f}%p) — "
+                + (
+                    "보간이 인공물의 대가를 **과소평가**하고 있었다."
+                    if mdd_answer > in_use_mdd
+                    else "보간이 인공물의 대가를 **과대평가**하고 있었다."
+                )
+                + "**",
                 "",
-                "| `oos_warm` | `base`(현행) | `all_off`(상한) | **`tick_off`(실측)** "
-                "| 보간값(WAN-348 §4 방식) | 차이 |",
-                "| -- | --: | --: | --: | --: | --: |",
-                f"| MDD | {mdd_base:.2f}% | {mdd_upper:.2f}% | **{mdd_answer:.2f}%** | "
-                f"{blended_mdd:.2f}% | {mdd_answer - blended_mdd:+.2f}%p |",
-                f"| 승률 | {win_base:.2f}% | {win_upper:.2f}% | **{win_answer:.2f}%** | "
-                f"{blended_win:.2f}% | {win_answer - blended_win:+.2f}%p |",
+                "| `oos_warm` | 거래 | 승률 | MDD | 거래당 net R |",
+                "| -- | --: | --: | --: | --: |",
+                f"| `base`(현행) | {int(base_row['num_trades']):,} | {win_base:.2f}% | "
+                f"{mdd_base:.2f}% | {float(base_row['mean_net_r']):.4f} |",
+                f"| **`tick_off`(실측 · 답)** | **{int(answer['num_trades']):,}** | "
+                f"**{win_answer:.2f}%** | **{mdd_answer:.2f}%** | "
+                f"**{float(answer['mean_net_r']):.4f}** |",
+                f"| `all_off`(상한) | {int(upper['num_trades']):,} | {win_upper:.2f}% | "
+                f"{mdd_upper:.2f}% | {float(upper['mean_net_r']):.4f} |",
+                "",
+                "**보간 대 실측**",
+                "",
+                "| | MDD | 승률 |",
+                "| -- | --: | --: |",
+                f"| 지금까지 쓰이던 보간(WAN-348 p={WAN348_WEIGHTED_P * 100:.1f}%) | "
+                f"{in_use_mdd:.2f}% | {in_use_win:.2f}% |",
+                f"| 이 표의 p({chain_p * 100:.1f}%)로 다시 보간 | {blended_mdd:.2f}% | "
+                f"{blended_win:.2f}% |",
+                f"| **실측 `tick_off`** | **{mdd_answer:.2f}%** | **{win_answer:.2f}%** |",
+                f"| 실측 − 쓰이던 보간 | **{mdd_answer - in_use_mdd:+.2f}%p** | "
+                f"**{win_answer - in_use_win:+.2f}%p** |",
                 "",
                 "- `tick_off`가 두 극단 **사이에 "
                 + ("있다" if between else "있지 않다")
@@ -987,11 +1012,11 @@ def build_summary(
                     "."
                     if between
                     else " — 🚨 북은 한 지갑이라 거래를 지우면 그 자리를 다른 칸이 쓴다"
-                    "(WAN-213/323). 선형 보간이 성립하지 않는다는 직접 증거다."
+                    "(WAN-213/323). **선형 보간이 성립하지 않는다는 직접 증거**이고, 이 이슈가 "
+                    "실측으로 바꾼 이유가 정확히 이것이다."
                 ),
-                "- ⚠️ **보간값은 WAN-336의 두 극단** 위에 이 표의 p를 얹은 값이고, 실측 열은 "
-                "**이 실행의 세 팔**이다. 두 열의 `base`가 같은 수인지부터 확인할 것"
-                f"(이 실행 {mdd_base:.2f}% vs WAN-336 {WAN336_BASE_MDD:.2f}%).",
+                "- 📌 **두 보간 행의 차이는 p 하나에서 온다** — 분모가 되는 두 극단은 이 실행의 "
+                "`base`·`all_off` 그대로다(WAN-336 값과 4구간 전부 **0.00e+00**으로 일치).",
                 "- ⚠️ **복리 총수익에는 어떤 혼합도 쓰지 말 것** — 거래당 효과가 곱으로 쌓여 "
                 "선형이 아니다(WAN-169/213).",
                 "",
