@@ -809,6 +809,23 @@ def _book_row(frame: pd.DataFrame, arm: str, segment: str) -> pd.Series | None:
     return None if part.empty else part.iloc[0]
 
 
+def identity_where_untargeted(frame: pd.DataFrame, segment: str) -> float | None:
+    """표적 집합이 **비어 있는 구간**에서 `tick_off`가 `base`를 재현하는가 — 최대 절대차.
+
+    표적 목록은 WAN-346 팔 A의 **`oos_warm` 거래**에서 왔으므로 `is` 구간에는 막을 분이
+    **하나도 없다**. 그러면 그 구간의 표적 팔은 기준선과 **비트 단위로 같아야 한다** —
+    다르면 팔이 시킨 것 말고 다른 것도 건드렸다는 뜻이고, 그 순간 §2·§3 전체가 무효다.
+
+    📌 이 검산은 공짜로 얻어진다(격자를 더 돌지 않는다). 구간이 없으면 `None`.
+    """
+    columns = ("num_trades", "win_rate", "total_return", "max_drawdown", "mean_net_r")
+    base = _book_row(frame, ADOPTED_ARM, segment)
+    answer = _book_row(frame, ANSWER_ARM, segment)
+    if base is None or answer is None:
+        return None
+    return max(abs(float(answer[c]) - float(base[c])) for c in columns)
+
+
 def _book_table(frame: pd.DataFrame, segment: str) -> list[str]:
     rows = [
         "| 팔 | 거래 | 승률 | MDD | 거래당 net R | 최대 동시 리스크(계획/실효) | 청산 |",
@@ -826,6 +843,33 @@ def _book_table(frame: pd.DataFrame, segment: str) -> list[str]:
             f"{int(row['liquidation_events'])} |"
         )
     return rows
+
+
+def _outside_range_lines(frame: pd.DataFrame) -> list[str]:
+    """`tick_off`가 두 극단 **밖으로** 나간 구간을 찍는다 — 보간의 실패를 직접 보이는 자리.
+
+    선형 보간은 진값이 두 끝 **사이**에 있다고 **가정**한다. 북은 한 지갑이라 거래를 일부만
+    지우면 남은 거래의 **순서와 자본 자리**가 통째로 달라지므로 그 가정이 성립할 이유가 없다
+    (WAN-213/323). 실제로 벗어난 구간이 있으면 그것이 이 이슈의 가장 강한 산출물이다.
+    """
+    out: list[str] = []
+    for segment in SEGMENT_ORDER:
+        rows = [_book_row(frame, arm, segment) for arm in (ADOPTED_ARM, UPPER_ARM, ANSWER_ARM)]
+        if any(row is None for row in rows):
+            continue
+        base, upper, answer = (float(row["max_drawdown"]) * 100 for row in rows)  # type: ignore[index]
+        if min(base, upper) <= answer <= max(base, upper):
+            continue
+        out.append(
+            f"- 🚨 **`{segment}`에서는 `tick_off`가 두 극단 밖으로 나간다** — MDD "
+            f"{answer:.2f}% vs `base` {base:.2f}% · `all_off` {upper:.2f}%. **선형 보간은 "
+            "진값이 두 끝 사이에 있다고 가정하는데 그 가정이 성립하지 않는다** — 북은 한 "
+            "지갑이라 거래를 일부만 지우면 남은 거래의 순서와 자본 자리가 통째로 달라진다"
+            "(WAN-213/323). ⚠️ 「부분이 전체보다 나쁘다」를 규칙으로 읽지 말 것: 이 표가 "
+            "보인 것은 **어느 방향으로든 벗어날 수 있다**는 것이고, 그래서 보간이 아니라 "
+            "실측이 필요하다."
+        )
+    return out
 
 
 def build_summary(
@@ -860,17 +904,27 @@ def build_summary(
     out += [
         "## §1 — 467건 전수 판정",
         "",
-        f"**한 줄: 전수 성립률은 사슬 인지 기준 {chain_p * 100:.1f}%, WAN-348과 같은 자"
-        f"(행마다 독립)로는 {solo_p * 100:.1f}%다 — 표본 100건의 "
-        f"{WAN348_WEIGHTED_P * 100:.1f}%와 "
-        + ("**같은 자리**" if inside else "**어긋난다**")
-        + f"(그 표의 95% 구간 {WAN348_SIMPLE_LOW * 100:.1f}~{WAN348_SIMPLE_HIGH * 100:.1f}% "
-        + ("안" if inside else "밖")
-        + ").**",
+        f"**한 줄: 전수 성립률은 사슬 인지 기준 {chain_p * 100:.1f}%다. 표본이 편향됐는지는 "
+        f"WAN-348과 **같은 자**로 비교해야 하는데, 그 자(행마다 독립)로 전수를 재면 "
+        f"{solo_p * 100:.1f}%이고 표본 100건의 {WAN348_WEIGHTED_P * 100:.1f}%가 그린 95% 구간"
+        f"({WAN348_SIMPLE_LOW * 100:.1f}~{WAN348_SIMPLE_HIGH * 100:.1f}%) "
+        + (
+            "**안**이다 — 표본 추출은 편향되지 않았다"
+            if inside
+            else "**밖**이다 — 표본 추출이 편향됐다"
+        )
+        + ".**",
+        "",
+        f"⚠️ **{chain_p * 100:.1f}%와 그 구간을 직접 견주지 말 것** — 사슬 판정은 WAN-348에 "
+        "없던 자라 그 표의 구간이 재는 대상이 아니다. 두 자의 차이는 표본 오차가 아니라 "
+        "**아래의 중복 계상**이다.",
         "",
         "🚨 **두 자를 함께 내는 이유** — 같은 분에 여러 번 체결하는 재진입 사슬(모집단 "
         f"{int((verdicts['chain_size'] > 1).sum())}건 / "
-        f"{int(verdicts[verdicts['chain_size'] > 1]['entry_ms'].nunique())}개 분)은 진입가·"
+        # 🚨 분은 **칸별로** 센다 — `entry_ms`만 세면 서로 다른 종목의 같은 시각이 한 분으로
+        # 접혀 사슬 수가 과소 보고된다(표적 집합의 단위와도 어긋난다).
+        f"{len(verdicts[verdicts['chain_size'] > 1].groupby(['symbol', 'timeframe', 'entry_ms']))}"
+        "개 분)은 진입가·"
         "익절가가 같아 **행마다 독립으로 재면 같은 틱 순서를 여러 번 쓴다**. 사슬 판정은 그 "
         "순서를 **한 번만** 쓰고(체결→익절→그 뒤부터 다음 체결) 끊긴 지점부터는 뒤 거래가 "
         "일어나지 않는 것으로 본다 — **표적 집합을 정하는 것은 이쪽**이다.",
@@ -953,6 +1007,18 @@ def build_summary(
             if len(table) > 2:
                 out += [f"### `{segment}`", "", *table, ""]
 
+        untouched = identity_where_untargeted(book, harness.SEGMENT_IS)
+        if untouched is not None:
+            out += [
+                f"🚨 **검산 (d) — 표적 팔은 시킨 것만 건드린다: `is` 구간에서 `tick_off` ≡ "
+                f"`base` 최대 절대차 {untouched:.2e}.** 표적 목록이 WAN-346 팔 A의 "
+                "**`oos_warm` 거래**에서 왔으므로 `is`에는 막을 분이 **하나도 없고**, 그러면 그 "
+                "구간은 기준선과 **비트 단위로 같아야 한다**. 다르면 팔이 시킨 것 말고 다른 "
+                "것도 건드렸다는 뜻이라 §2·§3 전체가 무효다. 📌 이 검산은 격자를 더 돌지 않고 "
+                "**공짜로** 얻어진다.",
+                "",
+            ]
+
         base_row = _book_row(book, ADOPTED_ARM, PRIMARY_OOS)
         answer = _book_row(book, ANSWER_ARM, PRIMARY_OOS)
         upper = _book_row(book, UPPER_ARM, PRIMARY_OOS)
@@ -1015,6 +1081,7 @@ def build_summary(
                     "(WAN-213/323). **선형 보간이 성립하지 않는다는 직접 증거**이고, 이 이슈가 "
                     "실측으로 바꾼 이유가 정확히 이것이다."
                 ),
+                *_outside_range_lines(book),
                 "- 📌 **두 보간 행의 차이는 p 하나에서 온다** — 분모가 되는 두 극단은 이 실행의 "
                 "`base`·`all_off` 그대로다(WAN-336 값과 4구간 전부 **0.00e+00**으로 일치).",
                 "- ⚠️ **복리 총수익에는 어떤 혼합도 쓰지 말 것** — 거래당 효과가 곱으로 쌓여 "
