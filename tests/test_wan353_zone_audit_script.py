@@ -5,8 +5,10 @@
 
 1. 캐시가 미스면 **되채우기를 실제로 돌리고**, 적중이면 **돌리지 않는다**.
    (순서를 안 지키면 WAN-334를 네 번 포기하게 만든 「매번 처음부터 재계산」이 재현된다.)
-2. 워커 기본값이 **2**로 실제 명령에 실린다 — 서버가 2코어 1GB이기 때문이다(WAN-324/354).
-   이슈 본문의 `--jobs 4`를 그대로 옮기면 안 된다.
+2. 기본으로는 `--jobs`를 **아예 안 넘긴다** — 서버 `.env`의 `ALPHABLOCK_BACKTEST_JOBS`가
+   이겨야 한다(WAN-356이 그 박스의 코어 수에 맞춰 넣어 뒀다). `config/settings.py` 규약상
+   **명시적 `--jobs N`이 환경변수를 이기므로**, 스크립트가 임의로 숫자를 넘기면 일부러 정한
+   서버 기본값을 조용히 덮어쓴다. `-j N`을 준 경우에만 실린다.
 3. `data_gap_skips` 파일이 없으면 **「확인 불가」를 찍는다**(WAN-194 원칙: 지어내지 않는다).
    🚨 이 갈래는 개발 중 실제로 조용히 죽어 있었다 — `else` 앞의 줄바꿈이 빠져 bash가 분기를
    통째로 삼켰고 **아무것도 안 찍으면서 종료 코드 0**을 냈다. 이 저장소가 반복해 경계하는
@@ -105,13 +107,18 @@ def test_skip_backfill_flag_suppresses_the_write_but_not_the_audit(tmp_path: Pat
     assert "--zone-audit" in calls
 
 
-def test_default_jobs_is_two_not_four(tmp_path: Path) -> None:
-    """서버는 2코어 1GB다(WAN-324/354). 기본값이 실제 명령에 실리는지 **인자로** 잰다."""
-    _report, calls = _run(tmp_path, cache_hit=False)
+def test_default_passes_no_jobs_flag_at_all(tmp_path: Path) -> None:
+    """기본 실행은 `--jobs`를 **한 번도 안 넘긴다** — 서버 `.env`가 이겨야 한다.
 
-    audit = next(line for line in calls.splitlines() if "--zone-audit" in line)
-    assert "--jobs 2" in audit
-    assert "--jobs 4" not in calls
+    명시적 `--jobs N`이 `ALPHABLOCK_BACKTEST_JOBS`를 이기므로(`config/settings.py`), 여기서
+    숫자를 하나라도 넘기면 WAN-356이 서버에 일부러 넣어 둔 값이 조용히 덮인다. 라벨이 아니라
+    **실제 명령줄**로 잰다.
+    """
+    report, calls = _run(tmp_path, cache_hit=False)
+
+    assert "--jobs" not in calls, f"기본 실행이 --jobs를 넘겼다:\n{calls}"
+    # 리포트 머리도 그 사실을 밝힌다 — 안 밝히면 다음 사람이 워커 수를 못 읽는다.
+    assert "ALPHABLOCK_BACKTEST_JOBS" in report
 
 
 def test_jobs_override_reaches_every_command(tmp_path: Path) -> None:

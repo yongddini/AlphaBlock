@@ -15,9 +15,12 @@
 #         움직였으므로 그 두 날은 지금 엔진 기준으로 **전 칸 미스**일 수 있다.
 #    그래서 순서가 「지문 확인 → 미스면 되채우기 → 그다음에 감사」다.
 #
-# ⚠️ `--jobs` 기본값이 **2**인 이유: 서버는 2코어 1GB이고 워커마다 1분봉 사본이 들어간다
-#    (WAN-324/354). `--jobs`는 결과를 안 바꾸는 순수 성능 노브라(WAN-121: 직렬 = 병렬 비트
-#    동일) **판정은 하나도 안 움직인다**. 이슈 본문의 `--jobs 4`를 그대로 쓰지 말 것.
+# ⚠️ `--jobs`는 **기본으로 넘기지 않는다** — 서버 `.env`의 `ALPHABLOCK_BACKTEST_JOBS`가
+#    이기게 둔다(WAN-356이 서버를 코어 수에 맞춰 넣어 뒀다). `config/settings.py`의 규약상
+#    **명시적 `--jobs N`이 환경변수를 이기므로**, 스크립트가 임의로 숫자를 넘기면 일부러 정한
+#    서버 기본값을 덮어쓴다. 러너와 코어를 다투는 게 걱정될 때만 `-j 1`처럼 **명시**한다.
+#    📌 `--jobs`는 결과를 안 바꾸는 순수 성능 노브라(WAN-121: 직렬 = 병렬 비트 동일)
+#    **판정은 어느 쪽이든 하나도 안 움직인다**. 이슈 본문의 `--jobs 4`를 그대로 쓰지 말 것.
 #
 # 무엇을 쓰나:
 #   - 단계 2(되채우기)만 DB에 쓴다 — `timeline_cache_*` 테이블에 캐시 셀을 **적재**한다
@@ -28,7 +31,7 @@
 # 사용:
 #   ./scripts/wan353-server-zone-audit.sh                      # stdout으로
 #   ./scripts/wan353-server-zone-audit.sh -o wan353-report.md  # 파일로(권장 — 붙여넣기용)
-#   ./scripts/wan353-server-zone-audit.sh -j 1                 # 워커 1개(러너와 다투지 않게)
+#   ./scripts/wan353-server-zone-audit.sh -j 1                 # 워커 1개(.env를 덮어써서라도)
 #   ./scripts/wan353-server-zone-audit.sh -n                   # 되채우기 건너뛰기(이미 했다면)
 #   DAYS="2026-08-17 2026-08-18" ./scripts/wan353-server-zone-audit.sh
 #
@@ -38,7 +41,8 @@
 set -uo pipefail
 
 OUT=""
-JOBS="${JOBS:-2}"
+# 빈 문자열 = `--jobs`를 아예 안 넘긴다(= 서버 `.env`가 이긴다). `-j N`을 준 경우에만 실린다.
+JOBS="${JOBS:-}"
 BACKFILL=1
 while getopts "o:j:nh" opt; do
   case "$opt" in
@@ -56,6 +60,11 @@ RUNTIME_STATE="${RUNTIME_STATE:-data/live_runtime_state.json}"
 # 완료기준 4 — WAN-343 §1이 「재시작과 겹치는 유일한 클러스터」로 남긴 08-18 그 시각.
 LONE_CLUSTER_DAY="2026-08-18"
 LONE_CLUSTER_TIME="10:04"
+
+# `-j`를 준 경우에만 `--jobs N`을 낸다. 안 주면 빈 문자열이라 명령줄에 아무것도 안 붙고
+# `harness.default_jobs()`가 `ALPHABLOCK_BACKTEST_JOBS`를 읽는다(= 서버 `.env`가 이긴다).
+JOBS_FLAG=""
+[ -n "$JOBS" ] && JOBS_FLAG=" --jobs $JOBS"
 
 emit() { if [ -n "$OUT" ]; then printf '%s\n' "$*" >>"$OUT"; else printf '%s\n' "$*"; fi; }
 section() { emit ""; emit "## $*"; emit ""; }
@@ -87,7 +96,7 @@ trap 'rm -f "$TMP_OUT" "$TMP_AUDIT"' EXIT
 [ -n "$OUT" ] && : >"$OUT"
 emit "# WAN-353 존 대장 감사 — 서버 실행 기록 ($(date '+%Y-%m-%d %H:%M:%S %Z'))"
 emit ""
-emit "- 대상 날짜(KST): \`$DAYS\` · 워커: \`--jobs $JOBS\` · 되채우기: $([ "$BACKFILL" = 1 ] && echo '함' || echo '건너뜀(-n)')"
+emit "- 대상 날짜(KST): \`$DAYS\` · 워커: $([ -n "$JOBS" ] && echo "\`--jobs $JOBS\`(명시 — 서버 \`.env\`를 덮어쓴다)" || echo "미지정 → \`ALPHABLOCK_BACKTEST_JOBS\`(서버 \`.env\`)") · 되채우기: $([ "$BACKFILL" = 1 ] && echo '함' || echo '건너뜀(-n)')"
 emit "- 저장소: \`$(pwd)\` · HEAD: \`$(git rev-parse --short HEAD 2>/dev/null || echo '?')\` ($(git log -1 --format=%cd --date=short 2>/dev/null || echo '?'))"
 emit ""
 emit "> 🚨 **읽는 법은 미리 못 박혀 있다**(wan343.md §5) — 도구가 마지막에 찍는 「판정:」 한"
@@ -110,7 +119,7 @@ NEED_BACKFILL=""
 for day in $DAYS; do
   emit ""
   emit "### $day"
-  run "uv run alphablock trades --day $day --no-stale --jobs $JOBS"
+  run "uv run alphablock trades --day $day --no-stale$JOBS_FLAG"
   if grep -q "캐시 미스\|아직 계산 안 됨" "$TMP_OUT"; then
     NEED_BACKFILL="$NEED_BACKFILL $day"
     emit "→ **미스**: 되채우기 대상."
@@ -134,7 +143,7 @@ else
   for day in $NEED_BACKFILL; do
     emit ""
     emit "### $day 적재"
-    run "uv run alphablock trades --day $day --persist-cache --jobs $JOBS"
+    run "uv run alphablock trades --day $day --persist-cache$JOBS_FLAG"
   done
 fi
 
@@ -149,7 +158,7 @@ emit "대장을 영속화하지 않아 같은 자로 잴 수 없다(WAN-306 · �
 for day in $DAYS; do
   emit ""
   emit "### $day"
-  run "uv run alphablock stop-width --day $day --with-backtest --zone-audit --jobs $JOBS"
+  run "uv run alphablock stop-width --day $day --with-backtest --zone-audit$JOBS_FLAG"
   { echo "===== $day ====="; cat "$TMP_OUT"; } >>"$TMP_AUDIT"
 done
 
