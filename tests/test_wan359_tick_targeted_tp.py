@@ -391,8 +391,23 @@ def test_targeted_arm_removes_same_minute_candidates_on_real_data() -> None:
 
     칸 하나(4h)로 좁혀 로컬에서 ~40초다. 전 격자는 `--part book`이 돈다.
     """
+    from backtest.run import parse_date_ms
     from backtest.wan169_leverage_book import run_cells
     from backtest.wan359_tick_targeted_tp import build_block_set
+
+    # 🚨 **실데이터 게이트는 `run_cells` 전에 건다** — 빈 DB에서는 그 호출이 skip 판정에
+    # 닿기도 전에 `ValueError`로 죽는다(CI 기본이 빈 DB다). 저장소의 다른 실데이터 회귀와
+    # 같은 패턴으로 창을 먼저 읽어 본다(1분봉·펀딩은 존재 확인에 필요 없다).
+    market = harness.load_market_data(
+        _REAL_CELL[0],
+        _REAL_CELL[1],
+        start_ms=parse_date_ms(_REAL_START),
+        end_ms=parse_date_ms(_REAL_END),
+        need_1m=False,
+        funding=False,
+    )
+    if market.empty:
+        pytest.skip(f"{_REAL_CELL[0]} {_REAL_CELL[1]} 실데이터가 없어 건너뜁니다(CI 기본).")
 
     blocks = build_block_set(pd.read_csv(VERDICT_CSV))
     minutes = blocks.minutes.get(_REAL_CELL)
@@ -409,8 +424,7 @@ def test_targeted_arm_removes_same_minute_candidates_on_real_data() -> None:
         "reentry": True,
     }
     base = run_cells([_REAL_CELL[0]], [_REAL_CELL[1]], **shared)  # type: ignore[arg-type]
-    if not base or not base[0].candidates.get("full"):
-        pytest.skip("실데이터가 없어 후보가 비었다(CI 기본)")
+    assert base and base[0].candidates.get("full"), "실데이터가 있는데 후보가 비었다"
     targeted = run_cells(
         [_REAL_CELL[0]],
         [_REAL_CELL[1]],
