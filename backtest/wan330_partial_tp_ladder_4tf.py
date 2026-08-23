@@ -326,6 +326,7 @@ def run_arm(
         partial_take_profit_fraction=PARTIAL_FRACTION,
         breakeven_after_partial=arm.breakeven,
         **ADOPTED_CELL_KWARGS,  # type: ignore[arg-type]
+        invalidation_cancel=harness.LEGACY_INVALIDATION_CANCEL,
     )
     identity: float | None = None
     if arm.is_baseline and lens == BASELINE_LENS:

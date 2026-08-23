@@ -76,6 +76,7 @@ from pathlib import Path
 import pandas as pd
 from pydantic import BaseModel, ConfigDict
 
+from backtest import harness
 from backtest.harness import (
     LEGACY_BAND_BAR,
     LEGACY_OB_PARAMS,
@@ -325,7 +326,7 @@ def run_cell(
             seg_htf,
             seg_1m,
             timeframe,
-            params=params,
+            params=harness.pin_invalidation_cancel(params),
             cfg=cfg,
             order_block_params=order_block_params,
             order_block_result=order_block_result,
@@ -338,7 +339,7 @@ def run_cell(
             symbol=symbol,
             segment=segment,
             gate=fill_name,
-            confluence_params=params,
+            confluence_params=harness.pin_invalidation_cancel(params),
             order_block_params=order_block_params,
             backtest_config=cfg,
             order_block_result=order_block_result,

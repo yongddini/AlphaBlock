@@ -673,6 +673,7 @@ def run_arm(
         no_same_step_tp=arm.all_off,
         no_same_step_tp_minutes=blocks.minutes if arm.targeted else None,
         **ADOPTED_CELL_KWARGS,  # type: ignore[arg-type]
+        invalidation_cancel=harness.LEGACY_INVALIDATION_CANCEL,
     )
     identity: float | None = None
     if arm.is_adopted:

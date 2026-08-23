@@ -714,13 +714,13 @@ def run_verify_cell(task: _VerifyTask) -> list[wan151.NullRow]:
             symbol=task.symbol,
             segment="IS" if segment.name == harness.SEGMENT_IS else "OOS",
             gate=LONG_ARM,
-            confluence_params=real,
+            confluence_params=harness.pin_invalidation_cancel(real),
             backtest_config=cfg,
             order_block_result=ob_result,
             iterations=BOOTSTRAP_ITERATIONS,
             seed=BOOTSTRAP_SEED,
             funding_rates=_verify_funding(task.symbol, window.funding_rates),  # type: ignore[arg-type]
-            pool_params=pool,
+            pool_params=harness.pin_invalidation_cancel(pool),
         )
         rows.append(
             wan151.NullRow(

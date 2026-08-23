@@ -372,7 +372,7 @@ def diagnose_cell(market: harness.MarketData) -> list[DiagRow]:
         market.htf_df,
         market.df_1m,
         market.timeframe,
-        params=no_band,
+        params=harness.pin_invalidation_cancel(no_band),
         cfg=cfg,
         order_block_result=ob_result,
         setup_sink=sink_off,
@@ -383,7 +383,7 @@ def diagnose_cell(market: harness.MarketData) -> list[DiagRow]:
         market.htf_df,
         market.df_1m,
         market.timeframe,
-        params=params,
+        params=harness.pin_invalidation_cancel(params),
         cfg=cfg,
         order_block_result=ob_result,
         setup_sink=sink_on,
@@ -505,7 +505,7 @@ def pnl_rows_for_cell(market: harness.MarketData, arms: Sequence[Arm] = ARMS) ->
             params = arm.params()
             outcome = harness.run_once(
                 window,
-                params=params,
+                params=harness.pin_invalidation_cancel(params),
                 cfg=arm.config(window.timeframe),
                 order_block_result=ob_result,
             )

@@ -42,6 +42,7 @@ from pathlib import Path
 import pandas as pd
 from pydantic import BaseModel, ConfigDict
 
+from backtest import harness
 from backtest.harness import (
     LEGACY_OB_PARAMS,
     MarketData,
@@ -190,7 +191,7 @@ def _run_cell(
         market.htf_df,
         market.df_1m,
         market.timeframe,
-        params=params,
+        params=harness.pin_invalidation_cancel(params),
         cfg=cfg,
         order_block_result=htf_obr,
         overlap=overlap,

@@ -201,6 +201,7 @@ def run_arm_cells(
         reentry_entry_rule=ADOPTED_REENTRY_ENTRY_RULE,
         fill=fill,
         short_enabled=short_enabled,
+        invalidation_cancel=harness.LEGACY_INVALIDATION_CANCEL,
     )
     if funding_proxy:
         cells, note = apply_funding_proxy(cells)

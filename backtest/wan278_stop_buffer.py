@@ -449,7 +449,7 @@ def run_arm(
         seg_market.htf_df,
         seg_market.df_1m,
         seg_market.timeframe,
-        params=params,
+        params=harness.pin_invalidation_cancel(params),
         cfg=cfg,
         order_block_result=obr,
         setup_sink=sink,
@@ -1056,7 +1056,11 @@ def run_checksum(
             [t for _, t in mine.paired], cfg, seg_market.timeframe
         ).metrics.total_return
         outcome = harness.run_once(
-            seg_market, params=params, cfg=cfg, order_block_result=obr, eval_from_ms=eval_from_ms
+            seg_market,
+            params=harness.pin_invalidation_cancel(params),
+            cfg=cfg,
+            order_block_result=obr,
+            eval_from_ms=eval_from_ms,
         )
         prod_ret = outcome.result.metrics.total_return
         max_diff = max(max_diff, abs(mine_ret - prod_ret))

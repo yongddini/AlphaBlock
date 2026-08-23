@@ -466,7 +466,7 @@ def label_cell(
         market.htf_df,
         market.df_1m,
         market.timeframe,
-        params=params,
+        params=harness.pin_invalidation_cancel(params),
         cfg=cfg,
         order_block_params=order_block_params,
     )
@@ -1262,7 +1262,9 @@ def checksum(
     )
     _annotate_percentiles(cell, _S_B_PCTL_RAW)
     outcome = harness.run_once(
-        market, params=ConfluenceParams(), cfg=harness.build_config(timeframe)
+        market,
+        params=harness.pin_invalidation_cancel(ConfluenceParams()),
+        cfg=harness.build_config(timeframe),
     )
     prod = outcome.result.metrics.num_trades
     if st.sequenced != prod:

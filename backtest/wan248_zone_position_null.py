@@ -489,7 +489,7 @@ def run_position_null_segment(
         htf_seg,
         one_min_seg,
         timeframe,
-        params=params,
+        params=harness.pin_invalidation_cancel(params),
         cfg=cfg,
         order_block_result=real_ob,
     )
@@ -523,7 +523,7 @@ def run_position_null_segment(
         htf_seg,
         one_min_seg,
         timeframe,
-        params=params,
+        params=harness.pin_invalidation_cancel(params),
         cfg=cfg,
         order_block_result=fake_ob,
     )

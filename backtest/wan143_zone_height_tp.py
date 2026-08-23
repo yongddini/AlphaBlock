@@ -270,7 +270,7 @@ def run_cell(
                 seg_market.htf_df,
                 seg_market.df_1m,
                 seg_market.timeframe,
-                params=params,
+                params=harness.pin_invalidation_cancel(params),
                 cfg=base_cfg,
                 order_block_result=obr,
                 take_profit_override=override,

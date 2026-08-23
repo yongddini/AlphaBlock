@@ -1315,6 +1315,8 @@ def main(argv: list[str] | None = None) -> int:
             jobs=args.jobs,
             # WAN-305 명시 핀: wan169 리포트 CSV는 재진입 이전 북의 동결 스냅샷이다.
             reentry=False,
+            # WAN-365 명시 핀: 그 CSV는 **소급 취소** 시절의 기록이기도 하다.
+            invalidation_cancel=harness.LEGACY_INVALIDATION_CANCEL,
         )
         cell_rows = [row for p in payloads for row in p.rows]
         book_rows = build_book_rows(payloads)

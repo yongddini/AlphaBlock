@@ -259,7 +259,12 @@ def run_cell(task: _Task, *, log: bool = True) -> list[ArmRow]:
         ob_result = harness.detect_order_blocks(window, ADOPTED_OB_PARAMS)
         for arm_name in task.arms:
             params = arm_params(ARMS_BY_NAME[arm_name])
-            outcome = harness.run_once(window, params=params, cfg=cfg, order_block_result=ob_result)
+            outcome = harness.run_once(
+                window,
+                params=harness.pin_invalidation_cancel(params),
+                cfg=cfg,
+                order_block_result=ob_result,
+            )
             row = harness.build_row(
                 outcome,
                 window,

@@ -314,9 +314,15 @@ def run_cell(task: _Task, *, log: bool = True) -> CellRow | None:
 
     sink_base: list[SetupDiagnostic] = []
     out_base = harness.run_once(
-        market, params=params_base, cfg=cfg, order_block_result=ob, setup_sink=sink_base
+        market,
+        params=harness.pin_invalidation_cancel(params_base),
+        cfg=cfg,
+        order_block_result=ob,
+        setup_sink=sink_base,
     )
-    out_wait = harness.run_once(market, params=params_wait, cfg=cfg, order_block_result=ob)
+    out_wait = harness.run_once(
+        market, params=harness.pin_invalidation_cancel(params_wait), cfg=cfg, order_block_result=ob
+    )
 
     counts = _status_counts([d.status for d in sink_base])
     window_start, window_end = task.start_ms, task.end_ms

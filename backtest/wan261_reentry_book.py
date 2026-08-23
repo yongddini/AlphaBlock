@@ -280,6 +280,7 @@ def run_report(
         jobs=jobs,
         reentry=True,
         reentry_entry_rule="freeze",
+        invalidation_cancel=harness.LEGACY_INVALIDATION_CANCEL,
     )
     if funding_proxy:
         payloads, note = apply_funding_proxy(payloads)

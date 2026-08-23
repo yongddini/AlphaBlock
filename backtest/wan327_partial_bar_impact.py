@@ -266,7 +266,11 @@ def _cell_rows_for_market(
     for segment in CELL_SEGMENTS:
         eval_from = None if segment == "full" else boundary
         outcome = harness.run_once(
-            market, params=params, cfg=cfg, order_block_result=ob_result, eval_from_ms=eval_from
+            market,
+            params=harness.pin_invalidation_cancel(params),
+            cfg=cfg,
+            order_block_result=ob_result,
+            eval_from_ms=eval_from,
         )
         metrics = outcome.result.metrics
         rows.append(
@@ -360,6 +364,7 @@ def run_book_impact(
             # 차가운 구간을 안 내므로 그 탐지도 건너뛴다(WAN-301 컴퓨트 노브) — `full`·
             # `oos_warm` 산출은 이 노브와 무관하다(같은 전체 창 후보의 경계 필터).
             cold_segments=False,
+            invalidation_cancel=harness.LEGACY_INVALIDATION_CANCEL,
         )
         payloads, note = apply_funding_proxy(payloads)
         if note and log:

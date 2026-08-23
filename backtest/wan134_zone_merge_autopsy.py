@@ -132,7 +132,7 @@ def label_merge_cell(market: harness.MarketData, *, params: ConfluenceParams) ->
         market.htf_df,
         market.df_1m,
         market.timeframe,
-        params=params,
+        params=harness.pin_invalidation_cancel(params),
         cfg=cfg,
     )
     if not candidates:
@@ -560,7 +560,10 @@ def run_ablation_cell(market: harness.MarketData) -> list[AblationRow]:
             ob_params = OrderBlockParams(combine_obs=combine)
             ob_result = OrderBlockDetector(ob_params).run(seg_market.htf_df)
             outcome = harness.run_once(
-                seg_market, params=params, cfg=cfg, order_block_result=ob_result
+                seg_market,
+                params=harness.pin_invalidation_cancel(params),
+                cfg=cfg,
+                order_block_result=ob_result,
             )
             m = outcome.result.metrics
             stats = outcome.stats

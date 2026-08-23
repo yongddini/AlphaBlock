@@ -1215,6 +1215,7 @@ def main(argv: list[str] | None = None) -> int:
             jobs=args.jobs,
             # WAN-305 명시 핀: wan180 리포트 CSV는 재진입 이전 북의 동결 스냅샷이다.
             reentry=False,
+            invalidation_cancel=harness.LEGACY_INVALIDATION_CANCEL,
         )
         funding_note = ""
         if not args.no_funding_proxy:

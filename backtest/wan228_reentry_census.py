@@ -695,7 +695,8 @@ def run_cell(task: _Task, *, log: bool = True) -> CellRow | None:
         return None
     ob = harness.detect_order_blocks(market, OrderBlockParams())
     cfg = harness.build_config(task.timeframe)
-    params = harness.build_params()  # 채택 기본값(핀 없음).
+    # WAN-365 명시 핀: wan228 census CSV는 **소급 취소** 시절의 동결 기록이다.
+    params = harness.pin_invalidation_cancel(harness.build_params())
 
     candidates, _stats = build_zone_limit_candidates(
         market.htf_df,

@@ -266,7 +266,7 @@ def build_arm_candidates(
         market.htf_df,
         market.df_1m,
         market.timeframe,
-        params=params,
+        params=harness.pin_invalidation_cancel(params),
         cfg=cfg,
         order_block_result=obr,
     )

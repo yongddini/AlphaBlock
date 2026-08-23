@@ -204,7 +204,7 @@ def run_audit(*, funding: bool = True) -> tuple[pd.DataFrame, pd.DataFrame, pd.D
         market.htf_df,
         market.df_1m,
         PILOT_TIMEFRAME,
-        params=params,
+        params=harness.pin_invalidation_cancel(params),
         cfg=cfg,
         order_block_result=ob_result,
     )

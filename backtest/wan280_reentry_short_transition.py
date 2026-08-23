@@ -397,7 +397,7 @@ def _long_reentries(
             substep_times=substep_times,
             htf_times=htf_times,
             htf_closes=htf_closes,
-            params=params,
+            params=harness.pin_invalidation_cancel(params),
             cfg=cfg,
             funding_rates=funding_rates,
             entry_rule=entry_rule,
@@ -602,7 +602,7 @@ def run_cell(task: _Task, *, log: bool = True) -> Wan280Cell | None:
             win.htf_df,
             win.df_1m,
             task.timeframe,
-            params=params,
+            params=harness.pin_invalidation_cancel(params),
             cfg=cfg,
             order_block_result=ob_result,
         )
@@ -1261,7 +1261,14 @@ def run_report(
     funding_proxy: bool = True,
     log: bool = True,
 ) -> tuple[list[BookScopeRow], list[ShortDiagRow]]:
-    cells = run_cells(symbols, timeframes, start=start, end=end, fill=fill, jobs=jobs)
+    cells = run_cells(
+        symbols,
+        timeframes,
+        start=start,
+        end=end,
+        fill=fill,
+        jobs=jobs,
+    )
     if funding_proxy:
         cells = _apply_funding_proxy(cells, log=log)
     book_rows = build_book_scope_rows(

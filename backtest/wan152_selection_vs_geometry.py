@@ -258,7 +258,7 @@ def build_cell(
             market.htf_df,
             market.df_1m,
             market.timeframe,
-            params=params,
+            params=harness.pin_invalidation_cancel(params),
             cfg=cfg,
             order_block_result=obr,
             stop_loss_override=override,

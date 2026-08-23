@@ -251,13 +251,13 @@ def run_cell(task: _Task, *, log: bool = True) -> list[NullRow]:
                 symbol=task.symbol,
                 segment="IS" if segment.name == harness.SEGMENT_IS else "OOS",
                 gate=arm_name,
-                confluence_params=real_params(arm),
+                confluence_params=harness.pin_invalidation_cancel(real_params(arm)),
                 backtest_config=cfg,
                 order_block_result=ob_result,
                 iterations=task.iterations,
                 seed=BOOTSTRAP_SEED,
                 funding_rates=window.funding_rates,
-                pool_params=pool_params(arm),
+                pool_params=harness.pin_invalidation_cancel(pool_params(arm)),
             )
             row = NullRow(
                 symbol=task.symbol,

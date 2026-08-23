@@ -64,11 +64,13 @@ _BREAK_BAR = _HTF_MS  # 두 번째 봉에서 존이 깨진다.
 
 
 def test_cutoff_moves_only_in_causal_mode() -> None:
-    assert invalidation_cutoff(_BREAK_BAR, htf_ms=_HTF_MS) == _BREAK_BAR
+    # WAN-365: 기본값이 인과(`bar_close`)로 옮겨졌다 — 인자를 안 주면 봉 마감이 나온다.
+    assert invalidation_cutoff(_BREAK_BAR, htf_ms=_HTF_MS) == _BREAK_BAR + _HTF_MS
     assert invalidation_cutoff(_BREAK_BAR, htf_ms=_HTF_MS, mode="bar_open") == _BREAK_BAR
     assert invalidation_cutoff(_BREAK_BAR, htf_ms=_HTF_MS, mode="bar_close") == _BREAK_BAR + _HTF_MS
     assert invalidation_cutoff(None, htf_ms=_HTF_MS, mode="bar_close") is None
-    assert ADOPTED_INVALIDATION_CANCEL == "bar_open", "채택 기본값이 움직이면 재-베이스라인이다"
+    assert ADOPTED_INVALIDATION_CANCEL == "bar_close", "채택 기본값이 움직이면 재-베이스라인이다"
+    assert harness.LEGACY_INVALIDATION_CANCEL == "bar_open", "옛 동작 핀이 움직이면 옛 CSV가 깨진다"
 
 
 # --------------------------------------------------------------------------- #
@@ -212,18 +214,21 @@ def _reentries(**kwargs: Any) -> list[_Candidate]:
 
 def test_reentry_path_actually_receives_the_cancel_mode() -> None:
     """재진입도 base와 **같은 취소 시점**을 받는다 — 한쪽만 걸면 잡종 엔진이다."""
-    adopted = _reentries()
+    legacy = _reentries(invalidation_cancel="bar_open")
     causal = _reentries(invalidation_cancel="bar_close", htf_ms=_HTF_MS)
-    assert adopted == [], "채택 팔은 무효화 봉의 재무장 체결을 만들지 않는다"
+    assert legacy == [], "소급 취소 팔은 무효화 봉의 재무장 체결을 만들지 않는다"
     assert causal, "인과 팔이 재진입 후보를 하나도 못 냈다 — 배선이 빠졌다(WAN-345 부류)"
     assert all(c.entry_after_invalidation for c in causal)
     assert all(_BREAK_BAR <= c.entry_time < _BREAK_BAR + _HTF_MS for c in causal)
 
 
 def test_reentry_causal_arm_refuses_to_fold_silently_without_the_bar_length() -> None:
-    """봉 길이를 모르면 조용히 채택 팔로 접히지 않고 시끄럽게 죽는다."""
+    """봉 길이를 모르면 조용히 소급 취소로 접히지 않고 시끄럽게 죽는다."""
     with pytest.raises(ValueError, match="htf_ms"):
         _reentries(invalidation_cancel="bar_close")
+    # WAN-365: 인자를 아예 안 줘도 채택 기본값이 인과라 같은 자리에서 죽는다.
+    with pytest.raises(ValueError, match="htf_ms"):
+        _reentries()
 
 
 # --------------------------------------------------------------------------- #
@@ -413,7 +418,9 @@ def test_causal_arm_revives_trades_on_real_data() -> None:
     from data.models import timeframe_to_ms
 
     ob_result = harness.detect_order_blocks(market)
-    params, cfg = harness.build_params(), harness.build_config(_REAL_TF)
+    # WAN-365: 파라미터 기본값이 인과라, 이 테스트의 「옛 팔」은 명시 핀으로 만든다.
+    params = harness.pin_invalidation_cancel(harness.build_params())
+    cfg = harness.build_config(_REAL_TF)
     htf_ms = timeframe_to_ms(_REAL_TF)
 
     def _build(**kwargs: Any) -> list[_Candidate]:
@@ -428,14 +435,24 @@ def test_causal_arm_revives_trades_on_real_data() -> None:
         )
         return cands
 
-    adopted = _build()
-    assert adopted, "실데이터가 있는데 후보가 비었다"
-    assert _build(invalidation_cancel="bar_open") == adopted, "기본값이 비트 재현이 아니다"
-    assert all(not c.entry_after_invalidation for c in adopted)
+    legacy = _build()
+    assert legacy, "실데이터가 있는데 후보가 비었다"
+    assert _build(invalidation_cancel="bar_open") == legacy, "명시 핀이 비트 재현이 아니다"
+    assert all(not c.entry_after_invalidation for c in legacy)
 
     causal = _build(invalidation_cancel="bar_close")
+    # WAN-365: 채택 기본값 파라미터는 인자 없이도 인과 팔과 같은 후보를 낸다.
+    adopted_default, _ = build_zone_limit_candidates(
+        market.htf_df,
+        market.df_1m,
+        _REAL_TF,
+        params=harness.build_params(),
+        cfg=cfg,
+        order_block_result=ob_result,
+    )
+    assert adopted_default == causal, "인자 없는 채택 파라미터가 인과로 돌지 않는다"
     revived = [c for c in causal if c.entry_after_invalidation]
-    assert len(causal) > len(adopted), "인과 팔이 실데이터에서 아무것도 되살리지 못했다"
+    assert len(causal) > len(legacy), "인과 팔이 실데이터에서 아무것도 되살리지 못했다"
     assert revived, "되살아난 거래 라벨이 하나도 안 붙었다"
     # 검산 (c) — 되살아난 체결은 **무효화 봉 안**에만 있다(취소가 꺼진 게 아니다).
     for cand in revived:
@@ -479,14 +496,14 @@ def test_run_cells_threads_the_mode_to_both_candidate_layers() -> None:
         "engine_check": False,
         **ADOPTED_CELL_KWARGS,
     }
-    adopted = run_cells([_REAL_SYMBOL], [_REAL_TF], **shared)
-    causal = run_cells([_REAL_SYMBOL], [_REAL_TF], invalidation_cancel="bar_close", **shared)
+    legacy = run_cells([_REAL_SYMBOL], [_REAL_TF], invalidation_cancel="bar_open", **shared)
+    causal = run_cells([_REAL_SYMBOL], [_REAL_TF], **shared)  # WAN-365: 미지정 = 인과
 
     def _revived(payloads: list[Any], key: str) -> int:
         return sum(
             1 for p in payloads for c in getattr(p, key)["full"] if c.entry_after_invalidation
         )
 
-    assert _revived(adopted, "candidates") == 0
-    assert _revived(adopted, "reentry_candidates") == 0
+    assert _revived(legacy, "candidates") == 0
+    assert _revived(legacy, "reentry_candidates") == 0
     assert _revived(causal, "candidates") > 0, "base 후보 층에 인과 팔이 안 걸렸다"

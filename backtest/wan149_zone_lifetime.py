@@ -217,7 +217,7 @@ def label_cell(
         market.htf_df,
         market.df_1m,
         market.timeframe,
-        params=conf,
+        params=harness.pin_invalidation_cancel(conf),
         cfg=cfg,
         order_block_result=ob_result,
         setup_sink=sink,

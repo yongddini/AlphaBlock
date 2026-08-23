@@ -179,7 +179,12 @@ def run_cell(task: _Task, *, log: bool = True) -> list[AblationRow]:
         ob_result = harness.detect_order_blocks(window, ADOPTED_OB_PARAMS)
         for level in task.levels:
             params = rung_params(RUNGS_BY_NAME[level])
-            outcome = harness.run_once(window, params=params, cfg=cfg, order_block_result=ob_result)
+            outcome = harness.run_once(
+                window,
+                params=harness.pin_invalidation_cancel(params),
+                cfg=cfg,
+                order_block_result=ob_result,
+            )
             row = harness.build_row(
                 outcome,
                 window,

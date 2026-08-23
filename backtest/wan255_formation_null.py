@@ -744,7 +744,7 @@ def _retap_return(
     arm: Arm = ARMS_BY_NAME[_RETAP_ARM_BY_DIR[direction]]
     outcome = harness.run_once(
         market,
-        params=arm.params(),
+        params=harness.pin_invalidation_cancel(arm.params()),
         cfg=arm.config(market.timeframe),
         eval_from_ms=eval_from_ms,
     )
