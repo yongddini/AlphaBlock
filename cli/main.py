@@ -778,6 +778,56 @@ def cmd_watch(args: argparse.Namespace, settings: Settings) -> int:
     )
 
 
+def cmd_same_minute(args: argparse.Namespace, settings: Settings) -> int:
+    """`alphablock same-minute [--days N]` — 페이퍼 「같은 분 왕복」 인구조사(WAN-362 §1).
+
+    「들어간 그 1분 안에 나온 거래」가 페이퍼에서 얼마나 자주 나고 **익절인가 손절인가**를
+    날짜(KST)·종목·TF로 갈라 센다. 백테스트 대조군(채택 북 `oos_warm` 익절 467 : 손절 7,
+    WAN-336)과 나란히 놓고 Wilson 구간·정확 이항 p·필요 표본을 함께 낸다.
+
+    표본이 작으므로 **날짜 하나씩 빼기**를 함께 낸다 — 「어제 급락 하루가 만든 결과인가」가
+    이 §의 첫 질문이기 때문이다. 순수 조회라 종료 코드는 항상 0이다(DB에 아무것도 안 쓴다).
+    """
+    from live.fill_report import resolve_day_window
+    from live.same_minute_census import render
+    from paper.store import PaperTradeStore
+
+    db_path = args.db if args.db is not None else settings.db_path
+    store = PaperTradeStore(db_path)
+    try:
+        if args.days is None:
+            records = store.list_records()
+            span = store.time_span()
+            label = "전수" + (
+                f" ({timefmt.format_kst(span[0])[:10]} ~ {timefmt.format_kst(span[1])[:10]})"
+                if span
+                else ""
+            )
+        else:
+            _, end_ms, day_key = resolve_day_window(args.day)
+            days = max(1, args.days)
+            start_ms = end_ms - days * 86_400_000
+            records = store.list_records(start_ms=start_ms, end_ms=end_ms)
+            label = f"{days}일 창(끝 {day_key})"
+        symbols = _split_csv(args.symbol)
+        timeframes = _split_csv(args.tf)
+        if symbols is not None or timeframes is not None:
+            # 좁히기는 **탐색용 옵트인**이다(WAN-333 §3b 관행) — 기본은 장부 전수다.
+            wanted_syms = set(symbols) if symbols is not None else None
+            wanted_tfs = set(timeframes) if timeframes is not None else None
+            records = [
+                record
+                for record in records
+                if (wanted_syms is None or record.symbol in wanted_syms)
+                and (wanted_tfs is None or record.timeframe in wanted_tfs)
+            ]
+            label += " · 좌표 " + _coordinate_label(symbols, timeframes)
+        print(render(records, label=label))
+    finally:
+        store.close()
+    return 0
+
+
 def cmd_fills(args: argparse.Namespace, settings: Settings) -> int:
     """`alphablock fills [--day YYYY-MM-DD]` — 당일(KST) 주문별 체결 여부 조회(WAN-232).
 
@@ -1765,6 +1815,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="조회할 KST 날짜(기본: 오늘). 예: 2026-08-02",
     )
     p_fills.set_defaults(func=cmd_fills)
+
+    p_same_minute = sub.add_parser(
+        "same-minute",
+        help="페이퍼 「같은 분 왕복」 인구조사 — 백테 익절 467:손절 7과 방향이 반대인가(WAN-362)",
+    )
+    p_same_minute.add_argument("--db", default=None, help="장부 DB 경로(기본: 설정의 db_path)")
+    p_same_minute.add_argument(
+        "--days",
+        type=int,
+        default=None,
+        help="최근 N일 창만 본다(기본: 장부 전수). --day로 창의 끝 날짜를 옮긴다",
+    )
+    p_same_minute.add_argument(
+        "--day",
+        default="today",
+        metavar="YYYY-MM-DD",
+        help="--days 창의 끝 KST 날짜(기본: 오늘)",
+    )
+    p_same_minute.add_argument("--symbol", default=None, help="종목 좁히기(콤마 구분, 탐색용)")
+    p_same_minute.add_argument("--tf", default=None, help="TF 좁히기(콤마 구분, 탐색용)")
+    p_same_minute.set_defaults(func=cmd_same_minute)
 
     p_stop_width = sub.add_parser(
         "stop-width",
