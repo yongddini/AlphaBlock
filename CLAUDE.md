@@ -1116,10 +1116,14 @@ WAN-348의 41%는 **표본 100건의 비율**이고 그 뒤 쓰인 할인 수치
 - 📌 **파급이 WAN-149와 글자 그대로 같은 부류다** — `invalidation_cancel`은 **WAN-364가 처음
   만든 축이라 기존 리포트가 하나도 명시하지 않았다**. 고정하지 않으면 옛 결론 리포트가 전부
   조용히 인과 엔진으로 다시 돌아 본문과 어긋난다(「바꿨다고 믿으면서 안 바뀐 것」의 거울상인
-  **「안 바꿨다고 믿으면서 바뀐 것」**). 엔진에 닿는 `wan*.py` **70개 중 67개를 명시 고정**했다
+  **「안 바꿨다고 믿으면서 바뀐 것」**). 엔진에 닿는 `wan*.py` **72개 중 70개를 명시 고정**했다
   — 47개는 `harness.pin_invalidation_cancel`(파라미터 핀), 22개는
-  `run_cells(invalidation_cancel=harness.LEGACY_INVALIDATION_CANCEL)`(북 계열 호출부 핀).
-  목록·제외 사유 표는 wan365.md §4.
+  `run_cells(invalidation_cancel=harness.LEGACY_INVALIDATION_CANCEL)`(북 계열 호출부 핀),
+  4개는 자기 파라미터 빌더 핀. 목록·제외 사유 표는 wan365.md §4.
+  🚨 **고정 대상을 손으로 적었으면 넷을 빠뜨렸다** — 호출부가 부르는 이름이 엔진에서 몇 단계
+  떨어진 자리가 있다(`wan142.build_cell`을 wan154·wan176·wan203이 빌려 쓰고
+  `wan70.run_random_control_b_evals`를 wan350이 쓴다). 목록은 **전이 폐포**로 구했고, 회귀
+  테스트가 매번 다시 구해 「언급조차 안 한 모듈」을 잡는다(돌연변이 확인 완료).
   - ⚠️ **공유 러너에는 핀을 박지 않았다**(`wan169.run_cells` · `wan228._iter_reentries` ·
     `wan70.run_random_control_b_segment` 내부) — 배선에 핀을 박으면 채택 규칙을 따라야 할 새
     호출부까지 조용히 옛 엔진으로 끌려간다(WAN-305가 이름 붙인 실패의 이 축 판). **호출부가

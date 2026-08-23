@@ -188,6 +188,8 @@ class Arm:
         return harness.build_params(
             fill=harness.fill_preset(self.lens_name),
             base=wan151.arm_of(LONG_ARM).params(),
+            # WAN-365 명시 핀: 이 표는 **소급 취소** 시절의 결론이다(pool도 여기서 파생된다).
+            invalidation_cancel=harness.LEGACY_INVALIDATION_CANCEL,
         )
 
     def pool_params(self) -> ConfluenceParams:

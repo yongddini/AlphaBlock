@@ -311,6 +311,8 @@ def zw_params() -> ConfluenceParams:
     return harness.build_params(
         fill=harness.BASELINE_FILL,
         max_zone_width_atr=harness.LEGACY_MAX_ZONE_WIDTH_ATR,
+        # WAN-365 명시 핀: 이 표는 **소급 취소** 시절의 결론이다.
+        invalidation_cancel=harness.LEGACY_INVALIDATION_CANCEL,
     )
 
 

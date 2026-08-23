@@ -131,63 +131,86 @@ def test_book_accepts_a_single_cancel_value() -> None:
 # 4. 파급 — 옛 결론 리포트가 실제로 핀을 물고 있다
 # --------------------------------------------------------------------------- #
 
-#: 엔진에 닿는 함수들 — 이 중 하나라도 부르는 `wan*.py`는 취소 시점을 **명시**해야 한다.
-_ENGINE_CALLS = frozenset(
-    {
-        "build_zone_limit_candidates",
-        "run_once",
-        "run_cells",
-        "run_zone_limit_backtest",
-        "run_zone_limit_backtest_verbose",
-        "run_zone_limit_portfolio_backtest",
-        "run_random_control_b_segment",
-        "reentry_events",
-        "reentry_candidates",
-        "_iter_reentries",
-    }
-)
+#: 엔진 진입점의 **뿌리** — 여기서 전이 폐포를 구한다.
+_ENGINE_ROOT = "build_zone_limit_candidates"
 
-#: 고정하지 **않는** 모듈과 그 이유 — 결정문 §파급의 표와 같은 집합이어야 한다.
+#: 엔진 파라미터를 나르는 키워드.
+_PARAM_KWARGS = frozenset({"params", "confluence_params", "pool_params"})
+
+#: 고정하지 **않는** 모듈과 그 이유 — 결정문 §4-2의 표와 같은 집합이어야 한다.
 _UNPINNED_BY_DESIGN: dict[str, str] = {
     # 「지금 채택된 것」을 재는 리포트다 — 기본값이 움직이면 그 수치는 낡아야 맞다.
     "wan95_zone_limit_report.py": "채택 성과 재산출 대상",
+    # 이 축이 그 모듈의 실험 변수다(두 팔이 자기 입력으로 명시한다).
+    "wan364_invalidation_cancel.py": "축이 실험 변수",
 }
 
 
-def _module_calls_engine(tree: ast.Module) -> bool:
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        name = (
-            func.id
-            if isinstance(func, ast.Name)
-            else func.attr
-            if isinstance(func, ast.Attribute)
-            else ""
-        )
-        if name in _ENGINE_CALLS:
-            return True
-    return False
+def _call_name(node: ast.Call) -> str:
+    func = node.func
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return ""
+
+
+def _engine_reaching_functions() -> frozenset[str]:
+    """`build_zone_limit_candidates`에 (이름 기준) 닿는 함수의 전이 폐포.
+
+    호출부가 부르는 이름이 `run_once`처럼 뿌리에서 몇 단계 떨어져 있어도 잡으려는 것이다 —
+    `build_cell`(wan142)·`run_random_control_b_evals`(wan70)처럼 **한 모듈이 남에게 빌려주는
+    셀 빌더**가 실제로 그 자리였다. 목록을 손으로 적으면 그런 것이 빠진다.
+    """
+    calls: dict[str, set[str]] = {}
+    for path in sorted(pathlib.Path("backtest").glob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+                names = {_call_name(c) for c in ast.walk(node) if isinstance(c, ast.Call)}
+                calls.setdefault(node.name, set()).update(names - {""})
+    reach = {_ENGINE_ROOT}
+    changed = True
+    while changed:
+        changed = False
+        for name, called in calls.items():
+            if name not in reach and called & reach:
+                reach.add(name)
+                changed = True
+    return frozenset(reach)
 
 
 def test_every_legacy_report_pins_the_old_cancel_time() -> None:
     """파급 처리가 빠진 모듈은 그 표가 조용히 인과 엔진으로 다시 돈다.
 
-    ⚠️ 이 테스트는 **문자열이 아니라 「엔진을 부르는가」**로 대상을 고른다 — 새 리포트를
-    추가하면서 핀을 잊으면 여기서 걸린다. 새 모듈이 채택 규칙을 따라야 하면(WAN-305)
-    `_UNPINNED_BY_DESIGN`에 이유와 함께 적는다.
+    ⚠️ 이 테스트는 **문자열이 아니라 「엔진에 닿는 함수에 파라미터를 넘기는가」**로 대상을
+    고른다 — 새 리포트를 추가하면서 핀을 잊으면 여기서 걸린다. 새 모듈이 채택 규칙을 따라야
+    하면(WAN-305) `_UNPINNED_BY_DESIGN`에 이유와 함께 적는다.
+
+    ⚠️ **고정 지점까지 강제하지는 않는다** — 호출부에서 감싸도, 그 모듈의 파라미터 빌더에서
+    `invalidation_cancel=`로 넘겨도 된다(둘 다 실제로 쓰인다). 여기서 잡는 것은 **한 모듈이
+    이 축을 아예 언급조차 하지 않는 것**이다.
     """
+    reach = _engine_reaching_functions()
+    assert "run_once" in reach and "run_cells" in reach and "build_cell" in reach
     missing: list[str] = []
     for path in sorted(pathlib.Path("backtest").glob("wan*.py")):
         if path.name in _UNPINNED_BY_DESIGN:
             continue
         src = path.read_text()
-        if not _module_calls_engine(ast.parse(src)):
+        tree = ast.parse(src)
+        local = {
+            n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef)
+        }
+        feeds_engine = any(
+            isinstance(n, ast.Call)
+            and _call_name(n) in reach
+            and _call_name(n) not in local
+            and {k.arg for k in n.keywords} & _PARAM_KWARGS
+            for n in ast.walk(tree)
+        )
+        if not feeds_engine and "run_cells(" not in src:
             continue
         if "pin_invalidation_cancel" in src or "LEGACY_INVALIDATION_CANCEL" in src:
-            continue
-        if "invalidation_cancel=" in src:  # wan364: 두 팔을 자기 입력으로 명시한다.
             continue
         missing.append(path.name)
     assert not missing, f"취소 시점을 명시하지 않은 리포트 모듈: {missing}"

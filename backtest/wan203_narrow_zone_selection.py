@@ -249,6 +249,8 @@ def _cell_worker(work: CellWork) -> tuple[list[SweepPnlRow], list[str]]:
         params = harness.build_params(
             fill=harness.fill_preset(lens),
             max_zone_width_atr=harness.LEGACY_MAX_ZONE_WIDTH_ATR,
+            # WAN-365 명시 핀: 이 표는 **소급 취소** 시절의 결론이다.
+            invalidation_cancel=harness.LEGACY_INVALIDATION_CANCEL,
         )
         cell = build_cell(market, params=params, barriers=BARRIERS_USED)
         raw = " · ".join(f"`{b}` {cell.n_raw.get(b, 0)}" for b in BARRIERS_USED)
