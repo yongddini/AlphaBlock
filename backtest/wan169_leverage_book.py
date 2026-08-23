@@ -63,6 +63,8 @@ from backtest.wan167_position_census import ALL_SYMBOLS, MAIN_TIMEFRAMES
 from backtest.wan228_reentry_census import ReentryEntryRule
 from backtest.wan228_reentry_census import reentry_candidates as _reentry_candidates_for_cand
 from backtest.zone_limit_backtest import (
+    ADOPTED_INVALIDATION_CANCEL,
+    InvalidationCancel,
     _Candidate,
     _prepare_htf,
     build_result_from_trades,
@@ -241,6 +243,12 @@ class _Task:
     비어 있으면(기본) 시뮬레이터에 `None`으로 내려가 **비트 단위로 예전과 같다**. 위
     `no_same_step_tp`(전부 끔)와 같은 축의 두 값이라 함께 켜면 엔진이 거부한다 — 「전부」와
     「이것만」이 섞이면 어느 쪽이 이겼는지 결과만 보고는 알 수 없다."""
+    invalidation_cancel: InvalidationCancel = ADOPTED_INVALIDATION_CANCEL
+    """WAN-364(옵트인): 미체결 지정가를 「존이 깨졌다」로 취소하는 **시점**.
+    `"bar_open"`(기본 = 채택)이면 예전과 **비트 단위로 같다**. `"bar_close"`는 무효화 봉의
+    탭도 후보로 받고 취소를 그 봉 마감으로 미루는 **인과 팔**이라, 소급 취소로 지워지던
+    셋업이 되살아나 대부분 손절로 끝난다. base 후보와 재진입 후보 **양쪽에** 같은 규칙이
+    걸린다 — 한쪽만 걸면 잡종 엔진이다(WAN-345 선례)."""
     reentry_entry_rule: ReentryEntryRule = "band"
     """재진입 후보의 재무장 지정가 규칙 — 기본 `"band"`(봉내 라이브 밴드 재산정) = 채택 규칙
     (WAN-273, WAN-305가 기본값으로 승격). `"freeze"`(첫 체결가 고정)는 옵트인으로 존치 —
@@ -341,6 +349,7 @@ def reentry_candidates_for_window(
     breakeven_after_partial: bool = False,
     no_same_step_tp: bool = False,
     no_same_step_tp_minutes: frozenset[int] | None = None,
+    invalidation_cancel: InvalidationCancel = ADOPTED_INVALIDATION_CANCEL,
 ) -> list[_Candidate]:
     """이 창의 base 후보에서 「익절 후 존 내 재진입」 후보를 만든다(WAN-261, 옵트인).
 
@@ -391,6 +400,8 @@ def reentry_candidates_for_window(
                 breakeven_after_partial=breakeven_after_partial,
                 no_same_step_tp=no_same_step_tp,
                 no_same_step_tp_minutes=no_same_step_tp_minutes,
+                invalidation_cancel=invalidation_cancel,
+                htf_ms=htf_ms,
             )
         )
     return out
@@ -461,6 +472,7 @@ def run_cell(task: _Task, *, log: bool = True) -> CellPayload:
             breakeven_after_partial=task.breakeven_after_partial,
             no_same_step_tp=task.no_same_step_tp,
             no_same_step_tp_minutes=task.no_same_step_tp_minutes or None,
+            invalidation_cancel=task.invalidation_cancel,
         )
         candidates[segment_name] = tuple(cands)
         funding[segment_name] = tuple(window.funding_rates)
@@ -480,6 +492,7 @@ def run_cell(task: _Task, *, log: bool = True) -> CellPayload:
                     breakeven_after_partial=task.breakeven_after_partial,
                     no_same_step_tp=task.no_same_step_tp,
                     no_same_step_tp_minutes=task.no_same_step_tp_minutes or None,
+                    invalidation_cancel=task.invalidation_cancel,
                 )
             )
 
@@ -573,6 +586,7 @@ def run_cells(
     repair_partial_bars: bool = False,
     no_same_step_tp: bool = False,
     no_same_step_tp_minutes: Mapping[tuple[str, str], frozenset[int]] | None = None,
+    invalidation_cancel: InvalidationCancel = ADOPTED_INVALIDATION_CANCEL,
 ) -> list[CellPayload]:
     """전 칸을 돈다. `jobs`는 성능 노브이지 결과 축이 아니다(WAN-121).
 
@@ -623,6 +637,11 @@ def run_cells(
     합으로 갈아끼운 사본에서 후보를 만든다 — 부분 봉의 백테 영향 크기를 재는 반사실이다.
     끄면(기본) 저장 봉 그대로라 예전과 비트 단위로 같다. **DB는 쓰지 않는다.**
 
+    `invalidation_cancel`(WAN-364, 옵트인)은 미체결 지정가를 「존이 깨졌다」로 취소하는
+    **시점**을 정한다 — `"bar_open"`(기본 = 채택)이면 비트 단위로 예전과 같고, `"bar_close"`는
+    무효화 봉의 탭도 후보로 받고 취소를 그 봉 마감으로 미루는 **인과 팔**이다. base 후보와
+    재진입 후보 **양쪽에** 걸린다.
+
     `no_same_step_tp_minutes`(WAN-359, 옵트인)는 그 반사실을 **전부가 아니라 「틱이 지지하지
     않는 그 분들」에만** 거는 표적 팔이다 — 칸 `(정규화 심볼, TF)`마다 1분 `open_time` 집합을
     준다. `None`(기본)이면 비트 단위로 예전과 같다. 🚨 **아무 칸과도 안 맞는 키가 있으면
@@ -668,6 +687,7 @@ def run_cells(
             no_same_step_tp_minutes=targeted.get(
                 (harness.normalize_symbol(symbol), timeframe), frozenset()
             ),
+            invalidation_cancel=invalidation_cancel,
         )
         for symbol in symbols
         for timeframe in timeframes

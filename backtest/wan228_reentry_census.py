@@ -86,11 +86,14 @@ from backtest.substep import (
 )
 from backtest.sweep import timeframe_to_ms
 from backtest.zone_limit_backtest import (
+    ADOPTED_INVALIDATION_CANCEL,
+    InvalidationCancel,
     _Candidate,
     _IntrabarLiveLimit,
     _prepare_htf,
     _to_trade,
     build_zone_limit_candidates,
+    invalidation_cutoff,
     is_same_step_take_profit,
     sequence_with_candidates,
 )
@@ -191,6 +194,8 @@ def _iter_reentries(
     breakeven_after_partial: bool = False,
     no_same_step_tp: bool = False,
     no_same_step_tp_minutes: frozenset[int] | None = None,
+    invalidation_cancel: InvalidationCancel = ADOPTED_INVALIDATION_CANCEL,
+    htf_ms: int | None = None,
 ) -> Iterator[tuple[_Candidate, _Reentry]]:
     """익절로 닫힌 한 존의 재무장 루프 코어 — `(_Candidate, _Reentry)`를 하나씩 낸다.
 
@@ -219,7 +224,18 @@ def _iter_reentries(
     stop_price = cand.stop_price
     is_long = cand.side is PositionSide.LONG
     direction = _direction(cand.side)
-    invalidation_time = ob.break_time if params.use_order_block_stop else None
+    if invalidation_cancel != ADOPTED_INVALIDATION_CANCEL and htf_ms is None:
+        # WAN-345 부류의 조용한 실패 방지 — 인과 팔인데 봉 길이를 모르면 그냥 채택 팔로
+        # 접힌다(라벨만 인과). 시끄럽게 죽는다.
+        raise ValueError(
+            f"invalidation_cancel={invalidation_cancel!r}에는 htf_ms가 필요합니다 — "
+            "무효화 봉의 마감 시각을 계산할 수 없습니다."
+        )
+    invalidation_time = (
+        invalidation_cutoff(ob.break_time, htf_ms=htf_ms or 0, mode=invalidation_cancel)
+        if params.use_order_block_stop
+        else None
+    )
     deviation = params.deviation_filter
     if entry_rule == "band" and deviation is None:
         return  # 재계산할 밴드가 없다 — 팔 1(band)은 볼린저 필터가 있어야 성립한다.
@@ -362,6 +378,11 @@ def _iter_reentries(
             # WAN-336 순수 관측: 재진입 거래도 base 후보와 **같은 술어**로 라벨을 단다 —
             # 한쪽만 달면 「같은 분 익절」 인구조사가 재진입을 통째로 놓친다.
             same_step_take_profit=is_same_step_take_profit(outcome.entry_time, exit_time, reason),
+            # WAN-364 순수 관측: 재진입 거래도 base 후보와 **같은 술어**로 라벨을 단다 —
+            # 한쪽만 달면 인과 팔에서 되살아난 재진입 거래가 귀속에서 통째로 빠진다.
+            entry_after_invalidation=(
+                ob.break_time is not None and outcome.entry_time >= ob.break_time
+            ),
         )
         # 격리 순손익: 기준자본에서 독립 체결(동시 1포지션·자본 경합 미반영 = 상한).
         trade = _to_trade(re_cand, cfg.initial_capital, cfg, funding_rates)
@@ -434,6 +455,8 @@ def reentry_candidates(
     breakeven_after_partial: bool = False,
     no_same_step_tp: bool = False,
     no_same_step_tp_minutes: frozenset[int] | None = None,
+    invalidation_cancel: InvalidationCancel = ADOPTED_INVALIDATION_CANCEL,
+    htf_ms: int | None = None,
 ) -> list[_Candidate]:
     """익절 후 재무장 재진입을 **북 시퀀서에 주입할 `_Candidate`로** 낸다(WAN-261).
 
@@ -446,6 +469,11 @@ def reentry_candidates(
     `"freeze"`(기본)면 첫 체결가를 얼려 **기존 wan261/262 북 CSV가 비트 재현**되고, `"band"`면
     재무장 순간의 봉내 라이브 밴드로 지정가를 재산정한다(WAN-267 격리 분해의 리더 팔을 북에
     얹는 경로). 재무장 루프가 하나뿐이라 census·격리 널·북 주입이 같은 규칙을 공유한다.
+
+    `invalidation_cancel`·`htf_ms`(WAN-364, 옵트인)도 루프로 그대로 흘러 **재진입 주문도
+    base 주문과 같은 취소 시점**을 받는다 — 한쪽만 걸면 「base는 인과, 재진입은 소급 취소」인
+    잡종 팔이 된다(WAN-345가 래더 축에서 겪은 그 실패). 인과 팔인데 `htf_ms`를 안 주면 조용히
+    접히지 않고 `ValueError`로 죽는다. 기본값이면 예전과 비트 단위로 같다.
 
     `no_same_step_tp`(WAN-336, 옵트인)도 루프로 그대로 흘러 **재진입 거래가 base 거래와 같은
     자를 받는다** — 한쪽만 걸면 「base는 진입 스텝 익절 금지, 재진입은 허용」인 잡종 팔을 재게
@@ -484,6 +512,8 @@ def reentry_candidates(
             breakeven_after_partial=breakeven_after_partial,
             no_same_step_tp=no_same_step_tp,
             no_same_step_tp_minutes=no_same_step_tp_minutes,
+            invalidation_cancel=invalidation_cancel,
+            htf_ms=htf_ms,
         )
     ]
 
