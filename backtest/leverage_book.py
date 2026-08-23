@@ -166,6 +166,9 @@ class PlacedSetup:
     """「익절 후 존 내 재진입」 후보였는지(WAN-273 채택 규칙, 라벨 전용)."""
     same_step_take_profit: bool = False
     """진입과 익절이 **같은 1분**인 거래인지(WAN-336 낙관 축의 라벨)."""
+    entry_after_invalidation: bool = False
+    """체결이 **존 무효화 봉 안에서** 일어났는지(WAN-364 라벨). 채택 팔에서는 정의상 항상
+    거짓이고, 인과 팔에서 되살아난 거래가 정확히 이 집합이다."""
     trigger_time: int = 0
     """이 셋업의 탭이 난 상위TF 봉 시각 — 진단 조인 키(`_Candidate.trigger_time` 그대로)."""
 
@@ -587,6 +590,7 @@ def run_leverage_book(
                 take_profit_price=cand.take_profit_price,
                 is_reentry=cand.is_reentry,
                 same_step_take_profit=cand.same_step_take_profit,
+                entry_after_invalidation=cand.entry_after_invalidation,
                 trigger_time=cand.trigger_time,
             )
         )

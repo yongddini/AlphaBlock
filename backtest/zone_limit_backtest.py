@@ -42,6 +42,7 @@ import math
 import random
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from typing import Literal
 
 import pandas as pd
 
@@ -151,6 +152,18 @@ class _Candidate:
     기존 수치도 움직이지 않는다(WAN-90 `mfe_r` · WAN-276 `exit_extreme`과 같은 부류).
     반사실의 크기는 옵트인 팔 `no_same_step_tp`(WAN-336 §2)가 잰다.
     """
+    entry_after_invalidation: bool = False
+    """체결이 **존 무효화 봉 안에서** 일어났는지 (WAN-364 · 순수 관측).
+
+    참이면 채택 팔(`invalidation_cancel="bar_open"`)에서는 **존재할 수 없는 거래**다 —
+    그쪽은 그 봉의 시작부터 주문을 취소된 것으로 보기 때문이다. 인과 팔
+    (`"bar_close"`)에서 되살아난 거래가 정확히 이 집합이고, 그래서 「이 룩어헤드가 무엇을
+    지웠나」를 거래 단위로 귀속할 수 있다.
+
+    **순수 관측이다** — 체결·청산·손익 어디에도 쓰이지 않는다(WAN-90 `mfe_r` ·
+    WAN-336 `same_step_take_profit`과 같은 부류). 채택 팔에서는 정의상 항상 거짓이라
+    기존 CSV가 비트 단위로 재현된다."""
+
     order_block: OrderBlock | None = None
     """이 셋업의 근거 오더블록(WAN-77). 체결·청산 로직에는 쓰이지 않고, 사후 분석
     (예: `ob_volume` 기반 성과 분해)이 거래를 원본 존에 조인할 때만 참조한다."""
@@ -565,6 +578,41 @@ class StopLossContext:
 StopLossOverride = Callable[["StopLossContext"], float | None]
 
 
+#: 미체결 지정가를 「존이 깨졌다」로 취소하는 **시점** (WAN-364, 옵트인).
+#:
+#: * `"bar_open"` — 채택 기본값. 무효화 봉의 `open_time`부터 취소된 것으로 본다.
+#: * `"bar_close"` — 인과 팔. 그 봉이 **닫힐 때** 비로소 취소한다.
+#:
+#: 🚨 **기본값(`"bar_open"`)은 봉이 끝나야 알 수 있는 사실을 봉 처음으로 되돌려 쓴다** —
+#: `ob.break_time`이 존을 깬 상위TF 봉의 `open_time`이라(`strategy/order_blocks.py`) 그
+#: 봉 **안에서** 체결됐을 주문이 소급 취소된다. 그렇게 지워지는 셋업은 무작위가 아니라
+#: **정의상 손절로 끝났을 것**이다(롱이면 가격이 존 아랫변을 뚫어야 무효화인데, 지정가는
+#: 그 위에 있으므로 체결이 무효화보다 반드시 먼저다). 인과적으로는 「취소」가 아니라
+#: 「체결 후 손절」이 옳다.
+InvalidationCancel = Literal["bar_open", "bar_close"]
+
+#: 채택 기본값 — 옛 CSV가 비트 재현되는 값이다. 바꾸는 것은 재-베이스라인(사용자 결정).
+ADOPTED_INVALIDATION_CANCEL: InvalidationCancel = "bar_open"
+
+
+def invalidation_cutoff(
+    break_time: int | None,
+    *,
+    htf_ms: int,
+    mode: InvalidationCancel = ADOPTED_INVALIDATION_CANCEL,
+) -> int | None:
+    """무효화 취소가 발효되는 시각 (WAN-364).
+
+    `bar_open`(기본)은 `break_time` 그대로 = 무효화 봉의 시작. `bar_close`는 그 봉의
+    **마감**(`break_time + htf_ms`)이라, 무효화 봉 **안에서**의 체결은 살아남고 그 뒤
+    손절 규칙이 결과를 낸다. 봉이 닫힌 뒤에는 두 팔 모두 취소한다 — 존이 죽은 걸 안
+    다음에도 주문을 걸어 두는 것은 인과가 아니라 다른 엔진이다.
+    """
+    if break_time is None:
+        return None
+    return break_time if mode == "bar_open" else break_time + htf_ms
+
+
 def _resolve_take_profit(
     params: ConfluenceParams,
     is_long: bool,
@@ -841,6 +889,7 @@ def build_zone_limit_candidates(
     observe_path_fill: bool = False,
     no_same_step_tp: bool = False,
     no_same_step_tp_minutes: frozenset[int] | None = None,
+    invalidation_cancel: InvalidationCancel = ADOPTED_INVALIDATION_CANCEL,
 ) -> tuple[list[_Candidate], ZoneLimitStats]:
     """B안 셋업 순회 → 1분 서브스텝 시뮬레이션까지(비용 반영 전 원가 후보 목록).
 
@@ -889,6 +938,15 @@ def build_zone_limit_candidates(
     갈린다: 정적 경로는 탭 봉에서 셋업을 빼(분모에도 안 들어간다), 봉내 경로는 이미 주문이
     걸린 뒤라 `CANCELLED_CONDITION_FAILED`(미체결)로 끝난다 — 오버라이드를 안 주면 두
     경로 모두 예전과 비트 단위로 같다.
+
+    `invalidation_cancel`(WAN-364, 옵트인)은 **미체결 지정가를 「존이 깨졌다」로 취소하는
+    시점**을 정한다. `"bar_open"`(기본 = 채택)은 무효화 봉의 `open_time`부터 취소된 것으로
+    보고, 그 봉에서 난 탭(시그널 `status="cancelled"`)도 후보에서 뺀다 — 봉이 끝나야 아는
+    사실을 봉 처음으로 되돌려 쓰는 **룩어헤드**이고, 그렇게 지워지는 셋업은 무작위가 아니라
+    **정의상 손절로 끝났을 것**이다(WAN-364 순서 논증). `"bar_close"`는 그 두 층을 함께
+    인과로 바꾼다: 무효화 봉의 탭도 후보로 받고, 취소는 그 봉이 **닫힐 때** 발효한다 —
+    무효화 봉 안의 체결은 살아남아 손절 규칙이 결과를 낸다. 기본값이면 예전과 **비트
+    단위로 같다**(같은 시그널 필터 · 같은 `invalidation_time`).
 
     `partial_take_profit_r`·`partial_take_profit_fraction`·`breakeven_after_partial`
     (WAN-323 반익절 래더, 옵트인)은 시뮬레이터로 그대로 흘려보낸다. 래더는 **청산만**
@@ -990,8 +1048,14 @@ def build_zone_limit_candidates(
     penetrations = 0
     same_step_take_profits = 0
     dropped = 0
+    # WAN-364: `status="cancelled"`는 **무효화 봉에서 난 탭**이라는 뜻이다(그 뒤의 탭은
+    # 시그널로 나오지도 않는다 — `strategy/order_blocks.py`). 인과 팔은 그 탭을 받아야
+    # 한다: 탭 시점에는 그 봉이 존을 깰지 아직 모른다.
+    accept_break_bar_taps = invalidation_cancel == "bar_close"
     for signal in entry_candidate_signals(ob_result, params, times, closes, time_to_pos):
-        if signal.status != "active":
+        if signal.status != "active" and not (
+            accept_break_bar_taps and signal.status == "cancelled"
+        ):
             continue
         pos = time_to_pos.get(signal.trigger_time)
         if pos is None:
@@ -1162,7 +1226,11 @@ def build_zone_limit_candidates(
             rsi_overbought=effective_overbought,
             take_profit_price=tp_price,
             limit_valid_bars=params.limit_valid_bars,
-            invalidation_time=ob.break_time if params.use_order_block_stop else None,
+            invalidation_time=(
+                invalidation_cutoff(ob.break_time, htf_ms=htf_ms, mode=invalidation_cancel)
+                if params.use_order_block_stop
+                else None
+            ),
             cancel_on_condition_fail=params.cancel_limit_on_condition_fail,
             stop_before_tp=params.stop_before_take_profit,
             rsi_gate_mode=effective_gate_mode,
@@ -1268,6 +1336,11 @@ def build_zone_limit_candidates(
                 take_profit_price=outcome.take_profit_price,
                 penetration=penetration,
                 same_step_take_profit=same_step_tp,
+                # WAN-364 순수 관측: 채택 팔에서는 정의상 항상 거짓이다(그 봉의 주문은
+                # 봉 시작부터 취소된 것으로 보므로 체결 자체가 없다).
+                entry_after_invalidation=(
+                    ob.break_time is not None and outcome.entry_time >= ob.break_time
+                ),
                 order_block=ob,
                 tap_index=signal.tap_index,
                 zone_key=signal.zone_key,
