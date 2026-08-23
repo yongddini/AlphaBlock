@@ -16,6 +16,7 @@ from cli.main import (
     cmd_collect,
     cmd_doctor,
     cmd_live,
+    cmd_same_minute,
     cmd_status,
     cmd_stop_width,
     cmd_tick_probe,
@@ -77,6 +78,18 @@ def test_parser_routes_tick_probe() -> None:
     assert args.nice == 19
     # 유니버스는 하드코딩하지 않는다 — 미지정이면 설정 symbols 개수를 쓴다(WAN-318 §6 교훈).
     assert args.universe is None
+
+
+def test_parser_routes_same_minute() -> None:
+    """`same-minute`는 기본이 **장부 전수**다 — 좁히기는 탐색용 옵트인(WAN-362 §1)."""
+    parser = build_parser()
+    args = parser.parse_args(["same-minute"])
+    assert args.func is cmd_same_minute
+    assert args.days is None, "기본이 창을 자르면 「전수」라는 §1의 질문이 바뀐다"
+    assert args.symbol is None and args.tf is None
+    narrowed = parser.parse_args(["same-minute", "--days", "7", "--tf", "15m"])
+    assert narrowed.days == 7
+    assert narrowed.tf == "15m"
 
 
 def test_help_renders_for_every_subcommand() -> None:
