@@ -548,6 +548,20 @@ def _verdict(frame: pd.DataFrame) -> str:
     grew = int(b["num_trades"]) - int(a["num_trades"])
     d_mean = float(b["mean_net_r"]) - float(a["mean_net_r"])
     direction = "부풀렸다" if d_mean < 0 else "오히려 낮췄다"
+    flipped = (
+        " 🚨 **크기가 준 것이 아니라 부호가 뒤집힌다** — 채택 북이 벌던 것이 "
+        "잃는 것이 된다(WAN-346이 보수 축 둘을 쌓고도 「크기는 절반, 부호는 남는다」였던 "
+        "것과 **다른 부류**다)."
+        if float(a["mean_net_r"]) > 0 > float(b["mean_net_r"])
+        else ""
+    )
+    ruin_bit = (
+        " 🚨 **인과 팔은 파괴선(MDD 50%)을 넘는다 — 청산 트리거가 0건이어도 계좌는 사실상 "
+        "끝났다**(WAN-312 §4: 사이징이 자본의 %라 연쇄 손실로는 청산 조건이 구조적으로 안 "
+        "걸린다 — 그래서 이 표에서 「청산 0건」은 아무것도 보증하지 않는다)."
+        if bool(b["ruin"])
+        else ""
+    )
     return (
         f"📌 **소급 취소를 인과로 바꾸면(`{PRIMARY_OOS}`) 거래가 "
         f"{int(a['num_trades'])} → {int(b['num_trades'])}건({grew:+}, "
@@ -559,6 +573,8 @@ def _verdict(frame: pd.DataFrame) -> str:
         f"({_pp(float(b['max_drawdown']) - float(a['max_drawdown']))}), "
         f"청산 {int(a['liquidation_events'])} → {int(b['liquidation_events'])}건이다 — "
         f"즉 이 룩어헤드는 채택 성과를 거래당 {abs(d_mean):.4f}R만큼 {direction}.**"
+        + flipped
+        + ruin_bit
     )
 
 
@@ -579,6 +595,25 @@ def _revived_note(frame: pd.DataFrame) -> str:
         f"거래당 net R {_num(b['revived_mean_net_r'])} · 합 {_num(b['revived_net_r'], 1)}R. "
         "🚨 **「전부 −1R」이 아니다** — 그 봉 안에서 먼저 익절선까지 갔다가 나중에 존을 깨는 "
         "경로가 실제로 있다. 다만 손절이 압도적이라 방향은 이슈의 예상대로다."
+    )
+
+
+def _loo_note(loo: pd.DataFrame) -> str:
+    """편중인가 — 종목을 하나씩 빼고 **지갑을 재배치해도** 부호가 유지되나."""
+    causal = loo[loo["arm"] == CAUSAL_ARM]
+    if causal.empty:
+        return ""
+    positive = int((causal["mean_net_r"] > 0).sum())
+    lo, hi = float(causal["mean_net_r"].min()), float(causal["mean_net_r"].max())
+    if positive:
+        return (
+            f"⚠️ 인과 팔의 거래당 net R이 {positive}/{len(causal)} 지갑에서 양수다 — "
+            "부호가 종목에 갈린다는 뜻이니 판정을 그만큼 약하게 읽을 것."
+        )
+    return (
+        f"📌 **종목 편중이 아니다** — 인과 팔은 {len(causal)}개 지갑(기준 + 종목별 제외) "
+        f"**전부** 거래당 net R이 음수다({lo:.4f} ~ {hi:.4f}). ETH·SOL 편중 계열"
+        "(WAN-111/119/124/151)이 여기서는 성립하지 않는다."
     )
 
 
@@ -678,7 +713,7 @@ def build_summary(frame: pd.DataFrame, loo: pd.DataFrame, census: pd.DataFrame) 
             f"{_pct(r.max_drawdown)} | {_num(r.mean_net_r)} | {int(r.revived_trades):,} |"
             for r in loo.itertuples()
         ]
-        parts.append("")
+        parts += ["", _loo_note(loo), ""]
 
     parts += [
         "## 읽는 법 · 경고",
