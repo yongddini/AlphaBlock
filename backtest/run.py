@@ -167,6 +167,7 @@ from backtest.zone_limit_backtest import SetupDiagnostic, ZoneLimitStats
 from strategy.models import (
     BandBar,
     ConfluenceParams,
+    InvalidationCancel,
     OrderBlockParams,
     OrderBlockResult,
     RsiGateMode,
@@ -327,6 +328,17 @@ class Grid:
 
     ⚠️ 단위는 **ATR 배수**지 퍼센트가 아니다(권고 문턱 15m 1.24 · 1h 1.32, 채택 `1.28`).
     """
+    invalidation_cancels: tuple[InvalidationCancel | None, ...] = (None,)
+    """무효화 취소 시점 축(WAN-365). `None` = 채택 기본값(`"bar_close"` = 인과), `"bar_open"`
+    = WAN-365 전의 옛 동작(소급 취소).
+
+    **진짜 축이다**(`combine_obs`와 같은 자리, `band_bar` 같은 핀이 아니다) — 인과 전환
+    전후를 한 표에 나란히 놓고 봐야 하는 비교라 CLI로 연다. 기본값 `(None,)`이라 인자를
+    안 주면 채택 기본값(인과)으로 돈다.
+
+    ⚠️ **미지정과 `bar_open`은 다르다**(WAN-159 `none` · WAN-273 `off`와 같은 규약) —
+    안 가르면 「옛 동작」 라벨을 단 채 조용히 인과로 도는 실패가 생긴다.
+    """
     limit_valid_bars: tuple[LimitValidBarsArg, ...] = (UNSET,)
     """지정가 유효기간 축(WAN-222, 상위TF 봉 수). `UNSET` = 채택 기본값(`24`), `None` =
     무기한(존 무효화까지 대기), 숫자 = 그 봉 수 경과 시 미체결 취소.
@@ -370,6 +382,7 @@ class Combo:
     combine_obs: bool | None
     max_zone_width_atr: ZoneWidthArg
     limit_valid_bars: LimitValidBarsArg
+    invalidation_cancel: InvalidationCancel | None
     fill: FillPreset
     seed: int
 
@@ -407,21 +420,23 @@ def iter_combos(grid: Grid) -> list[Combo]:
                     for combine_obs in grid.combine_obs:
                         for zone_width in grid.max_zone_widths_atr:
                             for valid_bars in grid.limit_valid_bars:
-                                for fill in grid.fills:
-                                    for seed in iter_seeds(fill, grid.seeds):
-                                        combos.append(
-                                            Combo(
-                                                take_profit_r=take_profit_r,
-                                                offset_bps=offset_bps,
-                                                retap_mode=retap_mode,
-                                                portfolio_leverage=leverage,
-                                                combine_obs=combine_obs,
-                                                max_zone_width_atr=zone_width,
-                                                limit_valid_bars=valid_bars,
-                                                fill=fill,
-                                                seed=seed,
+                                for cancel in grid.invalidation_cancels:
+                                    for fill in grid.fills:
+                                        for seed in iter_seeds(fill, grid.seeds):
+                                            combos.append(
+                                                Combo(
+                                                    take_profit_r=take_profit_r,
+                                                    offset_bps=offset_bps,
+                                                    retap_mode=retap_mode,
+                                                    portfolio_leverage=leverage,
+                                                    combine_obs=combine_obs,
+                                                    max_zone_width_atr=zone_width,
+                                                    limit_valid_bars=valid_bars,
+                                                    invalidation_cancel=cancel,
+                                                    fill=fill,
+                                                    seed=seed,
+                                                )
                                             )
-                                        )
     return combos
 
 
@@ -610,6 +625,7 @@ def _run_cell(task: _CellTask) -> _CellOutcome:
                 short_enabled=grid.short_enabled,
                 max_zone_width_atr=combo.max_zone_width_atr,
                 limit_valid_bars=combo.limit_valid_bars,
+                invalidation_cancel=combo.invalidation_cancel,
                 base=_pinned_base(grid),
             )
             portfolio = combo.portfolio
@@ -863,6 +879,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     strategy.add_argument(
+        "--invalidation-cancel",
+        help=(
+            "무효화 취소 시점 축(WAN-365 채택 기본값 bar_close = 인과). bar_open은 WAN-365 "
+            "전의 옛 동작(무효화 봉 시작으로 소급 취소)이라 옛 CSV 재현용이다. 콤마 복수 = "
+            "격자(per-cell 전용, 북은 단일값만). 안 주면 채택 기본값. "
+            "예: --invalidation-cancel bar_close,bar_open"
+        ),
+    )
+    strategy.add_argument(
         "--limit-valid-bars",
         help=(
             "지정가 유효기간 축(WAN-222, 상위TF 봉 수). 미체결 지정가가 이 봉 수 경과 시 "
@@ -1024,6 +1049,7 @@ def grid_from_args(args: argparse.Namespace) -> Grid:
         combine_obs=_combine_obs_from_args(args),
         max_zone_widths_atr=_zone_widths_from_args(args),
         limit_valid_bars=_limit_valid_bars_from_args(args),
+        invalidation_cancels=_invalidation_cancels_from_args(args),
         seeds=split_ints(args.seeds, label="--seeds") if args.seeds else None,
         short_enabled=short_enabled,
     )
@@ -1238,6 +1264,17 @@ def run_book_main(args: argparse.Namespace, book: LeverageBookParams) -> int:
     from backtest import book_cli  # 지연 import(사이클 회피 — 모듈 독스트링).
 
     reentry_on, reentry_rule = _resolve_reentry(args.reentry)
+    # WAN-365: 북은 **단일값만** 받는다 — 한 실행이 한 지갑이라 두 취소 시점을 한 표에
+    # 넣을 수 없다(칸을 이어붙일 수 없는 것과 같은 이유, WAN-316). 격자는 per-cell 축이다.
+    cancels = _invalidation_cancels_from_args(args)
+    if len(cancels) > 1:
+        print(
+            "오류: 북 모드는 --invalidation-cancel을 격자로 받지 못합니다(한 실행 = 한 지갑). "
+            "값 하나만 주거나 per-cell(--positions single)로 여세요.",
+            file=sys.stderr,
+        )
+        return 2
+    book_cancel = cancels[0]
     try:
         detail_segment = _book_detail_segment(args, segments)
         jobs = jobs_from_arg(args.jobs)
@@ -1253,6 +1290,7 @@ def run_book_main(args: argparse.Namespace, book: LeverageBookParams) -> int:
             reentry=reentry_on,
             reentry_entry_rule=reentry_rule,
             adv_fraction=_adv_fraction_from_args(args),
+            invalidation_cancel=book_cancel,
         )
         rows = [seg.row for seg in book_segments]
         if detail_segment is not None:
@@ -1295,6 +1333,38 @@ def _combine_obs_from_args(args: argparse.Namespace) -> tuple[bool | None, ...]:
             values.append(value)
     if not values:
         raise ValueError("--combine-obs가 비어 있습니다.")
+    return tuple(values)
+
+
+#: `--invalidation-cancel`이 받는 토큰. **미지정(채택 = 인과)과 `bar_close`는 같은 뜻이고,
+#: `bar_open`만 옛 동작**이다(WAN-365). 명시 토큰을 남겨 두는 이유는 옛 CSV 재현 명령이
+#: 자기 엔진을 문서에 적을 수 있어야 하기 때문이다.
+INVALIDATION_CANCEL_TOKENS: tuple[str, ...] = ("bar_close", "bar_open")
+
+
+def _invalidation_cancels_from_args(
+    args: argparse.Namespace,
+) -> tuple[InvalidationCancel | None, ...]:
+    """`--invalidation-cancel bar_close,bar_open` → `("bar_close", "bar_open")`.
+
+    안 주면 `(None,)` = 채택 기본값(인과). `None`을 여기서 `"bar_close"`로 푸는 대신 그대로
+    넘기는 이유는 `_combine_obs_from_args`와 같다 — 채택 기본값을 CLI가 복사하면 기본값이
+    움직일 때 이 경로만 옛 값을 물고 돈다.
+    """
+    if not args.invalidation_cancel:
+        return (None,)
+    values: list[InvalidationCancel | None] = []
+    for token in split_list(args.invalidation_cancel):
+        if token not in INVALIDATION_CANCEL_TOKENS:
+            supported = ", ".join(INVALIDATION_CANCEL_TOKENS)
+            raise ValueError(
+                f"--invalidation-cancel에 알 수 없는 값이 있습니다: {token!r} (지원: {supported})"
+            )
+        value = cast(InvalidationCancel, token)
+        if value not in values:
+            values.append(value)
+    if not values:
+        raise ValueError("--invalidation-cancel이 비어 있습니다.")
     return tuple(values)
 
 

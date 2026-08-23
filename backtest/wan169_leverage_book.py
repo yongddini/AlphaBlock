@@ -63,8 +63,6 @@ from backtest.wan167_position_census import ALL_SYMBOLS, MAIN_TIMEFRAMES
 from backtest.wan228_reentry_census import ReentryEntryRule
 from backtest.wan228_reentry_census import reentry_candidates as _reentry_candidates_for_cand
 from backtest.zone_limit_backtest import (
-    ADOPTED_INVALIDATION_CANCEL,
-    InvalidationCancel,
     _Candidate,
     _prepare_htf,
     build_result_from_trades,
@@ -72,7 +70,7 @@ from backtest.zone_limit_backtest import (
     sequence_with_candidates,
 )
 from data.models import FundingRate
-from strategy.models import ConfluenceParams
+from strategy.models import ConfluenceParams, InvalidationCancel
 
 REPORTS_DIR = Path("backtest/reports")
 DEFAULT_CELLS_CSV = REPORTS_DIR / "wan169_leverage_book_cells.csv"
@@ -243,12 +241,14 @@ class _Task:
     비어 있으면(기본) 시뮬레이터에 `None`으로 내려가 **비트 단위로 예전과 같다**. 위
     `no_same_step_tp`(전부 끔)와 같은 축의 두 값이라 함께 켜면 엔진이 거부한다 — 「전부」와
     「이것만」이 섞이면 어느 쪽이 이겼는지 결과만 보고는 알 수 없다."""
-    invalidation_cancel: InvalidationCancel = ADOPTED_INVALIDATION_CANCEL
-    """WAN-364(옵트인): 미체결 지정가를 「존이 깨졌다」로 취소하는 **시점**.
-    `"bar_open"`(기본 = 채택)이면 예전과 **비트 단위로 같다**. `"bar_close"`는 무효화 봉의
-    탭도 후보로 받고 취소를 그 봉 마감으로 미루는 **인과 팔**이라, 소급 취소로 지워지던
-    셋업이 되살아나 대부분 손절로 끝난다. base 후보와 재진입 후보 **양쪽에** 같은 규칙이
-    걸린다 — 한쪽만 걸면 잡종 엔진이다(WAN-345 선례)."""
+    invalidation_cancel: InvalidationCancel | None = None
+    """WAN-364 · 기본값 WAN-365: 미체결 지정가를 「존이 깨졌다」로 취소하는 **시점**.
+
+    `None`(기본)이면 채택 기본값(`ConfluenceParams().invalidation_cancel` = `"bar_close"` =
+    인과)으로 돈다. `"bar_open"`은 WAN-365 전의 옛 동작(소급 취소)이라 **옛 북 CSV를 비트
+    재현**한다 — 옛 결론 모듈이 `harness.LEGACY_INVALIDATION_CANCEL`로 명시 고정하는 값이다.
+    base 후보와 재진입 후보 **양쪽에** 같은 규칙이 걸린다 — 한쪽만 걸면 잡종 엔진이다
+    (WAN-345 선례)."""
     reentry_entry_rule: ReentryEntryRule = "band"
     """재진입 후보의 재무장 지정가 규칙 — 기본 `"band"`(봉내 라이브 밴드 재산정) = 채택 규칙
     (WAN-273, WAN-305가 기본값으로 승격). `"freeze"`(첫 체결가 고정)는 옵트인으로 존치 —
@@ -349,7 +349,7 @@ def reentry_candidates_for_window(
     breakeven_after_partial: bool = False,
     no_same_step_tp: bool = False,
     no_same_step_tp_minutes: frozenset[int] | None = None,
-    invalidation_cancel: InvalidationCancel = ADOPTED_INVALIDATION_CANCEL,
+    invalidation_cancel: InvalidationCancel | None = None,
 ) -> list[_Candidate]:
     """이 창의 base 후보에서 「익절 후 존 내 재진입」 후보를 만든다(WAN-261, 옵트인).
 
@@ -431,6 +431,10 @@ def run_cell(task: _Task, *, log: bool = True) -> CellPayload:
         if task.fill is None
         else harness.build_params(fill=task.fill, seed=task.seed, take_profit_r=task.take_profit_r)
     )
+    # WAN-365: 취소 시점을 **파라미터에 실어** 재진입·엔진 본 진입이 같은 값을 읽게 한다.
+    # `None`(기본)이면 채택 기본값 그대로라 인자를 안 준 실행이 채택 북이다.
+    if task.invalidation_cancel is not None:
+        params = params.model_copy(update={"invalidation_cancel": task.invalidation_cancel})
     if task.short_enabled:
         # WAN-282(옵트인): 베어리시 OB 숏을 후보에 같이 낸다. 끄면(기본) 이 model_copy를
         # 아예 타지 않아 예전과 비트 단위로 같다 — 롱 후보는 short_enabled와 무관하게 같은
@@ -586,7 +590,7 @@ def run_cells(
     repair_partial_bars: bool = False,
     no_same_step_tp: bool = False,
     no_same_step_tp_minutes: Mapping[tuple[str, str], frozenset[int]] | None = None,
-    invalidation_cancel: InvalidationCancel = ADOPTED_INVALIDATION_CANCEL,
+    invalidation_cancel: InvalidationCancel | None = None,
 ) -> list[CellPayload]:
     """전 칸을 돈다. `jobs`는 성능 노브이지 결과 축이 아니다(WAN-121).
 
@@ -637,10 +641,11 @@ def run_cells(
     합으로 갈아끼운 사본에서 후보를 만든다 — 부분 봉의 백테 영향 크기를 재는 반사실이다.
     끄면(기본) 저장 봉 그대로라 예전과 비트 단위로 같다. **DB는 쓰지 않는다.**
 
-    `invalidation_cancel`(WAN-364, 옵트인)은 미체결 지정가를 「존이 깨졌다」로 취소하는
-    **시점**을 정한다 — `"bar_open"`(기본 = 채택)이면 비트 단위로 예전과 같고, `"bar_close"`는
-    무효화 봉의 탭도 후보로 받고 취소를 그 봉 마감으로 미루는 **인과 팔**이다. base 후보와
-    재진입 후보 **양쪽에** 걸린다.
+    ⚠️ **`invalidation_cancel` 기본값은 채택(인과 `"bar_close"`)이다**(WAN-365 = WAN-305
+    원칙) — 「아무것도 안 하면」 페이퍼와 같은 선상이 나온다. 옛 북 CSV를 결론에 박아 둔
+    모듈은 `harness.LEGACY_INVALIDATION_CANCEL`(= `"bar_open"` = 소급 취소)을 **명시로**
+    넘겨 그 시절 엔진에 고정한다. base 후보와 재진입 후보 **양쪽에** 걸린다 — 한쪽만 걸면
+    잡종 엔진이다(WAN-345 선례).
 
     `no_same_step_tp_minutes`(WAN-359, 옵트인)는 그 반사실을 **전부가 아니라 「틱이 지지하지
     않는 그 분들」에만** 거는 표적 팔이다 — 칸 `(정규화 심볼, TF)`마다 1분 `open_time` 집합을

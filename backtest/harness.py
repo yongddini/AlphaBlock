@@ -55,6 +55,7 @@ from data.storage import OhlcvStore
 from strategy.models import (
     BandBar,
     ConfluenceParams,
+    InvalidationCancel,
     OrderBlockParams,
     OrderBlockResult,
     RsiGateMode,
@@ -390,6 +391,35 @@ def pin_zone_width(
     return params.model_copy(update={"max_zone_width_atr": threshold})
 
 
+#: 무효화 취소 시점의 **옛 값** — WAN-365 전까지의 채택 동작(소급 취소, WAN-364가 이름 붙인
+#: 룩어헤드). 채택 기본값은 `ConfluenceParams().invalidation_cancel`(= `"bar_close"` = 인과)다.
+#:
+#: 🚨 `invalidation_cancel`은 **WAN-364가 처음 만든 축이라 기존 리포트가 하나도 명시하지
+#: 않았다** — `LEGACY_BAND_BAR`(WAN-132)·`LEGACY_COMBINE_OBS`(WAN-149)와 **글자 그대로 같은
+#: 함정**이다. 고정하지 않으면 옛 결론 리포트가 전부 조용히 인과 엔진으로 다시 돌아 본문과
+#: 어긋난다 — 「바꿨다고 믿으면서 안 바뀐 것」의 거울상인 **「안 바꿨다고 믿으면서 바뀐 것」**.
+#: 그래서 옛 수치를 결론에 박아 둔 모듈은 `pin_invalidation_cancel`(또는 엔진 호출부의
+#: `invalidation_cancel=` 인자)로 **명시 고정**한다. 목록은
+#: [`docs/decisions/wan365.md`](../docs/decisions/wan365.md) §파급.
+#:
+#: ⚠️ 반대로 **"지금 채택된 것"을 재는 리포트는 고정하지 않는다**(wan95) — 기본값이 움직이면
+#: 그 수치는 낡은 것이 되어야 맞다.
+#: ⚠️ **이미 이 축을 팔로 명시한 모듈도 손대지 않는다**(wan364) — 두 값을 자기 입력으로
+#: 넘기므로 기본값 전환과 무관하게 같은 행을 낸다.
+LEGACY_INVALIDATION_CANCEL: InvalidationCancel = "bar_open"
+
+
+def pin_invalidation_cancel(
+    params: ConfluenceParams, mode: InvalidationCancel = LEGACY_INVALIDATION_CANCEL
+) -> ConfluenceParams:
+    """`params`의 무효화 취소 시점만 갈아끼운다(다른 필드는 손대지 않는다).
+
+    `pin_band_bar`·`pin_zone_width`와 같은 자리다. 기본값 `"bar_open"`이 **옛 동작**(소급
+    취소)이라, 옛 결론 CSV를 재현해야 하는 모듈이 이 한 줄로 그 시절 엔진에 고정된다.
+    """
+    return params.model_copy(update={"invalidation_cancel": mode})
+
+
 class _Unset(enum.Enum):
     """`build_params(max_zone_width_atr=...)`의 「인자 미지정」 센티넬.
 
@@ -452,6 +482,7 @@ def build_params(
     retap_mode: str | None = None,
     max_zone_width_atr: float | None | _Unset = UNSET,
     limit_valid_bars: int | None | _Unset = UNSET,
+    invalidation_cancel: InvalidationCancel | None = None,
     base: ConfluenceParams | None = None,
 ) -> ConfluenceParams:
     """CLI 인자를 `ConfluenceParams`로 조립한다.
@@ -474,6 +505,10 @@ def build_params(
     센티넬 `UNSET`으로 나른다: `UNSET`이면 `base`의 값(= 채택 기본값 = `24`)을 물려받고,
     명시적 `None`이면 **무기한**(존 무효화까지 대기)이다. 미지정과 무기한을 안 가르면
     「유효기간 24」 실행에 `--limit-valid-bars none` 라벨이 붙는 조용한 실패가 생긴다.
+
+    ⚠️ **`invalidation_cancel`은 `offset_bps` 규약이다**(WAN-365) — `None`(기본)이 "손대지
+    않는다" = 채택 기본값(`"bar_close"` = 인과)이고, 값을 주면 그것으로 덮어쓴다. 옛 결론
+    리포트는 `LEGACY_INVALIDATION_CANCEL`(= `"bar_open"` = 소급 취소)을 명시로 넘긴다.
 
     진입 방식은 지정가(B안) 단독이다(A안은 WAN-208/WAN-215로 제거). 알 수 없는
     `entry_mode`는 `ValueError`로 거부한다.
@@ -499,6 +534,8 @@ def build_params(
         # 명시적 `None`은 **무기한**이다(채택 기본값 24를 덮어쓴다). `UNSET`이면
         # `base`(= 채택 기본값 24)의 값을 그대로 물려받는다 — 위 독스트링 규약.
         update["limit_valid_bars"] = limit_valid_bars
+    if invalidation_cancel is not None:
+        update["invalidation_cancel"] = invalidation_cancel
     if take_profit_r is not None:
         update["take_profit_r"] = take_profit_r
     if short_enabled is not None:
