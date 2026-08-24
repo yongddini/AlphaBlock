@@ -329,7 +329,7 @@ def run_cell(
                         window.htf_df,
                         window.df_1m,
                         window.timeframe,
-                        params=harness.pin_invalidation_cancel(params),
+                        params=params,
                         cfg=cfg,
                         order_block_result=obr,
                         take_profit_override=override,

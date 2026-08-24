@@ -104,7 +104,17 @@ def test_baseline_arm_reproduces_wan269(tmp_path: Path) -> None:
     payloads_by_rule: dict[str, Sequence[CellPayload]] = {}
     for rule in ("freeze", "band"):
         payloads = run_cells(
-            _SYMBOLS, _TFS, start=_START, end=_END, jobs=1, reentry=True, reentry_entry_rule=rule
+            _SYMBOLS,
+            _TFS,
+            start=_START,
+            end=_END,
+            jobs=1,
+            reentry=True,
+            reentry_entry_rule=rule,
+            # WAN-365: 대조의 **양쪽**을 옛 엔진으로 맞춘다 — wan269/wan271 CSV는 소급 취소
+            # 시절의 기록이고 `run_report`가 그 핀을 물고 있다. 한쪽만 새 엔진으로 두면
+            # 「비트 재현」 검산이 엔진 차이를 재게 된다.
+            invalidation_cancel=harness.LEGACY_INVALIDATION_CANCEL,
         )
         payloads, _ = apply_funding_proxy(payloads)
         payloads_by_rule[rule] = payloads

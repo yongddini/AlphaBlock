@@ -138,11 +138,23 @@ _ENGINE_ROOT = "build_zone_limit_candidates"
 _PARAM_KWARGS = frozenset({"params", "confluence_params", "pool_params"})
 
 #: 고정하지 **않는** 모듈과 그 이유 — 결정문 §4-2의 표와 같은 집합이어야 한다.
+#:
+#: 🚨 **기준은 「이 팔 = 인자 없는 채택 실행」이라는 동일성 검산을 계약으로 갖는가**이다.
+#: 그런 모듈에 옛 엔진을 핀으로 박으면 **라벨이 거짓이 된다** — 이 저장소가 가장 경계하는
+#: 실패다(WAN-91/95/112/123/159). 그 표가 낡는 것은 맞는 결과이고(`LEGACY_MAX_ZONE_WIDTH_ATR`
+#: 독스트링의 「지금 채택된 것을 재는 리포트는 고정하지 않는다」 규약 그대로), 그 검산이
+#: 깨지는 것은 틀린 결과다. ⚠️ 이 집합은 **추측이 아니라 테스트가 골라냈다** — 처음에 넷을
+#: 잘못 고정했더니 각 모듈의 `≡ run_once` 검산이 실패해 드러났다.
 _UNPINNED_BY_DESIGN: dict[str, str] = {
     # 「지금 채택된 것」을 재는 리포트다 — 기본값이 움직이면 그 수치는 낡아야 맞다.
     "wan95_zone_limit_report.py": "채택 성과 재산출 대상",
     # 이 축이 그 모듈의 실험 변수다(두 팔이 자기 입력으로 명시한다).
     "wan364_invalidation_cancel.py": "축이 실험 변수",
+    # 아래 넷은 「이 팔 == 인자 없는 채택 실행」을 실데이터 검산으로 **못 박아 둔** 모듈이다.
+    "wan197_guard_with_filter.py": "default 팔 ≡ 인자 없는 backtest.run (검산)",
+    "wan204_ob_extension_tp.py": "팔 A ≡ harness.run_once (검산)",
+    "wan248_zone_position_null.py": "실제 팔 ≡ run_once warm-OOS (검산)",
+    "wan350_conservative_null.py": "팔 A = 채택 기본값 그 자체 (검산)",
 }
 
 

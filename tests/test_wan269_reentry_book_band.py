@@ -105,7 +105,7 @@ def _kwargs(substeps: list[SubStep]) -> dict[str, object]:
         substep_times=[s.time for s in substeps],
         htf_times=[0],
         htf_closes=[100.0],
-        params=ConfluenceParams(),
+        params=harness.pin_invalidation_cancel(ConfluenceParams()),  # WAN-365 핀(옛 계약)
         cfg=harness.build_config("1h"),
         funding_rates=None,
     )
@@ -127,7 +127,9 @@ def test_reentry_candidates_entry_rule_default_is_freeze() -> None:
 def test_band_arm_needs_a_filter() -> None:
     """볼린저 필터가 없으면 band 팔은 재산정할 밴드가 없어 재진입을 내지 않는다(가드)."""
     substeps = _win_then_stop_substeps()
-    params = ConfluenceParams(deviation_filter=None)
+    params = harness.pin_invalidation_cancel(  # WAN-365 핀(옛 계약)
+        ConfluenceParams(deviation_filter=None)
+    )
     kwargs = _kwargs(substeps)
     kwargs["params"] = params
     band = reentry_candidates(_long_candidate(), entry_rule="band", **kwargs)  # type: ignore[arg-type]
