@@ -269,3 +269,18 @@ def test_pin_actually_removes_break_bar_taps_on_real_data() -> None:
     assert len(pinned) < len(adopted), "핀이 무효화 봉의 탭을 하나도 안 지웠다(라벨만 붙었다)"
     assert all(not c.entry_after_invalidation for c in pinned)
     assert any(c.entry_after_invalidation for c in adopted)
+
+
+def test_cancel_grid_without_positions_folds_to_per_cell() -> None:
+    """콤마 격자는 `--positions` 없이 주면 per-cell로 접힌다(다른 전략 축과 같은 규약).
+
+    단일값은 **접히지 않는다** — 그게 「옛 채택 북 재현」 레시피이기 때문이다.
+    """
+    from backtest.run import _book_from_args
+
+    parser = build_parser()
+    single = parser.parse_args(["--invalidation-cancel", "bar_open"])
+    assert _book_from_args(single) is not None, "단일값이 per-cell로 접히면 옛 북 재현이 사라진다"
+
+    grid = parser.parse_args(["--invalidation-cancel", "bar_close,bar_open"])
+    assert _book_from_args(grid) is None, "격자가 북으로 가면 한 지갑에 두 팔이 들어간다"

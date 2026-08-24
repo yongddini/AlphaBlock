@@ -1186,6 +1186,11 @@ def _book_fallback_flags(args: argparse.Namespace) -> list[str]:
     거래별은 칸을 가로지르는 한 지갑이다(WAN-213/341).
     """
     detail: list[tuple[object, str]] = [(args.trades, "--trades"), (args.equity, "--equity")]
+    # WAN-365: 취소 시점은 **단일값이면 북이 돈다**(옛 채택 북 재현). 콤마 격자만 per-cell로
+    # 접는다 — 한 실행이 한 지갑이라 북은 두 팔을 한 표에 못 넣기 때문이다(WAN-316). 명시적
+    # `--positions book`에 격자를 주면 접지 않고 `run_book_main`이 거부한다.
+    if len(_invalidation_cancels_from_args(args)) > 1:
+        detail.append((True, "--invalidation-cancel"))
     return [*_book_rejected_flags(args), *[name for value, name in detail if value]]
 
 
