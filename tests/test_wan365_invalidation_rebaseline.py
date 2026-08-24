@@ -155,6 +155,10 @@ _UNPINNED_BY_DESIGN: dict[str, str] = {
     "wan204_ob_extension_tp.py": "팔 A ≡ harness.run_once (검산)",
     "wan248_zone_position_null.py": "실제 팔 ≡ run_once warm-OOS (검산)",
     "wan350_conservative_null.py": "팔 A = 채택 기본값 그 자체 (검산)",
+    # 인과 엔진 위의 부품 사다리(WAN-366) — 핀 없음이 설계다(WAN-305). 사다리 꼭대기
+    # `L4` ≡ 인자 없는 채택 북을 실데이터 검산 (a)로 못 박고, `_assert_adopted_base`가
+    # 취소 시점 기본값이 인과가 아니면 실행 자체를 거부한다.
+    "wan366_causal_ablation.py": "L4 ≡ 인자 없는 채택 북 (검산) · 기본값 감시가 내장",
 }
 
 
