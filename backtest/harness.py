@@ -556,6 +556,7 @@ def build_config(
     slippage: float | None = None,
     funding_enabled: bool | None = None,
     max_notional_adv_fraction: AdvCapArg = UNSET,
+    min_stop_distance_fraction: float | None = None,
     seed: int = 0,
 ) -> BacktestConfig:
     """공용 팩토리(`default_backtest_config`) 위에 비용·펀딩 오버라이드만 얹는다.
@@ -570,6 +571,13 @@ def build_config(
     명시적 `None`이면 **끈다**(옛 상한-끔 북 리포트 재현), `float`이면 그 프랙션으로 고정한다.
     안 가르면 "상한 끔" 라벨을 단 채 조용히 0.005로 도는 이중 배선이 된다(WAN-91/95/112 부류).
     `risk_sizing`이 `None`(사이징 비활성)이면 상한 개념 자체가 없어 이 인자를 무시한다.
+
+    `min_stop_distance_fraction`(손절폭 가드, WAN-76/79 · WAN-366 옵트인)은 `offset_bps`
+    규약이다 — `None`(기본)이 "손대지 않는다"라 채택 기본값(`0.003` = 0.3%)을 물려받고,
+    값을 주면 그것으로 덮어쓴다(`0.0` = 가드 끔). ⚠️ **가드는 후보 생성이 아니라 사이징에
+    걸리므로**(`execution.sizing.size_with_reason`의 `stop_too_tight`) 같은 후보를 가드만
+    바꿔 다시 시퀀싱할 수 있다 — wan76 §3·WAN-197이 쓰던 성질이고, WAN-366 사다리의
+    `L2→L3` 단이 후보 재생성 없이 서는 이유다.
     """
     cfg = default_backtest_config(timeframe, seed=seed)
     update: dict[str, object] = {}
@@ -581,11 +589,14 @@ def build_config(
         update["slippage"] = slippage
     if funding_enabled is not None:
         update["funding_enabled"] = funding_enabled
-    if max_notional_adv_fraction is not UNSET and cfg.risk_sizing is not None:
+    sizing_update: dict[str, object] = {}
+    if max_notional_adv_fraction is not UNSET:
         # 명시적 `None`은 **끄기**(채택 0.005를 덮어씀), `float`이면 그 프랙션으로 고정.
-        update["risk_sizing"] = cfg.risk_sizing.model_copy(
-            update={"max_notional_adv_fraction": max_notional_adv_fraction}
-        )
+        sizing_update["max_notional_adv_fraction"] = max_notional_adv_fraction
+    if min_stop_distance_fraction is not None:
+        sizing_update["min_stop_distance_fraction"] = min_stop_distance_fraction
+    if sizing_update and cfg.risk_sizing is not None:
+        update["risk_sizing"] = cfg.risk_sizing.model_copy(update=sizing_update)
     return cfg.model_copy(update=update) if update else cfg
 
 

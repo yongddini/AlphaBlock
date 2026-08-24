@@ -164,6 +164,7 @@ def build_book_rows(
     slippage: float | None = None,
     stress_risk_multiple: float = 1.0,
     compound_sizing: bool = True,
+    min_stop_distance_fraction: float | None = None,
 ) -> list[BookRunRow]:
     """이미 만든 칸 후보(payloads)에서 요청 구간별 북 행을 낸다.
 
@@ -186,6 +187,10 @@ def build_book_rows(
 
     `compound_sizing=False`(WAN-346 §2, 옵트인)는 베팅 크기를 **초기 자본에 못 박아** 복리
     착시 없이 읽는 팔을 낸다 — `True`(기본)면 예전과 비트 단위로 같다.
+
+    `min_stop_distance_fraction`(WAN-366, 옵트인)은 손절폭 가드를 이 배치에서만 갈아끼운다 —
+    `None`(기본)이면 채택 0.3%라 예전과 비트 단위로 같다. 가드는 **사이징**에 걸려 후보를 안
+    바꾸므로(WAN-197) 같은 payload를 가드만 바꿔 다시 배치할 수 있다.
     """
     return [
         seg.row
@@ -201,6 +206,7 @@ def build_book_rows(
             slippage=slippage,
             stress_risk_multiple=stress_risk_multiple,
             compound_sizing=compound_sizing,
+            min_stop_distance_fraction=min_stop_distance_fraction,
         )
     ]
 
@@ -261,6 +267,7 @@ def iter_book_segments(
     slippage: float | None = None,
     stress_risk_multiple: float = 1.0,
     compound_sizing: bool = True,
+    min_stop_distance_fraction: float | None = None,
 ) -> list[BookSegment]:
     """`build_book_rows`의 속 — 집계 행뿐 아니라 그 행을 만든 `BookOutcome`까지 돌려준다.
 
@@ -277,6 +284,7 @@ def iter_book_segments(
         fee_rate=fee_rate,
         maker_fee_rate=maker_fee_rate,
         slippage=slippage,
+        min_stop_distance_fraction=min_stop_distance_fraction,
     )
     num_symbols = len({p.symbol for p in payloads})
     out: list[BookSegment] = []

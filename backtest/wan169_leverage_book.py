@@ -249,6 +249,18 @@ class _Task:
     재현**한다 — 옛 결론 모듈이 `harness.LEGACY_INVALIDATION_CANCEL`로 명시 고정하는 값이다.
     base 후보와 재진입 후보 **양쪽에** 같은 규칙이 걸린다 — 한쪽만 걸면 잡종 엔진이다
     (WAN-345 선례)."""
+    bollinger: bool = True
+    """WAN-366(옵트인): 볼린저 진입가 재산정(`deviation_filter`)을 켜 둘지.
+
+    `True`(기본)면 채택 기본값 그대로라 **비트 단위로 예전과 같다**. `False`면 후보 생성
+    파라미터의 `deviation_filter`를 `None`으로 덮어써 진입가가 **존 근단**에 남는다 —
+    WAN-114/145/151 사다리의 `L0`/`L1` 단과 같은 축이고, 그 모듈들이 per-cell에서 하던 것을
+    **북 후보 생성**에 옮긴 것이다. 규칙 3(밴드가 존보다 불리하면 기각)도 함께 꺼진다."""
+    max_zone_width_atr: harness.ZoneWidthArg = harness.UNSET
+    """WAN-366(옵트인): 존폭 필터 문턱. `harness.build_params`와 **같은 센티넬 규약**이다 —
+    `UNSET`(기본)이면 채택 기본값(`1.28`)을 물려받아 비트 단위로 예전과 같고, 명시적 `None`이면
+    **끈다**(사다리의 필터-끔 단). 안 가르면 「필터 끔」 라벨을 단 채 조용히 1.28로 도는 이중
+    필터가 된다(WAN-159가 못 박은 규약)."""
     reentry_entry_rule: ReentryEntryRule = "band"
     """재진입 후보의 재무장 지정가 규칙 — 기본 `"band"`(봉내 라이브 밴드 재산정) = 채택 규칙
     (WAN-273, WAN-305가 기본값으로 승격). `"freeze"`(첫 체결가 고정)는 옵트인으로 존치 —
@@ -427,10 +439,21 @@ def run_cell(task: _Task, *, log: bool = True) -> CellPayload:
     # 인자 없음 = 채택 기본값(옛 핀 물려받기 금지 — 완료기준). `fill`(WAN-264, 옵트인)을 주면
     # 체결 렌즈만 갈아끼운다 — `None`이면 `build_params(fill=BASELINE_FILL)`과 같아 비트 재현.
     params = (
-        harness.build_params(take_profit_r=task.take_profit_r)
+        harness.build_params(
+            take_profit_r=task.take_profit_r, max_zone_width_atr=task.max_zone_width_atr
+        )
         if task.fill is None
-        else harness.build_params(fill=task.fill, seed=task.seed, take_profit_r=task.take_profit_r)
+        else harness.build_params(
+            fill=task.fill,
+            seed=task.seed,
+            take_profit_r=task.take_profit_r,
+            max_zone_width_atr=task.max_zone_width_atr,
+        )
     )
+    if not task.bollinger:
+        # WAN-366(옵트인): 볼린저를 끄면 진입가가 존 근단에 남는다(사다리 `L0`/`L1`).
+        # 켜 두면(기본) 이 model_copy를 아예 타지 않아 예전과 비트 단위로 같다.
+        params = params.model_copy(update={"deviation_filter": None})
     # WAN-365: 취소 시점을 **파라미터에 실어** 재진입·엔진 본 진입이 같은 값을 읽게 한다.
     # `None`(기본)이면 채택 기본값 그대로라 인자를 안 준 실행이 채택 북이다.
     if task.invalidation_cancel is not None:
@@ -580,6 +603,8 @@ def run_cells(
     stop_slippage_alpha: float = 0.0,
     limit_stop_nonfill: bool = False,
     short_enabled: bool = False,
+    bollinger: bool = True,
+    max_zone_width_atr: harness.ZoneWidthArg = harness.UNSET,
     seed: int = 0,
     cold_segments: bool = True,
     engine_check: bool = True,
@@ -621,6 +646,11 @@ def run_cells(
 
     `short_enabled`(WAN-282, 옵트인)를 켜면 후보 생성이 베어리시 OB 숏을 같이 낸다(롱 모델의
     거울) — 끄면(기본) `params`에 얹지 않아 예전과 비트 단위로 같다. 롱+숏 북 측정용이다.
+
+    `bollinger`·`max_zone_width_atr`(WAN-366, 옵트인)은 **후보 집합 사다리**의 두 축이다 —
+    전자는 볼린저 진입가 재산정을, 후자는 존폭 필터를 끈다. 기본값(`True` · `UNSET`)이면
+    채택 기본값 그대로라 비트 단위로 같다. ⚠️ 손절폭 가드는 여기 없다 — 그건 **사이징**
+    축이라 후보를 안 바꾸고 `build_book_rows(min_stop_distance_fraction=)`가 배치에서 건다.
 
     `seed`(WAN-293, 옵트인)는 체결 **탈락** 렌즈의 추첨 시드다 — `fill.dropout_rate > 0`인
     렌즈만 후보 생성 RNG에 흘러 든다. 기본 `0`은 예전 값이라 비트 단위로 같고, 탈락 없는
@@ -680,6 +710,8 @@ def run_cells(
             stop_slippage_alpha=stop_slippage_alpha,
             limit_stop_nonfill=limit_stop_nonfill,
             short_enabled=short_enabled,
+            bollinger=bollinger,
+            max_zone_width_atr=max_zone_width_atr,
             seed=seed,
             cold_segments=cold_segments,
             engine_check=engine_check,
