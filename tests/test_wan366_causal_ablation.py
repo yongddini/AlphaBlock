@@ -34,12 +34,17 @@ from backtest.wan366_causal_ablation import (
     ADOPTED_RUNG,
     ADOPTED_STOP_GUARD,
     ADOPTED_ZONE_WIDTH,
+    BRANCH_RUNG,
+    CHAIN,
+    GUARD_PAIRS,
     LADDER,
     NET_R_NOISE,
     RUNGS,
     RUNGS_BY_NAME,
+    STEPS,
     LadderRow,
     _assert_adopted_base,
+    _assert_guard_pairs,
     _check_guard_axis,
     _guard_arg,
     bucket_label,
@@ -372,3 +377,215 @@ def test_summary_is_undecided_without_the_ladder() -> None:
     frame = rows_to_frame([_row("L0", PRIMARY_OOS)])
     text = build_summary(frame, pd.DataFrame(), pd.DataFrame())
     assert "판정 불가" in text
+
+
+# --------------------------------------------------------------------------- #
+# 7 · WAN-368 — 분기 단 `L0g`(존 단독 ＋ 가드)
+# --------------------------------------------------------------------------- #
+
+
+def test_branch_rung_shares_the_base_generation() -> None:
+    """`L0g`는 `L0`이 만든 후보를 **재시퀀싱만** 한다 — 이 모듈의 컴퓨트 예산 전부다.
+
+    가드는 사이징 축이라 후보를 안 바꾸므로 둘은 한 생성(`G0`)을 나눠 써야 한다. 그룹이
+    갈리면 후보가 따로 만들어져 검산 (b)가 **비교할 것이 없어 조용히 통과한다**.
+    """
+    assert [r.name for r in generation_of("G0")] == ["L0", "L0g"]
+    assert rungs_to_generations(["L0g"]) == ("G0",)
+    # 생성 그룹은 여전히 셋이다 — 단이 하나 늘어도 컴퓨트는 안 는다.
+    assert rungs_to_generations(LADDER) == ("G0", "G1", "G2")
+
+
+def test_branch_rung_turns_off_the_loss_components() -> None:
+    """`L0g`가 실제로 「볼린저 끔 · 존폭 필터 끔 · 가드 켬 · 재진입 끔」이다.
+
+    🚨 존폭 필터는 **명시적 `None`(끈다)**이어야 한다 — 센티넬(`harness.UNSET`)이 「채택
+    1.28」이라, 안 가르면 「필터 끔」 라벨을 달고 조용히 1.28로 도는 이중 필터가 된다
+    (WAN-159가 못 박은 자리).
+    """
+    branch = RUNGS_BY_NAME[BRANCH_RUNG]
+    assert branch.bollinger is False
+    assert branch.zone_width is None
+    assert branch.guard == ADOPTED_STOP_GUARD
+    assert branch.reentry is False
+    assert branch.is_adopted is False
+    assert branch.branch is True
+    # 채택값이면 배치에 `None`(손대지 않는다)을 넘긴다 — 라벨이 아니라 배선.
+    assert _guard_arg(branch) is None
+    # `L0`과 후보 생성 축이 같아야 한 번의 생성으로 먹일 수 있다.
+    base = RUNGS_BY_NAME["L0"]
+    assert (branch.bollinger, branch.zone_width) == (base.bollinger, base.zone_width)
+
+
+def test_branch_generation_passes_explicit_none_to_the_filter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """생성 그룹 `G0`이 존폭 필터에 **명시적 `None`**을 넘긴다(센티넬이 아니라).
+
+    `generation_payloads`가 실제로 `run_cells`에 넘기는 인자를 가로채 확인한다 — 라벨이
+    아니라 호출부로 건다.
+    """
+    import backtest.wan366_causal_ablation as mod
+
+    seen: dict[str, Any] = {}
+
+    def _spy(*args: Any, **kwargs: Any) -> list[Any]:
+        seen.update(kwargs)
+        return []
+
+    monkeypatch.setattr(mod, "run_cells", _spy, raising=True)
+    mod.generation_payloads(
+        [_REAL_SYMBOL], [_REAL_TF], "G0", start=_REAL_START, end=_REAL_END, jobs=1
+    )
+
+    assert seen["bollinger"] is False
+    assert seen["max_zone_width_atr"] is None, (
+        "존폭 필터에 센티넬이 넘어갔습니다 — 「끔」 라벨을 달고 1.28로 도는 이중 필터가 "
+        "됩니다(WAN-159)."
+    )
+    assert seen["reentry"] is False
+    assert seen["engine_check"] is False
+
+
+def test_guard_pair_invariants_hold() -> None:
+    """가드 짝은 **가드만** 다르고 같은 생성 그룹이다 — 검산 (b)의 전제."""
+    _assert_guard_pairs()
+    assert ("L0", "L0g") in GUARD_PAIRS
+    assert ("L2", "L3") in GUARD_PAIRS
+
+
+def test_guard_pair_invariant_rejects_split_generation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """짝이 다른 그룹에 놓이면 죽는다 — 그러면 검산이 조용히 통과한다."""
+    import backtest.wan366_causal_ablation as mod
+
+    split = {
+        name: (rung.__class__(**{**rung.__dict__, "gen": "GX"}) if name == "L0g" else rung)
+        for name, rung in mod.RUNGS_BY_NAME.items()
+    }
+    monkeypatch.setattr(mod, "RUNGS_BY_NAME", split, raising=True)
+    with pytest.raises(AssertionError, match="생성 그룹이 다릅니다"):
+        _assert_guard_pairs()
+
+
+def test_guard_axis_check_covers_the_branch_pair() -> None:
+    """`L0`·`L0g`도 검산 (b)에 걸린다 — 새 짝이 검사에서 빠지면 검산이 아니다."""
+    drifted = {
+        "L0": [_row("L0", PRIMARY_OOS, num_candidates=900)],
+        "L0g": [_row("L0g", PRIMARY_OOS, num_candidates=880)],
+    }
+    with pytest.raises(AssertionError, match="검산\\(b\\)"):
+        _check_guard_axis(drifted)
+
+
+def test_guard_axis_check_falls_back_to_the_persisted_csv() -> None:
+    """짝의 한쪽만 이번에 돌려도 **적재된 CSV의 짝 행과** 대조한다.
+
+    한쪽만 돌렸다고 검산이 조용히 건너뛰면 그건 검산이 아니다(WAN-194/318/321 「실패가
+    성공과 같은 모양」).
+    """
+    previous = rows_to_frame([_row("L0", PRIMARY_OOS, num_candidates=900)])
+    fresh_ok = {"L0g": [_row("L0g", PRIMARY_OOS, num_candidates=900)]}
+    _check_guard_axis(fresh_ok, previous)  # 예외 없음.
+
+    fresh_drift = {"L0g": [_row("L0g", PRIMARY_OOS, num_candidates=880)]}
+    with pytest.raises(AssertionError, match="검산\\(b\\)"):
+        _check_guard_axis(fresh_drift, previous)
+
+
+def test_branch_is_not_a_ladder_step() -> None:
+    """`L0g`는 **분기**라 이웃 차가 뜻이 없다 — `L0`→`L0g`만 증분이다.
+
+    표시 순서(`LADDER`)에서 `L0g`가 `L0`과 `L1` 사이에 있으므로, 증분을 이웃 zip으로
+    되돌리면 「볼린저의 순기여」(`L0`→`L1`)가 조용히 다른 양으로 바뀐다.
+    """
+    assert LADDER.index("L0g") == 1  # 표시 순서상 사다리 한가운데다.
+    assert "L0g" not in CHAIN
+    assert ("L0", "L0g") in STEPS
+    assert ("L0", "L1") in STEPS  # 볼린저의 순기여가 살아 있다.
+    assert not any(lo == "L0g" for lo, _hi in STEPS)
+
+    rows = []
+    for segment in (harness.SEGMENT_IS, PRIMARY_OOS):
+        rows += [
+            _row("L0", segment, mean_net_r=-0.20),
+            _row("L0g", segment, mean_net_r=0.02),
+            _row("L1", segment, mean_net_r=-0.30),
+        ]
+    steps = {i.step for i in increments(rows_to_frame(rows))}
+    assert steps == {"L0→L1", "L0→L0g"}
+
+
+def test_branch_section_reports_interaction_when_the_guard_differs() -> None:
+    """맨몸 가드와 쌓은 가드의 크기가 다르면 **상호작용한다**로 찍는다."""
+    rows = []
+    for segment in (harness.SEGMENT_IS, PRIMARY_OOS):
+        rows += [
+            _row("L0", segment, mean_net_r=-0.20, num_trades=1000),
+            _row("L0g", segment, mean_net_r=-0.15, num_trades=900),  # 맨몸 +0.05R
+            _row("L2", segment, mean_net_r=-0.40),
+            _row("L3", segment, mean_net_r=-0.14),  # 쌓은 +0.26R
+        ]
+    text = build_summary(rows_to_frame(rows), pd.DataFrame(), pd.DataFrame())
+    assert "상호작용한다" in text
+    assert "단순 덧셈은 성립하지 않는다" in text
+    # 가드가 쳐낸 거래 수가 함께 나온다(PM 시나리오 표를 가르는 그 한 숫자).
+    assert "+100건(+10.0%)" in text
+
+
+def test_branch_section_reports_no_interaction_when_the_guard_matches() -> None:
+    """두 자리에서 크기가 같으면 **단순 덧셈이 성립한다**로 찍는다."""
+    rows = []
+    for segment in (harness.SEGMENT_IS, PRIMARY_OOS):
+        rows += [
+            _row("L0", segment, mean_net_r=-0.20),
+            _row("L0g", segment, mean_net_r=0.06),  # 맨몸 +0.26R
+            _row("L2", segment, mean_net_r=-0.40),
+            _row("L3", segment, mean_net_r=-0.14),  # 쌓은 +0.26R
+        ]
+    text = build_summary(rows_to_frame(rows), pd.DataFrame(), pd.DataFrame())
+    assert "상호작용하지 않고" in text
+
+
+def test_branch_section_compares_against_the_best_chain_rung() -> None:
+    """`L0g` vs `L3` 대조가 **앞구간에서 고르고 뒷구간에서 확인**한다."""
+    rows = []
+    for segment in (harness.SEGMENT_IS, PRIMARY_OOS):
+        rows += [
+            _row("L0", segment, mean_net_r=-0.20),
+            _row("L0g", segment, mean_net_r=-0.30),
+            _row("L2", segment, mean_net_r=-0.40),
+            _row("L3", segment, mean_net_r=-0.14),
+        ]
+    text = build_summary(rows_to_frame(rows), pd.DataFrame(), pd.DataFrame())
+    assert f"`{harness.SEGMENT_IS}`(선택)" in text
+    assert f"`{PRIMARY_OOS}`(확인)" in text
+    assert "나쁘다" in text
+
+
+def test_branch_section_is_absent_without_the_branch_row() -> None:
+    """분기 단이 없으면 §2를 아예 안 그린다 — 없는 판정을 지어내지 않는다."""
+    rows = [
+        _row("L0", PRIMARY_OOS, mean_net_r=-0.20),
+        _row("L1", PRIMARY_OOS, mean_net_r=-0.30),
+    ]
+    text = build_summary(rows_to_frame(rows), pd.DataFrame(), pd.DataFrame())
+    assert "§2 분기 단" not in text
+
+
+def test_verdict_marks_branch_steps_as_not_a_ladder_rung() -> None:
+    """§1 판정에 분기 단이 섞이면 **그 사실을 밝힌다**.
+
+    가드는 `L2`→`L3`와 `L0`→`L0g` **두 자리**에서 잡히므로, 안 밝히면 「값을 더하는 단이
+    2개」가 서로 다른 부품 둘로 읽힌다.
+    """
+    rows = []
+    for segment in (harness.SEGMENT_IS, PRIMARY_OOS):
+        rows += [
+            _row("L0", segment, mean_net_r=-0.20),
+            _row("L0g", segment, mean_net_r=0.06),
+            _row("L2", segment, mean_net_r=-0.40),
+            _row("L3", segment, mean_net_r=-0.14),
+        ]
+    text = build_summary(rows_to_frame(rows), pd.DataFrame(), pd.DataFrame())
+    assert "값을 더하는 단이 2개" in text
+    assert "서로 다른 부품으로 세지 말 것" in text
