@@ -332,7 +332,7 @@ def label_cell(
         market.htf_df,
         market.df_1m,
         market.timeframe,
-        params=params,
+        params=harness.pin_invalidation_cancel(params),
         cfg=cfg,
         order_block_params=order_block_params,
     )
@@ -1121,7 +1121,9 @@ def checksum(
     st = LabelStats()
     label_cell(market, params=ConfluenceParams(), order_block_params=OrderBlockParams(), stats=st)
     outcome = harness.run_once(
-        market, params=ConfluenceParams(), cfg=harness.build_config(timeframe)
+        market,
+        params=harness.pin_invalidation_cancel(ConfluenceParams()),
+        cfg=harness.build_config(timeframe),
     )
     prod = outcome.result.metrics.num_trades
     return st.sequenced, prod, st.sequenced == prod

@@ -299,7 +299,7 @@ def run_arm(
         seg_market.htf_df,
         seg_market.df_1m,
         seg_market.timeframe,
-        params=params,
+        params=harness.pin_invalidation_cancel(params),
         cfg=cfg,
         order_block_result=obr,
         setup_sink=sink,
@@ -649,6 +649,7 @@ def run_book_report(
             partial_take_profit_r=arm.partial_r,
             partial_take_profit_fraction=PARTIAL_FRACTION,
             breakeven_after_partial=arm.breakeven,
+            invalidation_cancel=harness.LEGACY_INVALIDATION_CANCEL,
         )
         book_rows = build_book_rows(
             payloads,
@@ -784,7 +785,9 @@ def run_checksum(
                 ).row
                 theirs = harness.run_once(
                     seg_market,
-                    params=harness.build_params(entry_mode="zone_limit"),
+                    params=harness.pin_invalidation_cancel(
+                        harness.build_params(entry_mode="zone_limit")
+                    ),
                     cfg=harness.build_config(seg_market.timeframe),
                     order_block_result=obr,
                     eval_from_ms=eval_from_ms,

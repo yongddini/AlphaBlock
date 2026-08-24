@@ -345,11 +345,16 @@ def run_audit(
     result = AuditResult()
     # 🚨 이중 필터 방지(WAN-159): 존폭 필터를 후보 리스트로 직접 만드므로 엔진의 채택
     # 기본값(1.28)을 꺼야 대조군·매칭이 오염되지 않는다(WAN-152 확장 모듈).
+    # WAN-365 명시 핀: 이 표는 **소급 취소** 시절의 결론이다.
     base_params = harness.build_params(
-        fill=harness.BASELINE_FILL, max_zone_width_atr=harness.LEGACY_MAX_ZONE_WIDTH_ATR
+        fill=harness.BASELINE_FILL,
+        max_zone_width_atr=harness.LEGACY_MAX_ZONE_WIDTH_ATR,
+        invalidation_cancel=harness.LEGACY_INVALIDATION_CANCEL,
     )
     pen_params = harness.build_params(
-        fill=harness.fill_preset(LENS_PEN), max_zone_width_atr=harness.LEGACY_MAX_ZONE_WIDTH_ATR
+        fill=harness.fill_preset(LENS_PEN),
+        max_zone_width_atr=harness.LEGACY_MAX_ZONE_WIDTH_ATR,
+        invalidation_cancel=harness.LEGACY_INVALIDATION_CANCEL,
     )
     for timeframe in timeframes:
         tf_bucket_pool: dict[tuple[str, str, str], list[TradeRecord]] = {}

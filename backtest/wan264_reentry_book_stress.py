@@ -374,6 +374,7 @@ def run_report(
             reentry=True,
             reentry_entry_rule="freeze",
             fill=fill,
+            invalidation_cancel=harness.LEGACY_INVALIDATION_CANCEL,
         )
         if funding_proxy:
             payloads, note = apply_funding_proxy(payloads)

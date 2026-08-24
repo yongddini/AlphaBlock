@@ -73,6 +73,7 @@ from typing import Literal
 import pandas as pd
 from pydantic import BaseModel, ConfigDict
 
+from backtest import harness
 from backtest.harness import LEGACY_OB_PARAMS, pin_band_bar
 from backtest.harness import split_bars as _split_bars
 from backtest.models import BacktestConfig, PositionSide
@@ -599,7 +600,7 @@ def run_symbol_timeframe(
                     symbol=symbol,
                     segment=segment_label,  # type: ignore[arg-type]
                     gate=gate_label,
-                    confluence_params=params,
+                    confluence_params=harness.pin_invalidation_cancel(params),
                     order_block_params=order_block_params,
                     backtest_config=cfg,
                     order_block_result=ob_result,

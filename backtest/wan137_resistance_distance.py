@@ -259,7 +259,7 @@ def measure_setups(
         market.htf_df,
         market.df_1m,
         entry_tf,
-        params=params,
+        params=harness.pin_invalidation_cancel(params),
         cfg=cfg,
         order_block_result=htf_obr,
     )

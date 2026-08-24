@@ -299,7 +299,12 @@ def run_cell(task: _Task, *, log: bool = True) -> _CellResult:
             params = real_params(arm)
 
             # 성과 표 — 분리 OB로 채택 엔진 그대로.
-            outcome = harness.run_once(window, params=params, cfg=cfg, order_block_result=ob_result)
+            outcome = harness.run_once(
+                window,
+                params=harness.pin_invalidation_cancel(params),
+                cfg=cfg,
+                order_block_result=ob_result,
+            )
             m = outcome.result.metrics
             stats = outcome.stats
             pnl_rows.append(
@@ -330,13 +335,13 @@ def run_cell(task: _Task, *, log: bool = True) -> _CellResult:
                 symbol=task.symbol,
                 segment="IS" if segment.name == harness.SEGMENT_IS else "OOS",
                 gate=arm_name,
-                confluence_params=params,
+                confluence_params=harness.pin_invalidation_cancel(params),
                 backtest_config=cfg,
                 order_block_result=ob_result,
                 iterations=task.iterations,
                 seed=BOOTSTRAP_SEED,
                 funding_rates=window.funding_rates,
-                pool_params=pool_params(arm),
+                pool_params=harness.pin_invalidation_cancel(pool_params(arm)),
             )
             null_rows.append(
                 NullRow(

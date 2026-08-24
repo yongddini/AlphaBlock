@@ -355,7 +355,12 @@ def run_cell(task: _Task, *, log: bool = True) -> list[IntervalRow]:
     ob_result = harness.detect_order_blocks(market, ADOPTED_OB_PARAMS)
     params = harness.build_params()  # 인자 없음 = 채택 기본값 그대로(옛 핀 없음)
     cfg = harness.build_config(task.timeframe)
-    outcome = harness.run_once(market, params=params, cfg=cfg, order_block_result=ob_result)
+    outcome = harness.run_once(
+        market,
+        params=harness.pin_invalidation_cancel(params),
+        cfg=cfg,
+        order_block_result=ob_result,
+    )
     rows = [
         IntervalRow(
             symbol=task.symbol,

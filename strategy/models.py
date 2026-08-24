@@ -363,6 +363,10 @@ RsiGateMode = Literal["extreme", "neutral", "none", "first_tap_free", "unconditi
 #: `"intrabar_live"`(WAN-132) — 뜻과 함께 그 필드의 독스트링 참고.
 BandBar = Literal["tap", "prev_closed", "intrabar_live", "intrabar_causal"]
 
+#: 미체결 지정가를 「존이 깨졌다」로 취소하는 **시점**(`ConfluenceParams.invalidation_cancel`).
+#: 채택 기본값은 `"bar_close"`(WAN-365 = 인과) — 뜻과 근거는 그 필드의 독스트링 참고.
+InvalidationCancel = Literal["bar_open", "bar_close"]
+
 
 def rsi_gate_passes(
     rsi: float,
@@ -658,6 +662,37 @@ class ConfluenceParams(BaseModel):
     """지정가에 닿았지만 실시간 RSI 조건 미충족 시 주문을 취소할지 여부.
 
     기본 False면 조건이 충족될 때까지(또는 만료·무효화까지) 주문을 유지한다.
+    """
+    invalidation_cancel: InvalidationCancel = "bar_close"
+    """미체결 지정가를 「존이 깨졌다」로 취소하는 **시점**. **기본 `"bar_close"`(WAN-365)**.
+
+    * `"bar_close"` — **채택 기본값(인과)**. 존을 깬 상위TF 봉이 **닫힐 때** 비로소 취소한다.
+      그 봉 **안에서**의 탭·체결은 살아남고, 결과는 손절 규칙이 낸다.
+    * `"bar_open"` — WAN-364까지의 옛 동작(소급 취소). 무효화 봉의 `open_time`부터 취소된
+      것으로 본다. 옛 리포트 재현 전용이다(`harness.LEGACY_INVALIDATION_CANCEL`).
+
+    🚨 **옛 기본값(`"bar_open"`)은 봉이 끝나야 알 수 있는 사실을 봉 처음으로 되돌려 썼다** —
+    `ob.break_time`이 존을 깬 상위TF 봉의 `open_time`이라(`strategy/order_blocks.py`) 그 봉
+    안에서 체결됐을 주문이 소급 취소된다. 그렇게 지워지는 셋업은 무작위가 아니라 **정의상
+    손절로 끝났을 것**이다(롱이면 가격이 존 아랫변을 뚫어야 무효화인데 지정가는 그 위에
+    있으므로 **체결이 무효화보다 반드시 먼저**다). 인과적으로는 「취소」가 아니라 「체결 후
+    손절」이 옳다 — 사용자 지적 *"손절을 해야지 뭘 취소한다는 거냐"*(WAN-364).
+
+    ⚠️ **「취소를 아예 끄는」 값이 아니다** — 봉이 닫힌 뒤에는 두 값 모두 취소한다. 존이
+    죽은 걸 안 다음에도 주문을 걸어 두는 것은 인과가 아니라 다른 엔진이다.
+
+    ⚠️ **알고 받는 것**: 전환하면 성과가 나빠진다(WAN-364 §4 — 채택 북 `oos_warm` 거래당
+    net R `+0.1985` → `−0.1798`로 부호가 뒤집힌다). 되살아나는 거래의 88.3%가 손절이다.
+    그게 맞는 숫자다 — 옛 플러스가 「지워진 손절」 덕이었다는 뜻이다.
+
+    📌 **층이 둘이다**(WAN-364 §2) — 이 값은 시그널 필터(무효화 봉의 탭을 후보로 받는가,
+    `build_zone_limit_candidates`)와 시뮬레이터 취소 시각(`invalidation_cutoff`)을 **함께**
+    바꾼다. 한 층만 바꾸면 라벨만 붙은 잡종이 된다.
+
+    ⚠️ **라이브(`live/limit_engine.py`)는 이 필드를 읽지 않는다 — 읽을 필요가 없다.** 라이브는
+    존 무효화를 **확정봉에서** 알아 한 봉 늦게 취소하므로 **구조적으로 인과**이고, 채택값과
+    같은 쪽이다. `"bar_open"`은 실거래에서 **흉내 낼 방법이 없다**(그 봉이 어떻게 끝날지 알아야
+    한다) — 백테스트 전용의 옛 기록 재현 값이다.
     """
 
     # --- 체결 가정 보수화 (WAN-96) ---

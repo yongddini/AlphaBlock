@@ -330,6 +330,7 @@ def build_lens_rows(
                 engine_check=engine_check,
                 # WAN-305 명시 핀: wan301/302 CSV는 재진입 꺼진 북의 동결 기록이다.
                 reentry=False,
+                invalidation_cancel=harness.LEGACY_INVALIDATION_CANCEL,
             )
             if funding_proxy:
                 cells, note = apply_funding_proxy(cells)

@@ -332,7 +332,7 @@ def _annotate_reentries(task: _Task) -> tuple[list[_AnnotatedReentry], int, floa
         market.htf_df,
         market.df_1m,
         task.timeframe,
-        params=params,
+        params=harness.pin_invalidation_cancel(params),
         cfg=cfg,
         order_block_result=ob,
     )
@@ -377,7 +377,7 @@ def _annotate_reentries(task: _Task) -> tuple[list[_AnnotatedReentry], int, floa
             substep_times=substep_times,
             htf_times=htf_times,
             htf_closes=htf_closes,
-            params=params,
+            params=harness.pin_invalidation_cancel(params),
             cfg=cfg,
             funding_rates=market.funding_rates,
         ):
@@ -401,7 +401,7 @@ def _annotate_reentries(task: _Task) -> tuple[list[_AnnotatedReentry], int, floa
             )
 
     coverage = harness.run_once(
-        market, params=params, cfg=cfg, order_block_result=ob
+        market, params=harness.pin_invalidation_cancel(params), cfg=cfg, order_block_result=ob
     ).result.metrics.funding_coverage
     return events, boundary, coverage
 

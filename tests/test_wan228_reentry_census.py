@@ -82,7 +82,10 @@ def _long_candidate(*, break_time: int | None) -> _Candidate:
 
 def _params() -> ConfluenceParams:
     # 채택 게이트(unconditional)라 RSI 값은 안 본다.
-    return ConfluenceParams()
+    # WAN-365: 이 픽스처는 **소급 취소 시절의 재무장 계약**을 검정한다(WAN-228/261/267/269).
+    # 채택 기본값은 인과(`bar_close`)라 무효화 컷오프가 한 봉 뒤로 밀리므로, 팔을 **명시**한다
+    # — 안 밝히면 「옛 계약」 라벨을 단 채 새 엔진으로 도는 그 실패가 테스트에서 재현된다.
+    return harness.pin_invalidation_cancel(ConfluenceParams())
 
 
 def _cfg() -> BacktestConfig:

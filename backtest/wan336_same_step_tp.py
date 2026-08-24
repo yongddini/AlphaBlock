@@ -459,6 +459,7 @@ def run_arm(
         engine_check=is_base,
         no_same_step_tp=not is_base,
         **ADOPTED_CELL_KWARGS,  # type: ignore[arg-type]
+        invalidation_cancel=harness.LEGACY_INVALIDATION_CANCEL,
     )
     identity: float | None = None
     if is_base:

@@ -475,6 +475,7 @@ def run_arm(
         # 움직일 때 이 경로만 옛 값을 물고 돈다(WAN-159 `UNSET` 계열 규약).
         fill=harness.fill_preset(arm.lens) if arm.lens else None,
         **ADOPTED_CELL_KWARGS,  # type: ignore[arg-type]
+        invalidation_cancel=harness.LEGACY_INVALIDATION_CANCEL,
     )
     identity: float | None = None
     if arm.is_adopted:

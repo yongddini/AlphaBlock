@@ -741,6 +741,7 @@ def main(argv: list[str] | None = None) -> int:
             jobs=args.jobs,
             short_enabled=True,
             reentry=False,
+            invalidation_cancel=harness.LEGACY_INVALIDATION_CANCEL,
         )
         if not args.no_funding_proxy:
             cells, funding_note = apply_funding_proxy(cells)

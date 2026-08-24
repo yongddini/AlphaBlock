@@ -105,7 +105,7 @@ def _kwargs(substeps: list[SubStep]) -> dict[str, object]:
         substep_times=[s.time for s in substeps],
         htf_times=[0],
         htf_closes=[100.0],
-        params=ConfluenceParams(),
+        params=harness.pin_invalidation_cancel(ConfluenceParams()),  # WAN-365 핀(옛 계약)
         cfg=harness.build_config("1h"),
         funding_rates=None,
     )

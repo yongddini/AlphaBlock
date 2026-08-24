@@ -58,6 +58,7 @@ from backtest.wan180_leverage_book_nine import apply_funding_proxy
 from backtest.wan228_reentry_census import ReentryEntryRule
 from backtest.zone_limit_backtest import build_result_from_trades
 from common.timefmt import format_kst
+from strategy.models import InvalidationCancel
 
 #: 채택 재진입 규칙(WAN-273 = 사용자 결정 2026-08-09) — 「익절 후 존 내 재진입」의 재무장
 #: 지정가를 봉내 라이브 밴드(볼린저)로 재산정한다. `"freeze"`(첫 체결가 고정)·`"zone"`(존
@@ -310,6 +311,7 @@ def run_book(
     reentry: bool = True,
     reentry_entry_rule: ReentryEntryRule = ADOPTED_REENTRY_ENTRY_RULE,
     adv_fraction: harness.AdvCapArg = harness.UNSET,
+    invalidation_cancel: InvalidationCancel | None = None,
 ) -> list[BookRunRow]:
     """채택 북을 실데이터에서 돌려 구간별 집계 행을 낸다.
 
@@ -332,6 +334,10 @@ def run_book(
     물려받아 후보에 룩어헤드-안전 `adv_usd`를 싣고, 북 시퀀싱이 명목을 `0.005 × ADV_usd`로
     자른다(자본에 안 비례하는 절대 상한이라 복리 착시를 깬다, WAN-90/213). `adv_fraction=None`은
     **WAN-279 이전의 상한-끔 북**이다(옛 CSV 비트 재현) — 미지정(`UNSET`)과 다르다(WAN-159 규약).
+
+    ⚠️ **채택 기본값은 인과 취소(`"bar_close"`)다(WAN-365)** — `invalidation_cancel` 기본이
+    `None`이라 `run_cells`가 채택 기본값(`ConfluenceParams().invalidation_cancel`)을 물려받는다.
+    `"bar_open"`은 **WAN-365 이전의 소급 취소 북**이다(옛 CSV 비트 재현) — 미지정과 다르다.
     """
     return [
         seg.row
@@ -348,6 +354,7 @@ def run_book(
             reentry=reentry,
             reentry_entry_rule=reentry_entry_rule,
             adv_fraction=adv_fraction,
+            invalidation_cancel=invalidation_cancel,
         )
     ]
 
@@ -366,6 +373,7 @@ def run_book_segments(
     reentry: bool = True,
     reentry_entry_rule: ReentryEntryRule = ADOPTED_REENTRY_ENTRY_RULE,
     adv_fraction: harness.AdvCapArg = harness.UNSET,
+    invalidation_cancel: InvalidationCancel | None = None,
 ) -> list[BookSegment]:
     """`run_book`의 속 — 집계 행뿐 아니라 그 행을 만든 거래·배치 기록까지 돌려준다.
 
@@ -384,6 +392,7 @@ def run_book_segments(
         adv_fraction=adv_fraction,
         reentry=reentry,
         reentry_entry_rule=reentry_entry_rule,
+        invalidation_cancel=invalidation_cancel,
     )
     if funding_proxy:
         payloads, note = apply_funding_proxy(payloads)

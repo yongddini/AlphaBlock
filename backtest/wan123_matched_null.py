@@ -104,6 +104,7 @@ from pathlib import Path
 import pandas as pd
 from pydantic import BaseModel, ConfigDict
 
+from backtest import harness
 from backtest.harness import (
     LEGACY_OB_PARAMS,
     SEGMENT_IS,
@@ -305,13 +306,13 @@ def run_symbol_timeframe(task: _SymbolTfTask, *, log: bool = True) -> list[NullR
                     symbol=task.symbol,
                     segment="IS" if segment.name == SEGMENT_IS else "OOS",
                     gate=lens_name,
-                    confluence_params=real_p,
+                    confluence_params=harness.pin_invalidation_cancel(real_p),
                     backtest_config=cfg,
                     order_block_result=ob_result,
                     iterations=task.iterations,
                     seed=BOOTSTRAP_SEED,
                     funding_rates=seg.funding_rates,
-                    pool_params=pool_p,
+                    pool_params=harness.pin_invalidation_cancel(pool_p),
                 )
                 row = NullRow(
                     symbol=task.symbol,

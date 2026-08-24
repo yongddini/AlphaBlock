@@ -96,7 +96,7 @@ from backtest.wan336_same_step_tp import (
     book_segments_for_payloads,
     verify_adopted_identity,
 )
-from backtest.zone_limit_backtest import InvalidationCancel
+from strategy.models import InvalidationCancel
 
 REPORTS_DIR = Path("backtest/reports")
 CSV_PATH = REPORTS_DIR / "wan364_invalidation_cancel.csv"

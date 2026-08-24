@@ -192,7 +192,7 @@ def run_cell(work: CellWork) -> list[SetupRow]:
         market.htf_df,
         market.df_1m,
         work.timeframe,
-        params=harness.build_params(fill=harness.BASELINE_FILL),
+        params=harness.pin_invalidation_cancel(harness.build_params(fill=harness.BASELINE_FILL)),
         cfg=harness.build_config(work.timeframe),
         order_block_result=harness.detect_order_blocks(market),
         setup_sink=sink,

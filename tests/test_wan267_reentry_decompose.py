@@ -96,7 +96,7 @@ def _events(
             substep_times=[s.time for s in substeps],
             htf_times=[0],
             htf_closes=[100.0],
-            params=ConfluenceParams(),
+            params=harness.pin_invalidation_cancel(ConfluenceParams()),  # WAN-365 핀(옛 계약)
             cfg=_cfg(),
             funding_rates=None,
             entry_rule=entry_rule,  # type: ignore[arg-type]
@@ -144,7 +144,7 @@ def test_freeze_arm_bit_matches_reentry_events() -> None:
         substep_times=[s.time for s in substeps],
         htf_times=[0],
         htf_closes=[100.0],
-        params=ConfluenceParams(),
+        params=harness.pin_invalidation_cancel(ConfluenceParams()),  # WAN-365 핀(옛 계약)
         cfg=_cfg(),
         funding_rates=None,
     )
@@ -172,7 +172,9 @@ def test_zone_arm_differs_from_freeze() -> None:
 def test_band_arm_needs_a_filter() -> None:
     """볼린저 필터가 없으면 band 팔은 성립하지 않는다(빈 결과)."""
     substeps = _substeps([(1, 116.0, 114.0, 115.0), (10, 101.0, 99.0, 100.5)])
-    params = ConfluenceParams().model_copy(update={"deviation_filter": None})
+    params = harness.pin_invalidation_cancel(  # WAN-365 핀(옛 계약)
+        ConfluenceParams().model_copy(update={"deviation_filter": None})
+    )
     events = list(
         _iter_reentries(
             _long_candidate(),

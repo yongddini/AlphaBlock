@@ -42,7 +42,6 @@ import math
 import random
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Literal
 
 import pandas as pd
 
@@ -77,6 +76,7 @@ from strategy.confluence import ConfluenceStrategy, entry_candidate_signals
 from strategy.indicators import atr, emas, vwma
 from strategy.models import (
     ConfluenceParams,
+    InvalidationCancel,
     OrderBlock,
     OrderBlockDirection,
     OrderBlockParams,
@@ -155,14 +155,14 @@ class _Candidate:
     entry_after_invalidation: bool = False
     """체결이 **존 무효화 봉 안에서** 일어났는지 (WAN-364 · 순수 관측).
 
-    참이면 채택 팔(`invalidation_cancel="bar_open"`)에서는 **존재할 수 없는 거래**다 —
-    그쪽은 그 봉의 시작부터 주문을 취소된 것으로 보기 때문이다. 인과 팔
-    (`"bar_close"`)에서 되살아난 거래가 정확히 이 집합이고, 그래서 「이 룩어헤드가 무엇을
-    지웠나」를 거래 단위로 귀속할 수 있다.
+    참이면 옛 팔(`invalidation_cancel="bar_open"`)에서는 **존재할 수 없는 거래**다 —
+    그쪽은 그 봉의 시작부터 주문을 취소된 것으로 보기 때문이다. 채택 팔
+    (`"bar_close"`, WAN-365)에서 되살아난 거래가 정확히 이 집합이고, 그래서 「이 룩어헤드가
+    무엇을 지웠나」를 거래 단위로 귀속할 수 있다.
 
     **순수 관측이다** — 체결·청산·손익 어디에도 쓰이지 않는다(WAN-90 `mfe_r` ·
-    WAN-336 `same_step_take_profit`과 같은 부류). 채택 팔에서는 정의상 항상 거짓이라
-    기존 CSV가 비트 단위로 재현된다."""
+    WAN-336 `same_step_take_profit`과 같은 부류). 옛 팔에서는 정의상 항상 거짓이라
+    옛 CSV가 비트 단위로 재현된다."""
 
     order_block: OrderBlock | None = None
     """이 셋업의 근거 오더블록(WAN-77). 체결·청산 로직에는 쓰이지 않고, 사후 분석
@@ -578,21 +578,14 @@ class StopLossContext:
 StopLossOverride = Callable[["StopLossContext"], float | None]
 
 
-#: 미체결 지정가를 「존이 깨졌다」로 취소하는 **시점** (WAN-364, 옵트인).
+#: 채택 기본값 = `ConfluenceParams.invalidation_cancel`의 기본값(WAN-365: `"bar_close"` = 인과).
 #:
-#: * `"bar_open"` — 채택 기본값. 무효화 봉의 `open_time`부터 취소된 것으로 본다.
-#: * `"bar_close"` — 인과 팔. 그 봉이 **닫힐 때** 비로소 취소한다.
-#:
-#: 🚨 **기본값(`"bar_open"`)은 봉이 끝나야 알 수 있는 사실을 봉 처음으로 되돌려 쓴다** —
-#: `ob.break_time`이 존을 깬 상위TF 봉의 `open_time`이라(`strategy/order_blocks.py`) 그
-#: 봉 **안에서** 체결됐을 주문이 소급 취소된다. 그렇게 지워지는 셋업은 무작위가 아니라
-#: **정의상 손절로 끝났을 것**이다(롱이면 가격이 존 아랫변을 뚫어야 무효화인데, 지정가는
-#: 그 위에 있으므로 체결이 무효화보다 반드시 먼저다). 인과적으로는 「취소」가 아니라
-#: 「체결 후 손절」이 옳다.
-InvalidationCancel = Literal["bar_open", "bar_close"]
-
-#: 채택 기본값 — 옛 CSV가 비트 재현되는 값이다. 바꾸는 것은 재-베이스라인(사용자 결정).
-ADOPTED_INVALIDATION_CANCEL: InvalidationCancel = "bar_open"
+#: 🚨 **여기서 리터럴을 다시 적지 않는다** — 옛 코드가 이 상수에 값을 박아 두는 바람에
+#: 「채택 기본값」이 두 곳에 살았다. 파라미터에서 읽으면 기본값이 움직여도 두 곳이 갈라질 수
+#: 없다(WAN-91/95/112/123/159가 반복해 겪은 조용한 갈라짐 방지). 뜻·근거·전환 비용은
+#: `ConfluenceParams.invalidation_cancel` 독스트링이 정본이고, 옛 동작 재현은
+#: `harness.LEGACY_INVALIDATION_CANCEL`(= `"bar_open"`)로 **명시 고정**한다.
+ADOPTED_INVALIDATION_CANCEL: InvalidationCancel = ConfluenceParams().invalidation_cancel
 
 
 def invalidation_cutoff(
@@ -601,12 +594,13 @@ def invalidation_cutoff(
     htf_ms: int,
     mode: InvalidationCancel = ADOPTED_INVALIDATION_CANCEL,
 ) -> int | None:
-    """무효화 취소가 발효되는 시각 (WAN-364).
+    """무효화 취소가 발효되는 시각 (WAN-364 · 기본값 WAN-365).
 
-    `bar_open`(기본)은 `break_time` 그대로 = 무효화 봉의 시작. `bar_close`는 그 봉의
-    **마감**(`break_time + htf_ms`)이라, 무효화 봉 **안에서**의 체결은 살아남고 그 뒤
-    손절 규칙이 결과를 낸다. 봉이 닫힌 뒤에는 두 팔 모두 취소한다 — 존이 죽은 걸 안
-    다음에도 주문을 걸어 두는 것은 인과가 아니라 다른 엔진이다.
+    `bar_close`(**채택 기본값**)는 그 봉의 **마감**(`break_time + htf_ms`)이라, 무효화 봉
+    **안에서**의 체결은 살아남고 그 뒤 손절 규칙이 결과를 낸다. `bar_open`(옛 동작)은
+    `break_time` 그대로 = 무효화 봉의 시작이라 그 봉 안의 체결이 **소급 취소**된다.
+    봉이 닫힌 뒤에는 두 값 모두 취소한다 — 존이 죽은 걸 안 다음에도 주문을 걸어 두는
+    것은 인과가 아니라 다른 엔진이다.
     """
     if break_time is None:
         return None
@@ -889,7 +883,7 @@ def build_zone_limit_candidates(
     observe_path_fill: bool = False,
     no_same_step_tp: bool = False,
     no_same_step_tp_minutes: frozenset[int] | None = None,
-    invalidation_cancel: InvalidationCancel = ADOPTED_INVALIDATION_CANCEL,
+    invalidation_cancel: InvalidationCancel | None = None,
 ) -> tuple[list[_Candidate], ZoneLimitStats]:
     """B안 셋업 순회 → 1분 서브스텝 시뮬레이션까지(비용 반영 전 원가 후보 목록).
 
@@ -939,14 +933,15 @@ def build_zone_limit_candidates(
     걸린 뒤라 `CANCELLED_CONDITION_FAILED`(미체결)로 끝난다 — 오버라이드를 안 주면 두
     경로 모두 예전과 비트 단위로 같다.
 
-    `invalidation_cancel`(WAN-364, 옵트인)은 **미체결 지정가를 「존이 깨졌다」로 취소하는
-    시점**을 정한다. `"bar_open"`(기본 = 채택)은 무효화 봉의 `open_time`부터 취소된 것으로
-    보고, 그 봉에서 난 탭(시그널 `status="cancelled"`)도 후보에서 뺀다 — 봉이 끝나야 아는
-    사실을 봉 처음으로 되돌려 쓰는 **룩어헤드**이고, 그렇게 지워지는 셋업은 무작위가 아니라
-    **정의상 손절로 끝났을 것**이다(WAN-364 순서 논증). `"bar_close"`는 그 두 층을 함께
-    인과로 바꾼다: 무효화 봉의 탭도 후보로 받고, 취소는 그 봉이 **닫힐 때** 발효한다 —
-    무효화 봉 안의 체결은 살아남아 손절 규칙이 결과를 낸다. 기본값이면 예전과 **비트
-    단위로 같다**(같은 시그널 필터 · 같은 `invalidation_time`).
+    `invalidation_cancel`(WAN-364 · 기본값 WAN-365)은 **미체결 지정가를 「존이 깨졌다」로
+    취소하는 시점**을 정한다. `None`(기본)이면 `params.invalidation_cancel`을 읽고, 값을 주면
+    그것을 덮어쓴다(`rsi_gate_mode` 오버라이드와 같은 규약 — 팔을 나란히 도는 측정 모듈용).
+    채택 기본값 `"bar_close"`는 무효화 봉의 탭도 후보로 받고 취소는 그 봉이 **닫힐 때**
+    발효한다 — 봉 안의 체결은 살아남아 손절 규칙이 결과를 낸다. `"bar_open"`(옛 동작)은
+    무효화 봉의 `open_time`부터 취소된 것으로 보고 그 봉에서 난 탭(시그널
+    `status="cancelled"`)도 후보에서 뺀다 — 봉이 끝나야 아는 사실을 봉 처음으로 되돌려 쓰는
+    **룩어헤드**이고, 그렇게 지워지는 셋업은 무작위가 아니라 **정의상 손절로 끝났을 것**이다
+    (WAN-364 순서 논증). 옛 리포트는 `harness.LEGACY_INVALIDATION_CANCEL`로 명시 고정한다.
 
     `partial_take_profit_r`·`partial_take_profit_fraction`·`breakeven_after_partial`
     (WAN-323 반익절 래더, 옵트인)은 시뮬레이터로 그대로 흘려보낸다. 래더는 **청산만**
@@ -1051,7 +1046,8 @@ def build_zone_limit_candidates(
     # WAN-364: `status="cancelled"`는 **무효화 봉에서 난 탭**이라는 뜻이다(그 뒤의 탭은
     # 시그널로 나오지도 않는다 — `strategy/order_blocks.py`). 인과 팔은 그 탭을 받아야
     # 한다: 탭 시점에는 그 봉이 존을 깰지 아직 모른다.
-    accept_break_bar_taps = invalidation_cancel == "bar_close"
+    cancel_mode = params.invalidation_cancel if invalidation_cancel is None else invalidation_cancel
+    accept_break_bar_taps = cancel_mode == "bar_close"
     for signal in entry_candidate_signals(ob_result, params, times, closes, time_to_pos):
         if signal.status != "active" and not (
             accept_break_bar_taps and signal.status == "cancelled"
@@ -1227,7 +1223,7 @@ def build_zone_limit_candidates(
             take_profit_price=tp_price,
             limit_valid_bars=params.limit_valid_bars,
             invalidation_time=(
-                invalidation_cutoff(ob.break_time, htf_ms=htf_ms, mode=invalidation_cancel)
+                invalidation_cutoff(ob.break_time, htf_ms=htf_ms, mode=cancel_mode)
                 if params.use_order_block_stop
                 else None
             ),

@@ -428,7 +428,7 @@ def run_cell(task: _Task, *, log: bool = True) -> list[DepthRow]:
         market.htf_df,
         market.df_1m,
         task.timeframe,
-        params=params,
+        params=harness.pin_invalidation_cancel(params),
         cfg=cfg,
         order_block_result=ob,
     )
@@ -446,7 +446,7 @@ def run_cell(task: _Task, *, log: bool = True) -> list[DepthRow]:
 
     tp_pairs = [(c, t) for c, t in paired if c.reason is ExitReason.TAKE_PROFIT]
     coverage = harness.run_once(
-        market, params=params, cfg=cfg, order_block_result=ob
+        market, params=harness.pin_invalidation_cancel(params), cfg=cfg, order_block_result=ob
     ).result.metrics.funding_coverage
     window_days = (task.end_ms - task.start_ms) / 86_400_000.0
 
@@ -462,7 +462,7 @@ def run_cell(task: _Task, *, log: bool = True) -> list[DepthRow]:
                     substep_times=substep_times,
                     htf_times=htf_times,
                     htf_closes=htf_closes,
-                    params=params,
+                    params=harness.pin_invalidation_cancel(params),
                     cfg=cfg,
                     funding_rates=market.funding_rates,
                     entry_rule=arm,

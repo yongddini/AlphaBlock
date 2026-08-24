@@ -61,6 +61,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from backtest import harness
 from backtest.book_cli import ADOPTED_REENTRY_ENTRY_RULE
 from backtest.harness import SEGMENT_FULL, SEGMENT_OOS, SEGMENT_OOS_WARM
 from backtest.wan169_leverage_book import run_cells
@@ -399,6 +400,7 @@ def main(argv: list[str] | None = None) -> int:
             jobs=args.jobs,
             reentry=True,
             reentry_entry_rule=REENTRY_ENTRY_RULE,
+            invalidation_cancel=harness.LEGACY_INVALIDATION_CANCEL,
         )
         nonfill_payloads = run_cells(
             symbols,
@@ -409,6 +411,7 @@ def main(argv: list[str] | None = None) -> int:
             reentry=True,
             reentry_entry_rule=REENTRY_ENTRY_RULE,
             limit_stop_nonfill=True,
+            invalidation_cancel=harness.LEGACY_INVALIDATION_CANCEL,
         )
         funding_note = ""
         if not args.no_funding_proxy:

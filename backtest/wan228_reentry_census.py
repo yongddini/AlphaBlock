@@ -86,8 +86,6 @@ from backtest.substep import (
 )
 from backtest.sweep import timeframe_to_ms
 from backtest.zone_limit_backtest import (
-    ADOPTED_INVALIDATION_CANCEL,
-    InvalidationCancel,
     _Candidate,
     _IntrabarLiveLimit,
     _prepare_htf,
@@ -100,6 +98,7 @@ from backtest.zone_limit_backtest import (
 from data.models import FundingRate
 from strategy.models import (
     ConfluenceParams,
+    InvalidationCancel,
     OrderBlockDirection,
     OrderBlockParams,
     SignalExitReason,
@@ -194,7 +193,7 @@ def _iter_reentries(
     breakeven_after_partial: bool = False,
     no_same_step_tp: bool = False,
     no_same_step_tp_minutes: frozenset[int] | None = None,
-    invalidation_cancel: InvalidationCancel = ADOPTED_INVALIDATION_CANCEL,
+    invalidation_cancel: InvalidationCancel | None = None,
     htf_ms: int | None = None,
 ) -> Iterator[tuple[_Candidate, _Reentry]]:
     """익절로 닫힌 한 존의 재무장 루프 코어 — `(_Candidate, _Reentry)`를 하나씩 낸다.
@@ -224,15 +223,19 @@ def _iter_reentries(
     stop_price = cand.stop_price
     is_long = cand.side is PositionSide.LONG
     direction = _direction(cand.side)
-    if invalidation_cancel != ADOPTED_INVALIDATION_CANCEL and htf_ms is None:
-        # WAN-345 부류의 조용한 실패 방지 — 인과 팔인데 봉 길이를 모르면 그냥 채택 팔로
+    # WAN-365: `None`이면 `params.invalidation_cancel`(= 채택 `"bar_close"`)을 읽는다 —
+    # 엔진 본 진입(`build_zone_limit_candidates`)과 같은 규약이라 재진입만 다른 시점으로
+    # 취소되는 잡종이 생길 수 없다.
+    cancel_mode = params.invalidation_cancel if invalidation_cancel is None else invalidation_cancel
+    if cancel_mode == "bar_close" and htf_ms is None:
+        # WAN-345 부류의 조용한 실패 방지 — 인과 팔인데 봉 길이를 모르면 그냥 소급 취소로
         # 접힌다(라벨만 인과). 시끄럽게 죽는다.
         raise ValueError(
-            f"invalidation_cancel={invalidation_cancel!r}에는 htf_ms가 필요합니다 — "
+            f"invalidation_cancel={cancel_mode!r}에는 htf_ms가 필요합니다 — "
             "무효화 봉의 마감 시각을 계산할 수 없습니다."
         )
     invalidation_time = (
-        invalidation_cutoff(ob.break_time, htf_ms=htf_ms or 0, mode=invalidation_cancel)
+        invalidation_cutoff(ob.break_time, htf_ms=htf_ms or 0, mode=cancel_mode)
         if params.use_order_block_stop
         else None
     )
@@ -455,7 +458,7 @@ def reentry_candidates(
     breakeven_after_partial: bool = False,
     no_same_step_tp: bool = False,
     no_same_step_tp_minutes: frozenset[int] | None = None,
-    invalidation_cancel: InvalidationCancel = ADOPTED_INVALIDATION_CANCEL,
+    invalidation_cancel: InvalidationCancel | None = None,
     htf_ms: int | None = None,
 ) -> list[_Candidate]:
     """익절 후 재무장 재진입을 **북 시퀀서에 주입할 `_Candidate`로** 낸다(WAN-261).
@@ -470,10 +473,11 @@ def reentry_candidates(
     재무장 순간의 봉내 라이브 밴드로 지정가를 재산정한다(WAN-267 격리 분해의 리더 팔을 북에
     얹는 경로). 재무장 루프가 하나뿐이라 census·격리 널·북 주입이 같은 규칙을 공유한다.
 
-    `invalidation_cancel`·`htf_ms`(WAN-364, 옵트인)도 루프로 그대로 흘러 **재진입 주문도
-    base 주문과 같은 취소 시점**을 받는다 — 한쪽만 걸면 「base는 인과, 재진입은 소급 취소」인
-    잡종 팔이 된다(WAN-345가 래더 축에서 겪은 그 실패). 인과 팔인데 `htf_ms`를 안 주면 조용히
-    접히지 않고 `ValueError`로 죽는다. 기본값이면 예전과 비트 단위로 같다.
+    `invalidation_cancel`·`htf_ms`(WAN-364 · 기본값 WAN-365)도 루프로 그대로 흘러 **재진입
+    주문도 base 주문과 같은 취소 시점**을 받는다 — 한쪽만 걸면 「base는 인과, 재진입은 소급
+    취소」인 잡종 팔이 된다(WAN-345가 래더 축에서 겪은 그 실패). `None`(기본)이면
+    `params.invalidation_cancel`을 읽어 채택 기본값(`"bar_close"` = 인과)으로 돈다. 인과인데
+    `htf_ms`를 안 주면 조용히 접히지 않고 `ValueError`로 죽는다.
 
     `no_same_step_tp`(WAN-336, 옵트인)도 루프로 그대로 흘러 **재진입 거래가 base 거래와 같은
     자를 받는다** — 한쪽만 걸면 「base는 진입 스텝 익절 금지, 재진입은 허용」인 잡종 팔을 재게
@@ -691,7 +695,8 @@ def run_cell(task: _Task, *, log: bool = True) -> CellRow | None:
         return None
     ob = harness.detect_order_blocks(market, OrderBlockParams())
     cfg = harness.build_config(task.timeframe)
-    params = harness.build_params()  # 채택 기본값(핀 없음).
+    # WAN-365 명시 핀: wan228 census CSV는 **소급 취소** 시절의 동결 기록이다.
+    params = harness.pin_invalidation_cancel(harness.build_params())
 
     candidates, _stats = build_zone_limit_candidates(
         market.htf_df,

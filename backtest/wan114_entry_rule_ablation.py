@@ -88,6 +88,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from backtest import harness
 from backtest.harness import (
     IS_FRACTION,
     LEGACY_OB_PARAMS,
@@ -286,7 +287,10 @@ def run_report(
                         for seed in iter_seeds(fill):
                             params = rung_params(rung, fill=fill, seed=seed)
                             outcome = run_once(
-                                window, params=params, cfg=cfg, order_block_result=ob_result
+                                window,
+                                params=harness.pin_invalidation_cancel(params),
+                                cfg=cfg,
+                                order_block_result=ob_result,
                             )
                             row = build_row(
                                 outcome, window, segment=segment, params=params, fill_name=fill.name

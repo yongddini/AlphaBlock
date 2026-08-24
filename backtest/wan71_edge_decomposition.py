@@ -48,6 +48,7 @@ from pathlib import Path
 import pandas as pd
 from pydantic import BaseModel, ConfigDict
 
+from backtest import harness
 from backtest.harness import LEGACY_OB_PARAMS, pin_band_bar
 from backtest.harness import split_bars as _split_bars
 from backtest.models import BacktestConfig
@@ -199,7 +200,7 @@ def run_cell(
             symbol=symbol,
             segment=segment,
             gate=gate_label,
-            confluence_params=params,
+            confluence_params=harness.pin_invalidation_cancel(params),
             order_block_params=order_block_params,
             backtest_config=cfg,
             order_block_result=order_block_result,
@@ -215,7 +216,7 @@ def run_cell(
             seg_htf,
             seg_1m,
             timeframe,
-            params=CURRENT_DEFAULT_PARAMS,
+            params=harness.pin_invalidation_cancel(CURRENT_DEFAULT_PARAMS),
             cfg=cfg,
             order_block_params=order_block_params,
             order_block_result=order_block_result,
