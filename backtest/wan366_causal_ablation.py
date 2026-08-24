@@ -38,10 +38,34 @@ WAN-364 §2 인구조사는 「무효화 봉에서 난 탭」이 전체의 몇 %
 * **볼린저 · 존폭 필터**는 후보 생성 축이다(`run_cells(bollinger=, max_zone_width_atr=)`).
 * **손절폭 가드**는 **사이징** 축이라 같은 후보를 다시 배치하면 된다
   (`build_book_rows(min_stop_distance_fraction=)`) — wan76 §3·WAN-197이 쓰던 성질이다.
+  이 성질 하나에 `L3`(`L2`의 후보)와 `L0g`(`L0`의 후보) **둘 다** 얹혀 있다.
 * **재진입**은 payload에 **별도 dict**로 실려 배치에서 켜고 끈다(`include_reentry`, WAN-261).
 
 그래서 `L2`·`L3`·`L4`가 **한 번의 후보 생성**을 나눠 쓰고, 그 생성이 곧 **채택 북**이다
 (검산 (a)가 그것을 못 박는다).
+
+## §2 — 분기 단 `L0g`(WAN-368): 사다리에 없는 조합 「존 단독 ＋ 가드」
+
+| 단 | 무엇을 켜나 | 볼린저 | 존폭 1.28 | 가드 0.3% | 재진입 |
+| -- | -- | -- | -- | -- | -- |
+| `L0g` | 존 단독 ＋ 손절폭 가드 | 끔 | 끔 | **켬** | 끔 |
+
+사다리는 **누적**이라 가드(`L2`→`L3`)는 **볼린저와 필터가 이미 켜진 위에서만** 측정됐다.
+그런데 그 둘은 「손절폭이 좁은 거래」를 **만드는** 부품이고 가드는 바로 그 부류를 쳐낸다 —
+즉 셋은 독립이 아닐 수 있다. `L0g`는 손해 부품 셋을 다 끄고 가드만 켠 단이고, 묻는 것은
+둘이다: **(1) `L0g`가 사다리 최선 단 `L3`보다 나은가 · (2) 가드의 기여(`L0`→`L0g`)가
+`L2`→`L3`와 같은 크기인가**(다르면 가드가 볼린저·필터와 **상호작용한다**는 뜻이고 그 사실
+자체가 산출물이다).
+
+🚨 **`L0g`는 누적 사다리 위의 단이 아니라 분기다** — 증분은 `L0`→`L0g` 하나뿐이고,
+`L0g`→`L1` 같은 이웃 차는 **뜻이 없다**(`STEPS`가 그 관계를 명시적으로 들고 있다).
+
+⚠️ **다른 조합은 뒤지지 않는다**(존＋볼린저＋가드 …). 축이 넷이면 조합이 16개이고,
+**기댓값이 음수인 엔진에서 조합을 뒤지면 앞구간에서 좋아 보이는 것은 반드시 나온다** —
+그건 신호가 아니라 검색의 산물이다(WAN-161/90/111). 결정문이 지목한 **한 단만** 잰다.
+
+📌 **단이 여섯이 돼도 후보 생성은 여전히 세 번뿐이다** — `L0g`는 `L0`이 만든 후보를
+**재시퀀싱만** 하므로(가드는 사이징 축) 이 단의 컴퓨트는 배치 한 번 + LOO 배치들이다.
 
 ## 좌표 (WAN-305 — 핀 하나도 없다)
 
@@ -57,8 +81,10 @@ WAN-364 §2 인구조사는 「무효화 봉에서 난 탭」이 전체의 몇 %
 * **(a) `L4` ≡ 인자 없는 채택 북** — `wan336.verify_adopted_identity`(펀딩 대리 무동작) +
   `book_cli.build_book_rows` 기본 인자 행과의 대조. 이 등식이 서면 사다리 꼭대기가 실제로
   오늘 페이퍼가 뛰는 그 규칙이다.
-* **(b) `L2`·`L3`가 같은 후보를 본다** — 가드는 사이징 축이라 후보 수가 **같아야** 한다.
-  다르면 가드가 후보 생성에 샌 것이다.
+* **(b) 가드 짝이 같은 후보를 본다** — `L2`·`L3`와 `L0`·`L0g` 두 짝 다 가드만 다르므로
+  후보 수가 **같아야** 한다. 다르면 가드가 후보 생성에 샌 것이다. 🚨 짝의 한쪽만 이번
+  실행에 있으면 **적재된 CSV의 짝 행과** 대조한다 — 한쪽만 돌렸다고 검산이 조용히
+  건너뛰면 그건 검산이 아니다(WAN-194/318/321 「실패가 성공과 같은 모양」).
 * **(c) 조인 문턱의 부분집합** — `L2`의 셋업이 `L1`의 **부분집합**이다(개수가 아니라 집합으로
   — 개수만 보면 같은 개수의 다른 셋업이 통과한다, WAN-161 선례).
 
@@ -68,7 +94,7 @@ WAN-364 §2 인구조사는 「무효화 봉에서 난 탭」이 전체의 몇 %
 uv run python -m backtest.wan366_causal_ablation --census-only              # §0만(싸다)
 uv run python -m backtest.wan366_causal_ablation --rungs L2,L3,L4 --jobs 4  # 채택 생성 먼저
 uv run python -m backtest.wan366_causal_ablation --rungs L1 --jobs 4 --append
-uv run python -m backtest.wan366_causal_ablation --rungs L0 --jobs 4 --append
+uv run python -m backtest.wan366_causal_ablation --rungs L0,L0g --jobs 4 --append  # §2(WAN-368)
 uv run python -m backtest.wan366_causal_ablation --from-csv                 # 요약만
 ```
 """
@@ -155,9 +181,24 @@ class Rung:
             and self.reentry
         )
 
+    @property
+    def branch(self) -> bool:
+        """누적 사다리 위의 단이 아닌가 — 이웃 차가 뜻을 갖지 않는 **분기**(WAN-368 `L0g`)."""
+        return self.name not in CHAIN
+
 
 RUNGS: tuple[Rung, ...] = (
     Rung("L0", "존 단독(볼린저·필터·가드·재진입 전부 끔)", "G0", False, None, 0.0, False),
+    Rung(
+        # WAN-368 — 누적 사다리에 없는 조합. `L0`과 **같은 생성 그룹**이라 후보를 재사용한다.
+        "L0g",
+        f"존 단독 ＋ 손절폭 가드 {ADOPTED_STOP_GUARD:.1%} (분기)",
+        "G0",
+        False,
+        None,
+        ADOPTED_STOP_GUARD,
+        False,
+    ),
     Rung("L1", "＋ 볼린저 진입가 재산정", "G1", True, None, 0.0, False),
     Rung("L2", f"＋ 존폭 필터 {ADOPTED_ZONE_WIDTH}", "G2", True, ADOPTED_ZONE_WIDTH, 0.0, False),
     Rung(
@@ -180,9 +221,29 @@ RUNGS: tuple[Rung, ...] = (
     ),
 )
 RUNGS_BY_NAME: dict[str, Rung] = {r.name: r for r in RUNGS}
+
+#: 표시 순서(사다리 + 분기). ⚠️ **이웃한 두 이름의 차가 증분이 아니다** — 증분은 `STEPS`가
+#: 명시적으로 들고 있다. `zip(LADDER, LADDER[1:])`로 되돌리면 분기 `L0g`가 사다리 한가운데
+#: 끼어들어 「볼린저의 순기여」(`L0`→`L1`)가 조용히 다른 양으로 바뀐다.
 LADDER: tuple[str, ...] = tuple(r.name for r in RUNGS)
+
+#: 누적 사다리 — 이웃한 두 단의 차가 그 부품의 **순기여**다.
+CHAIN: tuple[str, ...] = ("L0", "L1", "L2", "L3", "L4")
+
+#: 분기 단 (부모, 자식) — 사다리 위에 없는 조합이라 그 짝의 차만 뜻을 갖는다(WAN-368).
+BRANCHES: tuple[tuple[str, str], ...] = (("L0", "L0g"),)
+
+#: 증분을 낼 (앞 단, 뒤 단) 전부 — 누적 사다리 + 분기.
+STEPS: tuple[tuple[str, str], ...] = tuple(zip(CHAIN, CHAIN[1:], strict=False)) + BRANCHES
+
+#: 가드 짝 (가드 끔, 가드 켬) — 가드만 다르므로 후보 수가 같아야 한다(검산 (b)).
+GUARD_PAIRS: tuple[tuple[str, str], ...] = (("L0", "L0g"), ("L2", "L3"))
+
 BASE_RUNG = "L0"
 ADOPTED_RUNG = "L4"
+#: WAN-368이 묻는 두 단 — 분기(`L0g`)와 사다리의 최선 단(`L3`).
+BRANCH_RUNG = "L0g"
+BEST_CHAIN_RUNG = "L3"
 
 
 def generation_of(gen: str) -> tuple[Rung, ...]:
@@ -404,6 +465,33 @@ def _assert_adopted_base() -> None:
             f"채택 손절폭 가드가 {guard}로 바뀌었습니다 — `ADOPTED_STOP_GUARD`와 라벨을 "
             "함께 고치세요."
         )
+    _assert_guard_pairs()
+
+
+def _assert_guard_pairs() -> None:
+    """가드 짝은 **가드만** 달라야 하고 **같은 생성 그룹**이어야 한다 — 설계 불변식.
+
+    이 성질이 검산 (b)의 전제다: 짝이 다른 그룹이면 후보가 따로 만들어져 「같은 후보를
+    본다」가 애초에 성립하지 않고, 그러면 검산이 **비교할 것이 없어 조용히 통과한다**.
+    라벨이 아니라 여기서 **동작**으로 막는다.
+    """
+    for off, on in GUARD_PAIRS:
+        a, b = RUNGS_BY_NAME[off], RUNGS_BY_NAME[on]
+        if a.gen != b.gen:
+            raise AssertionError(
+                f"가드 짝 {off}·{on}이 생성 그룹이 다릅니다({a.gen} != {b.gen}) — 가드는 "
+                "사이징 축이라 같은 후보를 나눠 써야 합니다(검산 (b)의 전제)."
+            )
+        if (a.bollinger, a.zone_width, a.reentry) != (b.bollinger, b.zone_width, b.reentry):
+            raise AssertionError(
+                f"가드 짝 {off}·{on}이 가드 말고 다른 축도 다릅니다 — 그러면 그 짝의 차를 "
+                "「가드의 기여」라고 부를 수 없습니다."
+            )
+        if (a.guard, b.guard) != (0.0, ADOPTED_STOP_GUARD):
+            raise AssertionError(
+                f"가드 짝 {off}·{on}의 가드가 (끔 0.0, 켬 {ADOPTED_STOP_GUARD})가 아닙니다"
+                f"({a.guard}, {b.guard})."
+            )
 
 
 def generation_payloads(
@@ -571,9 +659,14 @@ def run_generation(
     end: str,
     jobs: int,
     segments: Sequence[str] = SEGMENT_ORDER,
+    previous: pd.DataFrame | None = None,
     log: bool = True,
 ) -> tuple[list[LadderRow], list[LadderLooRow]]:
-    """생성 그룹 하나 — 후보를 **한 번** 만들고 그 그룹의 단들을 배치한다."""
+    """생성 그룹 하나 — 후보를 **한 번** 만들고 그 그룹의 단들을 배치한다.
+
+    `previous`는 이미 적재된 CSV다 — 가드 짝의 한쪽만 이번에 돌렸을 때 검산 (b)가 그쪽
+    행과 대조하는 데만 쓴다(계산에는 안 쓴다).
+    """
     _assert_adopted_base()
     start_ms, end_ms = parse_date_ms(start), parse_date_ms(end)
     payloads = generation_payloads(symbols, timeframes, gen, start=start, end=end, jobs=jobs)
@@ -601,29 +694,53 @@ def run_generation(
         )
         if log:
             print(f"[wan366] {rung.name}({rung.adds}): {len(level_rows)}행", flush=True)
-    _check_guard_axis(by_level)
+    _check_guard_axis(by_level, previous)
     return rows, loo
 
 
-def _check_guard_axis(by_level: dict[str, list[LadderRow]]) -> None:
+def _candidates_by_segment(
+    level: str,
+    by_level: dict[str, list[LadderRow]],
+    previous: pd.DataFrame | None,
+) -> dict[str, int]:
+    """이 단의 구간별 후보 수 — 이번 실행에 없으면 **적재된 CSV**에서 읽는다.
+
+    짝의 한쪽만 돌렸다고 검산이 조용히 건너뛰면 그건 검산이 아니다(WAN-194/318/321
+    「실패가 성공과 같은 모양」). `--rungs L0g --append`처럼 한쪽만 돌려도 CSV의 짝 행과
+    대조된다.
+    """
+    rows = by_level.get(level)
+    if rows:
+        return {r.segment: r.num_candidates for r in rows}
+    if previous is None or previous.empty or "level" not in previous.columns:
+        return {}
+    hit = previous[previous["level"] == level]
+    return {str(r.segment): int(r.num_candidates) for r in hit.itertuples()}
+
+
+def _check_guard_axis(
+    by_level: dict[str, list[LadderRow]],
+    previous: pd.DataFrame | None = None,
+) -> None:
     """검산 (b) — 가드는 **사이징** 축이라 후보 수를 못 바꾼다.
 
-    `L2`와 `L3`는 같은 payload를 가드만 바꿔 배치한 것이라 `num_candidates`가 같아야 한다.
-    다르면 가드가 후보 생성에 샌 것이고, 그러면 이 사다리의 컴퓨트 설계(생성 3회) 자체가
-    틀린 것이다 — 라벨이 아니라 **동작**으로 잡는다.
+    가드 짝(`L2`·`L3` 그리고 WAN-368의 `L0`·`L0g`)은 같은 payload를 가드만 바꿔 배치한
+    것이라 `num_candidates`가 같아야 한다. 다르면 가드가 후보 생성에 샌 것이고, 그러면 이
+    사다리의 컴퓨트 설계(생성 3회) 자체가 틀린 것이다 — 라벨이 아니라 **동작**으로 잡는다.
     """
-    left, right = by_level.get("L2"), by_level.get("L3")
-    if not left or not right:
-        return
-    right_by_segment = {r.segment: r for r in right}
-    for row in left:
-        peer = right_by_segment.get(row.segment)
-        if peer is not None and peer.num_candidates != row.num_candidates:
-            raise AssertionError(
-                f"검산(b) 실패 — {row.segment}에서 가드만 바꿨는데 후보 수가 달라졌습니다"
-                f"({row.num_candidates} != {peer.num_candidates}). 가드는 사이징 축이라 "
-                "후보를 바꿀 수 없습니다(WAN-197)."
-            )
+    for off, on in GUARD_PAIRS:
+        left = _candidates_by_segment(off, by_level, previous)
+        right = _candidates_by_segment(on, by_level, previous)
+        if not left or not right:
+            continue
+        for segment, count in left.items():
+            peer = right.get(segment)
+            if peer is not None and peer != count:
+                raise AssertionError(
+                    f"검산(b) 실패 — {segment}에서 {off}→{on}은 가드만 바꿨는데 후보 수가 "
+                    f"달라졌습니다({count} != {peer}). 가드는 사이징 축이라 후보를 바꿀 수 "
+                    "없습니다(WAN-197)."
+                )
 
 
 def run_report(
@@ -635,6 +752,7 @@ def run_report(
     end: str = harness.DEFAULT_END,
     jobs: int = 1,
     segments: Sequence[str] = SEGMENT_ORDER,
+    previous: pd.DataFrame | None = None,
     on_generation: Callable[[list[LadderRow], list[LadderLooRow]], None] | None = None,
     log: bool = True,
 ) -> tuple[list[LadderRow], list[LadderLooRow]]:
@@ -657,6 +775,7 @@ def run_report(
             end=end,
             jobs=jobs,
             segments=segments,
+            previous=previous,
             log=log,
         )
         rows.extend(gen_rows)
@@ -885,7 +1004,7 @@ def increments(frame: pd.DataFrame) -> list[Increment]:
     """이웃한 두 단이 **둘 다 있을 때만** 증분을 낸다(없는 단을 0으로 메우지 않는다)."""
     out: list[Increment] = []
     levels = _levels_present(frame)
-    for lo, hi in zip(LADDER, LADDER[1:], strict=False):
+    for lo, hi in STEPS:
         if lo not in levels or hi not in levels:
             continue
         for segment in _segments_present(frame):
@@ -962,10 +1081,18 @@ def _verdict(frame: pd.DataFrame) -> str:
             "「파라미터를 더 뒤진다」가 아니라 **「이 규칙 집합에는 없다」**이고, 그건 실패가 "
             "아니라 **결론**이다(이슈 §「그래서 이 이슈가 하는 것」)." + flip_bit + level_bit
         )
+    # 분기 단(WAN-368 `L0g`)이 섞이면 **같은 부품이 두 자리에서** 잡힌다 — 그 사실을 밝히지
+    # 않으면 「값을 더하는 부품이 2개」가 서로 다른 부품 둘로 읽힌다.
+    branch_bit = (
+        " ⚠️ 그중 분기 단(`(분기)` 표시)은 **누적 사다리 위의 단이 아니다** — 같은 부품을 "
+        "다른 자리에서 잰 것이라 서로 다른 부품으로 세지 말 것(§2가 그 둘을 나란히 놓는다)."
+        if any("(분기)" in a for a in adders)
+        else ""
+    )
     return (
-        f"📌 **판정: 값을 더하는 부품이 {len(adders)}개 있다** — {' · '.join(adders)}. "
+        f"📌 **판정: 값을 더하는 단이 {len(adders)}개 있다** — {' · '.join(adders)}. "
         "앞구간에서 고르고 뒷구간에서 확인한 것이라(OOS는 선택 축이 아니다) **다음 단계는 "
-        "그 축만 쓰는 것**이다." + flip_bit + level_bit
+        "그 축만 쓰는 것**이다." + branch_bit + flip_bit + level_bit
     )
 
 
@@ -1025,8 +1152,11 @@ def _render_ladder(frame: pd.DataFrame) -> list[str]:
         ]
         for row in seg_rows:
             ruin = " 🚨" if bool(row["ruin"]) else ""
+            # 분기 단은 누적 사다리 위에 없다 — 표에서도 그렇게 보여야 이웃 행의 차를
+            # 「그 부품의 순기여」로 읽는 사고가 안 난다(WAN-368).
+            mark = "🔀 " if RUNGS_BY_NAME[str(row["level"])].branch else ""
             parts.append(
-                f"| `{row['level']}` | {row['adds']} | {int(row['num_candidates']):,} | "
+                f"| {mark}`{row['level']}` | {row['adds']} | {int(row['num_candidates']):,} | "
                 f"{int(row['num_trades']):,} | {_pct(row['win_rate'])} | "
                 f"{_pct(row['total_return'])} | {_num(row['mean_net_r'])} | "
                 f"{_pct(row['max_drawdown'])}{ruin} | {_num(row['return_over_mdd'], 2)} | "
@@ -1034,10 +1164,17 @@ def _render_ladder(frame: pd.DataFrame) -> list[str]:
             )
         parts.append("")
 
+    if any(RUNGS_BY_NAME[level].branch for level in _levels_present(frame)):
+        parts += [
+            "🔀 = **누적 사다리 위의 단이 아니라 분기다**(WAN-368 `L0g`) — 위아래 행의 차를 "
+            "「그 부품의 순기여」로 읽지 말 것. 뜻을 갖는 증분은 아래 표에만 있다.",
+            "",
+        ]
+
     incs = increments(frame)
     if incs:
         parts += [
-            "### 증분 (다음 단 − 이 단)",
+            "### 증분 (뒤 단 − 앞 단 · 누적 사다리 + 분기)",
             "",
             "| 단 | 부품 | 구간 | Δ거래당 netR | Δ총수익 | ΔMDD | Δ거래 |",
             "| -- | -- | -- | --: | --: | --: | --: |",
@@ -1057,6 +1194,173 @@ def _render_ladder(frame: pd.DataFrame) -> list[str]:
             "읽는다 — 부호만 보고 「뒤집혔다」로 쓰지 않기 위한 자다(WAN-120 선례).",
             "",
         ]
+    return parts
+
+
+# --------------------------------------------------------------------------- #
+# §2 렌더 — 분기 단 `L0g`(WAN-368)
+# --------------------------------------------------------------------------- #
+
+
+def _guard_increment(frame: pd.DataFrame, pair: tuple[str, str], segment: str) -> float | None:
+    """가드 짝의 거래당 net R 차 — 한쪽이라도 없으면 `None`(0으로 메우지 않는다)."""
+    off, on = pair
+    a, b = _pick(frame, off, segment), _pick(frame, on, segment)
+    if a is None or b is None:
+        return None
+    return float(b["mean_net_r"]) - float(a["mean_net_r"])
+
+
+def _branch_verdict(frame: pd.DataFrame) -> str:
+    """완료기준 2 — 한 문장 판정: `L0g`가 `L3`보다 나은가 · 가드 기여가 같은 크기인가.
+
+    🚨 고르는 구간은 `is`다(WAN-161/90/111: OOS는 선택 축이 아니다). `oos_warm`은 확인과
+    뒤집힘 세기에만 쓴다.
+    """
+    pieces: list[str] = []
+    for segment, role in ((harness.SEGMENT_IS, "선택"), (PRIMARY_OOS, "확인")):
+        branch = _pick(frame, BRANCH_RUNG, segment)
+        best = _pick(frame, BEST_CHAIN_RUNG, segment)
+        if branch is None or best is None:
+            continue
+        gap = float(branch["mean_net_r"]) - float(best["mean_net_r"])
+        if abs(gap) < NET_R_NOISE:
+            word = "**구분되지 않는다**"
+        elif gap > 0:
+            word = "**낫다**"
+        else:
+            word = "**나쁘다**"
+        pieces.append(
+            f"`{segment}`({role}) {BRANCH_RUNG} {float(branch['mean_net_r']):+.4f}R vs "
+            f"`{BEST_CHAIN_RUNG}` {float(best['mean_net_r']):+.4f}R → {word}"
+            f"({gap:+.4f}R)"
+        )
+    if not pieces:
+        return (
+            f"⚠️ **판정 불가** — `{BRANCH_RUNG}`와 `{BEST_CHAIN_RUNG}`가 같은 구간에 함께 "
+            "있어야 대조가 성립한다."
+        )
+
+    bare = _guard_increment(frame, ("L0", BRANCH_RUNG), harness.SEGMENT_IS)
+    stacked = _guard_increment(frame, ("L2", "L3"), harness.SEGMENT_IS)
+    bare_oos = _guard_increment(frame, ("L0", BRANCH_RUNG), PRIMARY_OOS)
+    stacked_oos = _guard_increment(frame, ("L2", "L3"), PRIMARY_OOS)
+    inter = ""
+    if (
+        bare is not None
+        and stacked is not None
+        and bare_oos is not None
+        and stacked_oos is not None
+    ):
+        d_is = bare - stacked
+        d_oos = bare_oos - stacked_oos
+        both = (
+            f"맨몸 `L0`→`{BRANCH_RUNG}` {bare:+.4f}R(IS) · {bare_oos:+.4f}R"
+            f"(`{PRIMARY_OOS}`) vs 볼린저·필터 위 `L2`→`L3` {stacked:+.4f}R · "
+            f"{stacked_oos:+.4f}R(차 {d_is:+.4f}R · {d_oos:+.4f}R)"
+        )
+        if max(abs(d_is), abs(d_oos)) < NET_R_NOISE:
+            inter = (
+                f" 📌 **가드의 기여는 두 자리에서 같은 크기다** — {both}로 둘 다 "
+                f"±{NET_R_NOISE:.3f}R 안이다. 즉 **가드는 볼린저·필터와 상호작용하지 않고** "
+                "단순 덧셈이 성립한다."
+            )
+        else:
+            inter = (
+                f" 🚨 **가드의 기여가 자리에 따라 다르다 — 상호작용한다** — {both}. "
+                "볼린저(진입가를 존 아랫변 쪽으로 당김)와 존폭 필터(좁은 존만 남김)가 "
+                "**가드가 쳐낼 부류를 만드는 부품**이라는 이슈의 가설이 숫자로 확인된 "
+                "것이고, **그래서 단순 덧셈은 성립하지 않는다** — 이 사실 자체가 산출물이다."
+            )
+
+    cut = ""
+    a, b = _pick(frame, "L0", PRIMARY_OOS), _pick(frame, BRANCH_RUNG, PRIMARY_OOS)
+    if a is not None and b is not None and int(a["num_trades"]):
+        cut = (
+            f" 📌 **가드가 맨몸에서 지운 거래는 `{PRIMARY_OOS}` 기준 "
+            f"{_removed_share(frame, ('L0', BRANCH_RUNG), PRIMARY_OOS)}**"
+            f"(`L2`→`L3`는 같은 구간에서 "
+            f"{_removed_share(frame, ('L2', 'L3'), PRIMARY_OOS)}) — 이 한 숫자가 이슈 "
+            "코멘트의 세 시나리오(보수 = 같은 **건수** · 중간 · 낙관 = 같은 **비율**) 중 "
+            "어느 것이었는지를 가른다. ⚠️ 「쳐낸 건수」가 아니라 **순증감**이다(북은 한 "
+            "지갑이라 가드가 비운 자리를 다른 칸이 쓴다 — WAN-316)."
+        )
+    return "📌 **판정: " + " · ".join(pieces) + ".**" + inter + cut
+
+
+def _removed_share(frame: pd.DataFrame, pair: tuple[str, str], segment: str) -> str:
+    """가드를 켜서 **순으로** 사라진 거래 — 부호를 그대로 낸다.
+
+    ⚠️ 「쳐낸 건수」가 아니라 **순증감**이다: 북은 한 지갑이라 가드가 자리를 비우면 다른
+    칸이 그 자리를 쓴다(WAN-316). 그래서 늘어날 수도 있고, 그 경우 부호가 그대로 보여야
+    한다 — 절댓값으로 접으면 「쳐냈다」는 잘못된 인상을 준다.
+    """
+    off, on = pair
+    a, b = _pick(frame, off, segment), _pick(frame, on, segment)
+    if a is None or b is None or not int(a["num_trades"]):
+        return "—"
+    removed = int(a["num_trades"]) - int(b["num_trades"])
+    return f"{removed:+,}건({removed / int(a['num_trades']) * 100:+.1f}%)"
+
+
+def _render_branch(frame: pd.DataFrame) -> list[str]:
+    """§2 — 분기 단이 CSV에 있을 때만 그린다."""
+    if frame.empty or BRANCH_RUNG not in set(frame["level"].unique()):
+        return []
+    parts = [
+        f"## §2 분기 단 `{BRANCH_RUNG}` — 「존 단독 ＋ 가드」 (WAN-368)",
+        "",
+        _branch_verdict(frame),
+        "",
+        "### 맨몸 가드 vs 쌓은 가드 (거래당 net R 증분)",
+        "",
+        "| 구간 | 맨몸 `L0`→`L0g` | 볼린저·필터 위 `L2`→`L3` | 차 | 맨몸 거래 순증감 |",
+        "| -- | --: | --: | --: | --: |",
+    ]
+    for segment in _segments_present(frame):
+        bare = _guard_increment(frame, ("L0", BRANCH_RUNG), segment)
+        stacked = _guard_increment(frame, ("L2", "L3"), segment)
+        delta = None if bare is None or stacked is None else float(bare) - float(stacked)
+        parts.append(
+            f"| `{segment}` | {_signed(bare)} | {_signed(stacked)} | {_signed(delta)} | "
+            f"{_removed_share(frame, ('L0', BRANCH_RUNG), segment)} |"
+        )
+    parts += [
+        "",
+        f"### `{BRANCH_RUNG}` vs 사다리 최선 단 `{BEST_CHAIN_RUNG}` (거래당 net R)",
+        "",
+        f"| 구간 | `{BRANCH_RUNG}`(존＋가드) | `{BEST_CHAIN_RUNG}`(볼린저＋필터＋가드) | 차 |",
+        "| -- | --: | --: | --: |",
+    ]
+    for segment in _segments_present(frame):
+        branch = _pick(frame, BRANCH_RUNG, segment)
+        best = _pick(frame, BEST_CHAIN_RUNG, segment)
+        gap = (
+            None
+            if branch is None or best is None
+            else float(branch["mean_net_r"]) - float(best["mean_net_r"])
+        )
+        parts.append(
+            f"| `{segment}` | {_num(None if branch is None else branch['mean_net_r'])} | "
+            f"{_num(None if best is None else best['mean_net_r'])} | {_signed(gap)} |"
+        )
+    parts += [
+        "",
+        f"🚨 **`{BRANCH_RUNG}`는 누적 사다리 위의 단이 아니라 분기다** — 뜻을 갖는 증분은 "
+        f"`L0`→`{BRANCH_RUNG}` 하나뿐이고, 표시 순서상 이웃한 `{BRANCH_RUNG}`→`L1` 같은 차는 "
+        "계산되지 않는다(`STEPS`가 그 관계를 명시적으로 들고 있다).",
+        "",
+        "⚠️ **다른 조합은 안 뒤졌다**(존＋볼린저＋가드, 존＋필터＋가드 …). 축이 넷이면 조합이 "
+        "16개이고, **기댓값이 음수인 엔진에서 조합을 뒤지면 앞구간에서 좋아 보이는 것은 "
+        "반드시 나온다** — 그건 신호가 아니라 검색의 산물이다(WAN-161: 배수 argmax가 8셀 중 "
+        "7에서 뒤집혔다 · WAN-90 · WAN-111). 결정문이 지목한 **한 단만** 쟀다.",
+        "",
+        "⚠️ **가드가 쳐내는 것은 「지는 거래」가 아니라 「1R 대비 비용이 말이 안 되는 거래」"
+        "다**(WAN-154 §3). 손절폭이 0.3%보다 좁으면 잡음 안에 손절선이 들어가 사실상 전부 "
+        "손절로 끝난다 — 그래서 그 부류를 빼면 거래당 실력이 오른다. **알파를 더한 게 아니라 "
+        "마이너스를 뺀 것**이다.",
+        "",
+    ]
     return parts
 
 
@@ -1104,7 +1408,7 @@ def build_summary(frame: pd.DataFrame, loo: pd.DataFrame, census: pd.DataFrame) 
         "",
         "재현: `uv run python -m backtest.wan366_causal_ablation --census-only` → "
         "`--rungs L2,L3,L4 --jobs 4` → `--rungs L1 --jobs 4 --append` → "
-        "`--rungs L0 --jobs 4 --append` (요약만: `--from-csv`)",
+        "`--rungs L0,L0g --jobs 4 --append` (§2 = WAN-368 · 요약만: `--from-csv`)",
         "",
         "🚨 **측정 전용이다** — `ConfluenceParams()`·`LeverageBookParams()` 기본값을 하나도 "
         "안 건드렸다. 사다리의 모든 단은 **옵트인**이고 아무것도 안 주면 채택 북이 나온다.",
@@ -1112,6 +1416,7 @@ def build_summary(frame: pd.DataFrame, loo: pd.DataFrame, census: pd.DataFrame) 
     ]
     parts += _render_census(census)
     parts += _render_ladder(frame)
+    parts += _render_branch(frame)
     parts += _render_loo(loo)
     parts += [
         "## 다음 이슈에 넘길 한 줄 (완료기준 5)",
@@ -1241,6 +1546,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         start=args.start,
         end=args.end,
         jobs=args.jobs,
+        previous=base_rows if not base_rows.empty else None,
         on_generation=persist,
     )
     SUMMARY_PATH.write_text(build_summary(base_rows, base_loo, census_frame), encoding="utf-8")
