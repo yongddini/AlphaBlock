@@ -61,8 +61,12 @@ gross_r − slippage_r − entry_fee_r − take_profit_fee_r − stop_fee_r − 
 
 * **(a) `taker_tp` 팔 ≡ WAN-366 `L4`** — 적재된 `wan366_causal_ablation.csv`의 그 행과 대조한다.
   이 등식이 서면 「전」 팔이 실제로 **WAN-370 이전의 채택 북**이다(라벨이 아니라 숫자로).
-* **(b) `maker_tp` 팔 ≡ 인자 없는 채택 북** — `book_cli.build_book_rows`를 **기본 인자**로 부른
-  행과 대조한다(그 기본이 곧 `backtest.run --oos-warm`이 도는 회계다).
+* **(b) `maker_tp` 팔 ≡ 채택 북 회계** — `book_cli.build_book_rows`에
+  `ADOPTED_TAKE_PROFIT_LIQUIDITY`를 **명시로** 넘긴 행과 대조한다. ⚠️ 「인자 없는」이
+  아니다 — `build_book_rows`의 기본값은 옛 회계(중앙 핀, `taker`)이고, 채택 북
+  (`run_book` = `backtest.run --oos-warm`)이 그 값을 **항상 명시**하므로 이 호출이 곧
+  그 회계다(§2-2가 경고한 함정 그대로 — 서술이 코드와 갈라지면 다음 사람이
+  「인자 없이 부르면 채택」이라고 읽는다).
 * **(c) 분해 항등식** — 거래마다 위 식의 최대 절대차. 0이 아니면 분해가 손익과 갈라진 것이다.
 * **(d) 두 팔이 같은 후보를 본다** — `num_candidates`가 같아야 한다. 다르면 비용이 후보 생성에
   샌 것이다.
@@ -563,7 +567,12 @@ def _verify_adopted(
     start_ms: int,
     end_ms: int,
 ) -> float:
-    """검산 (b) — 채택 팔 ≡ **기본 인자** `book_cli.build_book_rows`(= `backtest.run` 회계)."""
+    """검산 (b) — 채택 팔 ≡ `build_book_rows`에 채택 값을 **명시로** 넘긴 행.
+
+    `build_book_rows`의 기본값은 옛 회계(중앙 핀)라 「기본 인자」로는 채택 북이 나오지
+    않는다 — 채택 북(`run_book` = `backtest.run --oos-warm`)이 명시하는 것과 같은 값을
+    여기서도 명시해, 이 대조가 곧 「그 회계와의 등식」이 된다.
+    """
     from backtest.book_cli import build_book_rows
 
     proxied, _note = apply_funding_proxy(payloads)
@@ -702,8 +711,8 @@ def render_summary(frame: pd.DataFrame, checks: dict[str, float] | None = None) 
             "",
             f"* (a) 옛 회계 팔 ≡ WAN-366 `L4` 최대차: `{checks.get('ladder_l4', float('nan')):.2e}`"
             + (" — ⚠️ 사다리 CSV 없음" if checks.get("ladder_l4", 0.0) < 0 else ""),
-            f"* (b) 채택 팔 ≡ 인자 없는 채택 북 최대차: "
-            f"`{checks.get('adopted_identity', float('nan')):.2e}`",
+            "* (b) 채택 팔 ≡ 채택 북 회계(`build_book_rows`에 채택 값 명시 = "
+            f"`run_book`이 도는 회계) 최대차: `{checks.get('adopted_identity', float('nan')):.2e}`",
             f"* (c) 분해 항등식 최대 절대차: `{checks.get('identity_max_abs', float('nan')):.2e}`R",
             f"* (d) 두 팔의 후보 수 차: `{checks.get('candidate_gap', float('nan')):.0f}`",
             "",
