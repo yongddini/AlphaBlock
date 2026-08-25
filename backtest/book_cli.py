@@ -57,6 +57,7 @@ from backtest.wan169_leverage_book import (
 from backtest.wan180_leverage_book_nine import apply_funding_proxy
 from backtest.wan228_reentry_census import ReentryEntryRule
 from backtest.zone_limit_backtest import build_result_from_trades
+from common.costs import Liquidity
 from common.timefmt import format_kst
 from strategy.models import InvalidationCancel
 
@@ -165,6 +166,7 @@ def build_book_rows(
     stress_risk_multiple: float = 1.0,
     compound_sizing: bool = True,
     min_stop_distance_fraction: float | None = None,
+    take_profit_liquidity: Liquidity = harness.LEGACY_TAKE_PROFIT_LIQUIDITY,
 ) -> list[BookRunRow]:
     """이미 만든 칸 후보(payloads)에서 요청 구간별 북 행을 낸다.
 
@@ -188,6 +190,14 @@ def build_book_rows(
     `compound_sizing=False`(WAN-346 §2, 옵트인)는 베팅 크기를 **초기 자본에 못 박아** 복리
     착시 없이 읽는 팔을 낸다 — `True`(기본)면 예전과 비트 단위로 같다.
 
+    🚨 **`take_profit_liquidity` 기본값은 옛 값(`taker`)이다(WAN-370)** — `include_reentry`와
+    **반대 방향의 기본값**이고, 그 이유는 `wan169.run_cells`의 `adv_fraction`과 같다: 이 함수를
+    쓰는 북 측정 모듈이 20개 가까이 되는데 그 CSV가 전부 옛 비용 회계 위의 기록이라, 한 곳의
+    기본값으로 그것들을 통째로 보존한다. 채택 북(`run_book`)과 재산출 대상(wan366·wan370)만
+    `harness.ADOPTED_TAKE_PROFIT_LIQUIDITY`를 **명시로** 넘긴다. ⚠️ 새 측정 모듈은 그 명시를
+    잊으면 옛 회계로 돈다 — 새 모듈은 반드시 채택 값을 넘길 것(WAN-305). `run_cells`에 넘긴
+    값과 **같아야** 한 표가 한 회계다.
+
     `min_stop_distance_fraction`(WAN-366, 옵트인)은 손절폭 가드를 이 배치에서만 갈아끼운다 —
     `None`(기본)이면 채택 0.3%라 예전과 비트 단위로 같다. 가드는 **사이징**에 걸려 후보를 안
     바꾸므로(WAN-197) 같은 payload를 가드만 바꿔 다시 배치할 수 있다.
@@ -207,6 +217,7 @@ def build_book_rows(
             stress_risk_multiple=stress_risk_multiple,
             compound_sizing=compound_sizing,
             min_stop_distance_fraction=min_stop_distance_fraction,
+            take_profit_liquidity=take_profit_liquidity,
         )
     ]
 
@@ -268,6 +279,7 @@ def iter_book_segments(
     stress_risk_multiple: float = 1.0,
     compound_sizing: bool = True,
     min_stop_distance_fraction: float | None = None,
+    take_profit_liquidity: Liquidity = harness.LEGACY_TAKE_PROFIT_LIQUIDITY,
 ) -> list[BookSegment]:
     """`build_book_rows`의 속 — 집계 행뿐 아니라 그 행을 만든 `BookOutcome`까지 돌려준다.
 
@@ -284,6 +296,7 @@ def iter_book_segments(
         fee_rate=fee_rate,
         maker_fee_rate=maker_fee_rate,
         slippage=slippage,
+        take_profit_liquidity=take_profit_liquidity,
         min_stop_distance_fraction=min_stop_distance_fraction,
     )
     num_symbols = len({p.symbol for p in payloads})
@@ -343,6 +356,11 @@ def run_book(
     자른다(자본에 안 비례하는 절대 상한이라 복리 착시를 깬다, WAN-90/213). `adv_fraction=None`은
     **WAN-279 이전의 상한-끔 북**이다(옛 CSV 비트 재현) — 미지정(`UNSET`)과 다르다(WAN-159 규약).
 
+    ⚠️ **채택 기본값은 익절 지정가(메이커 2bp)다(WAN-370)** — 이 함수가 후보 생성·배치 양쪽에
+    `harness.ADOPTED_TAKE_PROFIT_LIQUIDITY`를 **명시로** 넘긴다(측정용 기본값은 옛 `taker`라
+    명시가 없으면 옛 회계로 돈다). 인자로 열지 않은 것도 의도다 — 여는 순간 "채택 북" 이름을
+    달고 옛 비용으로 도는 호출이 생긴다.
+
     ⚠️ **채택 기본값은 인과 취소(`"bar_close"`)다(WAN-365)** — `invalidation_cancel` 기본이
     `None`이라 `run_cells`가 채택 기본값(`ConfluenceParams().invalidation_cancel`)을 물려받는다.
     `"bar_open"`은 **WAN-365 이전의 소급 취소 북**이다(옛 CSV 비트 재현) — 미지정과 다르다.
@@ -398,6 +416,9 @@ def run_book_segments(
         end=end,
         jobs=jobs,
         adv_fraction=adv_fraction,
+        # WAN-370: 채택 북은 익절을 지정가(메이커 2bp)로 값매김한다 — 측정 모듈용 기본값
+        # (옛 taker)을 여기서 **명시로** 덮어쓰는 것이 「채택 북 = 인자 없는 실행」의 일부다.
+        take_profit_liquidity=harness.ADOPTED_TAKE_PROFIT_LIQUIDITY,
         reentry=reentry,
         reentry_entry_rule=reentry_entry_rule,
         invalidation_cancel=invalidation_cancel,
@@ -413,6 +434,7 @@ def run_book_segments(
         start_ms=parse_date_ms(start),
         end_ms=parse_date_ms(end),
         include_reentry=reentry,
+        take_profit_liquidity=harness.ADOPTED_TAKE_PROFIT_LIQUIDITY,
     )
 
 

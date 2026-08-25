@@ -17,10 +17,10 @@ import pytest
 from backtest.harness import (
     BASELINE_FILL,
     SEGMENT_OOS_WARM,
-    build_config,
     build_params,
     detect_order_blocks,
     eval_boundary_ms,
+    legacy_build_config,
     load_market_data,
     normalize_symbol,
     run_once,
@@ -282,7 +282,9 @@ def test_fixed_arm_reproduces_run_once(_market) -> None:  # type: ignore[no-unty
     fixed_rows = {r.segment: r for r in rows if r.arm == ARM_FIXED}
     assert fixed_rows, "팔 A 행이 없다"
 
-    cfg = build_config(_market.timeframe, funding_enabled=True)
+    # ⚠️ 이 모듈은 옛 비용 회계로 핀된 리포트다(WAN-370) — 대조 쪽도 같은 회계여야
+    # 이 등식이 「연장 훅 배선」을 재지 「비용 축」을 재지 않는다.
+    cfg = legacy_build_config(_market.timeframe, funding_enabled=True)
     for segment in segments_for(warm_oos=True):
         window = slice_market(_market, segment)
         if window.empty or window.df_1m.empty:

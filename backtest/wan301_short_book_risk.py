@@ -166,7 +166,7 @@ def _book_risk_row(
     """이 팔·스코프·구간의 채택(cap_only 5배 · WAN-180 스냅샷) 북을 돌려 위험 행을 낸다."""
     # WAN-305 명시 핀: wan301 판은 재진입 꺼진 북이다(payload에도 재진입이 없어 무동작 가드).
     seg_cells = _segment_cells(list(cells), segment, "", include_reentry=False)
-    base_cfg = harness.build_config(BOOK_ANNUALIZATION_TF)
+    base_cfg = harness.legacy_build_config(BOOK_ANNUALIZATION_TF)
     outcome = run_leverage_book(
         seg_cells,
         base_cfg,

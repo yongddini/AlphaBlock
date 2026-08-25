@@ -247,7 +247,7 @@ def run_cell(task: _Task, *, log: bool = True) -> list[ArmRow]:
     )
     if market.empty or market.df_1m.empty:
         return []
-    cfg = harness.build_config(task.timeframe)
+    cfg = harness.legacy_build_config(task.timeframe)
     rows: list[ArmRow] = []
     for segment in harness.segments_for(oos=True):
         if segment.name not in SEGMENT_ORDER:

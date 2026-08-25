@@ -250,7 +250,7 @@ def measure_setups(
     params = _uncensored_params(
         harness.pin_band_bar(harness.build_params(entry_mode="zone_limit", max_zone_width_atr=None))
     )
-    cfg = harness.build_config(entry_tf)
+    cfg = harness.legacy_build_config(entry_tf)
 
     # 후보 생성에 쓸 진입 TF 오더블록(라인 577과 같이 raw htf_df에서 탐지) — 저항 질의에도
     # 이 결과를 그대로 재사용해 자기-TF 저항이 엔진이 본 존과 정확히 일치하게 한다.

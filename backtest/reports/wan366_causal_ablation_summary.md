@@ -1,3 +1,9 @@
+> 🚨 **시점 배너(WAN-370, 2026-08-25)** — 이 표는 **옛 비용 회계**(익절도 테이커 4bp＋슬리피지
+> 5bp) 위의 값이다. WAN-370이 익절을 지정가(메이커 2bp·슬리피지 0)로 옮겼고 **재산출하지
+> 않았다**(사용자 결정) — 새 회계에서 증분의 부호가 유지됨은
+> [`docs/decisions/wan370.md`](../../docs/decisions/wan370.md) §4의 산수 논증이 보인다.
+> 새 회계의 채택 단(`L4`) 절대값은 `wan370_cost_decomposition.csv`가 정본이다.
+
 # WAN-366 — 인과 엔진 위에서 부품을 다시 분해한다
 
 재현: `uv run python -m backtest.wan366_causal_ablation --census-only` → `--rungs L2,L3,L4 --jobs 4` → `--rungs L1 --jobs 4 --append` → `--rungs L0,L0g --jobs 4 --append` (§2 = WAN-368 · 요약만: `--from-csv`)

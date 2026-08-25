@@ -187,7 +187,7 @@ def _metrics_row(
 def run_audit(*, funding: bool = True) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """감사 본체 — (후보 조인, 이벤트 거래, 집계) 프레임을 낸다."""
     params: ConfluenceParams = harness.build_params()  # 채택 기본값 그대로.
-    cfg = harness.build_config(PILOT_TIMEFRAME, funding_enabled=funding)
+    cfg = harness.legacy_build_config(PILOT_TIMEFRAME, funding_enabled=funding)
     market = harness.load_market_data(
         PILOT_SYMBOL,
         PILOT_TIMEFRAME,

@@ -347,7 +347,7 @@ def _exclude_payloads(
 
 def build_grid(payloads: Sequence[CellPayload], scopes: Sequence[str]) -> list[RMultipleRow]:
     """시나리오(k × 변형) × 스코프 × 구간의 채택 북 스트레스 행."""
-    base_cfg = harness.build_config(BOOK_ANNUALIZATION_TF)
+    base_cfg = harness.legacy_build_config(BOOK_ANNUALIZATION_TF)
     rows: list[RMultipleRow] = []
     for scope in scopes:
         scoped = scope_payloads(payloads, scope)
@@ -379,7 +379,7 @@ def build_leave_one_out(
     변형은 `pure` 하나, 구간은 full·oos_warm만 — 「특정 종목이 만든 결과인가」는 그 축에서
     답이 나오고, 전 격자를 다시 도는 것은 비용만 는다.
     """
-    base_cfg = harness.build_config(BOOK_ANNUALIZATION_TF)
+    base_cfg = harness.legacy_build_config(BOOK_ANNUALIZATION_TF)
     all_symbols = sorted({_short(p.symbol) for p in payloads})
     drops: list[tuple[str, tuple[str, ...]]] = [(f"-{s}", (s,)) for s in all_symbols]
     present_new = tuple(s for s in NEW_THREE if s in all_symbols)
@@ -426,7 +426,7 @@ def verify_adopted_identity(payloads: Sequence[CellPayload], *, start: str, end:
     """
     from backtest.run import parse_date_ms  # 지연 import(사이클 회피 — book_cli와 같은 이유)
 
-    base_cfg = harness.build_config(BOOK_ANNUALIZATION_TF)
+    base_cfg = harness.legacy_build_config(BOOK_ANNUALIZATION_TF)
     cli_rows = {
         r.segment: r
         for r in build_book_rows(

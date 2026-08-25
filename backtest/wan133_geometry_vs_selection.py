@@ -204,7 +204,7 @@ def _label_from_candidates(
     `atr_at_entry`(원 ATR — 심볼마다 척도가 달라 층 분위에만 쓴다) · `atr_pctl`·
     `zone_width_pctl`(셀 내부 순위 백분위 — 심볼 간 풀링 가능한 척도).
     """
-    cfg = harness.build_config(market.timeframe)
+    cfg = harness.legacy_build_config(market.timeframe)
     labeled: list[LabeledTrade] = []
     for cand, _trade in sequence_with_candidates(candidates, cfg):
         if cand.reason is ExitReason.STOP_LOSS:
@@ -269,7 +269,7 @@ def label_cell(market: MarketData, *, params: ConfluenceParams) -> CellResult:
     result = CellResult(symbol=market.symbol, timeframe=market.timeframe)
     if market.empty or market.df_1m.empty:
         return result
-    cfg = harness.build_config(market.timeframe)
+    cfg = harness.legacy_build_config(market.timeframe)
     frame = harness_prepare(market.htf_df)
     extractor = _FeatureExtractor.build(frame)
     times = frame["open_time"].astype("int64")
@@ -744,7 +744,7 @@ def pnl_rows_for_cell(cell: CellResult, market: MarketData) -> list[PnlRow]:
     """기본 팔 vs 필터 팔의 구간별 손익. 필터는 IS 문턱을 OOS에 적용(룩어헤드 없음)."""
     if not cell.default_candidates:
         return []
-    cfg = harness.build_config(cell.timeframe)
+    cfg = harness.legacy_build_config(cell.timeframe)
     threshold = _is_threshold(cell)
     pairs = list(zip(cell.default_candidates, cell.default_zwa, strict=True))
     rows: list[PnlRow] = []

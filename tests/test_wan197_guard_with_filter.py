@@ -398,12 +398,16 @@ def _btc_market() -> MarketData:
 def test_full_list_guard_default_reproduces_production(_btc_market: MarketData) -> None:
     """후보 전체를 가드 0.3%로 시퀀싱한 수익 == `run_once` 프로덕션(비트 일치).
 
-    이 표의 `default` 팔이 곧 「인자 없는 backtest.run」임을 실데이터로 고정한다.
+    이 표의 `default` 팔이 곧 「그 시절 인자 없는 backtest.run」임을 실데이터로 고정한다.
+
+    ⚠️ **비용 회계는 옛 값으로 고정한다**(WAN-370): 이 모듈은 익절도 테이커이던 시절의 표를
+    결론에 박아 둔 **핀된 리포트**라 `legacy_build_config`으로 돈다 — 대조하는 프로덕션 쪽도
+    같은 회계여야 이 등식이 「가드 배선」을 재지 「비용 축」을 재지 않는다.
     """
     params = harness.build_params()
     cands = production_candidates(_btc_market, params)
     s = trade_stats(list(cands), _btc_market, _TIMEFRAME, guard=STOP_GUARD_FRACTION)
-    cfg = harness.build_config(_TIMEFRAME)
+    cfg = harness.legacy_build_config(_TIMEFRAME)
     out = harness.run_once(_btc_market, params=params, cfg=cfg)
     pm = out.result.metrics
     assert s.total_return == pytest.approx(pm.total_return, abs=1e-9)

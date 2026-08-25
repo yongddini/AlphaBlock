@@ -182,7 +182,7 @@ def _cell_return_rows(payloads: Sequence[CellPayload]) -> list[CellReturnRow]:
     """
     rows: list[CellReturnRow] = []
     for payload in payloads:
-        cfg = harness.build_config(payload.timeframe)
+        cfg = harness.legacy_build_config(payload.timeframe)
         for segment in SEGMENTS:
             for arm in ARMS:
                 cell = _segment_cells([payload], segment, "", include_reentry=arm == "on")[0]

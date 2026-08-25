@@ -136,7 +136,7 @@ def _cell_return_rows(payloads_by_rule: dict[str, Sequence[CellPayload]]) -> lis
     band_by_key = {(p.symbol, p.timeframe): p for p in payloads_by_rule["band"]}
     for freeze_payload in freeze_payloads:
         key = (freeze_payload.symbol, freeze_payload.timeframe)
-        cfg = harness.build_config(freeze_payload.timeframe)
+        cfg = harness.legacy_build_config(freeze_payload.timeframe)
         for segment in SEGMENTS:
             for arm in ARMS:
                 rule, include = ARM_SPEC[arm]

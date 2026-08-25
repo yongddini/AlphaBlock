@@ -778,7 +778,7 @@ def run_cell(task: _Task, *, log: bool = True) -> list[FormationRow]:
             real_ob, window.htf_df, _ADOPTED_OB, rng=random.Random(POOL_SEED), pool_k=task.pool_k
         )
         buy_hold = _buy_hold(bh_frame)
-        cfg = harness.build_config(task.timeframe, funding_enabled=True)
+        cfg = harness.legacy_build_config(task.timeframe, funding_enabled=True)
 
         for direction in task.directions:
             retap: tuple[float, int] | None = None

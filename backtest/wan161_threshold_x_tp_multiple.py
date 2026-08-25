@@ -260,7 +260,7 @@ def build_arm_candidates(
     0개라 검정이 공허해진다 — wan152/155 테스트 관행). 실행 경로는 넘기지 않는다.
     """
     params = build_arm_params(threshold=threshold, r_multiple=r_multiple, base=base)
-    cfg = harness.build_config(market.timeframe)
+    cfg = harness.legacy_build_config(market.timeframe)
     obr = order_block_result or harness.detect_order_blocks(market)
     candidates, stats = build_zone_limit_candidates(
         market.htf_df,
@@ -301,7 +301,7 @@ def build_rows_for_arm(
         seg_cands = _segment_candidates(candidates, boundary, segment)
         stop_fracs = [_stop_frac(c) for c in seg_cands]
         tp_dists = [f * r_multiple for f in stop_fracs if f > 0]
-        cfg = apply_guard(harness.build_config(market.timeframe), GUARD)
+        cfg = apply_guard(harness.legacy_build_config(market.timeframe), GUARD)
         paired = sequence_with_candidates(seg_cands, cfg, market.funding_rates)
         trades = [t for _, t in paired]
         metrics = build_result_from_trades(trades, cfg, market.timeframe).metrics

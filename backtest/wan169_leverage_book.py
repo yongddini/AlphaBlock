@@ -69,6 +69,7 @@ from backtest.zone_limit_backtest import (
     build_zone_limit_candidates,
     sequence_with_candidates,
 )
+from common.costs import Liquidity
 from data.models import FundingRate
 from strategy.models import ConfluenceParams, InvalidationCancel
 
@@ -205,6 +206,17 @@ class _Task:
     timeframe: str
     start_ms: int
     end_ms: int
+    take_profit_liquidity: Liquidity = harness.LEGACY_TAKE_PROFIT_LIQUIDITY
+    """익절 청산 유동성(WAN-370): 후보 cfg의 `take_profit_liquidity`를 이 값으로 **명시 고정**
+    한다 — `adv_fraction`과 **글자 그대로 같은 중앙화**다. 기본이 옛 값(`taker`)이라 이 함수를
+    공유하는 북 측정 모듈 전부가 한 곳에서 옛 비용 회계로 보존되고, 채택 북
+    (`book_cli.run_book`)과 재산출 대상(wan366·wan370)만 `ADOPTED_TAKE_PROFIT_LIQUIDITY`를
+    **명시로** 넘겨 옵트인한다. 🚨 새 측정 모듈은 그 명시를 잊으면 옛 회계로 돈다 — 새 모듈은
+    반드시 채택 값을 넘길 것(WAN-305).
+
+    ⚠️ 이 cfg는 **후보 생성과 per-cell 격리 행**에만 쓰인다. 북 배치 회계의 비용은
+    `book_cli.iter_book_segments`의 base_cfg가 정한다(같은 값을 넘겨야 한 표가 한 회계다).
+    """
     adv_fraction: harness.AdvCapArg = harness.LEGACY_MAX_NOTIONAL_ADV_FRACTION
     """유동성 한도(WAN-244/279): 후보 생성 cfg의 `max_notional_adv_fraction`을 이 값으로 **명시
     고정**한다(`run_cell`이 `build_config(max_notional_adv_fraction=...)`으로 항상 얹는다).
@@ -469,7 +481,12 @@ def run_cell(task: _Task, *, log: bool = True) -> CellPayload:
     # 이 저장소의 북 후보 생성은 전부 이 함수를 지나므로(wan180/261/264/269/271이 run_cells를
     # 공유) 여기 한 곳의 고정이 그 모듈들을 한꺼번에 상한-끔으로 보존한다. 채택 북
     # (`book_cli.run_book`)만 `UNSET`을 넘겨 채택 0.005를 물려받는다. wan244는 0.005를 넘겨 켠다.
-    cfg = harness.build_config(task.timeframe, max_notional_adv_fraction=task.adv_fraction)
+    cfg = harness.build_config(
+        task.timeframe,
+        max_notional_adv_fraction=task.adv_fraction,
+        # WAN-370: 익절 청산 유동성도 같은 이유로 **항상 명시 고정**한다(기본 = 옛 taker).
+        take_profit_liquidity=task.take_profit_liquidity,
+    )
 
     candidates: dict[str, tuple[_Candidate, ...]] = {}
     funding: dict[str, tuple[FundingRate, ...]] = {}
@@ -597,6 +614,7 @@ def run_cells(
     end: str,
     jobs: int = 1,
     adv_fraction: harness.AdvCapArg = harness.LEGACY_MAX_NOTIONAL_ADV_FRACTION,
+    take_profit_liquidity: Liquidity = harness.LEGACY_TAKE_PROFIT_LIQUIDITY,
     reentry: bool = True,
     reentry_entry_rule: ReentryEntryRule = "band",
     fill: harness.FillPreset | None = None,
@@ -624,6 +642,10 @@ def run_cells(
     같다(wan180/261/264/269/271 무영향). `UNSET`이면 채택 기본값(0.005)을 물려받아 후보에
     룩어헤드-안전 `adv_usd`를 싣는다(채택 북 `book_cli.run_book`의 옵트인 경로). `float`이면 그
     프랙션으로 켠다(wan244 측정).
+
+    `take_profit_liquidity`(익절 청산 유동성, WAN-370)도 같은 중앙화다 — `taker`(기본)면 옛
+    비용 회계라 옛 북 CSV가 비트 재현되고, 채택 값(`maker`)은 채택 북·재산출 대상만 명시로
+    넘긴다. 비용은 후보 집합을 안 바꾸므로 이 축은 per-cell 격리 행과 손익에만 나타난다.
 
     ⚠️ **`reentry` 기본값은 켬(band)이다(WAN-305)** — 채택 규칙(WAN-273 재진입 · 페이퍼
     러너 WAN-274)과 같은 선상이 「아무것도 안 하면」 나오게 한다. 각 칸의 payload에 「익절 후
@@ -704,6 +726,7 @@ def run_cells(
             start_ms=parse_date_ms(start),
             end_ms=parse_date_ms(end),
             adv_fraction=adv_fraction,
+            take_profit_liquidity=take_profit_liquidity,
             reentry=reentry,
             reentry_entry_rule=reentry_entry_rule,
             fill=fill,
@@ -821,15 +844,26 @@ def _scope_payloads(payloads: Sequence[CellPayload], scope: str) -> list[CellPay
     return [p for p in payloads if p.timeframe == scope]
 
 
-def build_book_rows(payloads: Sequence[CellPayload]) -> list[BookRow]:
-    """격자 전체의 북 행 + 격리(현행) 대조 행."""
+def build_book_rows(
+    payloads: Sequence[CellPayload],
+    *,
+    take_profit_liquidity: Liquidity = harness.LEGACY_TAKE_PROFIT_LIQUIDITY,
+) -> list[BookRow]:
+    """격자 전체의 북 행 + 격리(현행) 대조 행.
+
+    `take_profit_liquidity`(WAN-370)는 배치 회계의 익절 청산 유동성이다 — 기본이 옛 값
+    (`taker`)이라 이 함수를 쓰는 북 측정 모듈의 CSV가 비트 재현되고, 재산출 대상만 채택 값을
+    명시로 넘긴다. ⚠️ `run_cells`에 넘긴 값과 **같아야** 한 표가 한 회계다.
+    """
     scopes = [*MAIN_TIMEFRAMES, "both"]
     symbols = sorted({_short(p.symbol) for p in payloads})
     cell_rows_by_key = {
         (row.symbol, row.timeframe, row.segment): row for p in payloads for row in p.rows
     }
     rows: list[BookRow] = []
-    base_cfg = harness.build_config(BOOK_ANNUALIZATION_TF)
+    base_cfg = harness.build_config(
+        BOOK_ANNUALIZATION_TF, take_profit_liquidity=take_profit_liquidity
+    )
 
     for scope in scopes:
         scoped = _scope_payloads(payloads, scope)

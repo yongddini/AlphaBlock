@@ -209,7 +209,7 @@ def label_cell(
     if market.empty or market.df_1m.empty:
         return []
     conf = params or harness.build_params(entry_mode="zone_limit")
-    cfg = harness.build_config(market.timeframe)
+    cfg = harness.legacy_build_config(market.timeframe)
     ob_result = harness.detect_order_blocks(market)
 
     sink: list[SetupDiagnostic] = []

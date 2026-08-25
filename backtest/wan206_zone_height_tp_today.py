@@ -260,7 +260,7 @@ def run_arm(
     params = harness.build_params(
         entry_mode="zone_limit", take_profit_r=r_multiple, fill=params_fill
     )
-    cfg = harness.build_config(seg_market.timeframe)
+    cfg = harness.legacy_build_config(seg_market.timeframe)
     override: TakeProfitOverride | None = (
         None if tp_rule == TP_ENTRY else make_zone_height_override(params, r_multiple)
     )
@@ -321,7 +321,7 @@ def run_cell(
     obr: OrderBlockResult = OrderBlockDetector(OrderBlockParams()).run(seg_market.htf_df)
 
     rows: list[TpRow] = []
-    cfg = harness.build_config(seg_market.timeframe)
+    cfg = harness.legacy_build_config(seg_market.timeframe)
     for r_multiple in r_multiples:
         # (렌즈, R) 안에서 entry_r·zone_height를 대조하려고 그 둘을 붙여 모은다.
         sets: dict[tuple[str, str], list[int]] = {}
@@ -820,7 +820,7 @@ def run_checksum(
             continue
         eval_from_ms = harness.eval_boundary_ms(market, segment)
         obr = OrderBlockDetector(OrderBlockParams()).run(seg_market.htf_df)
-        cfg = harness.build_config(seg_market.timeframe)
+        cfg = harness.legacy_build_config(seg_market.timeframe)
         # 내 entry_r 팔
         mine = run_arm(
             seg_market,

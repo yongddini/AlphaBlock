@@ -87,7 +87,7 @@ from backtest.harness import (
     LEGACY_SYMBOLS,
     LEGACY_YEARS,
     MarketData,
-    build_config,
+    legacy_build_config,
     build_params,
     detect_order_blocks,
     load_market_data,
@@ -484,7 +484,7 @@ def run_cell(spec: CellSpec) -> CellResult:
     if market.empty or market.df_1m.empty:
         print(f"[wan104] {spec.symbol} {spec.timeframe}: 데이터 없음 — 건너뜀")
         return CellResult([], [])
-    cfg = build_config(spec.timeframe)
+    cfg = legacy_build_config(spec.timeframe)
     take_profit_r = ConfluenceParams().take_profit_r
     classes: list[ClassRow] = []
     gaps: list[GapRow] = []

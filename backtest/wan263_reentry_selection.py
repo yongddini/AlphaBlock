@@ -325,7 +325,7 @@ def _annotate_reentries(task: _Task) -> tuple[list[_AnnotatedReentry], int, floa
     if market.empty or market.df_1m.empty:
         return [], 0, None
     ob = harness.detect_order_blocks(market, OrderBlockParams())
-    cfg = harness.build_config(task.timeframe)
+    cfg = harness.legacy_build_config(task.timeframe)
     params = harness.build_params()  # 채택 기본값(핀 없음).
 
     candidates, _stats = build_zone_limit_candidates(

@@ -229,7 +229,7 @@ class BookStressRow(BaseModel):
 
 def _cost_config(timeframe: str, cost: CostPreset) -> BacktestConfig:
     """이 TF·비용의 실행 cfg. `None` 필드는 채택 기본값을 그대로 쓴다(비트 재현)."""
-    return harness.build_config(
+    return harness.legacy_build_config(
         timeframe,
         fee_rate=cost.fee_rate,
         maker_fee_rate=cost.maker_fee_rate,

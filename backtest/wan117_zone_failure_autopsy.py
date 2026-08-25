@@ -327,7 +327,7 @@ def label_cell(market: harness.MarketData, *, params: ConfluenceParams) -> list[
     """
     if market.empty or market.df_1m.empty:
         return []
-    cfg = harness.build_config(market.timeframe)
+    cfg = harness.legacy_build_config(market.timeframe)
     candidates, _ = build_zone_limit_candidates(
         market.htf_df,
         market.df_1m,

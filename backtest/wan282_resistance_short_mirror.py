@@ -416,7 +416,7 @@ def build_diag_rows(
     rows: list[ShortDiagRow] = []
     for cell in long_short_cells:
         gap = cell.symbol in FUNDING_GAP_SYMBOLS
-        cfg = harness.build_config(cell.timeframe)
+        cfg = harness.legacy_build_config(cell.timeframe)
         for segment in SEGMENTS:
             shorts = _short_candidates(cell, segment)
             paired = sequence_with_candidates(shorts, cfg, _funding_for(cell, segment))
@@ -432,7 +432,7 @@ def build_diag_rows(
 def _book_equity_curve(cells: Sequence[CellPayload], segment: str) -> list[EquityPoint]:
     """이 팔·구간의 채택 북 자본곡선 — build_book_rows와 같은 배치를 다시 돌려 곡선만 낸다."""
     seg_cells = _segment_cells(list(cells), segment, "", include_reentry=True)
-    cfg = harness.build_config(BOOK_ANNUALIZATION_TF)
+    cfg = harness.legacy_build_config(BOOK_ANNUALIZATION_TF)
     outcome = run_leverage_book(seg_cells, cfg, ADOPTED_BOOK)
     result = build_result_from_trades(
         outcome.trades, outcome.effective_config, BOOK_ANNUALIZATION_TF

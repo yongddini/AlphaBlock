@@ -249,7 +249,7 @@ def _reprice_with_funding(
     (비어 있는) 원본 펀딩으로 돌았으므로 대리 펀딩 성과와 비교하면 배선 검산이 아니라
     펀딩 차이를 재는 셈이 된다. 검산은 대리가 필요 없는 기존 6종목 칸이 담당한다.
     """
-    cfg = harness.build_config(payload.timeframe)
+    cfg = harness.legacy_build_config(payload.timeframe)
     rows: list[CellRow] = []
     # 차가운 구간을 생성하지 않은 payload(WAN-301 `cold_segments=False`)는 존재하는 구간만
     # 재계산한다 — 전 구간이 있으면(기본) 예전과 비트 단위로 같다.
@@ -453,7 +453,7 @@ def build_rows(
     payloads: Sequence[CellPayload],
 ) -> tuple[list[BookRow], list[OppRow], list[MonthlyRow]]:
     """격자 전체 — 두 유니버스 × 두 팔의 북 행 + 격리 대조 행 + 팔 A 기회비용 + 월별 수익률."""
-    base_cfg = harness.build_config(BOOK_ANNUALIZATION_TF)
+    base_cfg = harness.legacy_build_config(BOOK_ANNUALIZATION_TF)
     old_six = {_short(s) for s in OLD_SYMBOLS}
     cell_rows_by_key = {
         (row.symbol, row.timeframe, row.segment): row for p in payloads for row in p.rows

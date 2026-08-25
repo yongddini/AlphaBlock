@@ -284,7 +284,7 @@ def build_arm_candidates(
         base=base,
     )
     override = None if tp_rule == TP_ENTRY else make_zone_height_override(params, r_multiple)
-    cfg = harness.build_config(market.timeframe)
+    cfg = harness.legacy_build_config(market.timeframe)
     obr = order_block_result or harness.detect_order_blocks(market)
     candidates, stats = build_zone_limit_candidates(
         market.htf_df,
@@ -335,7 +335,7 @@ def build_rows_for_arm(
         ]
         _, tp_med, _ = _quantiles(tp_dists)
         for guard in guards:
-            cfg = apply_guard(harness.build_config(market.timeframe), guard)
+            cfg = apply_guard(harness.legacy_build_config(market.timeframe), guard)
             paired = sequence_with_candidates(seg_cands, cfg, market.funding_rates)
             trades = [t for _, t in paired]
             metrics = build_result_from_trades(trades, cfg, market.timeframe).metrics

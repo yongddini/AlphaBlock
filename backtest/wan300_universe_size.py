@@ -312,7 +312,7 @@ def _book_row(
     같다(wan300 CSV 재현).
     """
     seg_cells = _segment_cells(list(payloads), segment, exclude, include_reentry=include_reentry)
-    base_cfg = harness.build_config(BOOK_ANNUALIZATION_TF)
+    base_cfg = harness.legacy_build_config(BOOK_ANNUALIZATION_TF)
     outcome = run_leverage_book(
         seg_cells,
         base_cfg,

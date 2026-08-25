@@ -33,6 +33,7 @@ from backtest.harness import (
     LEGACY_BAND_BAR,
     LEGACY_COMBINE_OBS,
     LEGACY_RSI_GATE_MODE,
+    LEGACY_TAKE_PROFIT_LIQUIDITY,
     RunRow,
     build_config,
     load_market_data,
@@ -47,6 +48,7 @@ from backtest.run import (
     run_grid,
 )
 from backtest.zone_limit_backtest import build_zone_limit_candidates
+from common.costs import Liquidity
 from strategy.models import BandBar, ConfluenceParams, DeviationFilterParams, RsiGateMode
 from strategy.realtime_band import RealtimeBand
 
@@ -96,19 +98,22 @@ def _run(
     rsi_gate_mode: RsiGateMode | None = None,
     band_bar: BandBar | None = None,
     combine_obs: bool | None = None,
+    take_profit_liquidity: Liquidity | None = None,
 ) -> RunRow:
     """CLI 인자로 한 셀을 돌려 그 행을 낸다.
 
     데이터 유무는 픽스처가 이미 확인했으므로, 여기서 0행이 나오면 그건 진짜 배선 버그다.
 
-    `rsi_gate_mode`(WAN-123)·`band_bar`(WAN-132)는 CLI 축이 아니라 핀이라 인자로 못 준다 —
-    옛 리포트 셀과 대조할 때만 여기서 되돌려 요청한다.
+    `rsi_gate_mode`(WAN-123)·`band_bar`(WAN-132)·`take_profit_liquidity`(WAN-370)는 CLI 축이
+    아니라 핀이라 인자로 못 준다 — 옛 리포트 셀과 대조할 때만 여기서 되돌려 요청한다.
     """
     grid = grid_from_args(build_parser().parse_args(argv))
     if rsi_gate_mode is not None:
         grid = replace(grid, rsi_gate_mode=rsi_gate_mode)
     if band_bar is not None:
         grid = replace(grid, band_bar=band_bar)
+    if take_profit_liquidity is not None:
+        grid = replace(grid, take_profit_liquidity=take_profit_liquidity)
     if combine_obs is not None:
         grid = replace(grid, combine_obs=(combine_obs,))
     # 창을 못 박는다(WAN-162) — `start_ms`/`end_ms`가 있으면 `load_market_data`가 `_YEARS`
@@ -155,10 +160,16 @@ def _assert_matches(row: RunRow, cell: pd.Series, columns: list[str]) -> None:
 #: 테스트가 **동결 CSV를 비트 단위로 그대로 재현**한다(`--invalidation-cancel bar_open`으로 옛
 #: 엔진을 요청해서). 즉 엔진은 **이 축 말고는 조용히 달라지지 않았다**. 그 대조가 이 상수를
 #: 다시 낸 근거다(위 문단의 규약 그대로: WAN-99가 먼저 통과해야 이 값을 갱신한다).
+#: 🔁 **WAN-370(익절 테이커 → 메이커)로 손익 열만 움직였다 — 그게 맞는 숫자다.** 익절 청산이
+#: 메이커 2bp·슬리피지 0으로 값매김되면서 total_return **−13.43% → −8.58%**, MDD **17.49% →
+#: 14.78%**. 거래 수(182)·승률(43.41%)·체결률(83.28%)은 **비트 그대로**다 — 비용은 후보
+#: 집합도 승패도 안 바꾸고 이긴 거래의 크기만 키운다(같은 실행에서 WAN-99 테스트가
+#: `take_profit_liquidity=LEGACY_TAKE_PROFIT_LIQUIDITY` 핀으로 동결 CSV를 비트 재현 — 엔진은
+#: 이 축 말고는 조용히 달라지지 않았다).
 _WAN95_PINNED = {
-    "total_return": -0.13425227105792018,
+    "total_return": -0.08581565507555988,
     "win_rate": 0.4340659340659341,
-    "max_drawdown": 0.17491935063968195,
+    "max_drawdown": 0.14782008977072353,
     "num_trades": 182,
     "fill_rate": 0.8328445747800587,
 }
@@ -241,6 +252,10 @@ def test_cli_reproduces_wan99_pen_5bp_cell() -> None:
         rsi_gate_mode=LEGACY_RSI_GATE_MODE,
         band_bar=LEGACY_BAND_BAR,
         combine_obs=LEGACY_COMBINE_OBS,
+        # ⚠️ **익절 비용도 되돌린다**(WAN-370): 채택 기본값이 「익절 = 지정가 메이커 2bp」가
+        # 되면서 같은 거래의 손익이 달라진다. WAN-99 격자는 익절도 테이커이던 엔진에서
+        # 나왔으므로 되돌려 요청한다(축이 아니라 핀이라 CLI 플래그가 없다).
+        take_profit_liquidity=LEGACY_TAKE_PROFIT_LIQUIDITY,
     )
     cell = _report_cell(
         _WAN99_CSV,

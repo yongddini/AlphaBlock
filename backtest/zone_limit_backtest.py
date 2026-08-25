@@ -1458,16 +1458,19 @@ def _to_trade(
     """공용 비용 모델로 셋업을 `Trade`로 변환한다(WAN-37).
 
     B안은 **지정가(메이커) 진입**이므로 진입에는 슬리피지가 붙지 않고 메이커 수수료가
-    적용된다. 청산은 손절·익절 도달 시 시장가 성격이라 테이커(수수료+슬리피지)로 본다.
-    이 비대칭이 A안(시장가=테이커 진입)과의 공정한 비교의 핵심이다.
+    적용된다. 청산은 **사유별로 갈린다**(WAN-370): 익절(부분 익절 포함)은 목표가를 미리
+    아는 청산이라 지정가 reduce-only = **메이커(슬리피지 0)**, 손절·만료·데이터 종료는
+    시장가 성격이라 **테이커(수수료+슬리피지)** 다. 분기는 `cfg.exit_liquidity` 한 곳에
+    있고, 옛 동작(익절도 테이커)은 `harness.LEGACY_TAKE_PROFIT_LIQUIDITY`로 고정한다.
 
     보유 구간 `[진입시각, 청산시각)`의 펀딩비는 A안 엔진(`BacktestEngine._funding_cost`)
     과 동일하게 진입 명목가 기준으로 산출해 실현손익에서 뺀다(WAN-95). 반익절 래더
     (WAN-323, 옵트인)로 부분 청산이 있으면 명목이 도중에 줄므로 구간을 나눠 각 구간의
     잔량 명목으로 매긴다 — 래더를 안 켜면 구간이 하나라 예전과 비트 단위로 같다.
 
-    ⚠️ **부분 청산도 청산이라 테이커**로 본다(전량 익절과 같은 취급) — 래더는 청산이
-    2회라 **수수료가 늘고**, 그 비용이 표에 그대로 드러나는 것이 WAN-323 §3-3의 요구다.
+    ⚠️ **부분 청산도 전량 익절과 같은 취급**이다(WAN-370 이후 둘 다 메이커) — 래더는
+    청산이 2회라 **수수료가 늘고**, 그 비용이 표에 그대로 드러나는 것이 WAN-323 §3-3의
+    요구다. 그 성질은 요율이 내려가도 유지된다(2회 × 2bp > 1회 × 2bp).
 
     `open_notional`(WAN-103)은 이미 열린 포지션들의 명목 합이다. 명목 상한이 포트폴리오
     전체에 걸리므로 사이징이 그 여유분만 새 포지션에 배정한다 — 동시 1포지션 경로는
@@ -1509,8 +1512,13 @@ def _to_trade(
         part_qty = min(qty * partial.fraction, remaining)
         if part_qty <= 0.0:
             continue
-        part_fill = costs.exit_fill(partial.price, is_long=is_long, liquidity=Liquidity.TAKER)
-        part_fee = costs.fee(part_fill * part_qty, Liquidity.TAKER)
+        part_reason = _EXIT_REASON[partial.reason]
+        # WAN-370: 청산 유동성은 **사유별**로 갈린다(익절=지정가, 손절=시장가). 분기 자체는
+        # `cfg.exit_liquidity` 한 곳에만 있다 — 여기서 `Liquidity.TAKER`를 그대로 쓰면
+        # 「부분 익절도 지정가」라는 결정이 라벨로만 남는다.
+        part_liquidity = cfg.exit_liquidity(part_reason)
+        part_fill = costs.exit_fill(partial.price, is_long=is_long, liquidity=part_liquidity)
+        part_fee = costs.fee(part_fill * part_qty, part_liquidity)
         gross += side.sign * (part_fill - entry_fill) * part_qty
         fills.append(
             TradeFill(
@@ -1518,12 +1526,13 @@ def _to_trade(
                 price=part_fill,
                 quantity=part_qty,
                 fee=part_fee,
-                reason=_EXIT_REASON[partial.reason],
+                reason=part_reason,
             )
         )
         remaining -= part_qty
-    exit_fill = costs.exit_fill(cand.exit_price, is_long=is_long, liquidity=Liquidity.TAKER)
-    exit_fee = costs.fee(exit_fill * remaining, Liquidity.TAKER)
+    exit_liquidity = cfg.exit_liquidity(cand.reason)
+    exit_fill = costs.exit_fill(cand.exit_price, is_long=is_long, liquidity=exit_liquidity)
+    exit_fee = costs.fee(exit_fill * remaining, exit_liquidity)
     gross += side.sign * (exit_fill - entry_fill) * remaining
     fills.append(
         TradeFill(

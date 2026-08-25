@@ -439,7 +439,7 @@ def run_arm(
     params = harness.build_params(
         entry_mode="zone_limit", take_profit_r=TP_MULTIPLE, fill=params_fill
     )
-    cfg = harness.build_config(seg_market.timeframe)
+    cfg = harness.legacy_build_config(seg_market.timeframe)
     stop_override: StopLossOverride | None = None
     tp_override: TakeProfitOverride | None = None
     if buffer > 0:
@@ -500,7 +500,7 @@ def run_cell(
     # WAN-159 · `combine_obs=False` WAN-149) 위에서 재는 것이 이 이슈의 요구다(핀 금지).
     obr: OrderBlockResult = OrderBlockDetector(OrderBlockParams()).run(seg_market.htf_df)
     atr_prev_by_time = _atr_prev_by_time(seg_market.htf_df) if unit == UNIT_ATR else {}
-    cfg = harness.build_config(seg_market.timeframe)
+    cfg = harness.legacy_build_config(seg_market.timeframe)
 
     rows: list[BufferRow] = []
     buffers = buffers_for(unit)
@@ -1042,7 +1042,7 @@ def run_checksum(
             continue
         eval_from_ms = harness.eval_boundary_ms(market, segment)
         obr = OrderBlockDetector(OrderBlockParams()).run(seg_market.htf_df)
-        cfg = harness.build_config(seg_market.timeframe)
+        cfg = harness.legacy_build_config(seg_market.timeframe)
         mine = run_arm(
             seg_market,
             params_fill=harness.BASELINE_FILL,

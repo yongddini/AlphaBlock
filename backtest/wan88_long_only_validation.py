@@ -82,9 +82,9 @@ from backtest.harness import (
     LEGACY_OB_PARAMS,
     LEGACY_RSI_GATE_MODE,
     FillPreset,
-    build_config,
     build_params,
     fill_preset,
+    legacy_build_config,
     pin_band_bar,
 )
 from backtest.harness import split_bars as _split_bars
@@ -444,7 +444,7 @@ def run_symbol_timeframe(
 
     is_end = _split_bars(n)
     warmup_bars = min(is_end, max(60, n // 6))
-    cfg = backtest_config or build_config(timeframe)
+    cfg = backtest_config or legacy_build_config(timeframe)
 
     is_htf, is_1m = _segment_window(
         frame, one_min_df, timeframe, context_start=0, seg_start=0, seg_end=is_end

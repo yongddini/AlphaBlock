@@ -79,7 +79,7 @@ from backtest.harness import (
     FillPreset,
     RunRow,
     Segment,
-    build_config,
+    legacy_build_config,
     build_params,
     build_row,
     detect_order_blocks,
@@ -249,7 +249,7 @@ def run_report(
             if market.empty or market.df_1m.empty:
                 _log(log, f"[wan115] {symbol} {timeframe}: 데이터 없음 — 건너뜀")
                 continue
-            cfg = build_config(timeframe)
+            cfg = legacy_build_config(timeframe)
             for segment in segments():
                 window = slice_market(market, segment)
                 if window.empty:

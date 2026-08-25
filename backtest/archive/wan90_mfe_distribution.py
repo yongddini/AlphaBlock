@@ -59,7 +59,7 @@ from backtest.harness import (
     LEGACY_COMBINE_OBS,
     LEGACY_OB_PARAMS,
     RunRow,
-    build_config,
+    legacy_build_config,
     detect_order_blocks,
     load_market_data,
     normalize_symbol,
@@ -233,7 +233,7 @@ def _trade_rows_for_cell(
     )
     if market.empty or market.df_1m.empty:
         return []
-    cfg = build_config(timeframe, funding_enabled=False)
+    cfg = legacy_build_config(timeframe, funding_enabled=False)
     # ⚠️ 밴드는 WAN-132 이전 값(`tap`)으로 고정한다 — 이 분포·R 스윕이 낸 판정(1.5R 유지)은
     # 탭 봉 종가 밴드의 1R 위에서 나왔고, 익절만 끈 변형은 `take_profit_override` 경로라
     # 봉내 라이브 밴드에서 아예 돌지 않는다.
