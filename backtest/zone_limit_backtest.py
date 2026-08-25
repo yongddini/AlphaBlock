@@ -173,6 +173,19 @@ class _Candidate:
     """이 셋업이 속한 존의 안정적 식별자(`OrderBlockSignal.zone_key` 그대로, WAN-83).
     포지션 충돌로 스킵된 첫 탭이 같은 존에서 재탭됐는지 사후에 그룹핑할 때 쓴다.
     진단 전용이며 체결·청산 로직에는 쓰이지 않는다."""
+    zone_width_atr: float | None = None
+    """이 셋업의 존폭 ÷ ATR14 — **엔진이 존폭 필터에 실제로 쓰는 그 값**(WAN-376, 순수 관측).
+
+    `observe_zone_width_atr=True`일 때만 채워지고 그 밖에는 항상 `None`이라 예전 CSV가
+    비트 단위로 재현된다. 필터가 켜져 있든 꺼져 있든 **같은 산식**이다:
+    `(seed_ob.top − seed_ob.bottom) ÷ ATR14[pos−1]`(탭 봉 **직전 확정봉** — 탭 봉 자신의
+    ATR은 그 봉 종가를 알아야 나오므로 룩어헤드다). 판정 불가(워밍업 NaN·비양수 ATR)는
+    `None`이고, 그 부류를 엔진은 **기각**하므로(WAN-158) 후처리 컷도 `None`을 버려야
+    같은 집합이 된다.
+
+    🚨 **밖에서 ATR을 다시 계산하지 말라고 있는 필드다** — 사본을 만들면 엔진과 갈라진다
+    (WAN-77의 사본이 실제로 그렇게 갈라졌다). 체결·청산·손익 어디에도 쓰이지 않는 순수
+    관측이다(WAN-90 `mfe_r` · WAN-276 `exit_extreme` · WAN-328 `path_fill_price`와 같은 부류)."""
     trigger_time: int = 0
     """이 셋업의 탭이 발생한 상위TF 봉 시각(`OrderBlockSignal.trigger_time` 그대로).
 
@@ -304,6 +317,11 @@ class SetupDiagnostic:
 
     `ZoneLimitOutcome.path_fill_price` 그대로다 — 안 켜면 항상 `None`이고 체결·손익에
     쓰이지 않는다."""
+    zone_width_atr: float | None = None
+    """존폭 ÷ ATR14 (WAN-376, `observe_zone_width_atr` 옵트인 · 진단 전용).
+
+    `_Candidate.zone_width_atr`와 **같은 값·같은 산식**이다. 후보는 체결된 셋업만 남으므로
+    미체결 셋업의 존폭까지 보려면 이쪽을 읽는다. 안 켜면 항상 `None`이다."""
 
 
 _MS_PER_DAY = 86_400_000
@@ -881,6 +899,7 @@ def build_zone_limit_candidates(
     partial_take_profit_fraction: float = 0.5,
     breakeven_after_partial: bool = False,
     observe_path_fill: bool = False,
+    observe_zone_width_atr: bool = False,
     no_same_step_tp: bool = False,
     no_same_step_tp_minutes: frozenset[int] | None = None,
     invalidation_cancel: InvalidationCancel | None = None,
@@ -948,6 +967,12 @@ def build_zone_limit_candidates(
     바꾸므로 진입 결정·체결 판정에는 전혀 안 쓰이고, 따라서 셋업·체결 집합(후보 수·
     `ZoneLimitStats`)은 기본과 **비트 단위로 같다** — 달라지는 건 각 후보의 부분 청산
     (`partial_exits`)과 잔량의 최종 청산뿐이다. 안 주면(기본) 엔진이 예전과 같다.
+
+    `observe_zone_width_atr`(WAN-376, 옵트인)를 켜면 후보·진단에 **존폭 ÷ ATR14**(필터가
+    보는 그 값)를 실어 준다. 필터가 꺼져 있어도 ATR을 계산해 같은 산식으로 채우므로, 「필터
+    끔으로 한 번 만들고 밖에서 컷」이라는 지름길이 「처음부터 필터 켜고 만들기」와 같은
+    집합인지 검산할 수 있다. **순수 관측이라 값을 싣는 것만으로는 후보·체결·손익이 하나도
+    안 움직인다** — 끄면(기본) 필드가 전부 `None`이라 예전과 비트 단위로 같다.
 
     `no_same_step_tp`(WAN-336, 옵트인)는 **진입한 그 1분 스텝에서 익절을 판정하지 않는**
     보수적 반사실이다 — 시뮬레이터로 그대로 흘려보낸다. ⚠️ 위 훅들과 달리 **체결 집합도
@@ -1023,8 +1048,10 @@ def build_zone_limit_candidates(
     # 존폭 필터(WAN-158, 옵트인). 꺼져 있으면(기본) ATR을 아예 계산하지 않으므로 기본
     # 실행은 예전과 비트 단위로 같다. 프레임은 `_prepare_htf`가 정렬한 것 그대로라
     # 측정 모듈(`wan117._FeatureExtractor`)이 읽는 위치와 pos가 일치한다.
+    # WAN-376(옵트인 관측): 필터가 꺼져 있어도 **같은 산식의 비율**을 후보에 실을 수 있게
+    # ATR을 계산한다. 관측을 안 켜면(기본) 조건이 예전과 글자 그대로 같다.
     zone_width_atr14: list[float] | None = None
-    if params.max_zone_width_atr is not None:
+    if params.max_zone_width_atr is not None or observe_zone_width_atr:
         zone_width_atr14 = [
             float(v) for v in atr(frame, length=params.zone_width_atr_length).tolist()
         ]
@@ -1121,6 +1148,7 @@ def build_zone_limit_candidates(
                 pos, closes, deviation_ema.tolist(), params.long_max_deviation
             ):
                 continue  # WAN-68: 롱 이격도 게이트.
+        observed_width_atr: float | None = None
         if zone_width_atr14 is not None:
             # WAN-158(옵트인): 존폭 ÷ ATR가 문턱보다 넓은 셋업은 주문을 걸지 않는다.
             # ATR은 **직전 확정봉**(pos-1)에서 읽는다 — 탭 봉 자신의 ATR은 그 봉 종가를
@@ -1128,6 +1156,16 @@ def build_zone_limit_candidates(
             # 판정 대상은 `ob`가 아니라 **`seed_ob`**다: 겹침 캐스케이드 팔 `C`(WAN-126)는
             # 하위TF 존으로 진입·손절하므로 그 존의 폭이 실제로 감수하는 폭이다.
             width_atr = zone_width_atr14[pos - 1] if pos >= 1 else None
+            if (
+                observe_zone_width_atr
+                and width_atr is not None
+                and not math.isnan(width_atr)
+                and width_atr > 0.0
+            ):
+                # WAN-376 순수 관측: 필터가 보는 그 비율 그대로. 판정 불가(NaN·비양수)는
+                # `None`으로 두고 지어내지 않는다 — 엔진은 그 부류를 기각하므로 후처리
+                # 컷도 `None`을 버려야 같은 집합이 된다.
+                observed_width_atr = (seed_ob.top - seed_ob.bottom) / width_atr
             if not params.zone_width_filter_passes(seed_ob, width_atr):
                 continue
 
@@ -1289,6 +1327,7 @@ def build_zone_limit_candidates(
                     # WAN-328: 손절폭의 구조적 천장(진입가는 존 안, 손절은 존 경계).
                     zone_height=abs(float(ob.top) - float(ob.bottom)),
                     path_fill_price=outcome.path_fill_price,
+                    zone_width_atr=observed_width_atr,
                 )
             )
         if not is_filled or outcome.entry_time is None or outcome.entry_price is None:
@@ -1340,6 +1379,8 @@ def build_zone_limit_candidates(
                 order_block=ob,
                 tap_index=signal.tap_index,
                 zone_key=signal.zone_key,
+                # WAN-376 순수 관측 — 안 켜면 `None`이라 예전과 비트 단위로 같다.
+                zone_width_atr=observed_width_atr,
                 trigger_time=signal.trigger_time,
                 mfe_r=outcome.mfe_r,
                 mae_r=outcome.mae_r,
