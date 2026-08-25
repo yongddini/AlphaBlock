@@ -46,8 +46,8 @@ from backtest import harness
 from backtest.harness import (
     LEGACY_OB_PARAMS,
     MarketData,
-    build_config,
     build_params,
+    legacy_build_config,
     load_market_data,
     mean_r,
     normalize_symbol,
@@ -186,7 +186,7 @@ def _run_cell(
     # 밴드에서 나왔고, 봉내 라이브 밴드는 진입가를 서브스텝마다 다시 내므로 팔 간
     # 비교의 축(겹침 정의)이 흐려진다.
     params = pin_band_bar(build_params(entry_mode="zone_limit", max_zone_width_atr=None))
-    cfg = build_config(market.timeframe)
+    cfg = legacy_build_config(market.timeframe)
     candidates, stats = build_zone_limit_candidates(
         market.htf_df,
         market.df_1m,

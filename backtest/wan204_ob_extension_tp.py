@@ -314,7 +314,7 @@ def run_cell(
         if ob_key not in ob_cache:
             ob_cache[ob_key] = harness.detect_order_blocks(window)
         obr = ob_cache[ob_key]
-        cfg = harness.build_config(window.timeframe, funding_enabled=True)
+        cfg = harness.legacy_build_config(window.timeframe, funding_enabled=True)
         for fill in fills:
             params = harness.build_params(fill=fill)
             filled_entries: dict[str, list[int]] = {}

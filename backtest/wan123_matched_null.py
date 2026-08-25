@@ -110,11 +110,11 @@ from backtest.harness import (
     SEGMENT_IS,
     SEGMENT_OOS,
     FillPreset,
-    build_config,
     build_params,
     detect_order_blocks,
     fill_preset,
     iter_seeds,
+    legacy_build_config,
     load_market_data,
     normalize_symbol,
     pin_band_bar,
@@ -284,7 +284,7 @@ def run_symbol_timeframe(task: _SymbolTfTask, *, log: bool = True) -> list[NullR
     if market.empty or market.df_1m.empty:
         return []
 
-    cfg = build_config(task.timeframe)
+    cfg = legacy_build_config(task.timeframe)
     rows: list[NullRow] = []
     for segment in segments_for(oos=True):
         if segment.name not in SEGMENT_ORDER:

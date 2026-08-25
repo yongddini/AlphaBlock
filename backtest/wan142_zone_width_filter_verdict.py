@@ -246,7 +246,7 @@ def _metrics_for(
     cands: list[_Candidate], market: MarketData, timeframe: str
 ) -> tuple[float, float, float, int]:
     """후보 목록 → (total_return, MDD, 승률, 거래수). 시퀀싱·비용·펀딩은 프로덕션 경로 그대로."""
-    cfg = harness.build_config(timeframe)
+    cfg = harness.legacy_build_config(timeframe)
     trades = [t for _, t in sequence_with_candidates(cands, cfg, market.funding_rates)]
     m = build_result_from_trades(trades, cfg, timeframe).metrics
     return m.total_return, m.max_drawdown, m.win_rate, m.num_trades
@@ -692,7 +692,7 @@ def build_cell(market: MarketData, *, params: ConfluenceParams) -> CellResult:
         market.df_1m,
         market.timeframe,
         params=harness.pin_invalidation_cancel(params),
-        cfg=harness.build_config(market.timeframe),
+        cfg=harness.legacy_build_config(market.timeframe),
         order_block_result=harness.detect_order_blocks(market),
     )
     cell.default_candidates = cands

@@ -293,7 +293,7 @@ def run_arm(
     `harness.run_once`와 비트 단위로 일치한다(`run_checksum`이 고정).
     """
     params = harness.build_params(entry_mode="zone_limit", take_profit_r=arm.take_profit_r)
-    cfg = harness.build_config(seg_market.timeframe)
+    cfg = harness.legacy_build_config(seg_market.timeframe)
     sink: list[SetupDiagnostic] = []
     candidates, stats = build_zone_limit_candidates(
         seg_market.htf_df,
@@ -788,7 +788,7 @@ def run_checksum(
                     params=harness.pin_invalidation_cancel(
                         harness.build_params(entry_mode="zone_limit")
                     ),
-                    cfg=harness.build_config(seg_market.timeframe),
+                    cfg=harness.legacy_build_config(seg_market.timeframe),
                     order_block_result=obr,
                     eval_from_ms=eval_from_ms,
                 ).result.metrics

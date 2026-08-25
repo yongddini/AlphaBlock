@@ -256,7 +256,7 @@ def run_cell(
     # ⚠️ 밴드를 고정하지 않는다 — 채택 기본값(`intrabar_live`, WAN-132) 위에서 재는 것이
     # 이 이슈의 요구다(§1-3 경고 3).
     base_params = harness.build_params(entry_mode="zone_limit")
-    base_cfg = harness.build_config(seg_market.timeframe)
+    base_cfg = harness.legacy_build_config(seg_market.timeframe)
 
     rows: list[TpRow] = []
     entry_sets: dict[tuple[float, str], list[int]] = {}

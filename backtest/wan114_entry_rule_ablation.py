@@ -97,12 +97,12 @@ from backtest.harness import (
     FillPreset,
     RunRow,
     Segment,
-    build_config,
     build_params,
     build_row,
     detect_order_blocks,
     fill_preset,
     iter_seeds,
+    legacy_build_config,
     load_market_data,
     normalize_symbol,
     pin_band_bar,
@@ -276,7 +276,7 @@ def run_report(
             if market.empty or market.df_1m.empty:
                 _log(log, f"[wan114] {symbol} {timeframe}: 데이터 없음 — 건너뜀")
                 continue
-            cfg = build_config(timeframe)
+            cfg = legacy_build_config(timeframe)
             for segment in segments():
                 window = slice_market(market, segment)
                 if window.empty:

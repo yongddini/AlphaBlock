@@ -134,7 +134,7 @@ class Arm:
         )
 
     def config(self, timeframe: str) -> BacktestConfig:
-        cfg = harness.build_config(timeframe)
+        cfg = harness.legacy_build_config(timeframe)
         if not self.allow_long:
             cfg = cfg.model_copy(update={"allow_long": False})
         return cfg

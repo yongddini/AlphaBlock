@@ -600,7 +600,7 @@ def build_gated_cell(
     """오늘 엔진으로 후보를 한 번 빌드하고 게이트 특징·라벨을 붙인다(핀 없음)."""
     if market.empty or market.df_1m.empty:
         return None
-    cfg = harness.build_config(market.timeframe)
+    cfg = harness.legacy_build_config(market.timeframe)
     cands, _ = build_zone_limit_candidates(
         market.htf_df,
         market.df_1m,
@@ -689,7 +689,7 @@ class _SeqStats:
 
 def _seq_stats(cands: list[_Candidate], market: harness.MarketData, timeframe: str) -> _SeqStats:
     """후보 목록을 프로덕션 시퀀서로 배치한 손익 + 즉사율(funding=False, wan150과 같음)."""
-    cfg = harness.build_config(timeframe)
+    cfg = harness.legacy_build_config(timeframe)
     pairs = sequence_with_candidates(cands, cfg)
     trades = [t for _, t in pairs]
     m = build_result_from_trades(trades, cfg, timeframe).metrics
@@ -1081,7 +1081,7 @@ def checksum(
     outcome = harness.run_once(
         market,
         params=harness.pin_invalidation_cancel(ConfluenceParams()),
-        cfg=harness.build_config(timeframe),
+        cfg=harness.legacy_build_config(timeframe),
     )
     prod = outcome.result.metrics.num_trades
     df = pd.read_csv(labeled_csv)

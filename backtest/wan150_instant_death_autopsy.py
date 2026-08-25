@@ -327,7 +327,7 @@ def label_cell(
     st = stats if stats is not None else LabelStats()
     if market.empty or market.df_1m.empty:
         return []
-    cfg = harness.build_config(market.timeframe)
+    cfg = harness.legacy_build_config(market.timeframe)
     candidates, _ = build_zone_limit_candidates(
         market.htf_df,
         market.df_1m,
@@ -1123,7 +1123,7 @@ def checksum(
     outcome = harness.run_once(
         market,
         params=harness.pin_invalidation_cancel(ConfluenceParams()),
-        cfg=harness.build_config(timeframe),
+        cfg=harness.legacy_build_config(timeframe),
     )
     prod = outcome.result.metrics.num_trades
     return st.sequenced, prod, st.sequenced == prod

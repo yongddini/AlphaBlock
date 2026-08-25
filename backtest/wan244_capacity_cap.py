@@ -167,7 +167,7 @@ def _base_cfg(cap_on: bool) -> BacktestConfig:
     """
     # WAN-279가 채택 기본값을 0.005로 올린 뒤라 상한 끔 팔은 **명시적 `None`으로 고정**한다
     # (pin 없이 build_config에 맡기면 조용히 0.005로 돌아 off/on 대조가 깨진다, WAN-91/95/112 부류).
-    return harness.build_config(
+    return harness.legacy_build_config(
         BOOK_ANNUALIZATION_TF,
         max_notional_adv_fraction=ADV_FRACTION if cap_on else None,
     )

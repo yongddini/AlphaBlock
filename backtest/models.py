@@ -72,7 +72,23 @@ class BacktestConfig(BaseModel):
     """진입 체결의 유동성 구분(WAN-37). 시장가 진입(A안)=taker, 지정가 진입(B안)=maker.
 
     taker면 진입에 테이커 수수료+슬리피지가, maker면 메이커 수수료+슬리피지 0이 적용된다.
-    청산은 항상 taker로 본다.
+    ⚠️ **청산은 「항상 taker」가 아니다** — 사유별로 갈린다(`take_profit_liquidity` ·
+    `exit_liquidity`, WAN-370).
+    """
+    take_profit_liquidity: Liquidity = Field(default=Liquidity.MAKER)
+    """**익절**(부분 익절 포함) 청산 체결의 유동성 구분 — 채택 기본값 **maker**(WAN-370).
+
+    익절은 목표가를 미리 아는 청산이라 실거래에서 **지정가 reduce-only**로 낸다
+    (`docs/decisions/wan235.md` §3-2가 정한 집행). 그런데 백테스트 비용만 테이커로 남아
+    있었다(같은 문서 §3-4가 「별도 재-베이스라인」으로 미뤄 둔 자리) — WAN-95가 **진입**
+    쪽에서 한 교정("실매매가 지정가면 계산도 지정가")을 익절 쪽에서 뒤늦게 한 것이다.
+
+    🚨 **근거는 정확성이지 수익이 아니다**(WAN-132가 진입가 정본을 옮길 때와 같은 성격).
+    ⚠️ **체결 판정은 안 바뀐다** — 「닿으면 체결」 그대로라, 수수료는 지정가인데 체결은
+    낙관인 상태다(사용자 결정 ①). 그 낙관은 `pen_5bp` 부류의 별도 축이다.
+
+    손절·만료·데이터 종료는 **테이커 그대로**다(가격이 반대로 가서 시장가로 터는 청산).
+    옛 동작(익절도 테이커)은 `harness.LEGACY_TAKE_PROFIT_LIQUIDITY`로 **명시 고정**한다.
     """
     position_fraction: float = Field(default=1.0, gt=0, le=1)
     """진입 시 노셔널로 사용할 자본(equity) 비율. `risk_sizing`이 None일 때만 쓰인다."""
@@ -122,6 +138,20 @@ class BacktestConfig(BaseModel):
         ):
             raise ValueError("partial_take_profit_pct는 take_profit_pct보다 작아야 합니다.")
         return self
+
+    def exit_liquidity(self, reason: ExitReason) -> Liquidity:
+        """청산 사유별 유동성 구분 — 이 저장소의 **단일 소스**(WAN-370).
+
+        익절(부분 익절 포함)은 `take_profit_liquidity`, 나머지(손절·데이터 종료)는 항상
+        테이커다. 🚨 **호출부가 「청산」을 한 덩어리로 취급하면 안 된다** — 사유를 안 보고
+        `Liquidity.TAKER`를 그대로 넘기면 라벨만 바뀌고 실제로는 전부 테이커로 도는,
+        이 저장소가 반복해 겪은 조용한 실패가 된다(WAN-91/95/112/123/159). 그래서 분기를
+        여기 한 곳에만 두고 회귀 테스트가 **동작으로**(익절 거래와 손절 거래의 수수료가
+        실제로 다른지) 고정한다.
+        """
+        if reason in (ExitReason.TAKE_PROFIT, ExitReason.PARTIAL_TAKE_PROFIT):
+            return self.take_profit_liquidity
+        return Liquidity.TAKER
 
     @property
     def cost_model(self) -> CostModel:

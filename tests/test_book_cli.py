@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 
-from backtest import book_cli
+from backtest import book_cli, harness
 from backtest.harness import (
     SEGMENT_FULL,
     SEGMENT_IS,
@@ -330,7 +330,18 @@ def test_reentry_off_reproduces_pre_wan273_book() -> None:
     from backtest.run import parse_date_ms
     from backtest.wan169_leverage_book import run_cells
 
-    base = run_cells(_SYMBOLS, _TFS, start=_START, end=_END, jobs=1, reentry=False)
+    # ⚠️ 비용 축(WAN-370)은 **명시로 채택 값**을 넘긴다 — `run_cells`/`build_book_rows`의
+    # 기본값은 옛 회계(`taker`)라(북 측정 모듈 CSV 보존을 위한 중앙 핀) 안 넘기면 이 대조가
+    # 「재진입 축」이 아니라 「비용 축」의 차이를 재게 된다. `run_book`은 그 값을 항상 명시한다.
+    base = run_cells(
+        _SYMBOLS,
+        _TFS,
+        start=_START,
+        end=_END,
+        jobs=1,
+        reentry=False,
+        take_profit_liquidity=harness.ADOPTED_TAKE_PROFIT_LIQUIDITY,
+    )
     ref = book_cli.build_book_rows(
         base,
         book=ADOPTED_BOOK,
@@ -338,6 +349,7 @@ def test_reentry_off_reproduces_pre_wan273_book() -> None:
         start_ms=parse_date_ms(_START),
         end_ms=parse_date_ms(_END),
         include_reentry=False,
+        take_profit_liquidity=harness.ADOPTED_TAKE_PROFIT_LIQUIDITY,
     )
     off = book_cli.run_book(
         _SYMBOLS,

@@ -164,6 +164,7 @@ from backtest.trade_store import (
     engine_revision,
 )
 from backtest.zone_limit_backtest import SetupDiagnostic, ZoneLimitStats
+from common.costs import Liquidity
 from strategy.models import (
     BandBar,
     ConfluenceParams,
@@ -357,6 +358,14 @@ class Grid:
     `rsi_gate_mode`와 같은 자리의 핀이다(축이 아니다). WAN-132가 밴드 정본을 옮긴 뒤,
     **탭 봉 종가 밴드에서 낸 수치를 결론에 박아 둔 리포트**(wan111 등)가 자기 엔진을
     고정하는 용도다(`harness.LEGACY_BAND_BAR`).
+    """
+    take_profit_liquidity: Liquidity | None = None
+    """익절 청산 유동성 **고정**. None이면 채택 기본값(WAN-370: `maker` = 지정가 2bp).
+
+    `rsi_gate_mode`·`band_bar`와 같은 자리의 핀이다(축이 아니다) — CLI 플래그로 열지 않으므로
+    기본 실행은 언제나 채택 비용 회계를 돈다. WAN-370이 익절을 메이커로 옮긴 뒤, **익절도
+    테이커이던 시절 수치를 결론에 박아 둔 동결 CSV**(wan99 등)와 대조하는 회귀 테스트가 자기
+    회계를 고정하는 용도다(`harness.LEGACY_TAKE_PROFIT_LIQUIDITY`).
     """
 
     def __post_init__(self) -> None:
@@ -593,6 +602,8 @@ def _run_cell(task: _CellTask) -> _CellOutcome:
         fee_rate=options.fee_rate,
         maker_fee_rate=options.maker_fee_rate,
         slippage=options.slippage,
+        # `None`이면 채택 기본값(익절 메이커, WAN-370) — 핀을 준 실행만 옛 회계로 돈다.
+        take_profit_liquidity=grid.take_profit_liquidity,
         funding_enabled=options.funding,
         max_notional_adv_fraction=options.max_notional_adv_fraction,
     )

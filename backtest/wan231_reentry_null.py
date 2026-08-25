@@ -431,7 +431,7 @@ def run_cell(task: _Task, *, log: bool = True) -> NullRow | None:
     if market.empty or market.df_1m.empty:
         return None
     ob = harness.detect_order_blocks(market, OrderBlockParams())
-    cfg = harness.build_config(task.timeframe)
+    cfg = harness.legacy_build_config(task.timeframe)
     params = harness.build_params()  # 채택 기본값(핀 없음).
 
     candidates, _stats = build_zone_limit_candidates(

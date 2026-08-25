@@ -159,6 +159,9 @@ _UNPINNED_BY_DESIGN: dict[str, str] = {
     # `L4` ≡ 인자 없는 채택 북을 실데이터 검산 (a)로 못 박고, `_assert_adopted_base`가
     # 취소 시점 기본값이 인과가 아니면 실행 자체를 거부한다.
     "wan366_causal_ablation.py": "L4 ≡ 인자 없는 채택 북 (검산) · 기본값 감시가 내장",
+    # 비용 분해(WAN-370) — 핀 없음이 설계다(WAN-305 · 인과 취소를 물려받아야 §1이 오늘
+    # 엔진의 분해다). 채택 팔 ≡ 인자 없는 채택 북을 실데이터 검산 (b)로 못 박는다.
+    "wan370_cost_decomposition.py": "maker_tp 팔 ≡ 인자 없는 채택 북 (검산)",
 }
 
 

@@ -348,7 +348,7 @@ def run_cell(
     params = harness.pin_band_bar(
         harness.build_params(entry_mode="zone_limit", max_zone_width_atr=None)
     )
-    cfg = harness.build_config(seg_market.timeframe)
+    cfg = harness.legacy_build_config(seg_market.timeframe)
 
     self_provider = indexed_zone_provider({seg_market.timeframe: obr}, combine=False)
     combined_provider: ZoneProvider | None = None

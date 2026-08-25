@@ -259,7 +259,7 @@ def _cell_rows_for_market(
 ) -> list[ImpactRow]:
     """한 팔의 per-cell 성과 행(full · oos_warm)."""
     params = harness.build_params()
-    cfg = harness.build_config(market.timeframe)
+    cfg = harness.legacy_build_config(market.timeframe)
     ob_result = harness.detect_order_blocks(market)
     boundary = harness.eval_boundary_ms(market, harness.WARM_OOS_SEGMENT)
     rows: list[ImpactRow] = []

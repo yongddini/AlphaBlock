@@ -48,6 +48,7 @@ from backtest.zone_limit_backtest import (
     run_zone_limit_backtest_verbose,
     run_zone_limit_portfolio_backtest,
 )
+from common.costs import Liquidity
 from config.settings import get_settings
 from data.funding import FundingRateStore
 from data.models import FundingRate
@@ -471,6 +472,27 @@ AdvCapArg = float | None | _Unset
 LEGACY_MAX_NOTIONAL_ADV_FRACTION: float | None = None
 
 
+#: 익절 청산 유동성의 **옛 값** — WAN-370 전까지 이 저장소의 모든 백테스트가 쓴 값이다
+#: (청산은 사유와 무관하게 테이커 4bp ＋ 슬리피지 5bp). 채택 기본값은
+#: `BacktestConfig().take_profit_liquidity`(= `maker` = 2bp · 슬리피지 0)다.
+#:
+#: 🚨 `take_profit_liquidity`는 **WAN-370이 처음 만든 축이라 기존 리포트가 하나도 명시하지
+#: 않았다** — `LEGACY_BAND_BAR`(WAN-132)·`LEGACY_COMBINE_OBS`(WAN-149)·
+#: `LEGACY_INVALIDATION_CANCEL`(WAN-365)과 **글자 그대로 같은 함정**이다. 고정하지 않으면
+#: 옛 결론 리포트가 전부 조용히 「익절 메이커」 엔진으로 다시 돌아 본문과 어긋난다
+#: (「안 바꿨다고 믿으면서 바뀐 것」). 그래서 옛 수치를 결론에 박아 둔 모듈은
+#: `legacy_build_config`(= 이 값으로 고정된 `build_config`)를 쓴다. 목록은
+#: [`docs/decisions/wan370.md`](../docs/decisions/wan370.md) §파급.
+#:
+#: ⚠️ 반대로 **"지금 채택된 것"을 재는 리포트는 고정하지 않는다**(wan95·wan366/368) —
+#: 기본값이 움직이면 그 수치는 낡은 것이 되어야 맞다.
+LEGACY_TAKE_PROFIT_LIQUIDITY: Liquidity = Liquidity.TAKER
+
+#: 채택 값(= 익절 지정가). 새 측정·대조 도구는 **인자를 안 주면** 이 값을 물려받는다
+#: (WAN-305 원칙: 기본값이 곧 페이퍼가 뛰는 규칙). 명시가 필요할 때 쓰는 이름이다.
+ADOPTED_TAKE_PROFIT_LIQUIDITY: Liquidity = Liquidity.MAKER
+
+
 def build_params(
     *,
     entry_mode: str = "zone_limit",
@@ -554,6 +576,7 @@ def build_config(
     fee_rate: float | None = None,
     maker_fee_rate: float | None = None,
     slippage: float | None = None,
+    take_profit_liquidity: Liquidity | None = None,
     funding_enabled: bool | None = None,
     max_notional_adv_fraction: AdvCapArg = UNSET,
     min_stop_distance_fraction: float | None = None,
@@ -572,6 +595,11 @@ def build_config(
     안 가르면 "상한 끔" 라벨을 단 채 조용히 0.005로 도는 이중 배선이 된다(WAN-91/95/112 부류).
     `risk_sizing`이 `None`(사이징 비활성)이면 상한 개념 자체가 없어 이 인자를 무시한다.
 
+    `take_profit_liquidity`(익절 청산 유동성, WAN-370)는 `offset_bps` 규약이다 —
+    `None`(기본)이 "손대지 않는다"라 **채택 기본값**(`maker` = 지정가 2bp · 슬리피지 0)을
+    물려받고, 값을 주면 그것으로 고정한다. 옛 CSV를 재현해야 하는 모듈은 `build_config` 대신
+    `legacy_build_config`를 쓴다(그쪽이 `LEGACY_TAKE_PROFIT_LIQUIDITY`를 항상 명시로 넘긴다).
+
     `min_stop_distance_fraction`(손절폭 가드, WAN-76/79 · WAN-366 옵트인)은 `offset_bps`
     규약이다 — `None`(기본)이 "손대지 않는다"라 채택 기본값(`0.003` = 0.3%)을 물려받고,
     값을 주면 그것으로 덮어쓴다(`0.0` = 가드 끔). ⚠️ **가드는 후보 생성이 아니라 사이징에
@@ -587,6 +615,8 @@ def build_config(
         update["maker_fee_rate"] = maker_fee_rate
     if slippage is not None:
         update["slippage"] = slippage
+    if take_profit_liquidity is not None:
+        update["take_profit_liquidity"] = take_profit_liquidity
     if funding_enabled is not None:
         update["funding_enabled"] = funding_enabled
     sizing_update: dict[str, object] = {}
@@ -598,6 +628,42 @@ def build_config(
     if sizing_update and cfg.risk_sizing is not None:
         update["risk_sizing"] = cfg.risk_sizing.model_copy(update=sizing_update)
     return cfg.model_copy(update=update) if update else cfg
+
+
+def legacy_build_config(
+    timeframe: str,
+    *,
+    fee_rate: float | None = None,
+    maker_fee_rate: float | None = None,
+    slippage: float | None = None,
+    funding_enabled: bool | None = None,
+    max_notional_adv_fraction: AdvCapArg = UNSET,
+    min_stop_distance_fraction: float | None = None,
+    seed: int = 0,
+) -> BacktestConfig:
+    """`build_config`을 **WAN-370 이전 비용 회계**(익절도 테이커)에 고정해 부른다.
+
+    옛 수치를 결론 문장에 박아 둔 리포트 모듈이 쓰는 한 줄짜리 핀이다 — 호출 형태는
+    `build_config`과 글자 그대로 같고 `take_profit_liquidity`만 항상
+    `LEGACY_TAKE_PROFIT_LIQUIDITY`로 명시한다. 이름 자체가 "이 표는 옛 회계의 기록"이라고
+    호출부에서 읽히는 것이 요점이다(`pin_band_bar`·`pin_invalidation_cancel`과 같은 자리).
+    그 축을 **인자로 받지 않는 것**도 의도다 — 받으면 "legacy"라는 이름을 달고 채택 회계로
+    도는 호출이 생긴다(라벨과 동작이 어긋나는 자리, WAN-91/95/112/123/159).
+
+    ⚠️ **새 모듈은 이걸 쓰지 않는다** — 새 측정·대조 도구의 기본값은 채택 규칙이어야 한다
+    (WAN-305). 이 함수는 **이미 낸 표를 재현하기 위한 것**이다.
+    """
+    return build_config(
+        timeframe,
+        fee_rate=fee_rate,
+        maker_fee_rate=maker_fee_rate,
+        slippage=slippage,
+        take_profit_liquidity=LEGACY_TAKE_PROFIT_LIQUIDITY,
+        funding_enabled=funding_enabled,
+        max_notional_adv_fraction=max_notional_adv_fraction,
+        min_stop_distance_fraction=min_stop_distance_fraction,
+        seed=seed,
+    )
 
 
 # --------------------------------------------------------------------------- #

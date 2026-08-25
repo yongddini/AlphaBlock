@@ -225,7 +225,7 @@ def _dir_monthly_rows(
     cell: CellPayload, side: PositionSide, buy_hold: dict[str, float]
 ) -> list[DirMonthlyRow]:
     """한 셀 한 방향의 월별 격리 손익 — 청산 달로 순수익 %p를 접는다."""
-    cfg = harness.build_config(cell.timeframe)
+    cfg = harness.legacy_build_config(cell.timeframe)
     funding = cell.funding[SEGMENT_FULL]
     paired = sequence_with_candidates(_direction_candidates(cell, side), cfg, funding)
     pp_sum: dict[str, float] = {}
@@ -268,7 +268,7 @@ def _book_monthly_rows(
     """
     # WAN-305 명시 핀: wan288 판은 재진입 꺼진 북이다(payload에도 재진입이 없어 무동작 가드).
     seg_cells = _segment_cells(list(cells), SEGMENT_OOS_WARM, "", include_reentry=False)
-    base_cfg = harness.build_config(BOOK_ANNUALIZATION_TF)
+    base_cfg = harness.legacy_build_config(BOOK_ANNUALIZATION_TF)
     outcome = run_leverage_book(
         seg_cells,
         base_cfg,

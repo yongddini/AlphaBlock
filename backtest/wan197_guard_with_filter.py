@@ -174,7 +174,7 @@ def production_candidates(market: MarketData, params: ConfluenceParams) -> list[
     「필터 켜진 오늘 엔진」이고, 인자 없는 `backtest.run`이 시퀀싱하는 바로 그 집합이다.
     """
     obr = harness.detect_order_blocks(market)
-    cfg = harness.build_config(market.timeframe)
+    cfg = harness.legacy_build_config(market.timeframe)
     cands, _ = build_zone_limit_candidates(
         market.htf_df,
         market.df_1m,

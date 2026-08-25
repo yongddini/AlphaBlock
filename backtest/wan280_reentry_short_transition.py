@@ -580,7 +580,7 @@ def run_cell(task: _Task, *, log: bool = True) -> Wan280Cell | None:
         return None
     params = harness.build_params() if task.fill is None else harness.build_params(fill=task.fill)
     # 측정 모듈이라 유동성 한도는 명시적으로 끈다(옛 북 CSV 비트 재현 규약, wan169 참고).
-    cfg = harness.build_config(task.timeframe)
+    cfg = harness.legacy_build_config(task.timeframe)
 
     boundary = harness.eval_boundary_ms(market, WARM_OOS_SEGMENT)
     assert boundary is not None

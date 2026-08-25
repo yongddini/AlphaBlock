@@ -241,7 +241,7 @@ def build_cell(
     times = frame["open_time"].astype("int64")
     start, end = int(times.iloc[0]), int(times.iloc[-1])
     cell.is_boundary = start + int((end - start) * IS_FRACTION)
-    cfg = harness.build_config(market.timeframe)
+    cfg = harness.legacy_build_config(market.timeframe)
     # 오더블록은 장벽과 무관하므로 한 번만 탐지해 팔들이 공유한다.
     obr = harness.detect_order_blocks(market)
     atr_map = atr_by_tap_time(frame)
@@ -439,7 +439,7 @@ def per_trade_records(
     * 상한 발동 = 손절 거리 분수 < `risk_per_trade`/`leverage` — `position_size`의 clamp
       대수식과 동치라(수량·자본이 약분된다) 시퀀싱 순서·복리에 의존하지 않는다.
     """
-    cfg = apply_guard(harness.build_config(timeframe), guard)
+    cfg = apply_guard(harness.legacy_build_config(timeframe), guard)
     sizing = cfg.risk_sizing
     records: list[TradeRecord] = []
     for cand, trade in sequence_with_candidates(cands, cfg, market.funding_rates):
@@ -527,7 +527,7 @@ def trade_stats(
     예전 `_metrics_for`와 같은 경로(`build_result_from_trades`)라 **비트 단위로 같고**,
     새 지표는 `per_trade_records`(같은 시퀀싱을 한 번 더 돈다)에서 온다.
     """
-    cfg = apply_guard(harness.build_config(timeframe), guard)
+    cfg = apply_guard(harness.legacy_build_config(timeframe), guard)
     trades = [t for _, t in sequence_with_candidates(cands, cfg, market.funding_rates)]
     m = build_result_from_trades(trades, cfg, timeframe).metrics
     agg = _aggregate_records(per_trade_records(cands, market, timeframe, guard=guard))
@@ -584,7 +584,7 @@ def pnl_rows_for_cell(
         threshold = is_threshold(cell, fraction=threshold_fraction)
     zone_cands = cell.by_barrier[BARRIER_ZONE]
     barriers = [b for b in BARRIERS if b in cell.by_barrier]
-    cfg = apply_guard(harness.build_config(cell.timeframe), guard)
+    cfg = apply_guard(harness.legacy_build_config(cell.timeframe), guard)
     guard_used = (
         cfg.risk_sizing.min_stop_distance_fraction
         if cfg.risk_sizing is not None

@@ -308,7 +308,7 @@ def run_cell(task: _Task, *, log: bool = True) -> CellRow | None:
     if market.empty or market.df_1m.empty:
         return None
     ob = harness.detect_order_blocks(market, OrderBlockParams())
-    cfg = harness.build_config(task.timeframe)
+    cfg = harness.legacy_build_config(task.timeframe)
     params_base = harness.build_params()  # 채택 기본값(limit_valid_bars=24)
     params_wait = harness.build_params(limit_valid_bars=None)  # 무기한 대기
 

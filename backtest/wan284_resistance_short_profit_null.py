@@ -578,7 +578,7 @@ def build_short_null_rows(
         drawn = by_key.get((cell.symbol, cell.timeframe))
         if drawn is None:
             continue
-        cfg = harness.build_config(cell.timeframe)
+        cfg = harness.legacy_build_config(cell.timeframe)
         rates = {seg: _funding_for(cell, seg) for seg in NULL_SEGMENTS}
         for segment in NULL_SEGMENTS:
             shorts = _short_candidates(cell, segment)

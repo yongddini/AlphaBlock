@@ -267,7 +267,7 @@ def build_grid(
 
     `include_reentry`(WAN-277, 옵트인)를 켜면 payload에 실린 재진입 후보(WAN-273 채택 band)를
     base와 함께 북에 넣는다 — 끄면(WAN-276 기본) base만 넣어 비트 재현된다."""
-    base_cfg = harness.build_config(BOOK_ANNUALIZATION_TF)
+    base_cfg = harness.legacy_build_config(BOOK_ANNUALIZATION_TF)
     rows: list[StressRow] = []
     for scope in scopes:
         base_scope = _scope_payloads(base_payloads, scope)
@@ -288,11 +288,11 @@ def build_grid(
 
 def _crash_stats(payloads: Sequence[CellPayload], scenario: str) -> CrashRow:
     """전 칸 full 구간의 격리 손절 거래 중 급락일 창에 청산된 것들의 실현손실 집계."""
-    base_cfg = harness.build_config(BOOK_ANNUALIZATION_TF)
+    base_cfg = harness.legacy_build_config(BOOK_ANNUALIZATION_TF)
     windows = [(_day_ms(d), _day_ms(d) + _DAY_MS) for d, _ in CRASH_DAYS]
     pcts: list[float] = []
     for payload in payloads:
-        cfg = harness.build_config(payload.timeframe)
+        cfg = harness.legacy_build_config(payload.timeframe)
         cands = list(payload.candidates[SEGMENT_FULL])
         for cand, trade in sequence_with_candidates(cands, cfg, payload.funding[SEGMENT_FULL]):
             if cand.reason is not ExitReason.STOP_LOSS:
@@ -344,7 +344,7 @@ def verify_alpha0_identity(
     후보를 조용히 건드린 것이라 α 스윕 전체가 오염된다(회귀 테스트가 동작으로도 고정).
 
     `include_reentry`(WAN-277)를 켜면 재진입 ON 북에서 α=0 항등을 확인한다."""
-    base_cfg = harness.build_config(BOOK_ANNUALIZATION_TF)
+    base_cfg = harness.legacy_build_config(BOOK_ANNUALIZATION_TF)
     worst = 0.0
     for scope in scopes:
         scoped = _scope_payloads(base_payloads, scope)
