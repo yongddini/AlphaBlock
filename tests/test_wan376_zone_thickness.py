@@ -227,6 +227,40 @@ def test_double_filter_is_refused() -> None:
         )
 
 
+def test_dropout_lens_is_refused() -> None:
+    """🚨 탈락 렌즈에서는 지름길이 **원리적으로** 깨진다 — 조용히 돌면 표가 거짓이 된다.
+
+    추첨 순서가 「어느 셋업이 체결됐나」에 달려 있어, 넓은 셋업을 안 만들면 뒤 셋업의 난수가
+    통째로 밀린다. `baseline`은 `dropout_rate=0`이라 난수를 뽑지도 않아 무관하다.
+    """
+    dropout = next(f for f in harness.FILL_PRESETS if f.dropout_rate > 0)
+    with pytest.raises(ValueError, match="탈락 렌즈"):
+        run_cells(
+            [_REAL_SYMBOL],
+            [_REAL_TF],
+            max_zone_width_atr=None,
+            post_filter_zone_width=ADOPTED_ZONE_WIDTH,
+            fill=dropout,
+            **_shared_kwargs(),
+        )
+
+
+def test_baseline_lens_is_allowed_with_the_shortcut() -> None:
+    """가드가 **탈락이 있는 렌즈만** 막는지 — 전부 막으면 지름길 자체가 못 돈다."""
+    baseline = harness.BASELINE_FILL
+    assert baseline.dropout_rate == 0.0
+    _skip_without_real_data()
+    payloads = run_cells(
+        [_REAL_SYMBOL],
+        [_REAL_TF],
+        max_zone_width_atr=None,
+        post_filter_zone_width=ADOPTED_ZONE_WIDTH,
+        fill=baseline,
+        **_shared_kwargs(),
+    )
+    assert payloads[0].candidates[harness.SEGMENT_FULL]
+
+
 # --------------------------------------------------------------------------- #
 # 5 · §0의 자 == 엔진의 자 (실데이터)
 # --------------------------------------------------------------------------- #
@@ -368,6 +402,27 @@ def _parity(level: str, **over: float) -> ParityRow:
     }
     base.update(over)
     return ParityRow(**base)
+
+
+def test_cell_parity_carries_the_scope() -> None:
+    """칸 대조 행에 **스코프**가 실린다 — 지갑이 다르면 같은 칸이라도 따로 남아야 한다."""
+    from backtest.wan376_zone_thickness import CELL_KEYS, CellParity
+
+    assert CELL_KEYS[0] == "scope"
+    row = CellParity(
+        scope="15m+1h",
+        symbol="BTC/USDT:USDT",
+        timeframe="15m",
+        segment="full",
+        straight_base=1,
+        shortcut_base=1,
+        straight_reentry=0,
+        shortcut_reentry=0,
+        base_identical=True,
+        reentry_identical=True,
+        width_identical=True,
+    )
+    assert row.scope == "15m+1h"
 
 
 def test_book_diffs_are_empty_when_the_arms_agree() -> None:

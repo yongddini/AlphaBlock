@@ -1045,11 +1045,12 @@ def build_zone_limit_candidates(
         )
     line_snapshots = _line_snapshots(params, htf_df)
 
-    # 존폭 필터(WAN-158, 옵트인). 꺼져 있으면(기본) ATR을 아예 계산하지 않으므로 기본
-    # 실행은 예전과 비트 단위로 같다. 프레임은 `_prepare_htf`가 정렬한 것 그대로라
-    # 측정 모듈(`wan117._FeatureExtractor`)이 읽는 위치와 pos가 일치한다.
-    # WAN-376(옵트인 관측): 필터가 꺼져 있어도 **같은 산식의 비율**을 후보에 실을 수 있게
-    # ATR을 계산한다. 관측을 안 켜면(기본) 조건이 예전과 글자 그대로 같다.
+    # 존폭 필터(WAN-158, 옵트인). 필터도 관측(WAN-376)도 꺼져 있으면(기본) ATR을 아예
+    # 계산하지 않으므로 기본 실행은 예전과 비트 단위로 같다 — 관측 절을 빼면 조건이 예전과
+    # 글자 그대로 같다. 프레임은 `_prepare_htf`가 정렬한 것 그대로라 측정 모듈
+    # (`wan117._FeatureExtractor`)이 읽는 위치와 pos가 일치한다.
+    # WAN-376(옵트인 관측): 필터가 꺼져 있어도 **같은 산식의 비율**을 후보에 실으려면 ATR이
+    # 필요하다. 값을 싣기만 할 뿐 어떤 판정에도 안 쓰이므로 결과는 그대로다.
     zone_width_atr14: list[float] | None = None
     if params.max_zone_width_atr is not None or observe_zone_width_atr:
         zone_width_atr14 = [

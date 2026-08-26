@@ -723,7 +723,8 @@ def run_cells(
     후자는 엔진 필터를 **끈 채** 만든 후보에서 그 비율로 컷해 재진입 파생·격리 성과·북 입력을
     다시 만든다(컷은 재진입 파생 **앞**이다 — 뒤에 걸면 「빠진 셋업의 재진입이 살아남는」
     잡종이다). 둘 다 기본값이면 예전과 **비트 단위로 같다**. ⚠️ 후자는 `max_zone_width_atr`과
-    동시에 못 준다(이중 필터).
+    동시에 못 주고(이중 필터), **탈락 렌즈**(`fill.dropout_rate > 0`)와도 못 쓴다 — 그쪽은
+    추첨 순서가 후보 집합에 의존해 지름길이 **원리적으로** 깨진다.
 
     `repair_partial_bars`(WAN-327, 옵트인 · **비파괴**)를 켜면 저장 상위TF 손상 봉을 1분봉
     합으로 갈아끼운 사본에서 후보를 만든다 — 부분 봉의 백테 영향 크기를 재는 반사실이다.
@@ -747,6 +748,16 @@ def run_cells(
         raise ValueError(
             "no_same_step_tp(전부)와 no_same_step_tp_minutes(표적)는 같은 축의 두 값이라 "
             "함께 줄 수 없습니다(WAN-359)."
+        )
+    if post_filter_zone_width is not None and fill is not None and fill.dropout_rate > 0:
+        # WAN-376 §1a: 탈락 렌즈에서는 지름길이 **원리적으로** 깨진다 — 추첨 순서가 「어느
+        # 셋업이 체결됐나」에 달려 있어, 넓은 셋업을 안 만들면 뒤 셋업의 난수가 통째로
+        # 밀린다(`baseline`은 `dropout_rate=0`이라 난수를 뽑지도 않는다). 조용히 돌면
+        # 「지름길이 성립한다」는 표가 거짓이 된다.
+        raise ValueError(
+            f"post_filter_zone_width는 탈락 렌즈({fill.name!r}, dropout_rate="
+            f"{fill.dropout_rate})와 함께 쓸 수 없습니다 — 추첨 순서가 후보 집합에 "
+            "의존해 지름길이 원리적으로 깨집니다(WAN-376)."
         )
     if post_filter_zone_width is not None and max_zone_width_atr is not None:
         # WAN-376 §1a: 지름길 팔은 **필터를 끈 채** 만들어야 한다. 켠 채로 또 컷하면

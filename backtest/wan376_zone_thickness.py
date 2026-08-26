@@ -75,7 +75,9 @@ LIQUIDITY` — 후보 생성 · 배치 **둘 다에 명시**, WAN-370/373) · `b
 
 ```
 uv run python -m backtest.wan376_zone_thickness --part census                 # §0 (몇 분)
-uv run python -m backtest.wan376_zone_thickness --part shortcut --timeframes 4h,2h,1h --jobs 4
+uv run python -m backtest.wan376_zone_thickness --part shortcut --timeframes 4h,2h --jobs 4
+uv run python -m backtest.wan376_zone_thickness --part shortcut --jobs 4 \
+    --symbols BTC/USDT:USDT,ETH/USDT:USDT,SOL/USDT:USDT,TRX/USDT:USDT  # 15m 포함
 uv run python -m backtest.wan376_zone_thickness --part summary                # 요약만
 ```
 """
@@ -141,6 +143,7 @@ QUANTILES: tuple[float, ...] = (0.05, 0.10, 0.25, 0.33, 0.50, 0.67, 0.75, 0.90, 
 MAP_KEYS: tuple[str, ...] = ("arm", "symbol", "timeframe", "width_label", "guard")
 QUANTILE_KEYS: tuple[str, ...] = ("arm", "symbol", "timeframe", "metric", "quantile")
 PARITY_KEYS: tuple[str, ...] = ("scope", "level", "segment")
+CELL_KEYS: tuple[str, ...] = ("scope", "symbol", "timeframe", "segment")
 
 _TAPS_NOT_TRADES = (
     "⚠️ **이 표는 「탭」을 세지 「거래」를 안 센다** — 볼린저 기각·체결 실패·북 용량이 "
@@ -473,6 +476,8 @@ class CellParity(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
+    scope: str
+    """이 대조가 나온 실행의 TF 집합 — 같은 칸이라도 실행이 다르면 따로 남긴다."""
     symbol: str
     timeframe: str
     segment: str
@@ -487,7 +492,7 @@ class CellParity(BaseModel):
 
 
 def cell_parity(
-    straight: Sequence[CellPayload], shortcut: Sequence[CellPayload]
+    straight: Sequence[CellPayload], shortcut: Sequence[CellPayload], *, scope: str = ""
 ) -> list[CellParity]:
     """칸·구간마다 두 팔의 후보를 **집합이 아니라 순서까지** 대조한다.
 
@@ -506,6 +511,7 @@ def cell_parity(
             rb = right.reentry_candidates.get(segment, ())
             rows.append(
                 CellParity(
+                    scope=scope,
                     symbol=left.symbol,
                     timeframe=left.timeframe,
                     segment=segment,
@@ -578,7 +584,7 @@ def run_shortcut(
             print(f"[wan376] §1a {arm} 팔 후보 생성 — {scope}", flush=True)
         payloads[arm] = arm_payloads(symbols, timeframes, arm, start=start, end=end, jobs=jobs)
 
-    cells = cell_parity(payloads["straight"], payloads["shortcut"])
+    cells = cell_parity(payloads["straight"], payloads["shortcut"], scope=scope)
     rows: list[ParityRow] = []
     for arm in PARITY_ARMS:
         for segment in place(payloads[arm], start_ms=start_ms, end_ms=end_ms, segments=segments):
@@ -696,6 +702,7 @@ def _render_map(grid: pd.DataFrame, quantiles: pd.DataFrame) -> list[str]:
     ]
 
     lines += _render_by_timeframe(grid)
+    lines += _render_l0_crosscheck(grid)
 
     collapse = collapse_points(grid)
     dead = collapse[collapse["worst_alive"] < MIN_TRADES_PER_SYMBOL]
@@ -768,6 +775,54 @@ def _render_map(grid: pd.DataFrame, quantiles: pd.DataFrame) -> list[str]:
     return lines
 
 
+#: WAN-366 사다리 CSV — §0의 탭 인구조사가 그 모듈의 `L0`(맨몸 단)과 같은 우주를 보는지
+#: 대조하는 데 쓴다. 없으면 검산을 **건너뛰지 않고 「대조 불가」로 밝힌다**.
+_L0_CSV_PATH = REPORTS_DIR / "wan366_causal_ablation.csv"
+
+
+def l0_crosscheck(grid: pd.DataFrame, path: Path = _L0_CSV_PATH) -> tuple[int, int] | None:
+    """(§0 전체 탭, WAN-366 `L0` full 후보 수) — 두 수가 같아야 같은 우주다.
+
+    `L0`은 볼린저·필터·가드·재진입을 전부 끈 단이고, 그 엔진에서는 **탭이 곧 체결**이라
+    (존 근단 지정가는 탭이 곧 터치 — WAN-114의 「존-단독 체결률 100%」) per-cell 후보 수가
+    탐지 층 탭 수와 같아야 한다. 다른 모듈·다른 파이프라인이 낸 같은 숫자라 배선 오류를
+    비트로 잡는다.
+    """
+    if grid.empty or not path.exists():
+        return None
+    ladder = pd.read_csv(path)
+    row = ladder[(ladder["level"] == "L0") & (ladder["segment"] == harness.SEGMENT_FULL)]
+    if row.empty:
+        return None
+    prox = grid[(grid["arm"] == "proximal") & (grid["width_label"] == "off")]
+    taps = int(prox["total_taps"].sum() / len(GUARD_POINTS))
+    return taps, int(row["num_candidates"].iloc[0])
+
+
+def _render_l0_crosscheck(grid: pd.DataFrame) -> list[str]:
+    pair = l0_crosscheck(grid)
+    lines = ["### 검산 — §0의 탭 인구조사가 사다리 `L0`과 같은 우주인가", ""]
+    if pair is None:
+        lines += [
+            "⚠️ **대조 불가** — `wan366_causal_ablation.csv`의 `L0` full 행이 없다. "
+            "조용히 건너뛰지 않고 밝힌다(WAN-194/318/321 「실패가 성공과 같은 모양」).",
+            "",
+        ]
+        return lines
+    taps, candidates = pair
+    verdict = "✅ 일치" if taps == candidates else f"🚨 불일치(차 {taps - candidates:+,})"
+    lines += [
+        f"§0 전체 탭 **{taps:,}** vs WAN-366 `L0` full 후보 **{candidates:,}** → {verdict}",
+        "",
+        "`L0`은 볼린저·필터·가드·재진입을 전부 끈 단이라 **탭이 곧 체결**이고"
+        "(WAN-114의 「존-단독 체결률 100%」), 그 per-cell 후보 합계가 탐지 층 탭 수와 같아야 "
+        "한다. **다른 모듈·다른 파이프라인이 낸 같은 숫자**라 이 등식이 §0가 엔진과 같은 탭 "
+        "집합을 셌다는 직접 증거다(무효화 봉 탭 포함 — 인과 엔진, WAN-365).",
+        "",
+    ]
+    return lines
+
+
 def _render_by_timeframe(grid: pd.DataFrame) -> list[str]:
     """TF별로 두 축을 **따로** 본다 — 합계 표는 15m(탭의 70%)이 통째로 지배한다."""
     lines = [
@@ -816,6 +871,14 @@ def _tf_key(timeframe: str) -> int:
     return order.get(timeframe, 99)
 
 
+def _cells_by_scope(cells: pd.DataFrame) -> str:
+    """대조 개수를 지갑별로 쪼개 밝힌다 — 한 수로 접으면 어느 지갑이 얇은지 안 보인다."""
+    if "scope" not in cells.columns:
+        return ""
+    counts = cells.groupby("scope").size().sort_values(ascending=False)
+    return " (" + " · ".join(f"`{k}` {v}" for k, v in counts.items()) + ")"
+
+
 def _render_parity(parity: pd.DataFrame, cells: pd.DataFrame) -> list[str]:
     lines = ["## §1a — 지름길이 성립하는가", ""]
     if parity.empty:
@@ -828,18 +891,20 @@ def _render_parity(parity: pd.DataFrame, cells: pd.DataFrame) -> list[str]:
         "",
         "### 북 집계 — 두 팔이 비트 일치해야 한다",
         "",
-        "| 구간 | 팔 | 거래 | 승률 | 거래당 net R | MDD | 최대 동시 | 청산 |",
-        "| -- | -- | -- | -- | -- | -- | -- | -- |",
+        "| 지갑 | 구간 | 팔 | 거래 | 승률 | 거래당 net R | MDD | 최대 동시 | 청산 |",
+        "| -- | -- | -- | -- | -- | -- | -- | -- | -- |",
     ]
-    for segment in SEGMENT_ORDER:
-        sub = parity[parity["segment"] == segment]
-        for _, r in sub.iterrows():
-            lines.append(
-                f"| `{segment}` | `{r['level']}` | {int(r['num_trades']):,} | "
-                f"{_pct(float(r['win_rate']))} | {float(r['mean_net_r']):+.4f}R | "
-                f"{_pct(float(r['max_drawdown']))} | {int(r['peak_concurrency'])} | "
-                f"{int(r['liquidation_events'])} |"
-            )
+    for scope_name in sorted(parity["scope"].unique(), key=lambda x: -len(str(x))):
+        scoped = parity[parity["scope"] == scope_name]
+        for segment in SEGMENT_ORDER:
+            sub = scoped[scoped["segment"] == segment]
+            for _, r in sub.iterrows():
+                lines.append(
+                    f"| `{scope_name}` | `{segment}` | `{r['level']}` | "
+                    f"{int(r['num_trades']):,} | {_pct(float(r['win_rate']))} | "
+                    f"{float(r['mean_net_r']):+.4f}R | {_pct(float(r['max_drawdown']))} | "
+                    f"{int(r['peak_concurrency'])} | {int(r['liquidation_events'])} |"
+                )
 
     diffs = _book_diffs(parity)
     lines += ["", "### 판정", ""]
@@ -861,7 +926,7 @@ def _render_parity(parity: pd.DataFrame, cells: pd.DataFrame) -> list[str]:
         lines += [
             "### 칸 단위 — 개수가 아니라 **후보 객체**로 대조했다",
             "",
-            f"* 대조한 (칸 × 구간): **{len(cells)}**",
+            f"* 대조한 (칸 × 구간): **{len(cells)}**" + _cells_by_scope(cells),
             f"* base 후보가 어긋난 곳: **{len(bad_base)}**",
             f"* 재진입 후보가 어긋난 곳: **{len(bad_re)}** "
             "(🚨 이 검산이 급소다 — 파생이 컷 **앞**에서 일어나야 「빠진 셋업의 재진입」이 "
@@ -908,18 +973,25 @@ _BOOK_COLS: tuple[str, ...] = (
 
 
 def _book_diffs(parity: pd.DataFrame) -> list[tuple[str, str, float]]:
-    """두 팔의 북 집계 차 — 0이 아닌 자리만 돌려준다(비트 일치 판정)."""
+    """두 팔의 북 집계 차 — 0이 아닌 자리만 돌려준다(비트 일치 판정).
+
+    🚨 **스코프마다 따로 본다** — 지갑이 다르면 애초에 다른 숫자라, 스코프를 섞으면 두
+    지갑의 차가 「팔의 차」로 둔갑한다(북은 이어붙일 수 없다, WAN-316).
+    """
     diffs: list[tuple[str, str, float]] = []
-    for segment in sorted(parity["segment"].unique()):
-        sub = parity[parity["segment"] == segment]
-        left = sub[sub["level"] == "straight"]
-        right = sub[sub["level"] == "shortcut"]
-        if left.empty or right.empty:
-            continue
-        for col in _BOOK_COLS:
-            delta = abs(float(left[col].iloc[0]) - float(right[col].iloc[0]))
-            if delta != 0.0:
-                diffs.append((segment, col, delta))
+    scopes = parity["scope"].unique() if "scope" in parity.columns else [""]
+    for scope_name in sorted(scopes):
+        scoped = parity[parity["scope"] == scope_name] if "scope" in parity.columns else parity
+        for segment in sorted(scoped["segment"].unique()):
+            sub = scoped[scoped["segment"] == segment]
+            left = sub[sub["level"] == "straight"]
+            right = sub[sub["level"] == "shortcut"]
+            if left.empty or right.empty:
+                continue
+            for col in _BOOK_COLS:
+                delta = abs(float(left[col].iloc[0]) - float(right[col].iloc[0]))
+                if delta != 0.0:
+                    diffs.append((f"{scope_name}·{segment}", col, delta))
     return diffs
 
 
@@ -1009,7 +1081,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             symbols, timeframes, start=args.start, end=args.end, jobs=args.jobs
         )
         parity = _merge(_read(PARITY_CSV_PATH), parity_to_frame(parity_rows), PARITY_KEYS)
-        cells = pd.DataFrame([r.model_dump() for r in cell_rows])
+        cells = _merge(
+            _read(_CELLS_CSV_PATH),
+            pd.DataFrame([r.model_dump() for r in cell_rows]),
+            CELL_KEYS,
+        )
         parity.to_csv(PARITY_CSV_PATH, index=False)
         cells.to_csv(_CELLS_CSV_PATH, index=False)
         print(f"[wan376] §1a 적재: {PARITY_CSV_PATH} · {_CELLS_CSV_PATH}", flush=True)
