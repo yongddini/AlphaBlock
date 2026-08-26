@@ -28,6 +28,7 @@ import pytest
 
 from backtest import harness
 from backtest.book_cli import ADOPTED_REENTRY_ENTRY_RULE
+from backtest.harness import SEGMENT_OOS_WARM
 from backtest.leverage_book import LeverageBookParams
 from backtest.run import parse_date_ms
 from backtest.wan169_leverage_book import (
@@ -48,6 +49,8 @@ from backtest.wan378_zone_thickness_grid import (
     GUARD_POINTS,
     WIDTH_POINTS,
     _exclude_payloads,
+    _read,
+    _render_loo,
     _short,
     arm_engine,
     arm_reentry_rule,
@@ -359,6 +362,53 @@ def test_grid_axes_are_the_confirmed_decision() -> None:
     assert "0.60" not in {zone_width_label(w) for w in WIDTH_POINTS}
     assert GUARD_POINTS == (0.0, 0.0025, 0.003, 0.0040)
     assert ARM_ORDER == (ARM_PROXIMAL, ARM_MID, ARM_BOLLINGER)
+
+
+def test_numeric_only_labels_do_not_silently_empty_the_loo_table(tmp_path: Any) -> None:
+    """🚨 `width_label`이 **숫자처럼 생긴 값만** 담긴 CSV에서도 표가 채워져야 한다.
+
+    이 열은 문자열 키인데(WAN-159 규약) LOO CSV에는 `off`가 없어 pandas가 `float64`로
+    추론하고, 그러면 렌더의 `== "1.28"` 비교가 전부 거짓이 되어 **에러 없이 빈 표**가
+    나온다 — 실제로 그렇게 나왔다. 라벨이 아니라 **렌더된 행 수**로 고정한다.
+    """
+    import pandas as pd
+
+    path = tmp_path / "loo.csv"
+    pd.DataFrame(
+        [
+            {
+                "scope": "15m",
+                "arm": ARM_BOLLINGER,
+                "width_label": w,
+                "width_threshold": float(w),
+                "guard": 0.003,
+                "reentry": True,
+                "segment": SEGMENT_OOS_WARM,
+                "num_cells": 4,
+                "num_symbols": 11,
+                "num_trades": 100,
+                "win_rate": 0.4,
+                "total_return": -0.5,
+                "mean_net_r": -0.13,
+                "max_drawdown": 0.5,
+                "peak_concurrency": 3,
+                "liquidation_events": 0,
+                "symbols_below_gate": 0,
+                "min_symbol_trades": 50,
+                "adopted_point": False,
+                "exclude": ex,
+            }
+            for w in ("1.55", "1.28", "1.15")
+            for ex in ("-ETH", "-BTC")
+        ]
+    ).to_csv(path, index=False)
+
+    frame = _read(path)
+    # dtype 이름이 아니라 **동작**으로 본다 — 문자열 라벨로 실제 행이 잡혀야 한다.
+    assert (frame["width_label"] == "1.28").any(), "라벨이 float로 추론되면 비교가 깨진다"
+    rendered = _render_loo(frame)
+    rows = [line for line in rendered if line.startswith("| `1.")]
+    assert len(rows) == 3, f"LOO 표가 비었다(문턱 3개를 기대, {len(rows)}행)"
 
 
 def test_summary_does_not_invent_a_verdict_on_empty_tables() -> None:

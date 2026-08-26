@@ -1100,7 +1100,19 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
 
 
 def _read(path: Path) -> pd.DataFrame:
-    return pd.read_csv(path) if path.exists() else pd.DataFrame()
+    """CSV를 읽되 `width_label`은 **문자열로 못 박는다**.
+
+    🚨 이 열은 문자열 키다(WAN-159 규약: 「끄기(`off`)와 숫자를 문자로 가른다」). 그런데
+    LOO CSV처럼 **숫자처럼 생긴 값만 남은 표**에서는 pandas가 `float64`로 추론해 렌더의
+    `== "1.28"` 비교가 전부 거짓이 되고 **표가 에러 없이 빈 채로** 나온다 — 실제로 그렇게
+    나왔다. 격자 CSV는 `off`가 섞여 있어 우연히 문자열로 남아 멀쩡했다.
+
+    ⚠️ 읽은 **뒤** `astype(str)`로 고치는 것은 답이 아니다 — 추론이 이미 `2.60`을 `2.6`으로
+    만들어 라벨이 달라진다. 추론 자체를 막아야 한다.
+    """
+    if not path.exists():
+        return pd.DataFrame()
+    return pd.read_csv(path, dtype={"width_label": str})
 
 
 def _merge(existing: pd.DataFrame, fresh: pd.DataFrame, keys: Sequence[str]) -> pd.DataFrame:
