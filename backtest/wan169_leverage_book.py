@@ -247,6 +247,22 @@ class _Task:
     재진입 후보 **양쪽에** 같은 규칙이 걸린다. 1분봉은 봉 안의 순서를 모르는데 「같은 1분에
     진입 + 익절」은 롱 기준 「저가 먼저 · 고가 나중」을 가정한 것이라, 이 팔이 그 가정을
     반대쪽 극단으로 눌러 본 반사실이다. `False`(기본)면 예전과 **비트 단위로 같다**."""
+    observe_zone_width_atr: bool = False
+    """WAN-376(옵트인 관측): 후보에 **존폭 ÷ ATR14**(엔진이 필터에 쓰는 그 값)를 싣는다.
+    순수 관측이라 켜도 후보 집합·손익이 하나도 안 움직인다. `False`(기본)면 필드가 전부
+    `None`이라 예전과 **비트 단위로 같다**."""
+    post_filter_zone_width: float | None = None
+    """WAN-376 §1a **지름길 팔**(옵트인): 엔진 필터를 **끈 채** 후보를 만들고, 그 뒤
+    `zone_width_atr`가 이 문턱보다 넓은(또는 판정 불가인) 후보를 **빼고** 나머지로 재진입
+    파생·격리 성과·북 입력을 만든다.
+
+    🚨 **재진입 파생이 이 팔의 급소다** — 재진입 후보는 base 후보에서 나오므로(WAN-261),
+    컷을 재진입 **뒤에** 걸면 「빠진 셋업의 재진입이 살아남는」 잡종이 된다. 그래서 컷은
+    반드시 base 후보 직후 · 재진입 파생 **앞**이다.
+
+    ⚠️ 엔진 필터(`max_zone_width_atr`)와 **동시에 못 쓴다** — 이중 필터가 되어 라벨이
+    거짓이 된다(WAN-159 `none` vs 미지정 규약과 같은 부류). `None`(기본)이면 이 경로를
+    아예 타지 않아 예전과 **비트 단위로 같다**."""
     no_same_step_tp_minutes: frozenset[int] = frozenset()
     """WAN-359(옵트인): **이 칸의** 「틱이 지지하지 않는」 1분 `open_time` 집합.
 
@@ -517,7 +533,18 @@ def run_cell(task: _Task, *, log: bool = True) -> CellPayload:
             no_same_step_tp=task.no_same_step_tp,
             no_same_step_tp_minutes=task.no_same_step_tp_minutes or None,
             invalidation_cancel=task.invalidation_cancel,
+            observe_zone_width_atr=(
+                task.observe_zone_width_atr or task.post_filter_zone_width is not None
+            ),
         )
+        if task.post_filter_zone_width is not None:
+            # WAN-376 §1a: 「필터 끔으로 만들고 밖에서 컷」. 판정 불가(`None`)는 엔진이
+            # 기각하는 부류라 여기서도 버린다 — 그래야 두 팔이 같은 집합을 겨눈다.
+            cands = [
+                c
+                for c in cands
+                if c.zone_width_atr is not None and c.zone_width_atr <= task.post_filter_zone_width
+            ]
         candidates[segment_name] = tuple(cands)
         funding[segment_name] = tuple(window.funding_rates)
         if task.reentry:
@@ -634,6 +661,8 @@ def run_cells(
     no_same_step_tp: bool = False,
     no_same_step_tp_minutes: Mapping[tuple[str, str], frozenset[int]] | None = None,
     invalidation_cancel: InvalidationCancel | None = None,
+    observe_zone_width_atr: bool = False,
+    post_filter_zone_width: float | None = None,
 ) -> list[CellPayload]:
     """전 칸을 돈다. `jobs`는 성능 노브이지 결과 축이 아니다(WAN-121).
 
@@ -689,6 +718,14 @@ def run_cells(
     슬롯 점유 시간이 달라져 뒤따르는 후보까지 갈린다) — 그래서 이건 오버라이드가 아니라 **팔**
     이고, 기준선 팔과 나란히 놓고 **차이의 폭**으로만 읽는다.
 
+    `observe_zone_width_atr`·`post_filter_zone_width`(WAN-376, 옵트인)는 존폭 축의 **관측**과
+    **지름길 팔**이다. 전자는 후보에 「존폭 ÷ ATR14」를 실을 뿐이라 켜도 아무 수치가 안 움직이고,
+    후자는 엔진 필터를 **끈 채** 만든 후보에서 그 비율로 컷해 재진입 파생·격리 성과·북 입력을
+    다시 만든다(컷은 재진입 파생 **앞**이다 — 뒤에 걸면 「빠진 셋업의 재진입이 살아남는」
+    잡종이다). 둘 다 기본값이면 예전과 **비트 단위로 같다**. ⚠️ 후자는 `max_zone_width_atr`과
+    동시에 못 주고(이중 필터), **탈락 렌즈**(`fill.dropout_rate > 0`)와도 못 쓴다 — 그쪽은
+    추첨 순서가 후보 집합에 의존해 지름길이 **원리적으로** 깨진다.
+
     `repair_partial_bars`(WAN-327, 옵트인 · **비파괴**)를 켜면 저장 상위TF 손상 봉을 1분봉
     합으로 갈아끼운 사본에서 후보를 만든다 — 부분 봉의 백테 영향 크기를 재는 반사실이다.
     끄면(기본) 저장 봉 그대로라 예전과 비트 단위로 같다. **DB는 쓰지 않는다.**
@@ -711,6 +748,23 @@ def run_cells(
         raise ValueError(
             "no_same_step_tp(전부)와 no_same_step_tp_minutes(표적)는 같은 축의 두 값이라 "
             "함께 줄 수 없습니다(WAN-359)."
+        )
+    if post_filter_zone_width is not None and fill is not None and fill.dropout_rate > 0:
+        # WAN-376 §1a: 탈락 렌즈에서는 지름길이 **원리적으로** 깨진다 — 추첨 순서가 「어느
+        # 셋업이 체결됐나」에 달려 있어, 넓은 셋업을 안 만들면 뒤 셋업의 난수가 통째로
+        # 밀린다(`baseline`은 `dropout_rate=0`이라 난수를 뽑지도 않는다). 조용히 돌면
+        # 「지름길이 성립한다」는 표가 거짓이 된다.
+        raise ValueError(
+            f"post_filter_zone_width는 탈락 렌즈({fill.name!r}, dropout_rate="
+            f"{fill.dropout_rate})와 함께 쓸 수 없습니다 — 추첨 순서가 후보 집합에 "
+            "의존해 지름길이 원리적으로 깨집니다(WAN-376)."
+        )
+    if post_filter_zone_width is not None and max_zone_width_atr is not None:
+        # WAN-376 §1a: 지름길 팔은 **필터를 끈 채** 만들어야 한다. 켠 채로 또 컷하면
+        # 이중 필터라 「지름길이 성립한다」는 판정이 거짓이 된다(WAN-159 규약과 같은 부류).
+        raise ValueError(
+            "post_filter_zone_width는 엔진 필터를 끈 채(max_zone_width_atr=None) 씁니다 — "
+            f"지금 max_zone_width_atr={max_zone_width_atr!r}이라 이중 필터가 됩니다(WAN-376)."
         )
     cells = {(harness.normalize_symbol(s), tf) for s in symbols for tf in timeframes}
     unmatched = sorted(key for key in targeted if key not in cells)
@@ -748,6 +802,8 @@ def run_cells(
                 (harness.normalize_symbol(symbol), timeframe), frozenset()
             ),
             invalidation_cancel=invalidation_cancel,
+            observe_zone_width_atr=observe_zone_width_atr,
+            post_filter_zone_width=post_filter_zone_width,
         )
         for symbol in symbols
         for timeframe in timeframes
