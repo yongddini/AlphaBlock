@@ -27,6 +27,7 @@ import pandas as pd
 import pytest
 
 from backtest import harness
+from backtest.book_cli import ADOPTED_REENTRY_ENTRY_RULE
 from backtest.leverage_book import LeverageBookParams
 from backtest.run import parse_date_ms
 from backtest.wan169_leverage_book import (
@@ -49,9 +50,11 @@ from backtest.wan378_zone_thickness_grid import (
     _exclude_payloads,
     _short,
     arm_engine,
+    arm_reentry_rule,
     build_summary,
     curve_shape,
     flip_table,
+    payloads_for_arm,
     place,
 )
 from strategy.models import ConfluenceParams
@@ -242,6 +245,38 @@ def test_the_adopted_arm_pins_nothing() -> None:
 # --------------------------------------------------------------------------- #
 # 6. 가드·재진입은 **배치** 축이다 (후보를 안 바꾼다)
 # --------------------------------------------------------------------------- #
+
+
+def test_every_arm_actually_produces_reentry_candidates() -> None:
+    """🚨 볼린저를 끈 팔이 **조용히 재진입 0개**가 되는 것을 막는다 (실데이터).
+
+    채택 재무장 규칙 `"band"`는 `params.deviation_filter`가 없으면
+    `wan228_reentry_census`가 **아무것도 내지 않고 return**한다. 그대로 두면 `proximal`·`mid`
+    팔이 라벨만 「재진입 ON」인 채 재진입 없는 엔진으로 돌고, 세 팔 비교에서 **「진입가
+    차이」와 「재진입 유무」가 섞인다**(WAN-131 재검이 무효가 된다). 라벨이 아니라 **후보가
+    실제로 나오는지**로 고정한다 — WAN-345가 이름 붙인 실패 부류다.
+    """
+    _skip_without_real_data()
+    for arm in ARM_ORDER:
+        payloads = payloads_for_arm(
+            [_REAL_SYMBOL],
+            [_REAL_TF],
+            arm,
+            start=_REAL_START,
+            end=_REAL_END,
+            jobs=1,
+            thresholds=(None,),
+        )[zone_width_label(None)]
+        assert payloads, arm
+        made = sum(len(v) for p in payloads for v in p.reentry_candidates.values())
+        assert made > 0, f"팔 `{arm}`이 재진입 후보를 하나도 못 냈다 — 규칙이 안 맞는다"
+
+
+def test_the_reentry_rule_follows_the_entry_price_arm() -> None:
+    """각 팔은 **자기가 들어간 자리에** 다시 건다 — 채택 팔만 밴드다."""
+    assert arm_reentry_rule(ARM_BOLLINGER) == ADOPTED_REENTRY_ENTRY_RULE == "band"
+    assert arm_reentry_rule(ARM_PROXIMAL) == "zone"
+    assert arm_reentry_rule(ARM_MID) == "zone"
 
 
 def test_guard_and_reentry_are_placement_axes() -> None:

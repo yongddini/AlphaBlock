@@ -83,13 +83,20 @@ import pandas as pd
 from pydantic import BaseModel, ConfigDict
 
 from backtest import harness
-from backtest.book_cli import BookSegment, iter_book_segments, net_r, run_book_segments
+from backtest.book_cli import (
+    ADOPTED_REENTRY_ENTRY_RULE,
+    BookSegment,
+    iter_book_segments,
+    net_r,
+    run_book_segments,
+)
 from backtest.harness import SEGMENT_IS, SEGMENT_OOS_WARM
 from backtest.leverage_book import LeverageBookParams
 from backtest.run import parse_date_ms
 from backtest.wan143_zone_height_tp import MIN_TRADES_PER_SYMBOL
 from backtest.wan169_leverage_book import CellPayload, run_cells_multi, zone_width_label
 from backtest.wan180_leverage_book_nine import apply_funding_proxy
+from backtest.wan228_reentry_census import ReentryEntryRule
 from backtest.wan323_partial_tp_ladder import SEGMENT_ORDER
 from backtest.wan336_same_step_tp import ADOPTED_CELL_KWARGS
 from backtest.wan376_zone_thickness import (
@@ -141,6 +148,30 @@ NEAR_ZERO_R = 0.005
 GRID_KEYS: tuple[str, ...] = ("scope", "arm", "width_label", "guard", "reentry", "segment")
 LOO_KEYS: tuple[str, ...] = (*GRID_KEYS, "exclude")
 CHECKSUM_KEYS: tuple[str, ...] = ("scope", "segment", "metric")
+
+
+def arm_reentry_rule(arm: str) -> ReentryEntryRule:
+    """팔마다 **자기가 들어간 자리에 다시 건다** — 재무장 규칙은 진입가 팔을 따라간다.
+
+    🚨 **채택 규칙 `"band"`는 볼린저가 꺼진 팔에서 정의되지 않는다.**
+    `wan228_reentry_census`가 `entry_rule == "band" and params.deviation_filter is None`이면
+    **조용히 아무것도 내지 않는다**(재계산할 밴드가 없다). 그래서 `proximal`·`mid` 팔에
+    채택값을 그대로 넘기면 **재진입 후보가 0개**가 되고, 그 팔은 라벨만 「재진입 ON」인 채
+    재진입 없는 엔진으로 돈다 — WAN-345가 이름 붙인 실패 부류 그대로다.
+
+    그 상태로 세 팔을 비교하면 **「진입가 차이」와 「재진입 유무」가 섞여** WAN-131(선별 대
+    가격) 재검이 통째로 무효가 되고, 「재진입 ON/OFF 대조」 열도 두 팔에서 ON ≡ OFF로 나와
+    **「재진입은 효과 없다」로 오독**된다.
+
+    그래서 볼린저를 끈 팔은 `"zone"`으로 재무장한다 — 그 규칙은 `zone_limit_price`를 쓰고
+    그것이 `zone_limit_ref`를 따르므로, `proximal` 팔은 존 근단에·`mid` 팔은 존 중앙에 다시
+    건다(각 팔의 **자기 진입가와 같은 자리**). `"zone"`은 WAN-267이 이미 측정한 정식 옵션이라
+    새로 지어낸 규칙이 아니다.
+
+    ⚠️ **그래도 팔 사이에 재무장 규칙이 다르다는 사실은 남는다** — 표에 밝힌다. 대안(두 팔을
+    재진입 없이 두기)은 「축을 하나만 흔든다」를 더 크게 위반한다.
+    """
+    return ADOPTED_REENTRY_ENTRY_RULE if arm == ARM_BOLLINGER else "zone"
 
 
 def arm_engine(arm: str) -> tuple[bool, ZoneLimitRef | None]:
@@ -249,6 +280,9 @@ def payloads_for_arm(
     """
     bollinger, zone_limit_ref = arm_engine(arm)
     kwargs = _cell_kwargs()
+    # 🚨 재무장 규칙은 **팔마다 다르다** — 채택 `"band"`는 볼린저가 꺼진 팔에서 정의되지
+    # 않아 재진입 후보가 조용히 0개가 된다(`arm_reentry_rule` 독스트링).
+    kwargs["reentry_entry_rule"] = arm_reentry_rule(arm)
     return run_cells_multi(
         symbols,
         timeframes,
