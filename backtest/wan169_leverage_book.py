@@ -57,7 +57,7 @@ from backtest.harness import (
 from backtest.leverage_book import BookCell, LeverageBookParams, run_leverage_book
 from backtest.models import BacktestConfig, ExitReason
 from backtest.run import parse_date_ms
-from backtest.substep import build_substeps
+from backtest.substep import SubStep, build_substeps
 from backtest.sweep import timeframe_to_ms
 from backtest.wan167_position_census import ALL_SYMBOLS, MAIN_TIMEFRAMES
 from backtest.wan228_reentry_census import ReentryEntryRule
@@ -71,7 +71,7 @@ from backtest.zone_limit_backtest import (
 )
 from common.costs import Liquidity
 from data.models import FundingRate
-from strategy.models import ConfluenceParams, InvalidationCancel
+from strategy.models import ConfluenceParams, InvalidationCancel, ZoneLimitRef
 
 REPORTS_DIR = Path("backtest/reports")
 DEFAULT_CELLS_CSV = REPORTS_DIR / "wan169_leverage_book_cells.csv"
@@ -284,6 +284,16 @@ class _Task:
     파라미터의 `deviation_filter`를 `None`으로 덮어써 진입가가 **존 근단**에 남는다 —
     WAN-114/145/151 사다리의 `L0`/`L1` 단과 같은 축이고, 그 모듈들이 per-cell에서 하던 것을
     **북 후보 생성**에 옮긴 것이다. 규칙 3(밴드가 존보다 불리하면 기각)도 함께 꺼진다."""
+    zone_limit_ref: ZoneLimitRef | None = None
+    """WAN-378(옵트인): 지정가를 걸 **존 내 기준선**(`ConfluenceParams.zone_limit_ref`).
+
+    `None`(기본)이면 채택 기본값(`"proximal"` = 존 근단)을 물려받아 **비트 단위로 예전과
+    같다**. `"mid"`(존 중앙)는 사용자 제안 *"OB Zone의 딱 반 되는 가격"*의 팔이다 — 진입가를
+    내려 **손절폭을 절반으로** 만들므로 손절폭 가드 축과 **독립이 아니다**(WAN-376 §0).
+
+    ⚠️ 볼린저(`bollinger=True`)와 함께 쓰면 밴드가 진입가를 다시 덮어쓰므로(WAN-95 채택 규칙:
+    둘 다 켜면 볼린저가 이긴다) 이 축은 **볼린저를 끈 팔에서만** 뜻이 있다. 그 조합을 막지는
+    않는다 — 엔진의 실제 우선순위를 그대로 재는 것이 이 축의 목적이기 때문이다."""
     max_zone_width_atr: harness.ZoneWidthArg = harness.UNSET
     """WAN-366(옵트인): 존폭 필터 문턱. `harness.build_params`와 **같은 센티넬 규약**이다 —
     `UNSET`(기본)이면 채택 기본값(`1.28`)을 물려받아 비트 단위로 예전과 같고, 명시적 `None`이면
@@ -376,6 +386,40 @@ def _isolated_metrics(
     return m.num_trades, m.win_rate, m.total_return, m.max_drawdown
 
 
+@dataclass(frozen=True)
+class ReentryWindowContext:
+    """재진입 파생이 쓰는 **창 단위 전처리** — 후보 집합과 무관한 것만 담는다 (WAN-378).
+
+    존폭 문턱을 여러 점 돌 때(`run_cell_variants`) 재진입 파생을 문턱마다 다시 해야 하는데
+    (부모 집합이 바뀌면 슬롯 점유·청산 시각이 바뀐다 — WAN-376 §1a), 그 안에서 **서브스텝
+    빌드와 상위TF 배열 준비는 문턱과 무관**하다. 6년 1분봉이면 그 준비만 셀당 5초대이고
+    9점 × 3구간이면 그냥 버리는 시간이 된다.
+
+    ⚠️ **캐시가 아니라 인자다** — 창이 다르면(차가운 `is`/`oos`) 반드시 다른 컨텍스트여야
+    하므로 호출부가 창마다 만들어 넘긴다. 안 넘기면 예전처럼 함수가 직접 만든다(비트 동일).
+    """
+
+    htf_ms: int
+    htf_times: list[int]
+    htf_closes: list[float]
+    substeps: list[SubStep]
+    substep_times: list[int]
+
+
+def reentry_window_context(window: harness.MarketData, timeframe: str) -> ReentryWindowContext:
+    """한 창의 재진입 전처리를 한 번만 만든다 — `reentry_candidates_for_window`와 같은 식."""
+    htf_ms = timeframe_to_ms(timeframe)
+    frame = _prepare_htf(window.htf_df)
+    substeps = build_substeps(window.df_1m, htf_ms)
+    return ReentryWindowContext(
+        htf_ms=htf_ms,
+        htf_times=[int(t) for t in frame["open_time"].astype("int64").tolist()],
+        htf_closes=[float(v) for v in frame["close"].astype(float).tolist()],
+        substeps=substeps,
+        substep_times=[s.time for s in substeps],
+    )
+
+
 def reentry_candidates_for_window(
     window: harness.MarketData,
     candidates: Sequence[_Candidate],
@@ -390,6 +434,7 @@ def reentry_candidates_for_window(
     no_same_step_tp: bool = False,
     no_same_step_tp_minutes: frozenset[int] | None = None,
     invalidation_cancel: InvalidationCancel | None = None,
+    context: ReentryWindowContext | None = None,
 ) -> list[_Candidate]:
     """이 창의 base 후보에서 「익절 후 존 내 재진입」 후보를 만든다(WAN-261, 옵트인).
 
@@ -409,12 +454,14 @@ def reentry_candidates_for_window(
     if not candidates:
         return []
     paired = sequence_with_candidates(list(candidates), cfg, window.funding_rates)
-    htf_ms = timeframe_to_ms(timeframe)
-    frame = _prepare_htf(window.htf_df)
-    htf_times = [int(t) for t in frame["open_time"].astype("int64").tolist()]
-    htf_closes = [float(v) for v in frame["close"].astype(float).tolist()]
-    substeps = build_substeps(window.df_1m, htf_ms)
-    substep_times = [s.time for s in substeps]
+    # WAN-378: 창 전처리는 후보 집합과 무관하다 — 문턱을 여러 점 도는 호출부가 한 번 만들어
+    # 넘긴다(`context`). 안 넘기면 예전처럼 여기서 만들므로 **비트 단위로 같다**.
+    ctx = context if context is not None else reentry_window_context(window, timeframe)
+    htf_ms = ctx.htf_ms
+    htf_times = ctx.htf_times
+    htf_closes = ctx.htf_closes
+    substeps = ctx.substeps
+    substep_times = ctx.substep_times
     out: list[_Candidate] = []
     for cand, trade in paired:
         # WAN-323: 익절뿐 아니라 **본절 청산**도 재무장 대상이다 — 본절은 존 무효화 경계를
@@ -447,13 +494,62 @@ def reentry_candidates_for_window(
     return out
 
 
+def zone_width_label(threshold: float | None) -> str:
+    """존폭 문턱을 표/딕셔너리 키로 — `None`(끔)과 숫자를 **문자로 가른다**.
+
+    WAN-159가 못 박은 「끄기(`None`)와 미지정은 다르다」 규약을 라벨 층까지 끌고 온 것이다
+    (숫자를 `float`로 키에 쓰면 `0.90`과 `0.9`가 갈리고 `None`은 키가 될 수 없다).
+    """
+    return "off" if threshold is None else f"{threshold:.2f}"
+
+
 def run_cell(task: _Task, *, log: bool = True) -> CellPayload:
     """한 칸의 구간별 후보·격리 성과·검산을 낸다 — 채택 기본값 그대로(옛 핀 없음).
 
     후보 생성이 이 리포트의 유일한 무거운 연산이다. `full` 후보는 따뜻한 구간이
     재사용하고(경계 필터만), 차가운 `is`/`oos`는 잘린 창에서 탐지부터 다시 한다
     (존 재고 0에서 시작 — `harness.slice_market` 규약 그대로).
+
+    📌 **속은 `run_cell_variants`다**(WAN-378) — 문턱 하나짜리 호출이라 예전과 **비트 단위로
+    같다**. 두 경로로 갈라 두면 한쪽만 고쳐져 조용히 다른 숫자를 내므로(WAN-95/112/123 부류)
+    단수는 복수의 특수 경우로만 존재한다.
     """
+    thresholds = (task.post_filter_zone_width,)
+    return run_cell_variants(task, thresholds, log=log)[zone_width_label(thresholds[0])]
+
+
+def run_cell_variants(
+    task: _Task, thresholds: Sequence[float | None], *, log: bool = True
+) -> dict[str, CellPayload]:
+    """한 칸을 **한 번만** 무겁게 돌고 존폭 문턱 여러 점의 payload를 함께 낸다 (WAN-378).
+
+    WAN-376 §1a가 「필터 끔으로 만들고 밖에서 컷」이 성립함을 실데이터로 못 박았지만,
+    `run_cells(post_filter_zone_width=)`는 문턱 **하나**만 받으므로 9점 격자를 돌리면 후보
+    생성이 9번 반복된다(§1b가 피하려던 바로 그 3N패스). 이 함수가 그 지름길을 실제 절약으로
+    바꾼다 — 무거운 것(1분봉 로딩 · 탐지 · 서브스텝 시뮬)은 **문턱과 무관**하므로 한 번 하고,
+    문턱마다 다시 하는 것은 **컷 ＋ 재진입 파생 ＋ 격리 시퀀싱**뿐이다.
+
+    🚨 **재진입 파생은 문턱마다 다시 해야 한다** — 재진입 후보는 base 후보의 per-cell
+    시퀀싱에서 나오므로(WAN-261), 컷이 부모 집합을 바꾸면 슬롯 점유가 바뀌어 청산 시각이
+    달라지고 재무장 시점도 달라진다. 컷을 재진입 **뒤에** 걸면 「빠진 셋업의 재진입이
+    살아남는」 잡종이 된다(WAN-376 §1a가 급소로 지목한 자리). 그래서 이 루프의 순서는
+    반드시 **컷 → 파생**이다.
+
+    `thresholds`의 `None`은 「필터 끔」(컷 없음)이고 `run_cell`의 `post_filter_zone_width=None`
+    과 **같은 뜻**이다. 같은 값을 두 번 주면 라벨이 겹치므로 거부한다.
+    """
+    labels = [zone_width_label(t) for t in thresholds]
+    if len(set(labels)) != len(labels):
+        raise ValueError(f"존폭 문턱이 중복입니다: {labels} — 라벨이 겹치면 payload가 덮인다.")
+    if task.engine_check and len(thresholds) > 1:
+        # 검산은 `harness.run_once`를 **엔진 필터 설정 하나**로 다시 도는 것이라, 밖에서 컷한
+        # 여러 문턱 중 어느 것과 대조할지가 정의되지 않는다. 조용히 아무 라벨에나 붙이면
+        # 「검산했다」는 라벨만 남는다(WAN-194/318/321 부류) — 그래서 시끄럽게 죽는다.
+        raise ValueError(
+            "engine_check는 문턱 하나짜리 실행에서만 정의됩니다 "
+            f"(문턱 {len(thresholds)}점) — 다중 문턱 실행은 engine_check=False로 부르세요."
+        )
+
     market = harness.load_market_data(
         task.symbol,
         task.timeframe,
@@ -482,6 +578,10 @@ def run_cell(task: _Task, *, log: bool = True) -> CellPayload:
         # WAN-366(옵트인): 볼린저를 끄면 진입가가 존 근단에 남는다(사다리 `L0`/`L1`).
         # 켜 두면(기본) 이 model_copy를 아예 타지 않아 예전과 비트 단위로 같다.
         params = params.model_copy(update={"deviation_filter": None})
+    if task.zone_limit_ref is not None:
+        # WAN-378(옵트인): 지정가 기준선(`proximal`/`mid`/`distal`). `None`(기본)이면 이
+        # model_copy를 아예 타지 않아 예전과 비트 단위로 같다.
+        params = params.model_copy(update={"zone_limit_ref": task.zone_limit_ref})
     # WAN-365: 취소 시점을 **파라미터에 실어** 재진입·엔진 본 진입이 같은 값을 읽게 한다.
     # `None`(기본)이면 채택 기본값 그대로라 인자를 안 준 실행이 채택 북이다.
     if task.invalidation_cancel is not None:
@@ -504,10 +604,10 @@ def run_cell(task: _Task, *, log: bool = True) -> CellPayload:
         take_profit_liquidity=task.take_profit_liquidity,
     )
 
-    candidates: dict[str, tuple[_Candidate, ...]] = {}
+    candidates: dict[str, dict[str, tuple[_Candidate, ...]]] = {ell: {} for ell in labels}
+    reentry: dict[str, dict[str, tuple[_Candidate, ...]]] = {ell: {} for ell in labels}
+    rows: dict[str, list[CellRow]] = {ell: [] for ell in labels}
     funding: dict[str, tuple[FundingRate, ...]] = {}
-    reentry: dict[str, tuple[_Candidate, ...]] = {}
-    rows: list[CellRow] = []
 
     boundary = harness.eval_boundary_ms(market, WARM_OOS_SEGMENT)
     assert boundary is not None  # WARM_OOS_SEGMENT는 평가 경계를 항상 가진다.
@@ -518,7 +618,7 @@ def run_cell(task: _Task, *, log: bool = True) -> CellPayload:
     for segment_name, segment in segment_specs:
         window = market if segment is None else harness.slice_market(market, segment)
         ob_result = harness.detect_order_blocks(window)
-        cands, _stats = build_zone_limit_candidates(
+        generated, _stats = build_zone_limit_candidates(
             window.htf_df,
             window.df_1m,
             task.timeframe,
@@ -534,42 +634,10 @@ def run_cell(task: _Task, *, log: bool = True) -> CellPayload:
             no_same_step_tp_minutes=task.no_same_step_tp_minutes or None,
             invalidation_cancel=task.invalidation_cancel,
             observe_zone_width_atr=(
-                task.observe_zone_width_atr or task.post_filter_zone_width is not None
+                task.observe_zone_width_atr or any(t is not None for t in thresholds)
             ),
         )
-        if task.post_filter_zone_width is not None:
-            # WAN-376 §1a: 「필터 끔으로 만들고 밖에서 컷」. 판정 불가(`None`)는 엔진이
-            # 기각하는 부류라 여기서도 버린다 — 그래야 두 팔이 같은 집합을 겨눈다.
-            cands = [
-                c
-                for c in cands
-                if c.zone_width_atr is not None and c.zone_width_atr <= task.post_filter_zone_width
-            ]
-        candidates[segment_name] = tuple(cands)
         funding[segment_name] = tuple(window.funding_rates)
-        if task.reentry:
-            # WAN-261(옵트인): base 후보에서 「익절 후 존 내 재진입」 후보를 별도로 만든다.
-            # base 후보·격리 성과 행은 건드리지 않으므로 끄면 예전과 비트 단위로 같다.
-            reentry[segment_name] = tuple(
-                reentry_candidates_for_window(
-                    window,
-                    cands,
-                    params=params,
-                    cfg=cfg,
-                    timeframe=task.timeframe,
-                    entry_rule=task.reentry_entry_rule,
-                    partial_take_profit_r=task.partial_take_profit_r,
-                    partial_take_profit_fraction=task.partial_take_profit_fraction,
-                    breakeven_after_partial=task.breakeven_after_partial,
-                    no_same_step_tp=task.no_same_step_tp,
-                    no_same_step_tp_minutes=task.no_same_step_tp_minutes or None,
-                    invalidation_cancel=task.invalidation_cancel,
-                )
-            )
-
-        num_trades, win_rate, total_return, mdd = _isolated_metrics(
-            cands, cfg, task.timeframe, window.funding_rates
-        )
         engine_return: float | None = None
         engine_trades: int | None = None
         if segment is None and task.engine_check:
@@ -577,60 +645,122 @@ def run_cell(task: _Task, *, log: bool = True) -> CellPayload:
             outcome = harness.run_once(window, params=params, cfg=cfg, order_block_result=ob_result)
             engine_return = outcome.result.metrics.total_return
             engine_trades = outcome.result.metrics.num_trades
-        rows.append(
+
+        # WAN-378: 문턱마다 재진입을 다시 파생해야 하지만(부모 집합이 바뀐다) 창 전처리는
+        # 문턱과 무관하다 — 한 번 만들어 돌려 쓴다. 문턱이 하나뿐이거나 재진입이 꺼져 있으면
+        # 만들지 않아 예전과 같은 호출 수다(비트 동일).
+        reentry_ctx = (
+            reentry_window_context(window, task.timeframe)
+            if task.reentry and len(thresholds) > 1
+            else None
+        )
+        for threshold, label in zip(thresholds, labels, strict=True):
+            if threshold is None:
+                cands = list(generated)
+            else:
+                # WAN-376 §1a: 「필터 끔으로 만들고 밖에서 컷」. 판정 불가(`None`)는 엔진이
+                # 기각하는 부류라 여기서도 버린다 — 그래야 두 팔이 같은 집합을 겨눈다.
+                cands = [
+                    c
+                    for c in generated
+                    if c.zone_width_atr is not None and c.zone_width_atr <= threshold
+                ]
+            candidates[label][segment_name] = tuple(cands)
+            if task.reentry:
+                # WAN-261(옵트인): base 후보에서 「익절 후 존 내 재진입」 후보를 별도로 만든다.
+                # base 후보·격리 성과 행은 건드리지 않으므로 끄면 예전과 비트 단위로 같다.
+                reentry[label][segment_name] = tuple(
+                    reentry_candidates_for_window(
+                        window,
+                        cands,
+                        params=params,
+                        cfg=cfg,
+                        timeframe=task.timeframe,
+                        entry_rule=task.reentry_entry_rule,
+                        partial_take_profit_r=task.partial_take_profit_r,
+                        partial_take_profit_fraction=task.partial_take_profit_fraction,
+                        breakeven_after_partial=task.breakeven_after_partial,
+                        no_same_step_tp=task.no_same_step_tp,
+                        no_same_step_tp_minutes=task.no_same_step_tp_minutes or None,
+                        invalidation_cancel=task.invalidation_cancel,
+                        context=reentry_ctx,
+                    )
+                )
+
+            num_trades, win_rate, total_return, mdd = _isolated_metrics(
+                cands, cfg, task.timeframe, window.funding_rates
+            )
+            rows[label].append(
+                CellRow(
+                    symbol=task.symbol,
+                    timeframe=task.timeframe,
+                    segment=segment_name,
+                    num_candidates=len(cands),
+                    num_trades=num_trades,
+                    win_rate=win_rate,
+                    total_return=total_return,
+                    max_drawdown=mdd,
+                    engine_total_return=engine_return,
+                    engine_num_trades=engine_trades,
+                )
+            )
+
+    payloads: dict[str, CellPayload] = {}
+    for label in labels:
+        # 따뜻한 구간(oos_warm): 전 창 후보를 경계로 걸러(straddle (b) — 워밍업 셋업은 배치조차
+        # 안 함) 신선한 초기자본으로 격리 시퀀싱 — `run_zone_limit_backtest_verbose(eval_from_ms=)`
+        # 와 같은 규약이다.
+        warm_cands = tuple(c for c in candidates[label][SEGMENT_FULL] if c.trigger_time >= boundary)
+        num_trades, win_rate, total_return, mdd = _isolated_metrics(
+            warm_cands, cfg, task.timeframe, funding[SEGMENT_FULL]
+        )
+        rows[label].append(
             CellRow(
                 symbol=task.symbol,
                 timeframe=task.timeframe,
-                segment=segment_name,
-                num_candidates=len(cands),
+                segment=SEGMENT_OOS_WARM,
+                num_candidates=len(warm_cands),
                 num_trades=num_trades,
                 win_rate=win_rate,
                 total_return=total_return,
                 max_drawdown=mdd,
-                engine_total_return=engine_return,
-                engine_num_trades=engine_trades,
             )
         )
-
-    # 따뜻한 구간(oos_warm): 전 창 후보를 경계로 걸러(straddle (b) — 워밍업 셋업은 배치조차
-    # 안 함) 신선한 초기자본으로 격리 시퀀싱 — `run_zone_limit_backtest_verbose(eval_from_ms=)`
-    # 와 같은 규약이다.
-    warm_cands = tuple(c for c in candidates[SEGMENT_FULL] if c.trigger_time >= boundary)
-    num_trades, win_rate, total_return, mdd = _isolated_metrics(
-        warm_cands, cfg, task.timeframe, funding[SEGMENT_FULL]
-    )
-    rows.append(
-        CellRow(
+        if log:
+            full_row = rows[label][0]
+            suffix = "" if len(labels) == 1 else f" [문턱 {label}]"
+            print(
+                f"[wan169] {task.symbol} {task.timeframe}{suffix}: "
+                f"full 후보 {full_row.num_candidates} · 거래 {full_row.num_trades} · "
+                f"수익 {full_row.total_return * 100:.2f}%",
+                flush=True,
+            )
+        payloads[label] = CellPayload(
             symbol=task.symbol,
             timeframe=task.timeframe,
-            segment=SEGMENT_OOS_WARM,
-            num_candidates=len(warm_cands),
-            num_trades=num_trades,
-            win_rate=win_rate,
-            total_return=total_return,
-            max_drawdown=mdd,
+            boundary_ms=boundary,
+            candidates=candidates[label],
+            funding=funding,
+            rows=tuple(rows[label]),
+            reentry_candidates=reentry[label],
         )
-    )
-    if log:
-        full_row = rows[0]
-        print(
-            f"[wan169] {task.symbol} {task.timeframe}: full 후보 {full_row.num_candidates} · "
-            f"거래 {full_row.num_trades} · 수익 {full_row.total_return * 100:.2f}%",
-            flush=True,
-        )
-    return CellPayload(
-        symbol=task.symbol,
-        timeframe=task.timeframe,
-        boundary_ms=boundary,
-        candidates=candidates,
-        funding=funding,
-        rows=tuple(rows),
-        reentry_candidates=reentry,
-    )
+    return payloads
 
 
 def _run_task_logged(task: _Task) -> CellPayload:
     return run_cell(task, log=True)
+
+
+@dataclass(frozen=True)
+class _MultiTask:
+    """워커에 보내는 「한 칸 × 문턱 여러 점」 단위 — 피클 가능해야 하므로 최상위 타입이다."""
+
+    task: _Task
+    thresholds: tuple[float | None, ...]
+
+
+def _run_variants_logged(multi: _MultiTask) -> dict[str, CellPayload]:
+    return run_cell_variants(multi.task, multi.thresholds, log=True)
 
 
 def run_cells(
@@ -649,6 +779,7 @@ def run_cells(
     limit_stop_nonfill: bool = False,
     short_enabled: bool = False,
     bollinger: bool = True,
+    zone_limit_ref: ZoneLimitRef | None = None,
     max_zone_width_atr: harness.ZoneWidthArg = harness.UNSET,
     seed: int = 0,
     cold_segments: bool = True,
@@ -697,6 +828,10 @@ def run_cells(
 
     `short_enabled`(WAN-282, 옵트인)를 켜면 후보 생성이 베어리시 OB 숏을 같이 낸다(롱 모델의
     거울) — 끄면(기본) `params`에 얹지 않아 예전과 비트 단위로 같다. 롱+숏 북 측정용이다.
+
+    `zone_limit_ref`(WAN-378, 옵트인)은 지정가를 걸 **존 내 기준선**이다 — `None`(기본)이면
+    채택 기본값(`"proximal"`)이라 비트 단위로 같고, `"mid"`는 존 중앙 진입(손절폭 절반)이다.
+    볼린저가 켜져 있으면 밴드가 진입가를 덮어쓰므로(WAN-95) 이 축은 볼린저를 끈 팔의 것이다.
 
     `bollinger`·`max_zone_width_atr`(WAN-366, 옵트인)은 **후보 집합 사다리**의 두 축이다 —
     전자는 볼린저 진입가 재산정을, 후자는 존폭 필터를 끈다. 기본값(`True` · `UNSET`)이면
@@ -788,6 +923,7 @@ def run_cells(
             limit_stop_nonfill=limit_stop_nonfill,
             short_enabled=short_enabled,
             bollinger=bollinger,
+            zone_limit_ref=zone_limit_ref,
             max_zone_width_atr=max_zone_width_atr,
             seed=seed,
             cold_segments=cold_segments,
@@ -812,6 +948,74 @@ def run_cells(
         return [run_cell(task) for task in tasks]
     with ProcessPoolExecutor(max_workers=min(jobs, len(tasks))) as executor:
         return list(executor.map(_run_task_logged, tasks))
+
+
+def run_cells_multi(
+    symbols: Sequence[str],
+    timeframes: Sequence[str],
+    *,
+    thresholds: Sequence[float | None],
+    start: str,
+    end: str,
+    jobs: int = 1,
+    adv_fraction: harness.AdvCapArg = harness.LEGACY_MAX_NOTIONAL_ADV_FRACTION,
+    take_profit_liquidity: Liquidity = harness.LEGACY_TAKE_PROFIT_LIQUIDITY,
+    reentry: bool = True,
+    reentry_entry_rule: ReentryEntryRule = "band",
+    bollinger: bool = True,
+    zone_limit_ref: ZoneLimitRef | None = None,
+    cold_segments: bool = True,
+) -> dict[str, list[CellPayload]]:
+    """존폭 문턱 **여러 점**의 칸 payload를 한 번의 무거운 패스로 낸다 (WAN-378 §1b).
+
+    `run_cells`가 문턱 하나짜리 진입점이라면 이쪽은 격자용이다 — 엔진 필터를 **끈 채**
+    후보를 한 번 만들고(WAN-376 §1a가 성립을 못 박은 지름길) 문턱마다 컷 ＋ 재진입 파생만
+    다시 한다. 반환은 `문턱 라벨 → 칸 payload 목록`이고 라벨은 `zone_width_label`이다.
+
+    🚨 **엔진 필터는 항상 꺼진다**(`max_zone_width_atr=None`) — 켜 두고 밖에서 또 컷하면
+    이중 필터라 라벨이 거짓이 된다(WAN-159 규약). 그래서 이 함수에는 그 인자가 아예 없다.
+
+    🚨 **검산(`engine_check`)도 없다** — `harness.run_once`는 엔진 필터 설정 하나로 도는데
+    이 함수는 여러 문턱을 동시에 내므로 어느 라벨과 대조할지가 정의되지 않는다. 배선 검산은
+    호출부가 채택 좌표 팔을 **표준 경로로 따로 돌려** 하는 것이 옳다(WAN-378 완료기준 6).
+
+    ⚠️ `run_cells`와 달리 체결 렌즈·손절 보수화·래더 같은 축은 열지 않았다 — 이 격자가 안
+    쓰는 축을 열면 「지름길이 원리적으로 깨지는 조합」(탈락 렌즈 등)을 여기서 다시 막아야
+    한다. 필요해지면 그때 열되 그 검사와 함께 연다.
+    """
+    labels = [zone_width_label(t) for t in thresholds]
+    if len(set(labels)) != len(labels):
+        raise ValueError(f"존폭 문턱이 중복입니다: {labels}")
+    multi = [
+        _MultiTask(
+            task=_Task(
+                symbol=harness.normalize_symbol(symbol),
+                timeframe=timeframe,
+                start_ms=parse_date_ms(start),
+                end_ms=parse_date_ms(end),
+                adv_fraction=adv_fraction,
+                take_profit_liquidity=take_profit_liquidity,
+                reentry=reentry,
+                reentry_entry_rule=reentry_entry_rule,
+                bollinger=bollinger,
+                zone_limit_ref=zone_limit_ref,
+                # 엔진 필터는 끈다 — 컷은 밖에서 문턱마다 건다(위 독스트링).
+                max_zone_width_atr=None,
+                cold_segments=cold_segments,
+                engine_check=False,
+                observe_zone_width_atr=True,
+            ),
+            thresholds=tuple(thresholds),
+        )
+        for symbol in symbols
+        for timeframe in timeframes
+    ]
+    if jobs <= 1 or len(multi) <= 1:
+        results = [run_cell_variants(m.task, m.thresholds) for m in multi]
+    else:
+        with ProcessPoolExecutor(max_workers=min(jobs, len(multi))) as executor:
+            results = list(executor.map(_run_variants_logged, multi))
+    return {label: [r[label] for r in results] for label in labels}
 
 
 # --------------------------------------------------------------------------- #

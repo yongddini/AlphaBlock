@@ -367,6 +367,11 @@ BandBar = Literal["tap", "prev_closed", "intrabar_live", "intrabar_causal"]
 #: 채택 기본값은 `"bar_close"`(WAN-365 = 인과) — 뜻과 근거는 그 필드의 독스트링 참고.
 InvalidationCancel = Literal["bar_open", "bar_close"]
 
+#: 지정가를 걸 **존 내 기준선**(`ConfluenceParams.zone_limit_ref`). 채택 기본값은
+#: `"proximal"`(존 근단, WAN-95) — 뜻은 그 필드의 독스트링 참고. 이름을 붙여 둔 것은 측정
+#: 모듈이 이 축을 옵트인 인자로 나를 때 세 값이 한 곳에서만 정의되게 하기 위해서다(WAN-378).
+ZoneLimitRef = Literal["proximal", "mid", "distal"]
+
 
 def rsi_gate_passes(
     rsi: float,
@@ -617,7 +622,7 @@ class ConfluenceParams(BaseModel):
     WAN-208/WAN-215로 제거됐고 채택 기본값은 `realtime` 단독이라, 이 값은 호환용으로만
     남아 있다.
     """
-    zone_limit_ref: Literal["proximal", "mid", "distal"] = "proximal"
+    zone_limit_ref: ZoneLimitRef = "proximal"
     """`entry_mode=zone_limit`일 때 지정가를 걸 존 내 기준선.
 
     `proximal`(기본): 존 근단(롱=존 상단, 숏=존 하단) — 가장 먼저 닿는 경계.
