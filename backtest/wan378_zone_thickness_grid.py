@@ -179,6 +179,11 @@ class GridRow(BaseModel):
     reentry: bool
     segment: str
     num_cells: int
+    num_symbols: int
+    """이 지갑이 실제로 본 종목 수 — 요약 머리글이 이 값에서 파생된다.
+
+    🚨 좌표를 본문에 **숫자로 적어 두면** 유니버스가 움직였을 때 라벨만 낡는다(WAN-318 §6이
+    대시보드에서 고친 것과 같은 부류 — 「9종목 × 4TF」가 12종목 위에 떠 있었다)."""
     num_trades: int
     win_rate: float
     total_return: float
@@ -305,6 +310,7 @@ def _row_kwargs(segment: BookSegment, *, num_symbols: int) -> dict[str, object]:
     return {
         "segment": segment.segment,
         "num_cells": row.num_cells,
+        "num_symbols": num_symbols,
         "num_trades": row.num_trades,
         "win_rate": row.win_rate,
         "total_return": row.total_return,
@@ -836,8 +842,28 @@ def _render_reentry(grid: pd.DataFrame) -> list[str]:
                 shown += 1
     if not shown:
         return lines[:-2] + ["_아직 안 돌렸다._", ""]
-    lines += [""]
+    lines += ["", *_reentry_headline(grid), ""]
     return lines
+
+
+def _reentry_headline(grid: pd.DataFrame) -> list[str]:
+    """「재진입이 판정을 뒤집는가」를 한 줄로 — 108줄 표를 사람이 다 읽지는 않는다."""
+    on = grid[(grid["segment"] == SEGMENT_OOS_WARM) & grid["reentry"]]
+    off = grid[(grid["segment"] == SEGMENT_OOS_WARM) & ~grid["reentry"]]
+    keys = ["arm", "width_label", "guard"]
+    merged = on.merge(off, on=keys, suffixes=("_on", "_off"))
+    if merged.empty:
+        return []
+    flipped = merged[
+        ((merged["mean_net_r_on"] > 0) & (merged["mean_net_r_off"] <= 0))
+        | ((merged["mean_net_r_on"] <= 0) & (merged["mean_net_r_off"] > 0))
+    ]
+    worst = float((merged["mean_net_r_on"] - merged["mean_net_r_off"]).abs().max())
+    return [
+        f"📌 **{len(merged)}팔 중 부호가 갈리는 곳은 {len(flipped)}곳**이고 |Δ|의 최댓값은 "
+        f"**{worst:.4f}R**이다. ⚠️ 「부호가 갈린다」는 재진입이 판정을 **뒤집었다**는 뜻이지 "
+        "재진입이 좋다/나쁘다가 아니다 — 채택 규칙은 ON이고(WAN-273) OFF는 대조다."
+    ]
 
 
 def _render_sample_gate(grid: pd.DataFrame) -> list[str]:
@@ -992,8 +1018,9 @@ def build_summary(grid: pd.DataFrame, loo: pd.DataFrame, checksum: pd.DataFrame)
     ]
     if not grid.empty:
         scopes = ", ".join(sorted(grid["scope"].unique()))
+        universe = int(grid["num_symbols"].max()) if "num_symbols" in grid.columns else 0
         lines += [
-            f"좌표: **12종목 × {scopes}**(한 지갑 — 북은 이어붙일 수 없다, WAN-316) · "
+            f"좌표: **{universe}종목 × {scopes}**(한 지갑 — 북은 이어붙일 수 없다, WAN-316) · "
             "못 박은 6년 창 · cap_only 5배 · `baseline` 렌즈 · **핀 하나도 없다**(WAN-305).",
             "",
         ]
