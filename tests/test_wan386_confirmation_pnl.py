@@ -484,3 +484,68 @@ def test_summary_does_not_invent_a_verdict_from_an_empty_grid() -> None:
 def test_arm_c_offset_is_the_measured_value_not_a_free_parameter() -> None:
     """팔 `C`의 오프셋은 WAN-383 §1이 실측한 팔 `2`의 평균 거리다(1.026%)."""
     assert pytest.approx(0.010259806091708956) == ARM_C_OFFSET
+
+
+# --------------------------------------------------------------------------- #
+# 검산 ③ — 미래 절단 불변 (WAN-166/377 자를 이 경로에도)
+# --------------------------------------------------------------------------- #
+
+
+def test_future_cut_does_not_change_an_already_closed_trade() -> None:
+    """봉 안에서 잘라도 **이미 끝난** 거래는 비트 동일하다 — 팔이 미래를 안 본다는 직접 증거.
+
+    확인 팔의 진입은 트리거 시각(과거)이고 청산은 앞으로 걸어가며 찾으므로 원리적으로
+    인과적이지만, 「원리적으로」는 배선 실수를 막지 못한다(WAN-345 선례). 값으로 고정한다.
+    """
+    steps = [
+        _step(0, high=101.0, low=99.0, close=100.0),
+        _step(60_000, high=116.0, low=100.0, close=115.0),
+        _step(120_000, high=140.0, low=80.0, close=130.0),
+        _step(180_000, high=145.0, low=120.0, close=140.0),
+    ]
+    full = simulate_fixed_entry_exits(
+        direction=OrderBlockDirection.BULLISH,
+        entry_index=0,
+        entry_price=100.0,
+        stop_price=90.0,
+        take_profit_prices=[115.0],
+        substeps=steps,
+    )
+    # 그 거래는 60_000에 끝났다 — 그 뒤를 통째로 잘라도 같은 결과여야 한다.
+    for cut in (2, 3):
+        truncated = simulate_fixed_entry_exits(
+            direction=OrderBlockDirection.BULLISH,
+            entry_index=0,
+            entry_price=100.0,
+            stop_price=90.0,
+            take_profit_prices=[115.0],
+            substeps=steps[:cut],
+        )
+        assert truncated == full, cut
+
+
+def test_future_cut_leaves_finished_arm_candidates_untouched() -> None:
+    """팔 변환 층에서도 같다 — 잘린 창에서 끝까지 살아 있는 거래만 `END_OF_DATA`로 바뀐다."""
+    probe = _probe(cross_time=60_000, cross_price=103.0, cross_ref_price=100.0)
+    steps = [
+        *_SYNTH_STEPS,
+        _step(180_000, high=131.0, low=127.0, close=130.0),
+    ]
+    times = [s.time for s in steps]
+    long_run = derive_arm_candidates(
+        [_synthetic_candidate(probe)],
+        arm=ARM_CROSS,
+        multiples=[1.5],
+        substeps=steps,
+        substep_times=times,
+    )[1.5]
+    short_run = derive_arm_candidates(
+        [_synthetic_candidate(probe)],
+        arm=ARM_CROSS,
+        multiples=[1.5],
+        substeps=_SYNTH_STEPS,
+        substep_times=_SYNTH_TIMES,
+    )[1.5]
+    assert long_run[0].exit_time == short_run[0].exit_time
+    assert long_run[0].exit_price == short_run[0].exit_price
+    assert long_run[0].reason is short_run[0].reason
