@@ -244,7 +244,9 @@ class ReachRow(BaseModel):
     """🚨 그 셋업들이 기준 팔에서 **이겼는가** — 이겼으면 확인이 좋은 거래를 버리는 것이다
     (RSI 게이트가 정확히 그랬다 — WAN-114/123)."""
     window_closed_share: float
-    """존 무효화까지 다 훑은 비율 — 낮으면 「안 왔다」가 **창 오른쪽 절단**일 수 있다."""
+    """「안 왔다」가 뜻을 갖는 비율(무효화까지 봤거나 세 팔이 전부 결판난 셋업).
+
+    낮으면 그 구간의 「안 옴」에 **창 오른쪽 절단**이 섞여 있다는 뜻이다."""
 
 
 # --------------------------------------------------------------------------- #
@@ -489,8 +491,13 @@ def run_report(
     jobs: int = 1,
     segments: Sequence[str] = SEGMENT_ORDER,
     log: bool = True,
-) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, float]]:
-    """4갈래 인구조사 + 도달률 표 + 검산값."""
+) -> tuple[pd.DataFrame, pd.DataFrame, list[BookSegment], dict[str, float]]:
+    """4갈래 인구조사 + 도달률 표 + **배치된 북** + 검산값.
+
+    🚨 북을 함께 돌려주는 이유는 호출부가 그것 때문에 격자를 **한 번 더 돌지 않게** 하기
+    위해서다 — 이 좌표에서 후보 생성이 비용의 전부라(WAN-372 실측: 48칸 8,156초 중 8,148초)
+    「요약을 쓰려고 다시 만들기」는 실행 시간을 두 배로 만든다.
+    """
     started = time.monotonic()
     start_ms, end_ms = parse_date_ms(start), parse_date_ms(end)
     payloads = build_payloads(symbols, timeframes, start=start, end=end, jobs=jobs)
@@ -519,7 +526,7 @@ def run_report(
     }
     if log:
         print(f"[wan383] 총 {time.monotonic() - started:.0f}s · 검산 {checks}", flush=True)
-    return census_frame, reach_frame, checks
+    return census_frame, reach_frame, book, checks
 
 
 # --------------------------------------------------------------------------- #
@@ -817,7 +824,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         symbols, timeframes = [harness.DEFAULT_SYMBOLS[0]], ["15m"]
         print(f"[wan383] 파일럿: {symbols[0]} × 15m 한 칸 (가장 비싼 TF)", flush=True)
 
-    census, reach, checks = run_report(
+    census, reach, book, checks = run_report(
         symbols,
         timeframes,
         start=args.start,
@@ -825,13 +832,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         jobs=args.jobs,
     )
     if args.pilot:
-        print(census.head(20).to_string())
+        print(census.to_string())
         print(reach.to_string())
         return 0
 
-    start_ms, end_ms = parse_date_ms(args.start), parse_date_ms(args.end)
-    payloads = build_payloads(symbols, timeframes, start=args.start, end=args.end, jobs=args.jobs)
-    book = place_book(payloads, start_ms=start_ms, end_ms=end_ms)
     _write(census, reach, book, checks)
     return 0
 

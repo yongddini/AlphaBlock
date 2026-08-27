@@ -503,3 +503,31 @@ def test_no_survivor_closes_phase_two() -> None:
     sentences, survivors = verdict(census, reach, [], segment="oos_warm")
     assert survivors == []
     assert len(sentences) == 3
+
+
+# --------------------------------------------------------------------------- #
+# 7 · 격자를 두 번 돌지 않는다 (비용 가드)
+# --------------------------------------------------------------------------- #
+
+
+def test_the_cli_builds_the_grid_exactly_once() -> None:
+    """🚨 `main`이 요약을 쓰려고 후보를 **다시** 만들면 실행 시간이 두 배가 된다.
+
+    이 좌표에서 비용의 전부가 후보 생성이라(WAN-372 실측: 48칸 8,156초 중 8,148초) 그
+    실수는 몇 시간짜리다. `run_report`가 북을 함께 돌려주므로 `main`은 그것을 쓰면 된다 —
+    라벨이 아니라 **AST에 그 호출이 없다**로 건다.
+    """
+    import ast
+    import inspect
+
+    from backtest import wan383_confirmation_entry as module
+
+    tree = ast.parse(inspect.getsource(module.main))
+    called = {
+        node.func.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "build_payloads" not in called, "main이 격자를 다시 만듭니다(비용 두 배)."
+    assert "place_book" not in called, "main이 북을 다시 배치합니다."
+    assert "run_report" in called

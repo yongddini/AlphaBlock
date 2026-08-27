@@ -1539,8 +1539,12 @@ class ConfirmationProbe:
     scan_end_time: int = 0
     """실제로 훑은 마지막 1분 스텝 시각."""
     window_closed: bool = False
-    """존 무효화까지 다 봤는가. 거짓이면 **데이터가 끝나서** 멈춘 것이라, 트리거가 안 온
-    것을 「끝까지 안 왔다」로 읽으면 안 된다(창 오른쪽 절단)."""
+    """훑기가 **데이터가 끝나서**가 아닌 이유로 끝났는가 — 즉 「트리거가 안 왔다」가 뜻을
+    갖는가.
+
+    참인 경우 둘: 존 무효화까지 다 봤거나(대기 창이 실제로 닫혔다), 세 팔이 전부 결판나
+    더 볼 것이 없었다. 거짓이면 **창 오른쪽이 잘린 것**이라 그 셋업의 「안 옴」은 「끝까지
+    안 왔다」가 아니라 「아직 모른다」다."""
 
     def first_touch(self, offset: float) -> tuple[int, float] | None:
         """진입가 대비 `offset`(상대) 위를 처음 터치한 (시각, 수준). 못 닿았으면 `None`.
@@ -1631,7 +1635,10 @@ def scan_confirmation(
             and ladder
             and ladder[-1][1] >= ladder_cap
         ):
-            break  # 세 팔이 전부 결판났다 — 더 훑어도 기록할 것이 없다.
+            # 세 팔이 전부 결판났다 — 더 훑어도 기록할 것이 없다. 「안 옴」이 없으므로
+            # 창 오른쪽 절단 걱정도 없다(그래서 `window_closed`가 참이다).
+            window_closed = True
+            break
 
     return ConfirmationProbe(
         entry_time=entry_time,
