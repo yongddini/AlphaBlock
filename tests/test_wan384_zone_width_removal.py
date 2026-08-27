@@ -170,7 +170,31 @@ _NO_PIN_NEEDED: frozenset[str] = frozenset(
 #: 기록이라 `LEGACY_MAX_ZONE_WIDTH_ATR`(= 끄기) 쪽이고 이 전환에 무영향이다.
 _FIRST_PINNED_ISSUE = 159
 
-_PIN_TOKENS = ("LEGACY_ZONE_WIDTH_FILTER_ON", "max_zone_width_atr=")
+#: 🚨 **「핀」으로 치는 형태 — 느슨하게 잡으면 이 가드가 무의미해진다.**
+#:
+#: 처음 판은 토큰이 `"max_zone_width_atr="`였는데, 그건 **핀이 아니라 파라미터 통과
+#: (passthrough)에도 걸린다** — `max_zone_width_atr=task.max_zone_width_atr` 한 줄이 있는
+#: 모듈이 「고정했다」로 통과했고, 실제로 `wan169_leverage_book.main()`이 핀 없이 새어
+#: 나갔다(PM 검토가 잡았다). 「그 이름을 어딘가에 썼다」가 아니라 **「값에 못 박았다」**
+#: 로만 통과해야 한다 — 이 저장소가 반복해 경계한 「라벨과 동작이 어긋남」
+#: (WAN-91/95/112/123/159)의 **테스트 축 변종**이다.
+#:
+#: 통과하는 형태는 셋뿐이다:
+#: * 둘째 세대 핀 상수(`LEGACY_ZONE_WIDTH_FILTER_ON`) — 직접 쓰든 모듈 상수로 받든.
+#: * 첫째 세대 핀 상수(`LEGACY_MAX_ZONE_WIDTH_ATR`) — 「필터 없던 시절 판」 선언.
+#: * **리터럴** 대입(`max_zone_width_atr=None` · `max_zone_width_atr=1.28`).
+#:
+#: ⚠️ `max_zone_width_atr=<식별자>`(`task.…` · `threshold` · `harness.UNSET`)는 **핀이
+#: 아니다** — 값이 실행 시점에 정해지므로 이 파일만 읽어서는 무엇으로 도는지 알 수 없다.
+_PIN_CONSTANTS = ("LEGACY_ZONE_WIDTH_FILTER_ON", "LEGACY_MAX_ZONE_WIDTH_ATR")
+_PIN_LITERAL = re.compile(r"max_zone_width_atr\s*=\s*(None|\d)")
+
+
+def _is_pinned(text: str) -> bool:
+    """이 모듈이 존폭 문턱을 **값에 못 박았는가**(라벨을 썼는가가 아니라)."""
+    if any(token in text for token in _PIN_CONSTANTS):
+        return True
+    return _PIN_LITERAL.search(text) is not None
 
 
 def _post_159_modules() -> list[Path]:
@@ -188,14 +212,20 @@ def test_every_post_wan159_report_pins_or_is_exempt() -> None:
     필터를 켠 채 결론을 낸 모듈이 하나라도 핀을 안 들면 조용히 필터 꺼진 엔진으로 다시 돌아
     본문과 어긋난다(WAN-132/149/159가 겪은 부류의 거울상). 새 모듈을 만들면 **핀을 넣거나
     `_NO_PIN_NEEDED`에 이유와 함께 등록**해야 이 테스트가 통과한다.
+
+    ⚠️ **이 스캔은 그물이지 증명이 아니다** — 파일 어딘가에 핀 형태가 있으면 통과하므로,
+    **기계 코드와 자기 리포트를 겸하는 모듈**은 못 잡는다. 실제 사례가 `wan169`다: 공유
+    기계인 `run_cells_multi`가 `max_zone_width_atr=None`을 들고 있어 자기 `main()`의 핀이
+    빠져도 이 스캔은 통과한다(PM 검토가 그 구멍으로 샌 것을 잡았다). 그 부류는 **호출부를
+    가로채는 스파이 테스트**가 맡는다(`test_wan169_main_pins_the_threshold_at_its_call_site`
+    · `test_book_modules_pass_the_pin_to_run_cells`). 두 층이 함께 있어야 한다.
     """
     modules = _post_159_modules()
     assert modules, "대상 모듈을 하나도 못 찾았습니다 — 경로 규약이 바뀌었습니다."
     missing = [
         path.stem
         for path in modules
-        if path.stem not in _NO_PIN_NEEDED
-        and not any(token in path.read_text() for token in _PIN_TOKENS)
+        if path.stem not in _NO_PIN_NEEDED and not _is_pinned(path.read_text())
     ]
     assert not missing, (
         f"존폭 핀이 없는 모듈: {missing} — 필터를 켠 채 낸 표라면 "
@@ -321,3 +351,65 @@ def test_pinning_1_28_reproduces_the_pre_wan384_engine() -> None:
             f"{column}: 핀 {actual} != WAN-384 이전 기준 {expected} — 핀이 옛 엔진을 "
             "되살리지 못했습니다."
         )
+
+
+def test_passthrough_does_not_count_as_a_pin() -> None:
+    """🚨 이 가드의 급소 — 「그 이름을 썼다」가 「값에 못 박았다」로 통과하면 안 된다.
+
+    처음 판이 정확히 그래서 `wan169_leverage_book.main()`을 놓쳤다(PM 검토가 잡았다).
+    """
+    # 핀이 아니다 — 값이 실행 시점에 정해진다.
+    assert not _is_pinned("max_zone_width_atr=task.max_zone_width_atr")
+    assert not _is_pinned("max_zone_width_atr=threshold")
+    assert not _is_pinned("max_zone_width_atr=harness.UNSET")
+    assert not _is_pinned("max_zone_width_atr=head.zone_width")
+    # 핀이다 — 상수 또는 리터럴.
+    assert _is_pinned("max_zone_width_atr=harness.LEGACY_ZONE_WIDTH_FILTER_ON")
+    assert _is_pinned("max_zone_width_atr=harness.LEGACY_MAX_ZONE_WIDTH_ATR")
+    assert _is_pinned("max_zone_width_atr=None")
+    assert _is_pinned("max_zone_width_atr=1.28")
+
+
+def test_wan169_main_pins_the_threshold_at_its_call_site(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """🚨 돌연변이 확인 — `wan169.main()`의 **실제 호출부**에 핀이 실려 나가는가.
+
+    wan169 리포트 CSV는 **2026-07-22 산출**이라 WAN-159(07-21)의 필터 1.28이 켜진 판이다.
+    같은 자리에 WAN-305·WAN-365 핀이 이미 있는데 WAN-384 핀만 빠져 있었다 — 파일을 읽는
+    가드(위)와 별개로, **인자가 정말 넘어가는지**를 호출부에서 가로채 확인한다.
+    """
+    import backtest.wan169_leverage_book as mod
+
+    class _Stop(Exception):
+        pass
+
+    seen: dict[str, Any] = {}
+
+    def _spy(*args: Any, **kwargs: Any) -> list[Any]:
+        seen.update(kwargs)
+        raise _Stop
+
+    monkeypatch.setattr(mod, "run_cells", _spy, raising=True)
+    with pytest.raises(_Stop):
+        mod.main(
+            [
+                "--symbols",
+                "BTCUSDT",
+                "--tf",
+                "1h",
+                "--out-cells",
+                str(tmp_path / "c.csv"),
+                "--out-grid",
+                str(tmp_path / "g.csv"),
+                "--out-md",
+                str(tmp_path / "s.md"),
+            ]
+        )
+    assert seen["max_zone_width_atr"] == LEGACY_ZONE_WIDTH_FILTER_ON, (
+        "wan169 리포트는 필터 1.28이 켜진 판인데 핀이 안 넘어갔습니다 — 지금 돌리면 "
+        "커밋된 CSV와 다른 행이 나옵니다(WAN-384 §4)."
+    )
+    # 같은 자리의 옛 핀 둘도 함께 살아 있어야 한다(하나만 남으면 그 CSV는 여전히 못 되살린다).
+    assert seen["reentry"] is False
+    assert seen["invalidation_cancel"] == harness.LEGACY_INVALIDATION_CANCEL
