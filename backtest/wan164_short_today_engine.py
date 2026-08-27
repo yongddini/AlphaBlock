@@ -25,7 +25,7 @@
 | 축 | WAN-145(`wan145_new_band_null`) | 이 모듈 |
 | -- | -- | -- |
 | 존 병합(`combine_obs`) | `True`(`LEGACY_OB_PARAMS` 병합) | **`False`(분리 = 채택 기본값)** |
-| 존폭 필터(`max_zone_width_atr`) | 없음(당시 미존재) | **`1.28`(채택 기본값 — 좁은 존만)** |
+| 존폭 필터(`max_zone_width_atr`) | 없음(당시 미존재) | **`1.28`(좁은 존만 · WAN-384 이후 핀)** |
 | 밴드(`band_bar`) | `intrabar_live` | `intrabar_live`(같음) |
 | 렌즈 | `baseline` 단독 | `baseline` 단독(같음) |
 | 팔 | `long_only`·`short_only`·`both` | 같음(WAN-89 정의 재사용) |
@@ -150,12 +150,16 @@ def arm_of(name: str) -> Arm:
 
 
 def real_params(arm: Arm) -> ConfluenceParams:
-    """검정 대상 = **지금 채택된 기본값 + 팔의 롱/숏 스위치**.
+    """검정 대상 = **이 표를 낸 엔진 + 팔의 롱/숏 스위치**.
 
-    ⚠️ `band_bar`·`max_zone_width_atr`을 **고정하지 않는다** — 팔은 `ConfluenceParams()`에서
-    출발하므로 봉내 라이브 밴드·필터 1.28을 그대로 물려받는다(그게 오늘 엔진이다).
+    ⚠️ `band_bar`는 **고정하지 않는다** — 팔은 `ConfluenceParams()`에서 출발하므로 봉내
+    라이브 밴드를 그대로 물려받는다.
+
+    🚨 **존폭 필터만은 명시 핀이다(WAN-384)** — 이 표는 필터를 켠 채(1.28) 낸 기록인데
+    WAN-384가 채택 기본값을 껐다. 고정하지 않으면 「필터 1.28」이라 적어 둔 본문과 숫자가
+    조용히 갈라진다(WAN-91/95/112/123/159 부류).
     """
-    return arm.params()
+    return harness.pin_zone_width(arm.params(), harness.LEGACY_ZONE_WIDTH_FILTER_ON)
 
 
 def pool_params(arm: Arm) -> ConfluenceParams:
@@ -170,7 +174,7 @@ def pool_params(arm: Arm) -> ConfluenceParams:
 
 def describe_engine() -> str:
     """이 리포트가 검정한 엔진의 지문 — 산출물만 봐도 어떤 엔진으로 돌았는지 드러나게."""
-    p = ConfluenceParams()
+    p = harness.pin_zone_width(ConfluenceParams(), harness.LEGACY_ZONE_WIDTH_FILTER_ON)
     band = p.deviation_filter.band_bar if p.deviation_filter else None
     return (
         f"entry_mode={p.entry_mode}, rsi_gate_mode={p.rsi_gate_mode}, "

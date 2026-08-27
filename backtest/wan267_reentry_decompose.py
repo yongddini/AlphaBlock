@@ -352,7 +352,8 @@ def verdict(rows: Sequence[DepthRow]) -> str:
 
 
 def describe_engine() -> str:
-    p = ConfluenceParams()
+    # WAN-384 명시 핀 — 이 지문은 존폭 필터를 켠 채(1.28) 낸 표의 것이다.
+    p = harness.pin_zone_width(ConfluenceParams(), harness.LEGACY_ZONE_WIDTH_FILTER_ON)
     band = p.deviation_filter.band_bar if p.deviation_filter else None
     return (
         f"entry_mode={p.entry_mode}, rsi_gate_mode={p.rsi_gate_mode}, "
@@ -422,7 +423,10 @@ def run_cell(task: _Task, *, log: bool = True) -> list[DepthRow]:
         return []
     ob = harness.detect_order_blocks(market, OrderBlockParams())
     cfg = harness.legacy_build_config(task.timeframe)
-    params = harness.build_params(fill=harness.fill_preset(task.lens))
+    # WAN-384 명시 핀: 이 표는 존폭 필터를 켠 채(1.28) 낸 기록이다.
+    params = harness.build_params(
+        fill=harness.fill_preset(task.lens), max_zone_width_atr=harness.LEGACY_ZONE_WIDTH_FILTER_ON
+    )
 
     candidates, _stats = build_zone_limit_candidates(
         market.htf_df,

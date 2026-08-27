@@ -511,6 +511,7 @@ def build_lens_rows(
             # = wan304_universe_reentry가 별도 모듈로 낸다).
             reentry=False,
             invalidation_cancel=harness.LEGACY_INVALIDATION_CANCEL,
+            max_zone_width_atr=harness.LEGACY_ZONE_WIDTH_FILTER_ON,
         )
         gapped.update(_short(c.symbol) for c in cells if not c.funding[SEGMENT_FULL])
         if funding_proxy:

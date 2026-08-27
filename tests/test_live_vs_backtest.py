@@ -17,6 +17,7 @@ import pandas as pd
 import pytest
 
 from backtest.harness import (
+    LEGACY_ZONE_WIDTH_FILTER_ON,
     MarketData,
     build_config,
     build_params,
@@ -120,7 +121,9 @@ def test_count_taps_reservations_mirrors_engine_gates() -> None:
     htf = _htf_frame(n=30)
     times = htf["open_time"].tolist()
     market = _market_from_htf(htf)
-    params = build_params()  # 채택 기본값: max_zone_width_atr=1.28, short_enabled=False.
+    # ⚠️ WAN-384가 존폭 필터를 껐다 — 이 테스트가 재는 것은 「예약 계수가 필터를 반영하는가」
+    # 이므로 문턱을 **명시로 켠다**(기본값이 아니라 실험 조건이다).
+    params = build_params(max_zone_width_atr=LEGACY_ZONE_WIDTH_FILTER_ON)
     cfg = build_config("1h")
 
     signals = [

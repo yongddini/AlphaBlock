@@ -417,6 +417,8 @@ def run_arm(
         # **당연히** 어긋난다(WAN-336/346 관행 그대로).
         engine_check=arm.is_adopted,
         invalidation_cancel=arm.cancel,
+        # WAN-384 명시 핀: 이 표는 존폭 필터를 켠 채(1.28) 낸 기록이다.
+        max_zone_width_atr=harness.LEGACY_ZONE_WIDTH_FILTER_ON,
         **ADOPTED_CELL_KWARGS,  # type: ignore[arg-type]
     )
     identity: float | None = None

@@ -476,6 +476,7 @@ def run_arm(
         fill=harness.fill_preset(arm.lens) if arm.lens else None,
         **ADOPTED_CELL_KWARGS,  # type: ignore[arg-type]
         invalidation_cancel=harness.LEGACY_INVALIDATION_CANCEL,
+        max_zone_width_atr=harness.LEGACY_ZONE_WIDTH_FILTER_ON,
     )
     identity: float | None = None
     if arm.is_adopted:

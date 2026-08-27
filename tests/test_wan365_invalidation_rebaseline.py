@@ -47,7 +47,8 @@ def test_adopted_default_is_causal_and_lives_in_one_place() -> None:
 def test_other_adopted_defaults_did_not_move() -> None:
     """이 재-베이스라인은 **취소 시점 하나만** 움직인다(완료기준 6)."""
     params = ConfluenceParams()
-    assert params.max_zone_width_atr == 1.28
+    # 🔁 존폭 필터는 그 뒤 **WAN-384가 껐다** — 이 이슈가 움직인 게 아니다(다른 재-베이스라인).
+    assert params.max_zone_width_atr is None
     assert params.take_profit_r == 1.5
     assert params.zone_limit_offset_bps == 2.0
     assert params.limit_valid_bars == 24

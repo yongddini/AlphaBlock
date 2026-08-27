@@ -257,6 +257,7 @@ def build_lens_rows(
                 # WAN-305 명시 핀: wan293 CSV는 재진입 꺼진 북(wan288 계열)의 동결 기록이다.
                 reentry=False,
                 invalidation_cancel=harness.LEGACY_INVALIDATION_CANCEL,
+                max_zone_width_atr=harness.LEGACY_ZONE_WIDTH_FILTER_ON,
             )
             if funding_proxy:
                 cells, note = apply_funding_proxy(cells)

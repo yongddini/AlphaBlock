@@ -650,6 +650,7 @@ def run_book_report(
             partial_take_profit_fraction=PARTIAL_FRACTION,
             breakeven_after_partial=arm.breakeven,
             invalidation_cancel=harness.LEGACY_INVALIDATION_CANCEL,
+            max_zone_width_atr=harness.LEGACY_ZONE_WIDTH_FILTER_ON,
         )
         book_rows = build_book_rows(
             payloads,

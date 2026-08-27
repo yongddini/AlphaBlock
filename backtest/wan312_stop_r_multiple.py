@@ -1102,6 +1102,7 @@ def main(argv: list[str] | None = None) -> int:
             reentry_entry_rule=ADOPTED_REENTRY_ENTRY_RULE,
             engine_check=not args.skip_engine_check,
             invalidation_cancel=harness.LEGACY_INVALIDATION_CANCEL,
+            max_zone_width_atr=harness.LEGACY_ZONE_WIDTH_FILTER_ON,
         )
         if args.legacy_wan277:
             # 좌표(9종목·한도 끔)만으로는 부족하다 — WAN-292 백필 이후라 대리가 무동작이라서

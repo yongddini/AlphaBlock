@@ -77,10 +77,13 @@ def test_engine_is_adopted_default() -> None:
 # ------------------------------------------------------- 2. 필터 축은 파라미터
 
 
-def test_filter_values_read_from_adopted_default() -> None:
+def test_filter_values_read_from_the_legacy_pin() -> None:
+    """🚨 WAN-384가 채택 기본값을 껐다 — 「켜짐」 모서리는 옛 핀 상수에서 온다."""
+    from backtest.harness import LEGACY_ZONE_WIDTH_FILTER_ON
+
     assert FILTER_OFF is None
-    assert FILTER_ON == 1.28
-    assert ConfluenceParams().max_zone_width_atr == FILTER_ON
+    assert FILTER_ON == 1.28 == LEGACY_ZONE_WIDTH_FILTER_ON
+    assert ConfluenceParams().max_zone_width_atr is None  # 더 이상 기본값에서 못 읽는다
 
 
 def test_real_params_filter_off_pins_none() -> None:
@@ -93,11 +96,15 @@ def test_real_params_filter_off_pins_none() -> None:
     assert off.rsi_gate_mode == ConfluenceParams().rsi_gate_mode
 
 
-def test_real_params_filter_on_is_identity_with_arm_params() -> None:
-    """켜짐 팔은 채택 기본값에 같은 1.28을 다시 얹는 항등 — wan176 재현의 근거."""
+def test_real_params_filter_on_pins_the_legacy_threshold() -> None:
+    """켜짐 팔은 그 시절 문턱(1.28)을 **명시로** 얹는다 — wan176 재현의 근거.
+
+    ⚠️ WAN-384 전에는 이것이 `arm.params()`와 **항등**이었다(기본값이 1.28이었으므로).
+    지금은 존폭 하나만 다르고 나머지는 전부 같다.
+    """
     arm = ARMS_BY_NAME[LONG_ARM]
     on = real_params(arm, max_zone_width_atr=FILTER_ON)
-    assert on == arm.params()
+    assert on == arm.params().model_copy(update={"max_zone_width_atr": 1.28})
     assert on.max_zone_width_atr == 1.28
 
 

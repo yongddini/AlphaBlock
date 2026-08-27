@@ -1659,6 +1659,10 @@ def main(argv: list[str] | None = None) -> int:
             reentry=False,
             # WAN-365 명시 핀: 그 CSV는 **소급 취소** 시절의 기록이기도 하다.
             invalidation_cancel=harness.LEGACY_INVALIDATION_CANCEL,
+            # WAN-384 명시 핀: 그 CSV는 **존폭 필터 1.28이 켜진** 판이기도 하다(2026-07-22
+            # 산출 = WAN-159 채택 뒤). 이 인자의 기본값은 `UNSET`(= 채택 기본값 물려받기)이라
+            # 안 주면 필터 꺼진 오늘 엔진으로 조용히 다시 돌아 본문과 어긋난다.
+            max_zone_width_atr=harness.LEGACY_ZONE_WIDTH_FILTER_ON,
         )
         cell_rows = [row for p in payloads for row in p.rows]
         book_rows = build_book_rows(payloads)

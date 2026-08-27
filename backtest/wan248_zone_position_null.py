@@ -162,7 +162,8 @@ def arm_of(name: str) -> Arm:
 
 def describe_engine() -> str:
     """검정한 엔진의 지문 — 산출물만 봐도 어떤 존·밴드·필터로 돌았는지 드러나게."""
-    p = ConfluenceParams()
+    # WAN-384 명시 핀 — 이 지문은 존폭 필터를 켠 채(1.28) 낸 표의 것이다.
+    p = harness.pin_zone_width(ConfluenceParams(), harness.LEGACY_ZONE_WIDTH_FILTER_ON)
     band = p.deviation_filter.band_bar if p.deviation_filter else None
     return (
         f"entry_mode={p.entry_mode}, rsi_gate_mode={p.rsi_gate_mode}, "
@@ -641,7 +642,8 @@ def run_cell(task: _Task, *, log: bool = True) -> list[PositionNullRow]:
         return []
 
     arm = arm_of(LONG_ARM)
-    base_params = arm.params()
+    # WAN-384 명시 핀: 이 표는 존폭 필터를 켠 채(1.28) 낸 기록이다.
+    base_params = harness.pin_zone_width(arm.params(), harness.LEGACY_ZONE_WIDTH_FILTER_ON)
     cfg = arm.config(task.timeframe)
 
     rows: list[PositionNullRow] = []

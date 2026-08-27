@@ -100,14 +100,17 @@ def test_arm_a_is_exactly_the_adopted_engine() -> None:
     assert arm_a.params() == wan151.arm_of(wan350.LONG_ARM).params()
 
 
-def test_zone_width_filter_stays_on_at_the_adopted_threshold() -> None:
-    """존폭 필터를 끄는 것은 「필터 끔」 팔이다 — 여기서는 채택 1.28을 물려받아야 한다.
+def test_zone_width_filter_stays_on_at_the_pinned_threshold() -> None:
+    """이 표는 존폭 필터를 **켠 채**(1.28) 낸 기록이다 — 값으로 고정한다.
 
-    `build_params`에 `max_zone_width_atr`를 안 넘기면 센티넬 `UNSET`이라 base의 값이 남는다.
-    `None`을 넘기면 **끄기**가 되므로(WAN-159) 그 실수를 값으로 막는다.
+    🚨 **WAN-384가 채택 기본값을 껐다** — 그래서 「안 넘기면 물려받는다」로는 더 이상
+    안 되고 `harness.LEGACY_ZONE_WIDTH_FILTER_ON`을 **명시**해야 한다. 안 그러면 이 널의
+    실제 팔이 조용히 필터 없는 유니버스를 돌아 본문과 갈라진다.
     """
+    assert ConfluenceParams().max_zone_width_atr is None  # 오늘의 채택은 꺼짐
     for arm in wan350.ARMS:
-        assert arm.params().max_zone_width_atr == ConfluenceParams().max_zone_width_atr == 1.28
+        pinned = harness.pin_zone_width(arm.params(), harness.LEGACY_ZONE_WIDTH_FILTER_ON)
+        assert pinned.max_zone_width_atr == 1.28
     assert "max_zone_width_atr=1.28" in wan350.describe_engine()
 
 

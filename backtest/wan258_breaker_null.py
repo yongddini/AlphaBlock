@@ -784,7 +784,10 @@ def _retap_return(
     arm: Arm = ARMS_BY_NAME[_RETAP_ARM_BY_DIR[direction]]
     outcome = harness.run_once(
         market,
-        params=harness.pin_invalidation_cancel(arm.params()),
+        # WAN-384 명시 핀: 이 대조 팔은 존폭 필터를 켠 채(1.28) 낸 기록이다.
+        params=harness.pin_invalidation_cancel(
+            harness.pin_zone_width(arm.params(), harness.LEGACY_ZONE_WIDTH_FILTER_ON)
+        ),
         cfg=arm.config(market.timeframe),
         eval_from_ms=eval_from_ms,
     )

@@ -81,6 +81,9 @@ def _shared_kwargs() -> dict[str, Any]:
         "cold_segments": False,
         "engine_check": False,
         "take_profit_liquidity": harness.ADOPTED_TAKE_PROFIT_LIQUIDITY,
+        # WAN-384 명시 핀 — 이 표는 존폭 필터를 켠 채(1.28) 낸 기록이라 모듈이 그렇게
+        # 부른다(`candidate_payloads`). 테스트가 안 맞추면 「검산」이 다른 엔진을 잰다.
+        "max_zone_width_atr": harness.LEGACY_ZONE_WIDTH_FILTER_ON,
         **ADOPTED_CELL_KWARGS,
     }
 
@@ -528,7 +531,8 @@ def test_adopted_params_are_untouched() -> None:
     from strategy.models import ConfluenceParams as _Params
 
     params = _Params()
-    assert params.max_zone_width_atr == 1.28
+    # 🔁 존폭 필터는 그 뒤 **WAN-384가 껐다** — 이 이슈가 움직인 게 아니다(다른 재-베이스라인).
+    assert params.max_zone_width_atr is None
     assert params.take_profit_r == 1.5
     assert params.short_enabled is False
     assert params.deviation_filter is not None

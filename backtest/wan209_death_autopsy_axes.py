@@ -902,7 +902,8 @@ def run_experiment(
     db_path: str = harness.DB_PATH,
 ) -> ExperimentResult:
     """오늘 엔진 라벨링(+§A/§B/§C) → 즉사 축 순열 → 문턱 스윕 → 공선성/부분상관 → LOO."""
-    params = ConfluenceParams()
+    # WAN-384 명시 핀: 이 표는 존폭 필터를 켠 채(1.28) 낸 기록이다.
+    params = harness.pin_zone_width(ConfluenceParams(), harness.LEGACY_ZONE_WIDTH_FILTER_ON)
     ob_params = OrderBlockParams()
     start_ms, end_ms = parse_date_ms(start), parse_date_ms(end)
     labeled: list[LabeledTrade] = []
@@ -1255,7 +1256,7 @@ def checksum(
     st = LabelStats()
     cell = label_cell(
         market,
-        params=ConfluenceParams(),
+        params=harness.pin_zone_width(ConfluenceParams(), harness.LEGACY_ZONE_WIDTH_FILTER_ON),
         order_block_params=OrderBlockParams(),
         regime=regime,
         stats=st,
@@ -1263,7 +1264,9 @@ def checksum(
     _annotate_percentiles(cell, _S_B_PCTL_RAW)
     outcome = harness.run_once(
         market,
-        params=harness.pin_invalidation_cancel(ConfluenceParams()),
+        params=harness.pin_invalidation_cancel(
+            harness.pin_zone_width(ConfluenceParams(), harness.LEGACY_ZONE_WIDTH_FILTER_ON)
+        ),
         cfg=harness.legacy_build_config(timeframe),
     )
     prod = outcome.result.metrics.num_trades

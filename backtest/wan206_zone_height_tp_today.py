@@ -257,8 +257,12 @@ def run_arm(
     평가 창 기준으로 다시 센다. 그래야 `entry_r` 팔(override=None)이 `harness.run_once`와
     비트 단위로 일치한다(`run_checksum`가 고정).
     """
+    # WAN-384 명시 핀: 이 표는 존폭 필터를 켠 채(1.28) 낸 기록이다.
     params = harness.build_params(
-        entry_mode="zone_limit", take_profit_r=r_multiple, fill=params_fill
+        entry_mode="zone_limit",
+        take_profit_r=r_multiple,
+        fill=params_fill,
+        max_zone_width_atr=harness.LEGACY_ZONE_WIDTH_FILTER_ON,
     )
     cfg = harness.legacy_build_config(seg_market.timeframe)
     override: TakeProfitOverride | None = (
@@ -809,8 +813,12 @@ def run_checksum(
     if market.empty or market.df_1m.empty:
         return 0.0, 0, "데이터 없음 — 검산 건너뜀"
 
+    # WAN-384 명시 핀: 이 표는 존폭 필터를 켠 채(1.28) 낸 기록이다.
     params = harness.build_params(
-        entry_mode="zone_limit", take_profit_r=1.5, fill=harness.BASELINE_FILL
+        entry_mode="zone_limit",
+        take_profit_r=1.5,
+        fill=harness.BASELINE_FILL,
+        max_zone_width_atr=harness.LEGACY_ZONE_WIDTH_FILTER_ON,
     )
     max_diff = 0.0
     compared = 0

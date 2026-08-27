@@ -154,8 +154,15 @@ def test_lens_flows_into_rows() -> None:
 
 
 def test_pen_params_keep_filter_on() -> None:
-    """`pen_5bp` 렌즈 파라미터도 존폭 필터 1.28을 켠 채다(끄지 않는다)."""
-    pen = harness.build_params(fill=harness.fill_preset(LENS_PEN))
+    """`pen_5bp` 렌즈 파라미터도 존폭 필터 1.28을 켠 채다(끄지 않는다).
+
+    🚨 WAN-384가 채택 기본값을 껐으므로 이 모듈은 문턱을 **명시로** 켠다 — 이 표의 본문이
+    「필터 켠 오늘 엔진」이라 문턱이 곧 실험 조건이다.
+    """
+    pen = harness.build_params(
+        fill=harness.fill_preset(LENS_PEN),
+        max_zone_width_atr=harness.LEGACY_ZONE_WIDTH_FILTER_ON,
+    )
     assert pen.max_zone_width_atr == 1.28
     assert pen.fill_penetration_bps > 0.0  # 관통 요구가 실제로 켜졌다
     assert harness.build_params().fill_penetration_bps == 0.0  # baseline은 0
@@ -241,10 +248,17 @@ def test_guard_rows_split_is_oos_by_trigger_time() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_adopted_params_have_filter_on() -> None:
-    """채택 기본값의 존폭 필터가 1.28로 켜져 있다 — 라벨이 아니라 값."""
-    assert harness.build_params().max_zone_width_atr == 1.28
-    assert ConfluenceParams().max_zone_width_atr == 1.28
+def test_report_params_have_filter_on() -> None:
+    """이 리포트가 실제로 넘기는 파라미터에 필터 1.28이 켜져 있다 — 라벨이 아니라 값.
+
+    🚨 오늘의 채택 기본값은 **꺼짐**(WAN-384)이라 「기본값이 켜져 있다」로는 못 지킨다 —
+    모듈이 만드는 그 dict를 직접 본다.
+    """
+    from backtest.wan197_guard_with_filter import lens_params
+
+    assert ConfluenceParams().max_zone_width_atr is None  # 오늘의 채택은 꺼짐
+    for params in lens_params().values():
+        assert params.max_zone_width_atr == 1.28
 
 
 # --------------------------------------------------------------------------- #
@@ -418,7 +432,10 @@ def test_full_list_guard_default_reproduces_production(_btc_market: MarketData) 
 
 def test_filter_on_yields_fewer_candidates_than_off(_btc_market: MarketData) -> None:
     """필터 1.28이 실제로 후보를 걷어낸다 — 끈 것보다 켠 것이 적다(조용한 라벨 방지)."""
-    on = production_candidates(_btc_market, harness.build_params())
+    on = production_candidates(
+        _btc_market,
+        harness.build_params(max_zone_width_atr=harness.LEGACY_ZONE_WIDTH_FILTER_ON),
+    )
     off = production_candidates(_btc_market, harness.build_params(max_zone_width_atr=None))
     assert len(off) > len(on) > 0
     assert is_boundary_ms(_btc_market.htf_df) > int(_btc_market.htf_df["open_time"].iloc[0])

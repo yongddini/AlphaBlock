@@ -379,6 +379,31 @@ def pin_band_bar(params: ConfluenceParams, band_bar: BandBar = LEGACY_BAND_BAR) 
 #: 만드는데 엔진이 먼저 1.28로 걸러 버리면 「이중 필터」가 되어 판정 근거표가 조용히 망가진다.
 LEGACY_MAX_ZONE_WIDTH_ATR: float | None = None
 
+#: 🚨 **WAN-384가 기본값을 다시 `None`(꺼짐)으로 되돌렸으므로 위 상수는 지금 기본값과 같다**
+#: — 즉 `LEGACY_MAX_ZONE_WIDTH_ATR` 핀은 **무동작**이 됐다(제거하지 않는다: 그 핀을 단
+#: 모듈들은 "이 표는 필터를 안 켠 판이다"를 라벨이 아니라 **값으로** 선언하고 있고, 언젠가
+#: 기본값이 또 움직이면 그 선언이 다시 일한다).
+#:
+#: WAN-159(2026-07-21)~WAN-383 사이에 **필터를 켠 채** 결론을 낸 리포트가 쓰는 값 —
+#: 존폭 ÷ ATR ≤ **1.28**인 좁은 존만 매매하던 그 시절 엔진이다.
+#:
+#: 🚨 **이 축은 핀의 방향이 두 세대다** — WAN-159가 `None` → `1.28`로 올렸고 WAN-384가
+#: `1.28` → `None`으로 되돌렸다. 그래서 「옛 판」이 두 개이고, 리포트마다 **어느 세대의
+#: 기록인지**를 골라야 한다:
+#:
+#: * WAN-158 이전(필터가 아예 없던 엔진) 수치 → `LEGACY_MAX_ZONE_WIDTH_ATR`(= `None`).
+#: * WAN-159~WAN-383 수치(**대부분의 오늘 엔진 리포트**) → 이 상수(= `1.28`).
+#:
+#: 고정하지 않으면 그 리포트가 조용히 **필터 꺼진** 엔진으로 다시 돌아 본문과 어긋난다
+#: (WAN-132 `band_bar`·WAN-149 `combine_obs`·WAN-159 자신이 겪은 그 부류의 거울상).
+#: 고정 대상 목록은 [`docs/decisions/wan384.md`](../docs/decisions/wan384.md) §파급이다.
+#:
+#: ⚠️ 반대로 **"지금 채택된 것"을 재는 리포트는 고정하지 않는다**(wan95) — 기본값이 움직이면
+#: 그 수치는 낡은 것이 되어야 맞다.
+#: ⚠️ **이미 이 축을 자기 입력으로 명시한 모듈은 손대지 않는다**(wan155/wan161/wan201/wan203 ·
+#: 문턱을 밖에서 거는 wan376/wan378) — 기본값 전환과 무관하게 같은 행을 낸다.
+LEGACY_ZONE_WIDTH_FILTER_ON: float = 1.28
+
 
 def pin_zone_width(
     params: ConfluenceParams, threshold: float | None = LEGACY_MAX_ZONE_WIDTH_ATR
@@ -387,7 +412,12 @@ def pin_zone_width(
 
     `pin_band_bar`와 같은 자리다 — 리포트가 `ConfluenceParams(...)`를 기본값에 맡기던 곳이
     대부분이라, 고정 보일러플레이트를 각자 짜면 한 곳을 빠뜨리는 것이 정확히 WAN-159 §파급이
-    경고한 「이중 필터」·「조용히 필터 켜진 엔진」이 된다. 기본값 `None`이 **끄기**다.
+    경고한 「이중 필터」·「조용히 필터 켜진 엔진」이 된다.
+
+    🚨 **인자 기본값(`LEGACY_MAX_ZONE_WIDTH_ATR` = `None` = 끄기)은 WAN-384 이후 채택
+    기본값과 같아 사실상 무동작이다** — 필터를 **켠 채** 낸 옛 리포트를 고정하려면
+    `LEGACY_ZONE_WIDTH_FILTER_ON`(= `1.28`)을 **명시로 넘겨야 한다**. 인자를 생략하고
+    「고정했다」고 믿는 것이 이 함수의 유일한 함정이다.
     """
     return params.model_copy(update={"max_zone_width_atr": threshold})
 
@@ -426,8 +456,13 @@ class _Unset(enum.Enum):
 
     존폭 필터는 **끄기 = 명시적 `None`**이라, `None`을 "손대지 않는다(채택 기본값에 맡긴다)"로
     쓰던 `offset_bps` 규약을 그대로 못 쓴다(둘이 충돌한다). 그래서 "미지정"을 이 센티넬로
-    따로 표현한다 — `is UNSET`이면 `base`의 값을 물려받고(= 채택 기본값 = `1.28`), 명시적
-    `None`이면 **끈다**. WAN-159 완료기준 3.
+    따로 표현한다 — `is UNSET`이면 `base`의 값을 물려받고, 명시적 `None`이면 **끈다**.
+    WAN-159 완료기준 3.
+
+    ⚠️ **WAN-384가 채택 기본값을 `None`(꺼짐)으로 되돌린 뒤에도 이 구분은 살아 있다** —
+    `base`가 **핀된 파라미터**(예: `LEGACY_ZONE_WIDTH_FILTER_ON`으로 1.28을 박은 옛 리포트)면
+    `UNSET`은 그 1.28을 물려받고 명시적 `None`은 그것을 **덮어써 끈다**. 둘이 갈리는 자리는
+    「기본값이 무엇인가」가 아니라 「`base`가 무엇인가」다.
 
     ⚠️ **`enum.Enum`이라야 한다** — CLI 축(`Grid`)이 `--jobs` 병렬에서 워커로 **피클**되는데,
     평범한 `object()` 센티넬은 언피클 때 **새 인스턴스**가 되어 `!= (UNSET,)` 비교가 깨진다.
@@ -519,9 +554,13 @@ def build_params(
 
     ⚠️ **`max_zone_width_atr`은 규약이 반대다** — 끄기가 `None`이라 `offset_bps`처럼
     `None`을 "손대지 않는다"로 쓸 수 없다(둘이 충돌한다, WAN-159). "미지정"은 센티넬
-    `UNSET`으로 표현한다: `UNSET`이면 `base`의 값을 물려받고(= 채택 기본값 = `1.28`),
-    명시적 `None`이면 **끈다**(= `1.28`을 덮어써 `None`으로). 이래야 wan155/wan161·CLI의
-    `none` 팔이 「필터 끔」 라벨을 단 채 조용히 1.28로 도는 이중 필터를 피한다.
+    `UNSET`으로 표현한다: `UNSET`이면 `base`의 값을 물려받고, 명시적 `None`이면 **끈다**
+    (= `base`의 문턱을 덮어써 `None`으로). 이래야 wan155/wan161·CLI의 `none` 팔이
+    「필터 끔」 라벨을 단 채 조용히 다른 문턱으로 도는 이중 필터를 피한다.
+
+    🚨 **채택 기본값은 WAN-384 이후 `None`(꺼짐)이다** — 그래서 `base`를 안 주면 `UNSET`과
+    명시적 `None`이 **같은 결과**를 낸다. 갈리는 것은 `base`가 핀된 파라미터일 때뿐이다
+    (`LEGACY_ZONE_WIDTH_FILTER_ON`으로 1.28을 박은 옛 리포트 — 위 `_Unset` 독스트링).
 
     ⚠️ **`limit_valid_bars`도 같은 규약이다**(WAN-222) — 무기한이 `None`이라 미지정을
     센티넬 `UNSET`으로 나른다: `UNSET`이면 `base`의 값(= 채택 기본값 = `24`)을 물려받고,
@@ -549,8 +588,8 @@ def build_params(
     if offset_bps is not None:
         update["zone_limit_offset_bps"] = offset_bps
     if max_zone_width_atr is not UNSET:
-        # 명시적 `None`은 **끄기**다(채택 기본값 1.28을 덮어쓴다). `UNSET`이면
-        # `base`(= 채택 기본값)의 값을 그대로 물려받는다 — 위 독스트링 규약.
+        # 명시적 `None`은 **끄기**다(`base`의 문턱을 덮어쓴다). `UNSET`이면 `base`
+        # (= 채택 기본값 = WAN-384 이후 꺼짐)의 값을 그대로 물려받는다 — 위 독스트링 규약.
         update["max_zone_width_atr"] = max_zone_width_atr
     if limit_valid_bars is not UNSET:
         # 명시적 `None`은 **무기한**이다(채택 기본값 24를 덮어쓴다). `UNSET`이면

@@ -63,17 +63,20 @@ def test_detection_uses_separated_zones_not_legacy_merge() -> None:
 
 
 def test_real_params_carry_the_adopted_filter_and_band() -> None:
+    """🚨 WAN-384 이후 존폭 필터는 **명시 핀**이다 — 이 표는 필터를 켠 채 낸 기록이다."""
     adopted = ConfluenceParams()
     p = real_params(arm_of(LONG_ARM))
-    assert p.max_zone_width_atr == adopted.max_zone_width_atr == 1.28
+    assert adopted.max_zone_width_atr is None  # 오늘의 채택은 꺼짐
+    assert p.max_zone_width_atr == 1.28  # 이 리포트는 그 시절 문턱에 고정
     assert p.deviation_filter is not None
     assert p.deviation_filter.band_bar == "intrabar_live" != LEGACY_BAND_BAR
     assert "max_zone_width_atr=1.28" in describe_engine()
     assert "band_bar=intrabar_live" in describe_engine()
 
 
-def test_long_arm_is_exactly_the_adopted_default() -> None:
-    assert real_params(arm_of(LONG_ARM)) == ConfluenceParams()
+def test_long_arm_is_the_adopted_default_with_the_pinned_filter() -> None:
+    """롱 팔 = 오늘의 채택 기본값에서 **존폭 문턱 하나만** 그 시절 값으로 되돌린 것."""
+    assert real_params(arm_of(LONG_ARM)) == ConfluenceParams(max_zone_width_atr=1.28)
 
 
 # ------------------------------------------------------- 2. 무력화 축이 살아 있다

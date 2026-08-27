@@ -1024,10 +1024,12 @@ def run_part_b(
                 db_path=db_path,
             )
             for lens in lenses:
-                params = (
+                # WAN-384 명시 핀: 이 표는 존폭 필터를 켠 채(1.28) 낸 기록이다.
+                params = harness.pin_zone_width(
                     ConfluenceParams()
                     if lens == LENS_PRIMARY
-                    else harness.build_params(fill=harness.fill_preset(lens))
+                    else harness.build_params(fill=harness.fill_preset(lens)),
+                    harness.LEGACY_ZONE_WIDTH_FILTER_ON,
                 )
                 cell = build_gated_cell(market, params=params, order_block_params=ob_params)
                 if cell is None:
@@ -1073,14 +1075,18 @@ def checksum(
         db_path=db_path,
     )
     cell = build_gated_cell(
-        market, params=ConfluenceParams(), order_block_params=OrderBlockParams()
+        market,
+        params=harness.pin_zone_width(ConfluenceParams(), harness.LEGACY_ZONE_WIDTH_FILTER_ON),
+        order_block_params=OrderBlockParams(),
     )
     assert cell is not None
     # 게이트 off = 전 후보 시퀀싱.
     stats = _seq_stats(cell.cands, market, timeframe)
     outcome = harness.run_once(
         market,
-        params=harness.pin_invalidation_cancel(ConfluenceParams()),
+        params=harness.pin_invalidation_cancel(
+            harness.pin_zone_width(ConfluenceParams(), harness.LEGACY_ZONE_WIDTH_FILTER_ON)
+        ),
         cfg=harness.legacy_build_config(timeframe),
     )
     prod = outcome.result.metrics.num_trades

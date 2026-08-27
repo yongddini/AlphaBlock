@@ -13,7 +13,7 @@ uv run python -m backtest.run --tp-r 1.0,1.5,2.0,3.0
 ## 기본값 = 채택 기본값(전략) + 채택 북(회계, WAN-213)
 
 전략 축은 `ConfluenceParams()`(WAN-95/87: 지정가 진입 + 실시간 RSI + 롱 온리 + 볼린저 +
-고정 1.5R + 존폭 필터 1.28) 그대로다. **포지션 회계**는 WAN-213부터 **레버리지 북**
+고정 1.5R + 존폭 필터 **없음**(WAN-384)) 그대로다. **포지션 회계**는 WAN-213부터 **레버리지 북**
 (`LeverageBookParams()` = cap_only 5배 · 칸=(종목,TF)마다 1포지션 · 공유 자본)이 기본값이다
 — 인자 없는 `backtest.run`이 단일 포지션 대신 북을 돈다(`--positions`가 그 분기, `book_cli`
 가 실행). per-cell 단일 포지션은 `--positions single`이다. CLI가 자기만의 기본값을 갖지
@@ -316,18 +316,19 @@ class Grid:
     리포트는 `(harness.LEGACY_COMBINE_OBS,)`로 고정한다.
     """
     max_zone_widths_atr: tuple[ZoneWidthArg, ...] = (UNSET,)
-    """존폭 필터 축(WAN-158 옵트인 → WAN-159 채택 기본값). `UNSET` = 채택 기본값(WAN-159:
-    `1.28`, 좁은 존만), `None` = **끄기**(전부 매매), 숫자 = 존폭 ÷ ATR가 그 값 이하만 진입.
+    """존폭 필터 축(WAN-158 옵트인 → WAN-159 채택 → **WAN-384 폐지**). `UNSET` = 채택
+    기본값(WAN-384: **꺼짐**), `None` = 끄기(전부 매매), 숫자 = 존폭 ÷ ATR가 그 값 이하만 진입.
 
     **진짜 축이다**(`combine_obs`와 같은 자리, `band_bar` 같은 핀이 아니다) — 필터 on/off를
     한 표에 나란히 놓고 보라고 여는 축이다. 기본값 `(UNSET,)`이라 인자를 안 주면 채택
-    기본값(1.28)으로 예전과 **비트 단위로 같은 행**이 나온다.
+    기본값(꺼짐)으로 돈다.
 
-    ⚠️ **끄기는 `None`(= CLI `none`)이고 미지정(`UNSET`)과 다르다**(WAN-159) — 채택 기본값이
-    `1.28`이 된 뒤로 둘이 갈라진다. `offset_bps`의 `None`("손대지 않는다")과 규약이 반대라
+    ⚠️ **끄기(`None` = CLI `none`)와 미지정(`UNSET`)은 규약상 여전히 다르다**(WAN-159) —
+    지금은 채택 기본값이 꺼짐이라 **CLI에서 두 결과가 같지만**, `build_params(base=...)`에
+    핀된 파라미터를 주면 갈린다. `offset_bps`의 `None`("손대지 않는다")과 규약이 반대라
     센티넬로 미지정을 따로 표현한다(`harness.UNSET`).
 
-    ⚠️ 단위는 **ATR 배수**지 퍼센트가 아니다(권고 문턱 15m 1.24 · 1h 1.32, 채택 `1.28`).
+    ⚠️ 단위는 **ATR 배수**지 퍼센트가 아니다(옛 채택 문턱은 `1.28`, WAN-159~383).
     """
     invalidation_cancels: tuple[InvalidationCancel | None, ...] = (None,)
     """무효화 취소 시점 축(WAN-365). `None` = 채택 기본값(`"bar_close"` = 인과), `"bar_open"`
@@ -883,9 +884,9 @@ def build_parser() -> argparse.ArgumentParser:
     strategy.add_argument(
         "--max-zone-width-atr",
         help=(
-            "존폭 필터 축(WAN-159 채택 기본값 1.28). 존폭÷ATR가 이 값 이하인 셋업만 진입. "
-            "콤마 복수 = 격자이며 none = 필터 끄기(전부 매매). 안 주면 채택 기본값(1.28). "
-            "단위는 ATR 배수지 퍼센트가 아니다(권고: 15m 1.24 · 1h 1.32, 채택 1.28). "
+            "존폭 필터 축(WAN-384 채택 기본값 = 꺼짐). 존폭÷ATR가 이 값 이하인 셋업만 진입. "
+            "콤마 복수 = 격자이며 none = 필터 끄기(전부 매매). 안 주면 채택 기본값(꺼짐). "
+            "단위는 ATR 배수지 퍼센트가 아니다(옛 채택 문턱 1.28은 WAN-159~383). "
             "예: --max-zone-width-atr none,1.28"
         ),
     )
@@ -1265,7 +1266,7 @@ def _write_book_detail(
 def run_book_main(args: argparse.Namespace, book: LeverageBookParams) -> int:
     """채택 레버리지 북 실행 경로 — per-cell 파이프라인 대신 공유 자본 북을 돈다.
 
-    스코프를 좁게 유지한다: 채택 기본값(전략·비용·존폭 필터 1.28·오프셋 2bp 등)만 돌고,
+    스코프를 좁게 유지한다: 채택 기본값(전략·비용·존폭 필터 꺼짐·오프셋 2bp 등)만 돌고,
     전략/비용/거래별-출력 축이 주어지면 **조용히 무시하지 않고 거부한다**(WAN-95 교훈).
     warm/cold OOS는 배선돼 있으나 `--walkforward`·`--years`(미끄러지는 창)는 아직 아니다.
     """

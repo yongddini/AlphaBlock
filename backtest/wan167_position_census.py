@@ -320,7 +320,8 @@ def run_census(
 
 def describe_engine() -> str:
     """이 census가 돌린 엔진의 지문 — 산출물만 봐도 어떤 엔진인지 드러나게(WAN-164 패턴)."""
-    p = ConfluenceParams()
+    # WAN-384 명시 핀 — 이 지문은 존폭 필터를 켠 채(1.28) 낸 표의 것이다.
+    p = harness.pin_zone_width(ConfluenceParams(), harness.LEGACY_ZONE_WIDTH_FILTER_ON)
     band = p.deviation_filter.band_bar if p.deviation_filter else None
     return (
         f"entry_mode={p.entry_mode}, rsi_gate_mode={p.rsi_gate_mode}, "
@@ -353,7 +354,8 @@ def run_cell(task: _Task, *, log: bool = True) -> list[IntervalRow]:
     if market.empty or market.df_1m.empty:
         return []
     ob_result = harness.detect_order_blocks(market, ADOPTED_OB_PARAMS)
-    params = harness.build_params()  # 인자 없음 = 채택 기본값 그대로(옛 핀 없음)
+    # WAN-384 명시 핀: 이 표는 존폭 필터를 켠 채(1.28) 낸 기록이다.
+    params = harness.build_params(max_zone_width_atr=harness.LEGACY_ZONE_WIDTH_FILTER_ON)
     cfg = harness.legacy_build_config(task.timeframe)
     outcome = harness.run_once(
         market,

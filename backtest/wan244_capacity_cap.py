@@ -578,6 +578,7 @@ def _load_payloads(
         # WAN-305 명시 핀: wan244 CSV는 재진입 이전 북의 동결 스냅샷이다.
         reentry=False,
         invalidation_cancel=harness.LEGACY_INVALIDATION_CANCEL,
+        max_zone_width_atr=harness.LEGACY_ZONE_WIDTH_FILTER_ON,
     )
     if proxy:
         payloads, note = apply_funding_proxy(payloads)
