@@ -42,6 +42,7 @@ import math
 import random
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from itertools import islice
 
 import pandas as pd
 
@@ -63,6 +64,7 @@ from backtest.multi_tf_overlap import (
 from backtest.portfolio import PortfolioParams, PortfolioStats, sequence_portfolio
 from backtest.substep import (
     PartialExit,
+    SubStep,
     ZoneLimitStatus,
     build_substeps,
     simulate_zone_limit_trade,
@@ -87,7 +89,13 @@ from strategy.models import (
 )
 from strategy.order_blocks import OrderBlockDetector
 from strategy.realtime_band import RealtimeBand
-from strategy.realtime_macd import DEFAULT_MACD_PARAMS, MacdParams, RealtimeMacd
+from strategy.realtime_macd import (
+    DEFAULT_MACD_PARAMS,
+    MacdColor,
+    MacdParams,
+    RealtimeMacd,
+    macd_color,
+)
 from strategy.realtime_rsi import RealtimeRsi
 
 logger = logging.getLogger(__name__)
@@ -195,6 +203,11 @@ class _Candidate:
     부류). 색은 `macd_hist_prev`와 함께 `strategy.realtime_macd.macd_color`가 낸다."""
     macd_hist_prev: float | None = None
     """직전 **확정봉**의 MACD 히스토그램(`hist[1]`) (WAN-372). 위와 한 쌍이다."""
+    confirmation: ConfirmationProbe | None = None
+    """확인 진입 트리거 관측 (WAN-383 §0, `observe_confirmation` 옵트인 · 순수 관측).
+
+    체결된 셋업에만 값이 있고, 안 켜면 항상 `None`이라 예전 CSV가 비트 재현된다. 켜도
+    후보·체결·손익이 하나도 안 움직인다(`zone_width_atr` WAN-376과 같은 부류)."""
     trigger_time: int = 0
     """이 셋업의 탭이 발생한 상위TF 봉 시각(`OrderBlockSignal.trigger_time` 그대로).
 
@@ -910,6 +923,7 @@ def build_zone_limit_candidates(
     observe_path_fill: bool = False,
     observe_zone_width_atr: bool = False,
     observe_macd: bool = False,
+    observe_confirmation: bool = False,
     macd_params: MacdParams = DEFAULT_MACD_PARAMS,
     no_same_step_tp: bool = False,
     no_same_step_tp_minutes: frozenset[int] | None = None,
@@ -990,6 +1004,12 @@ def build_zone_limit_candidates(
     같은 부류의 **순수 관측이라 켜도 후보·체결·손익이 하나도 안 움직이고**, 끄면(기본) 필드가
     전부 `None`이라 예전과 비트 단위로 같다. `macd_params`는 사용자의 트레이딩뷰 설정
     (12/26/9)이 기본값이며 **스윕 대상이 아니다**(WAN-161: 앞구간 승자를 찾는 기계가 된다).
+
+    `observe_confirmation`(WAN-383 §0, 옵트인)을 켜면 **체결된 셋업마다** 탭부터 존 무효화까지
+    한 번 더 훑어 확인 진입 세 팔의 트리거 시각을 후보에 실어 준다(`ConfirmationProbe`). 별도
+    훑기가 필요한 이유는 시뮬레이터가 **청산에서 멈추는데** WAN-383 §1이 묻는 것은 「트리거가
+    왔을 때 기준 팔은 이미 나갔는가」라 청산 이후까지 봐야 하기 때문이다. **순수 관측이라 켜도
+    후보·체결·손익이 하나도 안 움직이고**, 끄면(기본) 필드가 `None`이라 예전과 비트 단위로 같다.
 
     `no_same_step_tp`(WAN-336, 옵트인)는 **진입한 그 1분 스텝에서 익절을 판정하지 않는**
     보수적 반사실이다 — 시뮬레이터로 그대로 흘려보낸다. ⚠️ 위 훅들과 달리 **체결 집합도
@@ -1079,7 +1099,11 @@ def build_zone_limit_candidates(
     effective_gate_mode = params.rsi_gate_mode if rsi_gate_mode is None else rsi_gate_mode
     rsi_seeder = _IncrementalRsiSeeder(closes, params.rsi_length)
     # WAN-372 관측 전용 — 안 켜면 만들지도 않아 비용이 0이다.
-    macd_seeder = _IncrementalMacdSeeder(closes, macd_params) if observe_macd else None
+    macd_seeder = (
+        _IncrementalMacdSeeder(closes, macd_params)
+        if (observe_macd or observe_confirmation)
+        else None
+    )
     # 체결률 하향 민감도(WAN-96). rate=0이면 난수를 아예 뽑지 않아 기본 실행은 WAN-95와
     # 비트 단위로 동일하다.
     dropout_rng = random.Random(params.fill_dropout_seed) if params.fill_dropout_rate > 0 else None
@@ -1240,7 +1264,7 @@ def build_zone_limit_candidates(
 
         cut = bisect.bisect_left(times, substeps[start].htf_bar_time)
         rsi_state = rsi_seeder.seed(cut)
-        macd_state = macd_seeder.seed(cut) if macd_seeder is not None else None
+        macd_state = macd_seeder.seed(cut) if (macd_seeder is not None and observe_macd) else None
         live_limit: _IntrabarLiveLimit | None = None
         if live_band_mode:
             assert deviation is not None
@@ -1269,6 +1293,11 @@ def build_zone_limit_candidates(
         # (`ConfluenceStrategy._evaluate_entry`)과 같은 조건이며, 병합 존이면
         # `signal.tap_index`가 이미 병합 존 기준으로 매겨져 있다(WAN-81 §5).
         first_tap_free = effective_gate_mode == "first_tap_free" and signal.tap_index == 0
+        invalidation_at = (
+            invalidation_cutoff(ob.break_time, htf_ms=htf_ms, mode=cancel_mode)
+            if params.use_order_block_stop
+            else None
+        )
         outcome = simulate_zone_limit_trade(
             direction=ob.direction,
             limit_price=limit_price,
@@ -1281,11 +1310,7 @@ def build_zone_limit_candidates(
             rsi_overbought=effective_overbought,
             take_profit_price=tp_price,
             limit_valid_bars=params.limit_valid_bars,
-            invalidation_time=(
-                invalidation_cutoff(ob.break_time, htf_ms=htf_ms, mode=cancel_mode)
-                if params.use_order_block_stop
-                else None
-            ),
+            invalidation_time=invalidation_at,
             cancel_on_condition_fail=params.cancel_limit_on_condition_fail,
             stop_before_tp=params.stop_before_take_profit,
             rsi_gate_mode=effective_gate_mode,
@@ -1302,6 +1327,24 @@ def build_zone_limit_candidates(
             no_same_step_tp_minutes=no_same_step_tp_minutes,
             macd_state=macd_state,
         )
+
+        confirmation: ConfirmationProbe | None = None
+        if (
+            observe_confirmation
+            and macd_seeder is not None
+            and outcome.entry_time is not None
+            and outcome.entry_price is not None
+        ):
+            # WAN-383 §0: 시뮬레이터가 청산에서 멈추므로 트리거 시각은 **별도로** 훑어야
+            # 안다. 시뮬레이터가 굴린 상태가 아니라 같은 `cut`의 **새 사본**을 준다.
+            confirmation = scan_confirmation(
+                substeps,
+                start,
+                macd_state=macd_seeder.seed(cut),
+                entry_time=outcome.entry_time,
+                entry_price=outcome.entry_price,
+                invalidation_time=invalidation_at,
+            )
 
         if not outcome.order_rested:
             # WAN-119: live 밴드가 이 셋업에 **끝까지 주문을 걸지 못했다**(워밍업이거나
@@ -1406,6 +1449,8 @@ def build_zone_limit_candidates(
                 # WAN-372 순수 관측 — 안 켜면 `None`이라 예전과 비트 단위로 같다.
                 macd_hist=outcome.macd_hist,
                 macd_hist_prev=outcome.macd_hist_prev,
+                # WAN-383 순수 관측 — 안 켜면 `None`이라 예전과 비트 단위로 같다.
+                confirmation=confirmation,
                 trigger_time=signal.trigger_time,
                 mfe_r=outcome.mfe_r,
                 mae_r=outcome.mae_r,
@@ -1426,6 +1471,180 @@ def build_zone_limit_candidates(
         dropped=dropped,
     )
     return candidates, stats
+
+
+# --------------------------------------------------------------------------- #
+# WAN-383 §0 — 확인 진입 트리거 관측 (옵트인 · 순수 관측)
+# --------------------------------------------------------------------------- #
+
+#: 팔 `C`(고정 오프셋)의 사다리를 어디까지 기록할지 — 진입가 대비 상대 상한.
+#: 이보다 더 올라간 뒤의 고점은 어떤 그럴듯한 오프셋도 이미 지난 뒤라 기록해도 안 쓰인다.
+CONFIRMATION_MAX_OFFSET = 0.05
+#: 사다리 기록의 상대 해상도(1bp) — 이보다 촘촘한 신고점은 같은 칸으로 본다.
+#: 사다리 길이를 `ln(1.05)/1e-4 ≈ 488`로 묶으면서 오프셋 조회 오차를 1bp 안으로 가둔다.
+CONFIRMATION_LADDER_STEP = 1e-4
+
+
+@dataclass(frozen=True)
+class ConfirmationProbe:
+    """한 체결 셋업의 「확인 진입 트리거가 언제 왔나」 관측 (WAN-383 §0).
+
+    **순수 관측이다** — 체결·청산·손익 어디에도 쓰이지 않고, 켜도 후보 집합과 숫자가 하나도
+    안 움직인다(`mfe_r` WAN-90 · `exit_extreme` WAN-276 · `path_fill_price` WAN-328 ·
+    `zone_width_atr` WAN-376과 같은 부류). 안 켜면 항상 `None`이라 예전 CSV가 비트 재현된다.
+
+    🚨 **이 관측이 필요한 이유는 시뮬레이터가 청산에서 멈추기 때문이다.** WAN-383 §1이 묻는
+    것은 *「트리거가 왔을 때 기준 팔은 이미 나갔는가」*라, **청산 이후**까지 봐야 답이 나온다.
+    그래서 시뮬레이션과 **별도로** 탭부터 존 무효화까지 한 번 더 훑는다(대기 길이는
+    파라미터가 아니라 「존 무효화까지」 하나다 — 사용자 확인).
+
+    세 팔의 트리거를 한 번에 잰다:
+
+    | 팔 | 트리거 | 이 레코드 |
+    | -- | -- | -- |
+    | `1` | 상위TF 봉이 **연한 빨강으로 마감** | `bar_close_time` · `bar_close_price` |
+    | `2` | 진한 빨강을 벗어나는 가격 `P*` 터치 | `cross_time` · `cross_price` |
+    | `C` | 진입가 대비 **고정 오프셋** 터치 | `rise_ladder`(오프셋을 나중에 고르려고) |
+
+    📌 팔 `C`의 오프셋은 **팔 `2`의 평균 거리에 맞춰야** 하는데 그 평균은 전수를 다 재야
+    나온다. 그래서 오프셋 하나를 미리 박지 않고 **신고점 사다리**를 싣는다 — 어떤 오프셋이든
+    `first_touch(사다리, 수준)`로 정확히(1bp 해상도) 답이 나오므로 격자를 두 번 돌 필요가 없다.
+    """
+
+    entry_time: int
+    """기준 팔의 체결 시각 — 트리거 시각을 비교할 원점이자 사다리의 기준 시점."""
+    entry_price: float
+    """기준 팔의 체결가 — 사다리 수준(`진입가 × (1 + 오프셋)`)의 분모."""
+    bar_close_time: int | None = None
+    """팔 `1` 트리거 시각 = **연한 빨강으로 마감한 첫 상위TF 봉**의 다음 봉 첫 1분 스텝 시각.
+
+    ⚠️ 「탭 봉의 다음 봉부터」가 아니라 **탭 봉의 마감부터** 센다 — 탭 봉이 연한 빨강으로
+    닫히면 그것이 가장 이른 확인이고, 그 봉을 건너뛰면 규칙이 근거 없이 한 봉 늦어진다.
+    """
+    bar_close_price: float | None = None
+    """그 봉의 확정 종가 = 팔 `1`의 진입가(시장가 진입)."""
+    cross_time: int | None = None
+    """팔 `2` 트리거 시각 — `P*`를 처음 터치한 1분 스텝."""
+    cross_price: float | None = None
+    """그 순간의 `P*`(원값). 이미 그 위였으면 현재가보다 **아래**일 수 있다."""
+    cross_ref_price: float | None = None
+    """트리거 직전의 현재가(직전 스텝 종가, 없으면 체결가).
+
+    🚨 `cross_price <= cross_ref_price`이면 **가격이 오르지 않았는데 발동한 것**이다 —
+    시그널선 따라잡기(EMA 산수)이지 반등 확인이 아니다. WAN-383 §1의 열 하나이고, 그
+    부류의 실제 진입가는 `P*`가 아니라 `max(P*, 현재가)`다."""
+    rise_ladder: tuple[tuple[int, float], ...] = ()
+    """체결 이후 **신고점**의 (시각, 가격) 사다리 — 팔 `C`의 첫 터치를 어떤 오프셋으로든
+    되짚을 수 있게 한다. 진입가 × (1 + `CONFIRMATION_MAX_OFFSET`)에서 끊고 1bp로 성글게 한다."""
+    scan_end_time: int = 0
+    """실제로 훑은 마지막 1분 스텝 시각."""
+    window_closed: bool = False
+    """존 무효화까지 다 봤는가. 거짓이면 **데이터가 끝나서** 멈춘 것이라, 트리거가 안 온
+    것을 「끝까지 안 왔다」로 읽으면 안 된다(창 오른쪽 절단)."""
+
+    def first_touch(self, offset: float) -> tuple[int, float] | None:
+        """진입가 대비 `offset`(상대) 위를 처음 터치한 (시각, 수준). 못 닿았으면 `None`.
+
+        `offset`이 `CONFIRMATION_MAX_OFFSET`을 넘으면 사다리가 그 위를 기록하지 않았으므로
+        **답을 지어내지 않고 `None`**을 낸다(못 닿은 것과 구분되지 않으니 호출부가 가드한다).
+        """
+        level = self.entry_price * (1.0 + offset)
+        for time_ms, high in self.rise_ladder:
+            if high >= level:
+                return time_ms, level
+        return None
+
+
+def scan_confirmation(
+    substeps: Sequence[SubStep],
+    start: int,
+    *,
+    macd_state: RealtimeMacd,
+    entry_time: int,
+    entry_price: float,
+    invalidation_time: int | None,
+    max_offset: float = CONFIRMATION_MAX_OFFSET,
+) -> ConfirmationProbe:
+    """탭부터 존 무효화까지 훑어 세 팔의 트리거 시각을 잰다 (WAN-383 §0 · 순수 관측).
+
+    `macd_state`는 **탭 봉 직전까지로 시딩된 사본**이어야 한다(`simulate_zone_limit_trade`에
+    넘기는 것과 같은 것 — 시뮬레이터가 자기 사본을 굴리므로 여기엔 별도 사본을 준다). 상위TF
+    봉 커밋은 시뮬레이터와 **글자 그대로 같은 자리**에서 한다(`step.htf_bar_time`이 바뀌는
+    순간, 직전 봉의 마지막 종가로) — 두 경로가 어긋나면 색이 체결 순간의 색과 갈라진다.
+
+    ⚠️ 트리거 판정은 **체결 스텝(포함)부터** 한다. 그 1분 안의 순서(체결이 먼저인지 반등이
+    먼저인지)는 1분봉이 모르지만, 기준 팔의 익절 판정이 이미 같은 낙관 위에 서 있으므로
+    (WAN-336) 같은 자를 쓴다 — 대신 호출부가 「같은 1분」 건수를 따로 세어 보인다.
+    """
+    macd = macd_state.copy()
+    current_htf = substeps[start].htf_bar_time
+    running_close: float | None = None
+    bar_close_time: int | None = None
+    bar_close_price: float | None = None
+    cross_time: int | None = None
+    cross_price: float | None = None
+    cross_ref_price: float | None = None
+    ladder: list[tuple[int, float]] = []
+    ladder_cap = entry_price * (1.0 + max_offset)
+    last_high = 0.0
+    prev_close: float | None = None
+    scan_end = substeps[start].time
+    window_closed = False
+
+    for step in islice(substeps, start, None):
+        if invalidation_time is not None and step.time >= invalidation_time:
+            window_closed = True
+            break
+        if step.htf_bar_time != current_htf:
+            if running_close is not None:
+                hist_before = macd.closed_hist
+                macd.commit(running_close)
+                if (
+                    bar_close_time is None
+                    and step.time >= entry_time
+                    and hist_before is not None
+                    and macd.closed_hist is not None
+                    and macd.ready
+                    and macd_color(macd.closed_hist, hist_before) is MacdColor.WEAK_RED
+                ):
+                    # 팔 `1`: 그 봉이 **연한 빨강으로 닫혔다**. 진입가는 그 확정 종가이고,
+                    # 시각은 그 사실을 알 수 있는 첫 순간 = 다음 봉의 첫 1분 스텝이다.
+                    bar_close_time = step.time
+                    bar_close_price = running_close
+            current_htf = step.htf_bar_time
+        scan_end = step.time
+        if step.time >= entry_time:
+            if cross_time is None:
+                p_star = macd.strong_red_exit_price()
+                if p_star is not None and step.high >= p_star:
+                    cross_time = step.time
+                    cross_price = p_star
+                    cross_ref_price = prev_close if prev_close is not None else entry_price
+            if step.high > last_high:
+                last_high = step.high
+                if not ladder or step.high >= ladder[-1][1] * (1.0 + CONFIRMATION_LADDER_STEP):
+                    ladder.append((step.time, step.high))
+        prev_close = running_close = step.close
+        if (
+            cross_time is not None
+            and bar_close_time is not None
+            and ladder
+            and ladder[-1][1] >= ladder_cap
+        ):
+            break  # 세 팔이 전부 결판났다 — 더 훑어도 기록할 것이 없다.
+
+    return ConfirmationProbe(
+        entry_time=entry_time,
+        entry_price=entry_price,
+        bar_close_time=bar_close_time,
+        bar_close_price=bar_close_price,
+        cross_time=cross_time,
+        cross_price=cross_price,
+        cross_ref_price=cross_ref_price,
+        rise_ladder=tuple(ladder),
+        scan_end_time=scan_end,
+        window_closed=window_closed,
+    )
 
 
 def _seed_rsi(
