@@ -20,6 +20,8 @@
 
 > 🔁 **WAN-159(존폭 필터를 채택 기본값으로)로 `zone_limit` 행이 다시 전면 재산출됐다.** 채택 기본 `max_zone_width_atr`가 `None`(꺼짐, 전부 매매) → **`1.28`**(존폭 ÷ ATR ≤ 1.28인 좁은 존만 매매)이 되면서 진입 **후보 집합 자체가 3분의 1로 줄었다** — 진입 방식·가격이 아니라 **어떤 셋업을 버리는가**가 바뀌었으므로 거래 수·승률·MDD가 모두 이동한다. ⚠️ **「켜면 돈을 더 번다」로 인용 금지** — 문턱 1.28은 데이터가 아니라 사용자 판단(측정 권고 15m 1.24 · 1h 1.32의 중간)이고, 승률 상승의 과반은 기하(1R이 좁아져 고정 1.5R 익절이 가까워짐)이며, TRX 15m은 손절폭 가드에 잘려 사실상 매매가 멈춘다 · ⚠️ **「엣지 없음」(WAN-84/88/111/114/124/151)은 그대로**다. 근거·경고는 [`docs/decisions/wan159.md`](../../docs/decisions/wan159.md).
 
+> 🔁 **WAN-384(존폭 필터 폐지)로 `zone_limit` 행이 다시 전면 재산출됐다 — 바로 위 WAN-159를 번복한다.** 채택 기본 `max_zone_width_atr`가 `1.28`(좁은 존만) → **`None`(꺼짐, 전부 매매)** 이 되면서 진입 **후보 집합이 통째로 넓어졌다**(이 표 기준 거래 수가 크게 는다). 근거는 WAN-378 §1b 격자다 — `oos_warm` · 가드 0.30% · 재진입 ON · **거래당 net R**에서 문턱을 조일수록 나빠지고(`끔` −0.1207 > `1.28` −0.1309 > `0.80` −0.1651) 그 방향이 **진입가 3팔 · 구간 4개 전부** 같다. ⚠️ **「끄면 이긴다」로 인용 금지** — `끔`도 **−0.1207R로 여전히 마이너스**이고(WAN-378의 108팔 전부 음수) `끔`과 `2.60`의 차이는 규약 폭(±0.005R) 안이라 구분되지 않는다. 고른 근거는 성적이 아니라 **자유 파라미터를 하나 없애는 것**이다 · ⚠️ **손절폭 가드(0.3%)와 혼동 금지** — 그쪽은 필터를 꺼도 **+0.1614R**로 존폭 축(−0.0101R)보다 16배 큰 일을 하고 이 결정이 건드리지 않았다(WAN-381 소관) · ⚠️ **「엣지 없음」(WAN-84/88/111/114/124/151/201/248)은 그대로**다. 근거·경고는 [`docs/decisions/wan384.md`](../../docs/decisions/wan384.md).
+
 ## 무엇이 바뀌었나
 
 채택 기본값(`ConfluenceParams()`)의 진입 방식을 **종가 시장가 → 존 근단 지정가(`zone_limit`)** 로 바꾸고, 지정가 진입에 **메이커 수수료(2bp)** 를 배선했다. 사용자의 실매매가 지정가이므로, 이전 손익표(`wan87_long_only_summary.md`, WAN-91 펀딩 리포트 등)는 **사용자가 하지 않는 매매**의 성과였다. 채택 지정가 진입의 왕복 비용은 **0.11%**(메이커 2bp + 슬리피지 0 진입 · 테이커 4bp + 슬리피지 5bp 청산)로, 옛 종가 진입의 0.18%보다 낮다 — 대신 **미체결 위험**이 생긴다(아래 체결률).
@@ -34,63 +36,63 @@
 
 | 심볼 | TF | 진입 | 거래수 | 승률 | total_return | MDD | PF | 체결률 |
 | -- | -- | -- | --: | --: | --: | --: | --: | --: |
-| ADA/USDT:USDT | 15m | zone_limit | 1066 | 57.13% | 411.54% | 8.51% | 1.38 | 71.06% |
-| ADA/USDT:USDT | 1h | zone_limit | 289 | 55.36% | 81.89% | 6.03% | 1.48 | 70.08% |
-| ADA/USDT:USDT | 2h | zone_limit | 113 | 49.56% | 15.66% | 6.49% | 1.25 | 70.78% |
-| ADA/USDT:USDT | 4h | zone_limit | 61 | 54.10% | 19.81% | 5.11% | 1.63 | 63.28% |
-| BCH/USDT:USDT | 15m | zone_limit | 876 | 55.25% | 201.77% | 11.79% | 1.33 | 72.15% |
-| BCH/USDT:USDT | 1h | zone_limit | 246 | 62.20% | 159.04% | 5.46% | 2.00 | 70.73% |
-| BCH/USDT:USDT | 2h | zone_limit | 126 | 66.67% | 97.28% | 5.86% | 2.41 | 70.33% |
-| BCH/USDT:USDT | 4h | zone_limit | 60 | 60.00% | 25.39% | 3.11% | 1.86 | 67.89% |
-| BNB/USDT:USDT | 15m | zone_limit | 769 | 55.92% | 176.40% | 5.99% | 1.37 | 72.19% |
-| BNB/USDT:USDT | 1h | zone_limit | 220 | 60.91% | 106.80% | 7.83% | 1.89 | 70.31% |
-| BNB/USDT:USDT | 2h | zone_limit | 110 | 60.00% | 43.72% | 5.00% | 1.86 | 63.50% |
-| BNB/USDT:USDT | 4h | zone_limit | 61 | 62.30% | 36.20% | 3.66% | 2.33 | 66.36% |
-| BTC/USDT:USDT | 15m | zone_limit | 658 | 57.45% | 142.65% | 7.79% | 1.42 | 75.65% |
-| BTC/USDT:USDT | 1h | zone_limit | 254 | 61.02% | 98.94% | 5.09% | 1.74 | 70.93% |
-| BTC/USDT:USDT | 2h | zone_limit | 120 | 60.83% | 48.69% | 4.58% | 1.83 | 72.20% |
-| BTC/USDT:USDT | 4h | zone_limit | 52 | 63.46% | 25.80% | 5.26% | 2.12 | 69.77% |
-| DOGE/USDT:USDT | 15m | zone_limit | 983 | 59.51% | 666.94% | 6.40% | 1.56 | 71.51% |
-| DOGE/USDT:USDT | 1h | zone_limit | 232 | 60.78% | 138.55% | 5.87% | 1.76 | 69.03% |
-| DOGE/USDT:USDT | 2h | zone_limit | 116 | 59.48% | 48.34% | 7.06% | 1.78 | 69.31% |
-| DOGE/USDT:USDT | 4h | zone_limit | 63 | 58.73% | 25.65% | 4.28% | 1.81 | 75.23% |
-| DOT/USDT:USDT | 15m | zone_limit | 1105 | 57.29% | 523.31% | 10.05% | 1.47 | 72.49% |
-| DOT/USDT:USDT | 1h | zone_limit | 243 | 58.44% | 109.96% | 5.48% | 1.67 | 72.58% |
-| DOT/USDT:USDT | 2h | zone_limit | 115 | 60.00% | 56.34% | 5.23% | 1.89 | 66.99% |
-| DOT/USDT:USDT | 4h | zone_limit | 67 | 52.24% | 16.64% | 5.06% | 1.44 | 69.17% |
-| ETH/USDT:USDT | 15m | zone_limit | 806 | 57.44% | 243.19% | 6.72% | 1.44 | 71.21% |
-| ETH/USDT:USDT | 1h | zone_limit | 250 | 62.80% | 129.19% | 9.92% | 2.13 | 68.25% |
-| ETH/USDT:USDT | 2h | zone_limit | 130 | 56.92% | 46.33% | 4.79% | 1.65 | 66.11% |
-| ETH/USDT:USDT | 4h | zone_limit | 68 | 61.76% | 36.80% | 4.71% | 2.12 | 70.00% |
-| LINK/USDT:USDT | 15m | zone_limit | 1037 | 56.89% | 443.42% | 8.03% | 1.46 | 70.83% |
-| LINK/USDT:USDT | 1h | zone_limit | 266 | 54.89% | 88.82% | 6.07% | 1.50 | 65.41% |
-| LINK/USDT:USDT | 2h | zone_limit | 119 | 52.94% | 29.33% | 7.76% | 1.42 | 65.61% |
-| LINK/USDT:USDT | 4h | zone_limit | 59 | 61.02% | 31.39% | 4.10% | 2.20 | 58.93% |
-| LTC/USDT:USDT | 15m | zone_limit | 960 | 55.83% | 239.80% | 6.60% | 1.33 | 74.43% |
-| LTC/USDT:USDT | 1h | zone_limit | 242 | 54.55% | 54.82% | 8.57% | 1.42 | 66.30% |
-| LTC/USDT:USDT | 2h | zone_limit | 120 | 60.00% | 51.78% | 3.23% | 1.82 | 63.29% |
-| LTC/USDT:USDT | 4h | zone_limit | 53 | 58.49% | 23.40% | 4.11% | 1.90 | 70.53% |
-| SOL/USDT:USDT | 15m | zone_limit | 1172 | 57.08% | 603.45% | 14.52% | 1.54 | 72.96% |
-| SOL/USDT:USDT | 1h | zone_limit | 280 | 54.64% | 99.18% | 7.81% | 1.54 | 71.69% |
-| SOL/USDT:USDT | 2h | zone_limit | 136 | 61.76% | 85.28% | 4.50% | 2.11 | 69.66% |
-| SOL/USDT:USDT | 4h | zone_limit | 76 | 57.89% | 33.65% | 4.13% | 1.86 | 69.84% |
-| TRX/USDT:USDT | 15m | zone_limit | 529 | 52.55% | 50.93% | 12.36% | 1.22 | 74.45% |
-| TRX/USDT:USDT | 1h | zone_limit | 227 | 63.00% | 102.97% | 4.00% | 1.91 | 71.27% |
-| TRX/USDT:USDT | 2h | zone_limit | 123 | 57.72% | 41.49% | 5.26% | 1.72 | 68.44% |
-| TRX/USDT:USDT | 4h | zone_limit | 69 | 66.67% | 44.73% | 3.17% | 2.64 | 65.65% |
-| XRP/USDT:USDT | 15m | zone_limit | 933 | 60.24% | 626.90% | 8.13% | 1.60 | 71.17% |
-| XRP/USDT:USDT | 1h | zone_limit | 246 | 62.20% | 151.02% | 9.91% | 1.92 | 65.50% |
-| XRP/USDT:USDT | 2h | zone_limit | 101 | 59.41% | 44.91% | 5.86% | 1.84 | 68.75% |
-| XRP/USDT:USDT | 4h | zone_limit | 58 | 58.62% | 23.55% | 4.20% | 1.77 | 67.65% |
+| ADA/USDT:USDT | 15m | zone_limit | 2847 | 40.92% | -85.52% | 87.13% | 0.88 | 84.77% |
+| ADA/USDT:USDT | 1h | zone_limit | 769 | 40.70% | -35.08% | 41.78% | 0.90 | 83.80% |
+| ADA/USDT:USDT | 2h | zone_limit | 380 | 35.53% | -44.69% | 46.30% | 0.76 | 85.96% |
+| ADA/USDT:USDT | 4h | zone_limit | 182 | 37.91% | -15.33% | 22.34% | 0.86 | 84.31% |
+| BCH/USDT:USDT | 15m | zone_limit | 2813 | 39.96% | -87.86% | 90.33% | 0.86 | 86.85% |
+| BCH/USDT:USDT | 1h | zone_limit | 822 | 40.88% | -17.29% | 24.02% | 0.96 | 86.09% |
+| BCH/USDT:USDT | 2h | zone_limit | 393 | 41.73% | -4.48% | 18.60% | 0.98 | 86.79% |
+| BCH/USDT:USDT | 4h | zone_limit | 195 | 42.05% | -0.65% | 16.68% | 0.99 | 83.59% |
+| BNB/USDT:USDT | 15m | zone_limit | 2491 | 39.98% | -84.76% | 85.47% | 0.87 | 87.17% |
+| BNB/USDT:USDT | 1h | zone_limit | 710 | 39.15% | -44.20% | 55.61% | 0.88 | 86.08% |
+| BNB/USDT:USDT | 2h | zone_limit | 376 | 37.50% | -34.51% | 39.15% | 0.81 | 83.38% |
+| BNB/USDT:USDT | 4h | zone_limit | 193 | 43.01% | 3.58% | 10.36% | 1.03 | 83.70% |
+| BTC/USDT:USDT | 15m | zone_limit | 2272 | 42.65% | -52.73% | 56.84% | 0.93 | 86.91% |
+| BTC/USDT:USDT | 1h | zone_limit | 762 | 43.31% | -13.53% | 31.90% | 0.97 | 85.17% |
+| BTC/USDT:USDT | 2h | zone_limit | 402 | 44.53% | 10.42% | 21.73% | 1.04 | 83.48% |
+| BTC/USDT:USDT | 4h | zone_limit | 185 | 48.65% | 25.80% | 10.97% | 1.21 | 84.98% |
+| DOGE/USDT:USDT | 15m | zone_limit | 2877 | 41.81% | -69.45% | 86.51% | 0.96 | 86.18% |
+| DOGE/USDT:USDT | 1h | zone_limit | 745 | 40.00% | -39.03% | 54.96% | 0.91 | 84.14% |
+| DOGE/USDT:USDT | 2h | zone_limit | 378 | 42.33% | 0.68% | 27.42% | 1.00 | 86.12% |
+| DOGE/USDT:USDT | 4h | zone_limit | 201 | 46.27% | 25.02% | 15.75% | 1.20 | 86.46% |
+| DOT/USDT:USDT | 15m | zone_limit | 3015 | 42.39% | -66.35% | 81.81% | 0.94 | 86.17% |
+| DOT/USDT:USDT | 1h | zone_limit | 780 | 39.10% | -47.50% | 50.78% | 0.85 | 86.08% |
+| DOT/USDT:USDT | 2h | zone_limit | 402 | 38.56% | -29.31% | 34.73% | 0.87 | 84.49% |
+| DOT/USDT:USDT | 4h | zone_limit | 200 | 37.00% | -21.16% | 29.68% | 0.82 | 86.51% |
+| ETH/USDT:USDT | 15m | zone_limit | 2733 | 40.98% | -78.81% | 81.77% | 0.90 | 86.49% |
+| ETH/USDT:USDT | 1h | zone_limit | 810 | 40.74% | -43.99% | 59.25% | 0.85 | 86.41% |
+| ETH/USDT:USDT | 2h | zone_limit | 404 | 40.10% | -24.15% | 40.17% | 0.89 | 85.38% |
+| ETH/USDT:USDT | 4h | zone_limit | 202 | 42.08% | 3.45% | 16.84% | 1.03 | 85.24% |
+| LINK/USDT:USDT | 15m | zone_limit | 2977 | 42.46% | -68.52% | 79.50% | 0.93 | 86.25% |
+| LINK/USDT:USDT | 1h | zone_limit | 768 | 38.28% | -52.48% | 54.87% | 0.85 | 84.31% |
+| LINK/USDT:USDT | 2h | zone_limit | 385 | 39.48% | -24.21% | 29.00% | 0.89 | 85.75% |
+| LINK/USDT:USDT | 4h | zone_limit | 200 | 33.00% | -34.78% | 35.05% | 0.68 | 83.12% |
+| LTC/USDT:USDT | 15m | zone_limit | 2911 | 39.75% | -90.91% | 91.21% | 0.84 | 86.30% |
+| LTC/USDT:USDT | 1h | zone_limit | 814 | 40.42% | -46.79% | 54.01% | 0.88 | 85.80% |
+| LTC/USDT:USDT | 2h | zone_limit | 418 | 39.47% | -31.07% | 36.77% | 0.87 | 85.73% |
+| LTC/USDT:USDT | 4h | zone_limit | 201 | 36.32% | -25.49% | 27.29% | 0.78 | 86.56% |
+| SOL/USDT:USDT | 15m | zone_limit | 2931 | 42.68% | -61.38% | 66.19% | 0.92 | 85.30% |
+| SOL/USDT:USDT | 1h | zone_limit | 723 | 40.25% | -30.26% | 36.08% | 0.92 | 84.70% |
+| SOL/USDT:USDT | 2h | zone_limit | 360 | 39.72% | -17.96% | 23.79% | 0.92 | 85.09% |
+| SOL/USDT:USDT | 4h | zone_limit | 170 | 41.18% | -2.50% | 15.35% | 0.97 | 83.14% |
+| TRX/USDT:USDT | 15m | zone_limit | 1863 | 37.20% | -89.42% | 89.75% | 0.77 | 86.18% |
+| TRX/USDT:USDT | 1h | zone_limit | 656 | 40.40% | -32.83% | 37.63% | 0.89 | 84.56% |
+| TRX/USDT:USDT | 2h | zone_limit | 353 | 40.23% | -21.75% | 26.64% | 0.88 | 81.89% |
+| TRX/USDT:USDT | 4h | zone_limit | 188 | 44.15% | 10.26% | 9.86% | 1.09 | 81.64% |
+| XRP/USDT:USDT | 15m | zone_limit | 2868 | 40.59% | -85.99% | 89.68% | 0.89 | 86.21% |
+| XRP/USDT:USDT | 1h | zone_limit | 774 | 41.86% | -18.01% | 27.36% | 0.96 | 85.70% |
+| XRP/USDT:USDT | 2h | zone_limit | 380 | 40.26% | -12.88% | 17.56% | 0.94 | 87.63% |
+| XRP/USDT:USDT | 4h | zone_limit | 200 | 40.50% | -7.09% | 16.24% | 0.94 | 88.60% |
 
 ## TF 채택 판단 (메이커 비용 기준 재산출)
 
 | TF | 진입 | 평균 return | 플러스 심볼 | 평균 MDD | 평균 체결률 |
 | -- | -- | --: | --: | --: | --: |
-| 15m | zone_limit | 360.86% | 12/12 | 8.91% | 72.51% |
-| 1h | zone_limit | 110.10% | 12/12 | 6.84% | 69.34% |
-| 2h | zone_limit | 50.76% | 12/12 | 5.47% | 67.91% |
-| 4h | zone_limit | 28.58% | 12/12 | 4.24% | 67.86% |
+| 15m | zone_limit | -76.81% | 0/12 | 82.18% | 86.23% |
+| 1h | zone_limit | -35.08% | 0/12 | 44.02% | 85.24% |
+| 2h | zone_limit | -19.49% | 2/12 | 30.16% | 85.14% |
+| 4h | zone_limit | -3.24% | 5/12 | 18.87% | 84.82% |
 
 ### 15m: WAN-91의 '채택 제외' 권고는 **유지되지 않는다**
 
@@ -98,8 +100,8 @@ WAN-91은 15m을 채택 대상에서 제외할 것을 권고했고, 그 근거�
 
 ### 그러나 이 결과를 채택 근거로 쓰기 전 반드시 볼 한계
 
-1. **체결 가정이 낙관적이다.** 시뮬레이터는 가격이 지정가에 **닿으면 체결**로 본다(`backtest/substep.py`). 실제 지정가는 큐 우선순위가 있어, 가격이 스치기만 하면 체결되지 않을 수 있다. 즉 실제 체결률은 이 표(15m 기준 72.51%)보다 낮고, **체결된 거래만 골라 담는 편향**이 남는다. WAN-96이 이 가정을 보수화해 재검정했다.
-2. **수익 개선을 승률만으로 설명할 수 없다**(15m 지정가 승률 56.88%). 개선의 몸통은 진입가·비용이다 — 지정가는 더 유리한 가격에 들어가 1R이 줄고 익절 목표가 가까워진다(고정 1:1.5R 규칙과의 상호작용). 옛 판(3심볼 × 3년)에서는 승률이 오히려 떨어지면서 수익이 늘어 이 성질이 극명했다.
+1. **체결 가정이 낙관적이다.** 시뮬레이터는 가격이 지정가에 **닿으면 체결**로 본다(`backtest/substep.py`). 실제 지정가는 큐 우선순위가 있어, 가격이 스치기만 하면 체결되지 않을 수 있다. 즉 실제 체결률은 이 표(15m 기준 86.23%)보다 낮고, **체결된 거래만 골라 담는 편향**이 남는다. WAN-96이 이 가정을 보수화해 재검정했다.
+2. **수익 개선을 승률만으로 설명할 수 없다**(15m 지정가 승률 40.95%). 개선의 몸통은 진입가·비용이다 — 지정가는 더 유리한 가격에 들어가 1R이 줄고 익절 목표가 가까워진다(고정 1:1.5R 규칙과의 상호작용). 옛 판(3심볼 × 3년)에서는 승률이 오히려 떨어지면서 수익이 늘어 이 성질이 극명했다.
 3. **4h는 표본이 작다**(체결률이 높아 기회 손실은 작지만 심볼당 거래가 적어 수익률 추정의 신뢰구간이 넓다). 1d는 WAN-182(작업 TF 15m·1h·4h 확정)가 표본 미달로 제외해 이 표에 없다 — 옛 판(3심볼 × 4TF)의 1d 행은 당시 기록이다.
 4. **1분봉 근사 잔존**: 채택 밴드(`intrabar_live`, WAN-132)는 미래를 보지 않지만 1분봉 근사라 **잔여 1분**이 남는다 — WAN-120이 그 잔여를 0으로 만든 감사에서 판정 불변(증분 88.5% 잔존)을 확인했다. 옛 판의 「탭 봉 SMA20 룩어헤드」 서술은 WAN-132 전환으로 채택 경로에서 사라졌다.
 
@@ -109,51 +111,51 @@ WAN-91은 15m을 채택 대상에서 제외할 것을 권고했고, 그 근거�
 
 | 심볼 | TF | 진입 | 펀딩 비용 | 커버리지 |
 | -- | -- | -- | --: | --: |
-| ADA/USDT:USDT | 15m | zone_limit | 230.98 | 100.00% |
-| ADA/USDT:USDT | 1h | zone_limit | 38.62 | 100.00% |
-| ADA/USDT:USDT | 2h | zone_limit | 33.03 | 100.00% |
-| ADA/USDT:USDT | 4h | zone_limit | -7.87 | 100.00% |
-| BCH/USDT:USDT | 15m | zone_limit | 11.05 | 100.00% |
-| BCH/USDT:USDT | 1h | zone_limit | -46.18 | 100.00% |
-| BCH/USDT:USDT | 2h | zone_limit | 7.36 | 100.00% |
-| BCH/USDT:USDT | 4h | zone_limit | -3.14 | 100.00% |
-| BNB/USDT:USDT | 15m | zone_limit | -63.17 | 86.47% |
-| BNB/USDT:USDT | 1h | zone_limit | -144.42 | 86.47% |
-| BNB/USDT:USDT | 2h | zone_limit | -25.63 | 86.47% |
-| BNB/USDT:USDT | 4h | zone_limit | -21.31 | 86.47% |
-| BTC/USDT:USDT | 15m | zone_limit | 81.30 | 86.47% |
-| BTC/USDT:USDT | 1h | zone_limit | 67.24 | 86.47% |
-| BTC/USDT:USDT | 2h | zone_limit | 47.88 | 86.47% |
-| BTC/USDT:USDT | 4h | zone_limit | 25.64 | 86.47% |
-| DOGE/USDT:USDT | 15m | zone_limit | 211.70 | 100.00% |
-| DOGE/USDT:USDT | 1h | zone_limit | 55.60 | 100.00% |
-| DOGE/USDT:USDT | 2h | zone_limit | 21.24 | 100.00% |
-| DOGE/USDT:USDT | 4h | zone_limit | -1.38 | 100.00% |
-| DOT/USDT:USDT | 15m | zone_limit | 135.56 | 100.00% |
-| DOT/USDT:USDT | 1h | zone_limit | -41.10 | 100.00% |
-| DOT/USDT:USDT | 2h | zone_limit | -61.62 | 100.00% |
-| DOT/USDT:USDT | 4h | zone_limit | -28.82 | 100.00% |
-| ETH/USDT:USDT | 15m | zone_limit | 134.50 | 86.47% |
-| ETH/USDT:USDT | 1h | zone_limit | 45.68 | 86.47% |
-| ETH/USDT:USDT | 2h | zone_limit | 22.44 | 86.47% |
-| ETH/USDT:USDT | 4h | zone_limit | 14.99 | 86.47% |
-| LINK/USDT:USDT | 15m | zone_limit | 167.22 | 100.00% |
-| LINK/USDT:USDT | 1h | zone_limit | 72.06 | 100.00% |
-| LINK/USDT:USDT | 2h | zone_limit | 38.31 | 100.00% |
-| LINK/USDT:USDT | 4h | zone_limit | 20.43 | 100.00% |
-| LTC/USDT:USDT | 15m | zone_limit | 156.86 | 100.00% |
-| LTC/USDT:USDT | 1h | zone_limit | 39.54 | 100.00% |
-| LTC/USDT:USDT | 2h | zone_limit | 17.39 | 100.00% |
-| LTC/USDT:USDT | 4h | zone_limit | 7.59 | 100.00% |
-| SOL/USDT:USDT | 15m | zone_limit | 137.75 | 87.64% |
-| SOL/USDT:USDT | 1h | zone_limit | -16.64 | 87.64% |
-| SOL/USDT:USDT | 2h | zone_limit | -43.93 | 87.64% |
-| SOL/USDT:USDT | 4h | zone_limit | -2.03 | 87.64% |
-| TRX/USDT:USDT | 15m | zone_limit | -12.24 | 86.47% |
-| TRX/USDT:USDT | 1h | zone_limit | -109.25 | 86.47% |
-| TRX/USDT:USDT | 2h | zone_limit | -112.46 | 86.47% |
-| TRX/USDT:USDT | 4h | zone_limit | -86.09 | 86.47% |
-| XRP/USDT:USDT | 15m | zone_limit | 173.42 | 86.47% |
-| XRP/USDT:USDT | 1h | zone_limit | 27.81 | 86.47% |
-| XRP/USDT:USDT | 2h | zone_limit | 14.28 | 86.47% |
-| XRP/USDT:USDT | 4h | zone_limit | 7.00 | 86.47% |
+| ADA/USDT:USDT | 15m | zone_limit | 287.51 | 100.00% |
+| ADA/USDT:USDT | 1h | zone_limit | 224.83 | 100.00% |
+| ADA/USDT:USDT | 2h | zone_limit | 103.87 | 100.00% |
+| ADA/USDT:USDT | 4h | zone_limit | 70.30 | 100.00% |
+| BCH/USDT:USDT | 15m | zone_limit | 119.99 | 100.00% |
+| BCH/USDT:USDT | 1h | zone_limit | -129.91 | 100.00% |
+| BCH/USDT:USDT | 2h | zone_limit | -63.66 | 100.00% |
+| BCH/USDT:USDT | 4h | zone_limit | -80.91 | 100.00% |
+| BNB/USDT:USDT | 15m | zone_limit | -168.84 | 86.47% |
+| BNB/USDT:USDT | 1h | zone_limit | -204.66 | 86.47% |
+| BNB/USDT:USDT | 2h | zone_limit | -86.60 | 86.47% |
+| BNB/USDT:USDT | 4h | zone_limit | -45.89 | 86.47% |
+| BTC/USDT:USDT | 15m | zone_limit | 324.00 | 86.47% |
+| BTC/USDT:USDT | 1h | zone_limit | 299.87 | 86.47% |
+| BTC/USDT:USDT | 2h | zone_limit | 262.46 | 86.47% |
+| BTC/USDT:USDT | 4h | zone_limit | 158.94 | 86.47% |
+| DOGE/USDT:USDT | 15m | zone_limit | 740.63 | 100.00% |
+| DOGE/USDT:USDT | 1h | zone_limit | 250.90 | 100.00% |
+| DOGE/USDT:USDT | 2h | zone_limit | 151.33 | 100.00% |
+| DOGE/USDT:USDT | 4h | zone_limit | 99.28 | 100.00% |
+| DOT/USDT:USDT | 15m | zone_limit | 257.16 | 100.00% |
+| DOT/USDT:USDT | 1h | zone_limit | 78.01 | 100.00% |
+| DOT/USDT:USDT | 2h | zone_limit | -13.94 | 100.00% |
+| DOT/USDT:USDT | 4h | zone_limit | -37.70 | 100.00% |
+| ETH/USDT:USDT | 15m | zone_limit | 207.41 | 86.47% |
+| ETH/USDT:USDT | 1h | zone_limit | 92.78 | 86.47% |
+| ETH/USDT:USDT | 2h | zone_limit | 93.30 | 86.47% |
+| ETH/USDT:USDT | 4h | zone_limit | 54.58 | 86.47% |
+| LINK/USDT:USDT | 15m | zone_limit | 479.34 | 100.00% |
+| LINK/USDT:USDT | 1h | zone_limit | 150.76 | 100.00% |
+| LINK/USDT:USDT | 2h | zone_limit | 136.95 | 100.00% |
+| LINK/USDT:USDT | 4h | zone_limit | 63.82 | 100.00% |
+| LTC/USDT:USDT | 15m | zone_limit | 230.93 | 100.00% |
+| LTC/USDT:USDT | 1h | zone_limit | 197.37 | 100.00% |
+| LTC/USDT:USDT | 2h | zone_limit | 130.32 | 100.00% |
+| LTC/USDT:USDT | 4h | zone_limit | 76.79 | 100.00% |
+| SOL/USDT:USDT | 15m | zone_limit | 56.45 | 87.64% |
+| SOL/USDT:USDT | 1h | zone_limit | 19.60 | 87.64% |
+| SOL/USDT:USDT | 2h | zone_limit | -25.15 | 87.64% |
+| SOL/USDT:USDT | 4h | zone_limit | 5.62 | 87.64% |
+| TRX/USDT:USDT | 15m | zone_limit | -39.99 | 86.47% |
+| TRX/USDT:USDT | 1h | zone_limit | -204.12 | 86.47% |
+| TRX/USDT:USDT | 2h | zone_limit | -222.71 | 86.47% |
+| TRX/USDT:USDT | 4h | zone_limit | -242.24 | 86.47% |
+| XRP/USDT:USDT | 15m | zone_limit | 163.78 | 86.47% |
+| XRP/USDT:USDT | 1h | zone_limit | 150.47 | 86.47% |
+| XRP/USDT:USDT | 2h | zone_limit | 95.36 | 86.47% |
+| XRP/USDT:USDT | 4h | zone_limit | 92.35 | 86.47% |
