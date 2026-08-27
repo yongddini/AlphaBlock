@@ -60,6 +60,7 @@ from backtest.zone_limit_backtest import build_result_from_trades
 from common.costs import Liquidity
 from common.timefmt import format_kst
 from strategy.models import InvalidationCancel
+from strategy.realtime_macd import WARMUP_LABEL, macd_color
 
 #: 채택 재진입 규칙(WAN-273 = 사용자 결정 2026-08-09) — 「익절 후 존 내 재진입」의 재무장
 #: 지정가를 봉내 라이브 밴드(볼린저)로 재산정한다. `"freeze"`(첫 체결가 고정)·`"zone"`(존
@@ -498,6 +499,9 @@ COL_NET_R = "net R"
 COL_IS_REENTRY = "재진입"
 COL_SAME_STEP_TP = "같은분익절"
 COL_TRIGGER_KST = "탭시각(KST)"
+COL_MACD_HIST = "MACD히스토그램"
+COL_MACD_HIST_PREV = "MACD히스토그램(직전봉)"
+COL_MACD_COLOR = "MACD색"
 
 BOOK_TRADE_COLUMNS: tuple[str, ...] = (
     COL_CELL_SYMBOL,
@@ -510,6 +514,9 @@ BOOK_TRADE_COLUMNS: tuple[str, ...] = (
     COL_SAME_STEP_TP,
     COL_TRIGGER_KST,
 )
+
+#: WAN-372 관측 열 — **관측을 켠 실행에만** 붙는다(아래 참고).
+BOOK_MACD_COLUMNS: tuple[str, ...] = (COL_MACD_HIST, COL_MACD_HIST_PREV, COL_MACD_COLOR)
 
 
 def _ordered_pairs(segment: BookSegment) -> list[tuple[Trade, PlacedSetup]]:
@@ -564,7 +571,24 @@ def book_trades_to_display_frame(segment: BookSegment) -> pd.DataFrame:
     frame[COL_IS_REENTRY] = [p.is_reentry for _t, p in pairs]
     frame[COL_SAME_STEP_TP] = [p.same_step_take_profit for _t, p in pairs]
     frame[COL_TRIGGER_KST] = [format_kst(p.trigger_time) for _t, p in pairs]
+    if any(p.macd_hist is not None for _t, p in pairs):
+        # WAN-372: 관측을 **켠 실행에만** 세 열이 붙는다 — 안 켠 실행에 빈 열을 달면 옛 CSV의
+        # 열 모양이 바뀌고, 「값이 없다」와 「관측을 안 켰다」가 화면에서 같은 모양이 된다.
+        frame[COL_MACD_HIST] = [p.macd_hist for _t, p in pairs]
+        frame[COL_MACD_HIST_PREV] = [p.macd_hist_prev for _t, p in pairs]
+        frame[COL_MACD_COLOR] = [macd_color_label(p) for _t, p in pairs]
     return frame
+
+
+def macd_color_label(placement: PlacedSetup) -> str:
+    """배치 기록의 MACD 색 이름 — 워밍업이라 값이 없으면 「워밍업」(지어내지 않는다).
+
+    판정은 `strategy.realtime_macd.macd_color` **한 곳**에서만 한다(부등호를 한 칸 옮기면
+    같은 봉이 다른 색이 된다).
+    """
+    if placement.macd_hist is None or placement.macd_hist_prev is None:
+        return WARMUP_LABEL
+    return macd_color(placement.macd_hist, placement.macd_hist_prev).label
 
 
 def book_equity_to_display_frame(segment: BookSegment) -> pd.DataFrame:

@@ -171,6 +171,13 @@ class PlacedSetup:
     거짓이고, 인과 팔에서 되살아난 거래가 정확히 이 집합이다."""
     trigger_time: int = 0
     """이 셋업의 탭이 난 상위TF 봉 시각 — 진단 조인 키(`_Candidate.trigger_time` 그대로)."""
+    macd_hist: float | None = None
+    """체결 순간의 봉내 라이브 MACD 히스토그램(WAN-372 · `observe_macd` 옵트인 관측).
+
+    후보가 실은 값 그대로다 — 안 켜면 `None`이고, 켜도 배치·손익 어디에도 안 쓰인다. 색은
+    `macd_hist_prev`와 함께 `strategy.realtime_macd.macd_color`가 낸다."""
+    macd_hist_prev: float | None = None
+    """직전 확정봉의 MACD 히스토그램(`hist[1]`) (WAN-372). 위와 한 쌍이다."""
 
 
 @dataclass
@@ -592,6 +599,8 @@ def run_leverage_book(
                 same_step_take_profit=cand.same_step_take_profit,
                 entry_after_invalidation=cand.entry_after_invalidation,
                 trigger_time=cand.trigger_time,
+                macd_hist=cand.macd_hist,
+                macd_hist_prev=cand.macd_hist_prev,
             )
         )
         _observe(stats, cand.entry_time, cash, open_by_cell, book, stress_risk_multiple)

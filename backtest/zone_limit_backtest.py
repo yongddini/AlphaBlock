@@ -87,6 +87,7 @@ from strategy.models import (
 )
 from strategy.order_blocks import OrderBlockDetector
 from strategy.realtime_band import RealtimeBand
+from strategy.realtime_macd import DEFAULT_MACD_PARAMS, MacdParams, RealtimeMacd
 from strategy.realtime_rsi import RealtimeRsi
 
 logger = logging.getLogger(__name__)
@@ -186,6 +187,14 @@ class _Candidate:
     🚨 **밖에서 ATR을 다시 계산하지 말라고 있는 필드다** — 사본을 만들면 엔진과 갈라진다
     (WAN-77의 사본이 실제로 그렇게 갈라졌다). 체결·청산·손익 어디에도 쓰이지 않는 순수
     관측이다(WAN-90 `mfe_r` · WAN-276 `exit_extreme` · WAN-328 `path_fill_price`와 같은 부류)."""
+    macd_hist: float | None = None
+    """체결 순간의 **봉내 라이브** MACD 히스토그램 (WAN-372, `observe_macd` 옵트인 · 순수 관측).
+
+    `ZoneLimitOutcome.macd_hist` 그대로다 — 안 켜면 항상 `None`이라 예전 CSV가 비트 재현되고,
+    켜도 후보·체결·손익이 하나도 안 움직인다(WAN-90 `mfe_r` · WAN-376 `zone_width_atr`와 같은
+    부류). 색은 `macd_hist_prev`와 함께 `strategy.realtime_macd.macd_color`가 낸다."""
+    macd_hist_prev: float | None = None
+    """직전 **확정봉**의 MACD 히스토그램(`hist[1]`) (WAN-372). 위와 한 쌍이다."""
     trigger_time: int = 0
     """이 셋업의 탭이 발생한 상위TF 봉 시각(`OrderBlockSignal.trigger_time` 그대로).
 
@@ -900,6 +909,8 @@ def build_zone_limit_candidates(
     breakeven_after_partial: bool = False,
     observe_path_fill: bool = False,
     observe_zone_width_atr: bool = False,
+    observe_macd: bool = False,
+    macd_params: MacdParams = DEFAULT_MACD_PARAMS,
     no_same_step_tp: bool = False,
     no_same_step_tp_minutes: frozenset[int] | None = None,
     invalidation_cancel: InvalidationCancel | None = None,
@@ -973,6 +984,12 @@ def build_zone_limit_candidates(
     끔으로 한 번 만들고 밖에서 컷」이라는 지름길이 「처음부터 필터 켜고 만들기」와 같은
     집합인지 검산할 수 있다. **순수 관측이라 값을 싣는 것만으로는 후보·체결·손익이 하나도
     안 움직인다** — 끄면(기본) 필드가 전부 `None`이라 예전과 비트 단위로 같다.
+
+    `observe_macd`(WAN-372, 옵트인)를 켜면 후보에 **체결 순간의 MACD 히스토그램**(봉내 라이브 ·
+    직전 확정봉)을 실어 준다. 색은 그 두 값에서만 파생된다(`strategy.realtime_macd`). 존폭 관측과
+    같은 부류의 **순수 관측이라 켜도 후보·체결·손익이 하나도 안 움직이고**, 끄면(기본) 필드가
+    전부 `None`이라 예전과 비트 단위로 같다. `macd_params`는 사용자의 트레이딩뷰 설정
+    (12/26/9)이 기본값이며 **스윕 대상이 아니다**(WAN-161: 앞구간 승자를 찾는 기계가 된다).
 
     `no_same_step_tp`(WAN-336, 옵트인)는 **진입한 그 1분 스텝에서 익절을 판정하지 않는**
     보수적 반사실이다 — 시뮬레이터로 그대로 흘려보낸다. ⚠️ 위 훅들과 달리 **체결 집합도
@@ -1061,6 +1078,8 @@ def build_zone_limit_candidates(
     effective_overbought = params.rsi_overbought if rsi_overbought is None else rsi_overbought
     effective_gate_mode = params.rsi_gate_mode if rsi_gate_mode is None else rsi_gate_mode
     rsi_seeder = _IncrementalRsiSeeder(closes, params.rsi_length)
+    # WAN-372 관측 전용 — 안 켜면 만들지도 않아 비용이 0이다.
+    macd_seeder = _IncrementalMacdSeeder(closes, macd_params) if observe_macd else None
     # 체결률 하향 민감도(WAN-96). rate=0이면 난수를 아예 뽑지 않아 기본 실행은 WAN-95와
     # 비트 단위로 동일하다.
     dropout_rng = random.Random(params.fill_dropout_seed) if params.fill_dropout_rate > 0 else None
@@ -1221,6 +1240,7 @@ def build_zone_limit_candidates(
 
         cut = bisect.bisect_left(times, substeps[start].htf_bar_time)
         rsi_state = rsi_seeder.seed(cut)
+        macd_state = macd_seeder.seed(cut) if macd_seeder is not None else None
         live_limit: _IntrabarLiveLimit | None = None
         if live_band_mode:
             assert deviation is not None
@@ -1280,6 +1300,7 @@ def build_zone_limit_candidates(
             observe_path_fill=observe_path_fill and live_limit is not None,
             no_same_step_tp=no_same_step_tp,
             no_same_step_tp_minutes=no_same_step_tp_minutes,
+            macd_state=macd_state,
         )
 
         if not outcome.order_rested:
@@ -1382,6 +1403,9 @@ def build_zone_limit_candidates(
                 zone_key=signal.zone_key,
                 # WAN-376 순수 관측 — 안 켜면 `None`이라 예전과 비트 단위로 같다.
                 zone_width_atr=observed_width_atr,
+                # WAN-372 순수 관측 — 안 켜면 `None`이라 예전과 비트 단위로 같다.
+                macd_hist=outcome.macd_hist,
+                macd_hist_prev=outcome.macd_hist_prev,
                 trigger_time=signal.trigger_time,
                 mfe_r=outcome.mfe_r,
                 mae_r=outcome.mae_r,
@@ -1441,6 +1465,35 @@ class _IncrementalRsiSeeder:
             self._state.commit(close)
         self._committed = cut
         return copy.copy(self._state)
+
+
+class _IncrementalMacdSeeder:
+    """`_IncrementalRsiSeeder`의 MACD 판(WAN-372) — 같은 이유·같은 계약.
+
+    MACD도 재귀 EMA라 셋업마다 `closes[:cut]`을 0부터 재커밋하면 O(신호수 × n)이 된다
+    (`RealtimeBand`처럼 「꼬리만」 커밋하는 지름길은 없다 — 창이 없고 상태가 처음부터의
+    모든 표본에 의존한다). `cut`이 지금까지 커밋한 지점 이상이면 접두사 상태에서 증분
+    커밋만 하고, 그 미만이면(드묾 — 오더블록 확정 순서 ≠ 첫 탭 순서) 처음부터 다시
+    시딩한다. 어느 경우든 반환값은 `RealtimeMacd.seed_from_closed(closes, end=cut)`와
+    **정확히 같다**(`commit`이 접두사에 대해 결정적이므로).
+
+    `seed()`는 진행 상태의 **사본**을 낸다 — 시뮬레이터가 반환값을 굴리므로 다음 시그널의
+    시딩이 오염되면 안 된다.
+    """
+
+    def __init__(self, closes: list[float], params: MacdParams = DEFAULT_MACD_PARAMS) -> None:
+        self._closes = closes
+        self._params = params
+        self._state = RealtimeMacd(params=params)
+        self._committed = 0
+
+    def seed(self, cut: int) -> RealtimeMacd:
+        if cut < self._committed:
+            return RealtimeMacd.seed_from_closed(self._closes, self._params, end=cut)
+        for close in self._closes[self._committed : cut]:
+            self._state.commit(close)
+        self._committed = cut
+        return self._state.copy()
 
 
 def sequence_with_candidates(

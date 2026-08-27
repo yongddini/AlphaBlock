@@ -251,6 +251,11 @@ class _Task:
     """WAN-376(옵트인 관측): 후보에 **존폭 ÷ ATR14**(엔진이 필터에 쓰는 그 값)를 싣는다.
     순수 관측이라 켜도 후보 집합·손익이 하나도 안 움직인다. `False`(기본)면 필드가 전부
     `None`이라 예전과 **비트 단위로 같다**."""
+    observe_macd: bool = False
+    """WAN-372(옵트인 관측): 후보에 **체결 순간의 MACD 히스토그램**(봉내 라이브 · 직전 확정봉)을
+    싣는다. base 후보와 재진입 후보 **양쪽에** 같은 규칙이 걸린다 — 한쪽만 달면 색 분포표가
+    채택 북 거래의 상당 부분을 놓친다(WAN-345 부류). 순수 관측이라 켜도 후보 집합·손익이
+    하나도 안 움직이고, `False`(기본)면 필드가 전부 `None`이라 **비트 단위로 같다**."""
     post_filter_zone_width: float | None = None
     """WAN-376 §1a **지름길 팔**(옵트인): 엔진 필터를 **끈 채** 후보를 만들고, 그 뒤
     `zone_width_atr`가 이 문턱보다 넓은(또는 판정 불가인) 후보를 **빼고** 나머지로 재진입
@@ -434,6 +439,7 @@ def reentry_candidates_for_window(
     no_same_step_tp: bool = False,
     no_same_step_tp_minutes: frozenset[int] | None = None,
     invalidation_cancel: InvalidationCancel | None = None,
+    observe_macd: bool = False,
     context: ReentryWindowContext | None = None,
 ) -> list[_Candidate]:
     """이 창의 base 후보에서 「익절 후 존 내 재진입」 후보를 만든다(WAN-261, 옵트인).
@@ -489,6 +495,8 @@ def reentry_candidates_for_window(
                 no_same_step_tp_minutes=no_same_step_tp_minutes,
                 invalidation_cancel=invalidation_cancel,
                 htf_ms=htf_ms,
+                # WAN-372 관측 전용 — base 후보와 같은 규칙으로 재진입 거래에도 색을 단다.
+                observe_macd=observe_macd,
             )
         )
     return out
@@ -636,6 +644,7 @@ def run_cell_variants(
             observe_zone_width_atr=(
                 task.observe_zone_width_atr or any(t is not None for t in thresholds)
             ),
+            observe_macd=task.observe_macd,
         )
         funding[segment_name] = tuple(window.funding_rates)
         engine_return: float | None = None
@@ -683,6 +692,7 @@ def run_cell_variants(
                         no_same_step_tp=task.no_same_step_tp,
                         no_same_step_tp_minutes=task.no_same_step_tp_minutes or None,
                         invalidation_cancel=task.invalidation_cancel,
+                        observe_macd=task.observe_macd,
                         context=reentry_ctx,
                     )
                 )
@@ -793,6 +803,7 @@ def run_cells(
     no_same_step_tp_minutes: Mapping[tuple[str, str], frozenset[int]] | None = None,
     invalidation_cancel: InvalidationCancel | None = None,
     observe_zone_width_atr: bool = False,
+    observe_macd: bool = False,
     post_filter_zone_width: float | None = None,
 ) -> list[CellPayload]:
     """전 칸을 돈다. `jobs`는 성능 노브이지 결과 축이 아니다(WAN-121).
@@ -852,6 +863,10 @@ def run_cells(
     **후보 집합 자체가 바뀔 수 있다**(익절이 미뤄지면 그 셋업이 다른 청산을 타고, 북에서는
     슬롯 점유 시간이 달라져 뒤따르는 후보까지 갈린다) — 그래서 이건 오버라이드가 아니라 **팔**
     이고, 기준선 팔과 나란히 놓고 **차이의 폭**으로만 읽는다.
+
+    `observe_macd`(WAN-372, 옵트인)는 후보에 **체결 순간의 MACD 히스토그램**을 실어 준다 —
+    base 후보와 재진입 후보 양쪽에 같은 규칙이 걸리고, 순수 관측이라 켜도 후보·손익이 하나도
+    안 움직인다(끄면 비트 재현).
 
     `observe_zone_width_atr`·`post_filter_zone_width`(WAN-376, 옵트인)는 존폭 축의 **관측**과
     **지름길 팔**이다. 전자는 후보에 「존폭 ÷ ATR14」를 실을 뿐이라 켜도 아무 수치가 안 움직이고,
@@ -939,6 +954,7 @@ def run_cells(
             ),
             invalidation_cancel=invalidation_cancel,
             observe_zone_width_atr=observe_zone_width_atr,
+            observe_macd=observe_macd,
             post_filter_zone_width=post_filter_zone_width,
         )
         for symbol in symbols

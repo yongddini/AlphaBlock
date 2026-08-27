@@ -104,6 +104,7 @@ from strategy.models import (
     SignalExitReason,
 )
 from strategy.realtime_band import RealtimeBand
+from strategy.realtime_macd import DEFAULT_MACD_PARAMS, MacdParams, RealtimeMacd
 from strategy.realtime_rsi import RealtimeRsi
 
 #: 재무장 지정가 규칙 (WAN-267) — 어떤 가격에 재진입 주문을 다시 거는가.
@@ -195,6 +196,8 @@ def _iter_reentries(
     no_same_step_tp_minutes: frozenset[int] | None = None,
     invalidation_cancel: InvalidationCancel | None = None,
     htf_ms: int | None = None,
+    observe_macd: bool = False,
+    macd_params: MacdParams = DEFAULT_MACD_PARAMS,
 ) -> Iterator[tuple[_Candidate, _Reentry]]:
     """익절로 닫힌 한 존의 재무장 루프 코어 — `(_Candidate, _Reentry)`를 하나씩 낸다.
 
@@ -263,6 +266,13 @@ def _iter_reentries(
         # `unconditional`이라 값은 안 보지만, 다른 게이트에서도 올바르게 돌게 시딩한다.
         cut = bisect.bisect_left(htf_times, substeps[start].htf_bar_time)
         rsi_state = RealtimeRsi.seed_from_closed(htf_closes[:cut], length=params.rsi_length)
+        # WAN-372 관측 전용 — base 후보와 **같은 규칙·같은 시딩**으로 색을 단다. 한쪽만
+        # 달면 재진입 거래가 색 표에서 통째로 「워밍업」으로 빠진다(WAN-345 부류).
+        macd_state = (
+            RealtimeMacd.seed_from_closed(htf_closes, macd_params, end=cut)
+            if observe_macd
+            else None
+        )
 
         if entry_rule == "band":
             assert deviation is not None
@@ -298,6 +308,7 @@ def _iter_reentries(
                 breakeven_after_partial=breakeven_after_partial,
                 no_same_step_tp=no_same_step_tp,
                 no_same_step_tp_minutes=no_same_step_tp_minutes,
+                macd_state=macd_state,
             )
         else:
             assert static_limit is not None
@@ -329,6 +340,7 @@ def _iter_reentries(
                 breakeven_after_partial=breakeven_after_partial,
                 no_same_step_tp=no_same_step_tp,
                 no_same_step_tp_minutes=no_same_step_tp_minutes,
+                macd_state=macd_state,
             )
         if not outcome.filled or outcome.entry_time is None or outcome.entry_price is None:
             break  # NO_TOUCH / CANCELLED_INVALIDATED — 더는 되돌아오지 않았다.
@@ -386,6 +398,9 @@ def _iter_reentries(
             entry_after_invalidation=(
                 ob.break_time is not None and outcome.entry_time >= ob.break_time
             ),
+            # WAN-372 순수 관측: 재진입 거래도 base 후보와 **같은 술어**로 색을 단다.
+            macd_hist=outcome.macd_hist,
+            macd_hist_prev=outcome.macd_hist_prev,
         )
         # 격리 순손익: 기준자본에서 독립 체결(동시 1포지션·자본 경합 미반영 = 상한).
         trade = _to_trade(re_cand, cfg.initial_capital, cfg, funding_rates)
@@ -460,6 +475,8 @@ def reentry_candidates(
     no_same_step_tp_minutes: frozenset[int] | None = None,
     invalidation_cancel: InvalidationCancel | None = None,
     htf_ms: int | None = None,
+    observe_macd: bool = False,
+    macd_params: MacdParams = DEFAULT_MACD_PARAMS,
 ) -> list[_Candidate]:
     """익절 후 재무장 재진입을 **북 시퀀서에 주입할 `_Candidate`로** 낸다(WAN-261).
 
@@ -482,6 +499,11 @@ def reentry_candidates(
     `no_same_step_tp`(WAN-336, 옵트인)도 루프로 그대로 흘러 **재진입 거래가 base 거래와 같은
     자를 받는다** — 한쪽만 걸면 「base는 진입 스텝 익절 금지, 재진입은 허용」인 잡종 팔을 재게
     된다. 끄면(기본) 예전과 비트 단위로 같다.
+
+    `observe_macd`(WAN-372, 옵트인 관측)도 루프를 그대로 탄다 — **재진입 거래도 base 거래와
+    같은 규칙으로 체결 순간의 MACD 색을 단다**. 한쪽만 달면 색 분포표가 채택 북 거래의 상당
+    부분(재진입)을 통째로 놓친다(WAN-345가 래더 축에서 겪은 그 실패의 관측 판). 순수 관측이라
+    켜도 후보·손익은 하나도 안 움직이고, 끄면(기본) 필드가 `None`이라 비트 재현된다.
 
     래더 셋(`partial_take_profit_r`·`partial_take_profit_fraction`·`breakeven_after_partial`,
     WAN-323 옵트인)도 마찬가지로 루프를 그대로 탄다 — **재진입 거래도 base 거래와 같은 래더
@@ -518,6 +540,8 @@ def reentry_candidates(
             no_same_step_tp_minutes=no_same_step_tp_minutes,
             invalidation_cancel=invalidation_cancel,
             htf_ms=htf_ms,
+            observe_macd=observe_macd,
+            macd_params=macd_params,
         )
     ]
 
