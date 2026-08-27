@@ -453,3 +453,35 @@ def test_trade_frame_gains_macd_columns_only_when_observed() -> None:
     assert set(observed[COL_MACD_COLOR]) <= allowed
     # 관측 열을 뺀 나머지는 두 실행이 같다 — 열이 늘었을 뿐 값이 안 움직였다.
     pd.testing.assert_frame_equal(observed[plain.columns], plain)
+
+
+# --------------------------------------------------------------------------- #
+# 7 · CLI — 관측 플래그는 북 전용이고, per-cell에서 조용히 무시되지 않는다
+# --------------------------------------------------------------------------- #
+
+
+def test_observe_macd_flag_is_book_only(capsys: pytest.CaptureFixture[str]) -> None:
+    """per-cell 경로엔 이 배선이 없다 — 조용히 무시하면 「색을 켰다」는 라벨만 남는다(WAN-95)."""
+    from backtest.run import main
+
+    assert main(["--positions", "single", "--observe-macd", "--quiet"]) == 2
+    assert "북 모드 전용" in capsys.readouterr().err
+
+
+def test_observe_macd_flag_reaches_the_book(monkeypatch: pytest.MonkeyPatch) -> None:
+    """플래그가 실제로 북 경로까지 간다 — 파서에만 있고 배선이 없으면 조용히 꺼진 채 돈다."""
+    from backtest import book_cli
+    from backtest.run import main
+
+    seen: dict[str, Any] = {}
+
+    def fake(*_args: Any, **kwargs: Any) -> list[Any]:
+        seen.update(kwargs)
+        return []
+
+    monkeypatch.setattr(book_cli, "run_book_segments", fake)
+    assert main(["--positions", "book", "--observe-macd", "--quiet"]) == 0
+    assert seen["observe_macd"] is True
+    seen.clear()
+    assert main(["--positions", "book", "--quiet"]) == 0
+    assert seen["observe_macd"] is False

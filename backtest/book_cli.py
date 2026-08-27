@@ -334,6 +334,7 @@ def run_book(
     reentry_entry_rule: ReentryEntryRule = ADOPTED_REENTRY_ENTRY_RULE,
     adv_fraction: harness.AdvCapArg = harness.UNSET,
     invalidation_cancel: InvalidationCancel | None = None,
+    observe_macd: bool = False,
 ) -> list[BookRunRow]:
     """채택 북을 실데이터에서 돌려 구간별 집계 행을 낸다.
 
@@ -380,6 +381,7 @@ def run_book(
             log=log,
             reentry=reentry,
             reentry_entry_rule=reentry_entry_rule,
+            observe_macd=observe_macd,
             adv_fraction=adv_fraction,
             invalidation_cancel=invalidation_cancel,
         )
@@ -401,12 +403,17 @@ def run_book_segments(
     reentry_entry_rule: ReentryEntryRule = ADOPTED_REENTRY_ENTRY_RULE,
     adv_fraction: harness.AdvCapArg = harness.UNSET,
     invalidation_cancel: InvalidationCancel | None = None,
+    observe_macd: bool = False,
 ) -> list[BookSegment]:
     """`run_book`의 속 — 집계 행뿐 아니라 그 행을 만든 거래·배치 기록까지 돌려준다.
 
     행만 필요하면 `run_book`을 쓴다(그쪽이 이 함수의 얇은 래퍼라 **같은 숫자**다). 거래별
     CSV(WAN-346 §0)처럼 「이 지갑이 실제로 한 거래 하나하나」가 필요한 호출부가 자기 배치
     루프를 따로 짜면 두 경로가 갈라지므로(WAN-95/112/123의 조용한 실패) 여기서 한 번에 낸다.
+
+    `observe_macd`(WAN-372, 옵트인 관측)를 켜면 거래별 표에 **체결 순간의 MACD 히스토그램·색**
+    열이 붙는다(`book_trades_to_display_frame`). 순수 관측이라 켜도 배치·손익·집계 행은
+    비트 단위로 같고, 끄면(기본) 열 자체가 안 생겨 옛 CSV의 열 모양이 그대로다.
     """
     from backtest.run import parse_date_ms  # 지연 import(사이클 회피)
 
@@ -423,6 +430,10 @@ def run_book_segments(
         reentry=reentry,
         reentry_entry_rule=reentry_entry_rule,
         invalidation_cancel=invalidation_cancel,
+        # WAN-372: **관측 전용**이라 여기는 인자로 연다 — 비용 축(`take_profit_liquidity`)을
+        # 안 연 이유("채택 북" 이름을 달고 옛 회계로 도는 호출이 생긴다)는 이 축에 없다.
+        # 켜도 후보·배치·손익이 비트 단위로 같고, 늘어나는 것은 거래별 표의 색 열뿐이다.
+        observe_macd=observe_macd,
     )
     if funding_proxy:
         payloads, note = apply_funding_proxy(payloads)

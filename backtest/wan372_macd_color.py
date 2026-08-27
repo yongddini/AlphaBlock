@@ -389,7 +389,7 @@ def _judgeable(frame: pd.DataFrame, segment: str) -> pd.DataFrame:
 def verdict(frame: pd.DataFrame) -> tuple[str, str]:
     """완료기준 3의 두 문장 — ① 색이 성적을 가르는가 ② 앞구간 승자가 뒷구간에도 좋은가."""
     oos = _judgeable(frame, PRIMARY_OOS)
-    ins = _judgeable(frame, "is")
+    ins = _judgeable(frame, harness.SEGMENT_IS)
     if oos.empty:
         return (
             f"① **판정 불가** — 뒷구간(`{PRIMARY_OOS}`)에 유효 표본({MIN_TRADES}건 이상)인 "
@@ -449,7 +449,7 @@ def verdict(frame: pd.DataFrame) -> tuple[str, str]:
 def gate_decision(frame: pd.DataFrame) -> str:
     """후속(필터) 이슈로 갈 근거가 있는가 — 사용자가 정한 두 조건을 **둘 다** 본다."""
     oos = _judgeable(frame, PRIMARY_OOS)
-    ins = _judgeable(frame, "is")
+    ins = _judgeable(frame, harness.SEGMENT_IS)
     if oos.empty or ins.empty or len(oos) < 2:
         return "**필터로 갈 근거 없음** — 유효 표본인 색이 둘 미만이라 조건 1을 물을 수 없다."
     spread = float(oos["mean_net_r"].max() - oos["mean_net_r"].min())
