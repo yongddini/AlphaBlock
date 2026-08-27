@@ -42,6 +42,7 @@ from typing import Protocol, runtime_checkable
 import pandas as pd
 
 from strategy.models import OrderBlockDirection, RsiGateMode, SignalExitReason, rsi_gate_passes
+from strategy.realtime_macd import RealtimeMacd
 from strategy.realtime_rsi import RealtimeRsi
 
 _SUBSTEP_COLUMNS = ("open_time", "high", "low", "close")
@@ -243,6 +244,22 @@ class ZoneLimitOutcome:
     ⚠️ **1분봉 OHLC 근사이지 틱 데이터가 아니다**(WAN-98 Canceled) — 봉 안의 경로를 모르므로
     「가격이 [저가, 고가]의 모든 값을 지난다」는 연속성만 쓴다. 같은 봉 안의 체결가 차이만
     재고, 틱 모델이 **더 이른 봉**에서 체결했을 가능성은 재지 않는다."""
+    macd_hist: float | None = None
+    """체결 순간의 **봉내 라이브** MACD 히스토그램 (WAN-372, 측정 전용 · 옵트인).
+
+    `macd_state`를 준 호출에서만 값이 있고(그 밖에는 항상 `None`), **체결·청산·손익 어디에도
+    쓰이지 않는다** — `mfe_r`(WAN-90) · `exit_extreme`(WAN-276) · `path_fill_price`(WAN-328)와
+    같은 순수 관측 필드다.
+
+    직전 확정봉까지의 세 EMA 상태에 **체결 순간의 현재가**를 마지막 표본으로 얹은 값이라
+    룩어헤드가 없다(`strategy.realtime_macd` 참고 — 사용자가 트레이딩뷰에서 그때 실제로 보는
+    값이자 진입가 정본과 같은 자, WAN-132). 워밍업이면 체결됐어도 `None`이다."""
+    macd_hist_prev: float | None = None
+    """직전 **확정봉**의 MACD 히스토그램(`hist[1]`) (WAN-372). 위 `macd_hist`와 한 쌍이다.
+
+    색은 이 둘에서만 파생된다(`strategy.realtime_macd.macd_color`) — 색 문자열을 여기 싣지
+    않는 이유는 판정 규칙이 **한 곳**에만 있어야 하기 때문이다(부등호를 한 칸 옮기면 같은
+    봉이 다른 색이 된다)."""
     order_rested: bool = True
     """이 셋업에 주문이 **한 번이라도 주문판에 걸렸는지** (WAN-119).
 
@@ -375,6 +392,7 @@ def simulate_zone_limit_trade(
     observe_path_fill: bool = False,
     no_same_step_tp: bool = False,
     no_same_step_tp_minutes: frozenset[int] | None = None,
+    macd_state: RealtimeMacd | None = None,
 ) -> ZoneLimitOutcome:
     """한 오더블록 셋업의 존-지정가 진입·청산을 1분 서브스텝으로 시뮬레이션한다.
 
@@ -487,6 +505,19 @@ def simulate_zone_limit_trade(
     * **손절은 그대로 진입 스텝에서 판정한다** — 익절만 미루는 것이 이 팔의 정의다(양쪽을
       다 미루면 그냥 진입을 한 스텝 늦춘 것이 되어 다른 실험이 된다).
     * 끄면(기본) `just_entered` 가지가 통째로 죽어 **예전과 비트 단위로 같다**.
+
+    ## 체결 순간의 MACD 색 (WAN-372, 옵트인 · 순수 관측)
+
+    `macd_state`(`strategy.realtime_macd.RealtimeMacd`)를 주면 **체결이 일어난 그 서브스텝**의
+    봉내 라이브 히스토그램과 직전 확정봉 히스토그램을 결과에 싣는다. 상태는 `rsi_state`와
+    **같은 자리**(상위TF 봉 마감)에서 커밋되므로 두 지표가 같은 시점을 본다.
+
+    * **체결·청산·손익 어디에도 안 쓰인다** — 안 주면(기본) 두 필드가 `None`이고 실행은
+      예전과 **비트 단위로 같다**.
+    * **색이 봉 안에서 바뀔 수 있다**(EMA는 재귀적이라 현재가가 움직이면 hist가 변한다) —
+      그래서 **체결 순간의 값**을 그 거래의 값으로 확정하고 그 봉이 어떻게 끝나든 바꾸지
+      않는다(사용자 확인 2026-08-27).
+    * ⚠️ `rsi_state`처럼 이 상태도 호출 중 **갱신된다** — 재사용하려면 `copy()`로 떠서 넘긴다.
     """
     if not substeps:
         # 서브스텝이 없으면 live 밴드는 값을 낼 기회조차 없었다 = 주문이 걸린 적 없다.
@@ -597,6 +628,8 @@ def simulate_zone_limit_trade(
     running_close: float | None = None
     position_open = False
     path_fill_price: float | None = None
+    macd_hist: float | None = None
+    macd_hist_prev: float | None = None
     entry_time: int | None = None
     entry_price: float | None = None
     entry_rsi: float | None = None
@@ -624,6 +657,9 @@ def simulate_zone_limit_trade(
                 rsi_state.commit(running_close)
                 if live_limit is not None:
                     live_limit.commit(running_close)
+                if macd_state is not None:
+                    # WAN-372 관측 전용 — RSI와 **같은 자리**에서 굴려 두 지표가 같은 시점을 본다.
+                    macd_state.commit(running_close)
             current_htf = step.htf_bar_time
             htf_elapsed += 1
         running_close = step.close
@@ -695,6 +731,12 @@ def simulate_zone_limit_trade(
                     entry_time = step.time
                     entry_price = current_limit
                     entry_rsi = live_rsi
+                    if macd_state is not None:
+                        # WAN-372: **체결 순간**의 색을 그 거래의 색으로 확정한다 — 그 봉이
+                        # 나중에 어떻게 끝나든 다시 재지 않는다(EMA라 봉 안에서 변한다).
+                        sample = macd_state.value(step.close)
+                        if sample is not None:
+                            macd_hist, macd_hist_prev = sample.hist, sample.hist_prev
                     # WAN-323: 1R과 분할 지점을 **체결 순간에** 못 박는다(룩어헤드 없음).
                     entry_stop = active_stop
                     # WAN-346: 익절 목표도 체결 순간에 확정된다(손절과 같은 자리) — 순수
@@ -790,6 +832,8 @@ def simulate_zone_limit_trade(
                     stop_price=_entry_stop(),
                     take_profit_price=entry_tp,
                     path_fill_price=path_fill_price,
+                    macd_hist=macd_hist,
+                    macd_hist_prev=macd_hist_prev,
                     exit_extreme=stop_extreme,
                     exit_at_breakeven=entry_stop is not None and active_stop != entry_stop,
                     partial_exits=tuple(partials),
@@ -827,6 +871,8 @@ def simulate_zone_limit_trade(
                     stop_price=_entry_stop(),
                     take_profit_price=entry_tp,
                     path_fill_price=path_fill_price,
+                    macd_hist=macd_hist,
+                    macd_hist_prev=macd_hist_prev,
                     partial_exits=tuple(partials),
                     order_rested=order_rested,
                 )
@@ -843,6 +889,8 @@ def simulate_zone_limit_trade(
             stop_price=_entry_stop(),
             take_profit_price=entry_tp,
             path_fill_price=path_fill_price,
+            macd_hist=macd_hist,
+            macd_hist_prev=macd_hist_prev,
             partial_exits=tuple(partials),
             order_rested=order_rested,
         )

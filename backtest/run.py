@@ -997,6 +997,14 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     detail.add_argument(
+        "--observe-macd",
+        action="store_true",
+        help=(
+            "북 거래별 내역에 체결 순간의 MACD 히스토그램·색 열을 붙인다(WAN-372, 관측 전용). "
+            "--positions book 전용이고, 켜도 거래·손익은 비트 단위로 그대로다"
+        ),
+    )
+    detail.add_argument(
         "--persist",
         action="store_true",
         help="거래·미체결 셋업·시드곡선을 DB에 적재한다(격자 전체 가능 — 조합마다 실행 지문)",
@@ -1307,6 +1315,7 @@ def run_book_main(args: argparse.Namespace, book: LeverageBookParams) -> int:
             reentry_entry_rule=reentry_rule,
             adv_fraction=_adv_fraction_from_args(args),
             invalidation_cancel=book_cancel,
+            observe_macd=args.observe_macd,
         )
         rows = [seg.row for seg in book_segments]
         if detail_segment is not None:
@@ -1597,6 +1606,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     if book is not None:
         return run_book_main(args, book)
+    if args.observe_macd:
+        # 관측 배선이 북 거래별 표에만 있다 — per-cell 경로에서 조용히 무시하면 「색을
+        # 켰다」는 라벨만 남고 열이 안 생긴다(WAN-95 교훈). 거부한다.
+        print(
+            "오류: --observe-macd는 북 모드 전용입니다(WAN-372) — --positions book과 함께 쓰세요.",
+            file=sys.stderr,
+        )
+        return 2
     if args.trades_segment:
         # per-cell 경로에는 「구간 고르기」가 없다 — 격자면 `_single_artifact`가 이미
         # 거부하고 단일 조합이면 구간도 하나다. 조용히 무시하면 라벨만 붙는다(WAN-95).

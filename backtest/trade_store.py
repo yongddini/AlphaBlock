@@ -154,6 +154,7 @@ ENGINE_SOURCE_FILES: tuple[str, ...] = (
     "strategy/models.py",
     "strategy/order_blocks.py",
     "strategy/realtime_band.py",
+    "strategy/realtime_macd.py",
     "strategy/realtime_rsi.py",
 )
 
