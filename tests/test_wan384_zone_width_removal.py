@@ -163,6 +163,10 @@ _NO_PIN_NEEDED: frozenset[str] = frozenset(
         "wan362_same_minute_roundtrip",
         # 채택된 것을 재는 리포트 — 기본값이 움직이면 낡아야 맞다
         "wan95_zone_limit_report",
+        # 오늘 채택 북 위의 **순수 관측**이라 핀 없음이 설계다(WAN-305) — 필터를 켠 채 낸
+        # 표가 아니라 「지금 매매하는 거래의 경로」를 재는 표이고, 그 거래 집합이 곧 필터
+        # 꺼진 채택 기본값이다. 검산 (a)가 「인자 없는 채택 북」과의 등식을 못 박는다.
+        "wan383_confirmation_entry",
     }
 )
 
