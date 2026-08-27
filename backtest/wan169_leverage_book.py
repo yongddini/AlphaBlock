@@ -251,6 +251,11 @@ class _Task:
     """WAN-376(옵트인 관측): 후보에 **존폭 ÷ ATR14**(엔진이 필터에 쓰는 그 값)를 싣는다.
     순수 관측이라 켜도 후보 집합·손익이 하나도 안 움직인다. `False`(기본)면 필드가 전부
     `None`이라 예전과 **비트 단위로 같다**."""
+    observe_confirmation: bool = False
+    """WAN-383 §0(옵트인 관측): 체결된 셋업마다 탭부터 존 무효화까지 한 번 더 훑어 **확인 진입
+    세 팔의 트리거 시각**을 후보에 싣는다. base 후보와 재진입 후보 **양쪽에** 같은 규칙이
+    걸린다(WAN-345 부류 방지). 순수 관측이라 켜도 후보 집합·손익이 하나도 안 움직이고,
+    `False`(기본)면 필드가 전부 `None`이라 **비트 단위로 같다**."""
     observe_macd: bool = False
     """WAN-372(옵트인 관측): 후보에 **체결 순간의 MACD 히스토그램**(봉내 라이브 · 직전 확정봉)을
     싣는다. base 후보와 재진입 후보 **양쪽에** 같은 규칙이 걸린다 — 한쪽만 달면 색 분포표가
@@ -440,6 +445,7 @@ def reentry_candidates_for_window(
     no_same_step_tp_minutes: frozenset[int] | None = None,
     invalidation_cancel: InvalidationCancel | None = None,
     observe_macd: bool = False,
+    observe_confirmation: bool = False,
     context: ReentryWindowContext | None = None,
 ) -> list[_Candidate]:
     """이 창의 base 후보에서 「익절 후 존 내 재진입」 후보를 만든다(WAN-261, 옵트인).
@@ -497,6 +503,8 @@ def reentry_candidates_for_window(
                 htf_ms=htf_ms,
                 # WAN-372 관측 전용 — base 후보와 같은 규칙으로 재진입 거래에도 색을 단다.
                 observe_macd=observe_macd,
+                # WAN-383 §0 관측 전용 — 같은 이유로 재진입 거래에도 트리거를 잰다.
+                observe_confirmation=observe_confirmation,
             )
         )
     return out
@@ -645,6 +653,7 @@ def run_cell_variants(
                 task.observe_zone_width_atr or any(t is not None for t in thresholds)
             ),
             observe_macd=task.observe_macd,
+            observe_confirmation=task.observe_confirmation,
         )
         funding[segment_name] = tuple(window.funding_rates)
         engine_return: float | None = None
@@ -693,6 +702,7 @@ def run_cell_variants(
                         no_same_step_tp_minutes=task.no_same_step_tp_minutes or None,
                         invalidation_cancel=task.invalidation_cancel,
                         observe_macd=task.observe_macd,
+                        observe_confirmation=task.observe_confirmation,
                         context=reentry_ctx,
                     )
                 )
@@ -804,6 +814,7 @@ def run_cells(
     invalidation_cancel: InvalidationCancel | None = None,
     observe_zone_width_atr: bool = False,
     observe_macd: bool = False,
+    observe_confirmation: bool = False,
     post_filter_zone_width: float | None = None,
 ) -> list[CellPayload]:
     """전 칸을 돈다. `jobs`는 성능 노브이지 결과 축이 아니다(WAN-121).
@@ -863,6 +874,9 @@ def run_cells(
     **후보 집합 자체가 바뀔 수 있다**(익절이 미뤄지면 그 셋업이 다른 청산을 타고, 북에서는
     슬롯 점유 시간이 달라져 뒤따르는 후보까지 갈린다) — 그래서 이건 오버라이드가 아니라 **팔**
     이고, 기준선 팔과 나란히 놓고 **차이의 폭**으로만 읽는다.
+
+    `observe_confirmation`(WAN-383 §0, 옵트인)은 체결된 셋업마다 **확인 진입 세 팔의 트리거
+    시각**을 후보에 실어 준다(base·재진입 양쪽). 순수 관측이라 켜도 후보·손익이 안 움직인다.
 
     `observe_macd`(WAN-372, 옵트인)는 후보에 **체결 순간의 MACD 히스토그램**을 실어 준다 —
     base 후보와 재진입 후보 양쪽에 같은 규칙이 걸리고, 순수 관측이라 켜도 후보·손익이 하나도
@@ -955,6 +969,7 @@ def run_cells(
             invalidation_cancel=invalidation_cancel,
             observe_zone_width_atr=observe_zone_width_atr,
             observe_macd=observe_macd,
+            observe_confirmation=observe_confirmation,
             post_filter_zone_width=post_filter_zone_width,
         )
         for symbol in symbols

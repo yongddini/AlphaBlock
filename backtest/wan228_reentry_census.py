@@ -93,6 +93,7 @@ from backtest.zone_limit_backtest import (
     build_zone_limit_candidates,
     invalidation_cutoff,
     is_same_step_take_profit,
+    scan_confirmation,
     sequence_with_candidates,
 )
 from data.models import FundingRate
@@ -197,6 +198,7 @@ def _iter_reentries(
     invalidation_cancel: InvalidationCancel | None = None,
     htf_ms: int | None = None,
     observe_macd: bool = False,
+    observe_confirmation: bool = False,
     macd_params: MacdParams = DEFAULT_MACD_PARAMS,
 ) -> Iterator[tuple[_Candidate, _Reentry]]:
     """익절로 닫힌 한 존의 재무장 루프 코어 — `(_Candidate, _Reentry)`를 하나씩 낸다.
@@ -273,6 +275,13 @@ def _iter_reentries(
             if observe_macd
             else None
         )
+        # WAN-383 §0 관측 전용 — base 후보와 **같은 규칙·같은 시딩**으로 트리거를 잰다.
+        # 한쪽만 배선하면 재진입 거래가 §1 인구조사에서 통째로 빠진다(WAN-345 부류).
+        confirm_state = (
+            RealtimeMacd.seed_from_closed(htf_closes, macd_params, end=cut)
+            if observe_confirmation
+            else None
+        )
 
         if entry_rule == "band":
             assert deviation is not None
@@ -345,6 +354,19 @@ def _iter_reentries(
         if not outcome.filled or outcome.entry_time is None or outcome.entry_price is None:
             break  # NO_TOUCH / CANCELLED_INVALIDATED — 더는 되돌아오지 않았다.
 
+        confirmation = (
+            scan_confirmation(
+                substeps,
+                start,
+                macd_state=confirm_state,
+                entry_time=outcome.entry_time,
+                entry_price=outcome.entry_price,
+                invalidation_time=invalidation_time,
+            )
+            if confirm_state is not None
+            else None
+        )
+
         # 1R은 **실제 체결가** 기준이다 — 정적 팔은 체결가 = 지정가라 예전과 같고, 밴드
         # 팔은 봉내 확정가라 다르다. 0R이면(밴드가 손절선에 붙었다면) 손익을 못 낸다.
         risk = abs(outcome.entry_price - stop_price)
@@ -398,6 +420,8 @@ def _iter_reentries(
             entry_after_invalidation=(
                 ob.break_time is not None and outcome.entry_time >= ob.break_time
             ),
+            # WAN-383 순수 관측 — base 후보와 같은 자. 안 켜면 `None`이라 비트 재현된다.
+            confirmation=confirmation,
             # WAN-372 순수 관측: 재진입 거래도 base 후보와 **같은 술어**로 색을 단다.
             macd_hist=outcome.macd_hist,
             macd_hist_prev=outcome.macd_hist_prev,
@@ -476,6 +500,7 @@ def reentry_candidates(
     invalidation_cancel: InvalidationCancel | None = None,
     htf_ms: int | None = None,
     observe_macd: bool = False,
+    observe_confirmation: bool = False,
     macd_params: MacdParams = DEFAULT_MACD_PARAMS,
 ) -> list[_Candidate]:
     """익절 후 재무장 재진입을 **북 시퀀서에 주입할 `_Candidate`로** 낸다(WAN-261).
@@ -499,6 +524,9 @@ def reentry_candidates(
     `no_same_step_tp`(WAN-336, 옵트인)도 루프로 그대로 흘러 **재진입 거래가 base 거래와 같은
     자를 받는다** — 한쪽만 걸면 「base는 진입 스텝 익절 금지, 재진입은 허용」인 잡종 팔을 재게
     된다. 끄면(기본) 예전과 비트 단위로 같다.
+
+    `observe_confirmation`(WAN-383 §0, 옵트인 관측)도 같은 이유로 루프를 그대로 탄다 —
+    재진입 거래도 base 거래와 같은 규칙으로 확인 진입 트리거를 잰다.
 
     `observe_macd`(WAN-372, 옵트인 관측)도 루프를 그대로 탄다 — **재진입 거래도 base 거래와
     같은 규칙으로 체결 순간의 MACD 색을 단다**. 한쪽만 달면 색 분포표가 채택 북 거래의 상당
@@ -541,6 +569,7 @@ def reentry_candidates(
             invalidation_cancel=invalidation_cancel,
             htf_ms=htf_ms,
             observe_macd=observe_macd,
+            observe_confirmation=observe_confirmation,
             macd_params=macd_params,
         )
     ]

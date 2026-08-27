@@ -288,6 +288,30 @@ class RealtimeMacd:
             return None
         return MacdSample(hist=hist_live, hist_prev=self.closed_hist)
 
+    def strong_red_exit_price(self) -> float | None:
+        """이 상태에서 「진한 빨강을 벗어나는」 최소 현재가 `P*` (WAN-383 §0).
+
+        워밍업이라 판정할 수 없으면 `None`(지어내지 않는다 — `value`와 같은 계약).
+        산식·근거는 모듈 수준 `strong_red_exit_price`가 정본이고 이건 상태를 풀어 넘기는
+        얇은 래퍼다. **상태를 바꾸지 않는다.**
+        """
+        if not self.ready:
+            return None
+        assert self.fast_ema is not None
+        assert self.slow_ema is not None
+        assert self.signal_ema is not None
+        assert self.closed_hist is not None
+        if math.isnan(self.closed_hist):
+            return None
+        price = strong_red_exit_price(
+            fast_ema=self.fast_ema,
+            slow_ema=self.slow_ema,
+            signal_ema=self.signal_ema,
+            closed_hist=self.closed_hist,
+            params=self.params,
+        )
+        return None if math.isnan(price) else price
+
     def copy(self) -> RealtimeMacd:
         """현재 상태의 독립 사본 — 시뮬레이터가 상태를 굴리므로 재사용 전에 뜬다."""
         return RealtimeMacd(
@@ -298,3 +322,58 @@ class RealtimeMacd:
             closed_hist=self.closed_hist,
             committed=self.committed,
         )
+
+
+def strong_red_exit_price(
+    *,
+    fast_ema: float,
+    slow_ema: float,
+    signal_ema: float,
+    closed_hist: float,
+    params: MacdParams = DEFAULT_MACD_PARAMS,
+) -> float:
+    """「진한 빨강을 벗어나는」 최소 현재가 `P*` — 순수 함수 (WAN-383 §0).
+
+    확인 진입(팔 `2`)의 트리거 가격이다. **직전 확정봉 상태만** 쓰므로 룩어헤드가 없다 —
+    탭 봉이 어떻게 끝나는지 몰라도 그 봉 **안에서** 계산되는 값이고, 사용자가 화면을 보며
+    "여기 오면 산다"고 걸어 둘 수 있는 가격이다.
+
+    ## 왜 유일한 해가 있나
+
+    현재가 `x`를 마지막 표본으로 얹은 히스토그램은 `x`의 **순증가 아핀 함수**다::
+
+        macd_live(x) = k·x + c,   k = a_f − a_s > 0
+        c            = (1 − a_f)·fast_확정 − (1 − a_s)·slow_확정
+        hist_live(x) = (1 − a_g)·(macd_live(x) − signal_확정)
+
+    (`hist = macd_live − signal_live`이고 `signal_live = a_g·macd_live + (1−a_g)·signal_확정`
+    이므로 `a_g` 항이 소거된다.) `fast_length < slow_length`가 `MacdParams.__post_init__`에서
+    강제되므로 `a_f > a_s`, 즉 `k > 0`이고 함수는 **엄격 증가**다 → 임계값을 주는 `x`가 하나뿐.
+
+    ## 임계 히스토그램 `h*`
+
+    진한 빨강은 `hist < 0` **그리고** `hist ≤ hist[1]`이다(`macd_color` 참고). 그래서 벗어나는
+    조건이 `hist[1]`의 부호에 따라 갈린다:
+
+    | `hist[1]` | 진한 빨강 조건 | 벗어남 | `h*` |
+    | -- | -- | -- | -- |
+    | `< 0` | `hist ≤ hist[1]` (부호는 따라온다) | `hist > hist[1]` → **연한 빨강** | `hist[1]` |
+    | `≥ 0` | `hist < 0` (`≤ hist[1]`은 자동) | `hist ≥ 0` → **초록** | `0` |
+
+    ⚠️ 즉 `hist[1] ≥ 0`이면 그 순간 색은 이미 진한 빨강이 아닐 수도 있다 — 그때 `P*`는
+    「빨강으로 안 떨어지게 하는 하한」이라 현재가보다 **아래**일 수 있고, 호출부는 트리거를
+    즉시 발동으로 본다(가격이 이미 그 위다). 그 부류를 「가격 상승 없이 발동」으로 세는 것이
+    WAN-383 §1의 열 하나다.
+
+    ⚠️ **시그널선 따라잡기** — `hist[1] < 0`이어도 `signal_확정`이 `macd`를 쫓아오면 `P*`가
+    직전 종가보다 **아래**로 내려올 수 있다. 그 부류도 반등 확인이 아니라 EMA 산수다.
+    """
+    a_f, a_s, a_g = (
+        _alpha(params.fast_length),
+        _alpha(params.slow_length),
+        _alpha(params.signal_length),
+    )
+    k = a_f - a_s  # `__post_init__`이 fast < slow를 강제하므로 항상 양수다.
+    c = (1.0 - a_f) * fast_ema - (1.0 - a_s) * slow_ema
+    target_hist = closed_hist if closed_hist < 0.0 else 0.0
+    return (signal_ema + target_hist / (1.0 - a_g) - c) / k

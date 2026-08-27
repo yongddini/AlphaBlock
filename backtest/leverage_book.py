@@ -68,7 +68,7 @@ from dataclasses import dataclass, field
 
 from backtest.models import BacktestConfig, Trade
 from backtest.portfolio import LiquidationEvent
-from backtest.zone_limit_backtest import _Candidate, _to_trade
+from backtest.zone_limit_backtest import ConfirmationProbe, _Candidate, _to_trade
 from data.models import FundingRate
 
 # 사이징 회계(배수·상한·cap-only 합성)의 정본은 `execution.leverage`다 — 백테스트 배치와
@@ -178,6 +178,10 @@ class PlacedSetup:
     `macd_hist_prev`와 함께 `strategy.realtime_macd.macd_color`가 낸다."""
     macd_hist_prev: float | None = None
     """직전 확정봉의 MACD 히스토그램(`hist[1]`) (WAN-372). 위와 한 쌍이다."""
+    confirmation: ConfirmationProbe | None = None
+    """확인 진입 트리거 관측(WAN-383 §0 · `observe_confirmation` 옵트인).
+
+    후보가 실은 값 그대로다 — 안 켜면 `None`이고, 켜도 배치·손익 어디에도 안 쓰인다."""
 
 
 @dataclass
@@ -601,6 +605,7 @@ def run_leverage_book(
                 trigger_time=cand.trigger_time,
                 macd_hist=cand.macd_hist,
                 macd_hist_prev=cand.macd_hist_prev,
+                confirmation=cand.confirmation,
             )
         )
         _observe(stats, cand.entry_time, cash, open_by_cell, book, stress_risk_multiple)
