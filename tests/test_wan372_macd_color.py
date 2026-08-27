@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 import pandas as pd
@@ -485,3 +486,53 @@ def test_observe_macd_flag_reaches_the_book(monkeypatch: pytest.MonkeyPatch) -> 
     seen.clear()
     assert main(["--positions", "book", "--quiet"]) == 0
     assert seen["observe_macd"] is False
+
+
+# --------------------------------------------------------------------------- #
+# 8 · 관측은 어디서도 기본으로 켜지지 않는다 (완료기준 6)
+# --------------------------------------------------------------------------- #
+
+
+def test_observation_defaults_are_off_everywhere() -> None:
+    """기본값이 하나라도 켜지면 「안 켜면 비트 재현」이라는 이 이슈의 계약이 깨진다.
+
+    라벨이 아니라 **시그니처 기본값**으로 건다 — 배선이 여럿이라(후보 빌더·재진입 루프·
+    칸 러너·북 진입점·CLI) 한 곳만 뒤집혀도 옛 CSV가 조용히 새 열을 얻는다.
+    """
+    import inspect
+
+    from backtest import book_cli, wan169_leverage_book, wan228_reentry_census
+    from backtest import run as run_module
+    from backtest.zone_limit_backtest import build_zone_limit_candidates
+
+    targets: list[Callable[..., Any]] = [
+        build_zone_limit_candidates,
+        wan228_reentry_census.reentry_candidates,
+        wan228_reentry_census._iter_reentries,
+        wan169_leverage_book.run_cells,
+        wan169_leverage_book.reentry_candidates_for_window,
+        book_cli.run_book,
+        book_cli.run_book_segments,
+    ]
+    for fn in targets:
+        default = inspect.signature(fn).parameters["observe_macd"].default
+        assert default is False, f"{fn.__qualname__}의 observe_macd 기본값이 켜져 있습니다."
+    assert wan169_leverage_book._Task.observe_macd is False
+    # CLI도 마찬가지 — 플래그를 안 주면 꺼진 채로 돈다.
+    assert run_module.build_parser().parse_args([]).observe_macd is False
+
+
+def test_adopted_params_are_untouched() -> None:
+    """완료기준 6 — 이 이슈는 전략 기본값·토대를 하나도 안 건드린다."""
+    from execution.leverage import LeverageBookParams as _BookParams
+    from strategy.models import ConfluenceParams as _Params
+
+    params = _Params()
+    assert params.max_zone_width_atr == 1.28
+    assert params.take_profit_r == 1.5
+    assert params.short_enabled is False
+    assert params.deviation_filter is not None
+    assert params.deviation_filter.band_bar == "intrabar_live"
+    # MACD는 전략 파라미터가 **아니다** — 관측 모듈에만 산다(켜고 끄는 축이 아니라 자다).
+    assert not hasattr(params, "macd_params")
+    assert _BookParams() == LeverageBookParams()
