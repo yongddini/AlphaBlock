@@ -436,8 +436,12 @@ def run_arm(
     `eval_from_ms`(따뜻한 연속 OOS, WAN-166)를 주면 `run_zone_limit_backtest_verbose`와 같은
     절차로 후보를 평가 창으로 좁힌다(WAN-206과 동일).
     """
+    # WAN-384 명시 핀: 이 표는 존폭 필터를 켠 채(1.28) 낸 기록이다.
     params = harness.build_params(
-        entry_mode="zone_limit", take_profit_r=TP_MULTIPLE, fill=params_fill
+        entry_mode="zone_limit",
+        take_profit_r=TP_MULTIPLE,
+        fill=params_fill,
+        max_zone_width_atr=harness.LEGACY_ZONE_WIDTH_FILTER_ON,
     )
     cfg = harness.legacy_build_config(seg_market.timeframe)
     stop_override: StopLossOverride | None = None
@@ -1031,8 +1035,12 @@ def run_checksum(
     )
     if market.empty or market.df_1m.empty:
         return 0.0, 0, "데이터 없음 — 검산 건너뜀"
+    # WAN-384 명시 핀: 이 표는 존폭 필터를 켠 채(1.28) 낸 기록이다.
     params = harness.build_params(
-        entry_mode="zone_limit", take_profit_r=TP_MULTIPLE, fill=harness.BASELINE_FILL
+        entry_mode="zone_limit",
+        take_profit_r=TP_MULTIPLE,
+        fill=harness.BASELINE_FILL,
+        max_zone_width_atr=harness.LEGACY_ZONE_WIDTH_FILTER_ON,
     )
     max_diff = 0.0
     compared = 0

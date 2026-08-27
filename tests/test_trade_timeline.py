@@ -639,8 +639,16 @@ def test_zone_width_skipped_rows_emit_symmetric_backtest_rows() -> None:
 
     ATR14=10이라 폭 5는 통과(0.5≤1.28, 행 없음), 폭 20은 기각(2.0>1.28 → 건너뜀 행). 1분봉
     없이 htf만으로 결정되는 순수 경로라 결정적으로 고정한다.
+
+    ⚠️ **WAN-384가 필터를 껐으므로 문턱을 명시로 켠다** — 이 테스트가 재는 것은 「필터에
+    걸린 셋업이 행으로 남는가」이지 「필터가 기본으로 켜져 있는가」가 아니다.
     """
-    from backtest.harness import MarketData, build_config, build_params
+    from backtest.harness import (
+        LEGACY_ZONE_WIDTH_FILTER_ON,
+        MarketData,
+        build_config,
+        build_params,
+    )
     from live.trade_timeline import (
         STATUS_BACKTEST_SKIP_ZONE_WIDTH,
         _zone_width_skipped_rows,
@@ -685,7 +693,7 @@ def test_zone_width_skipped_rows_emit_symmetric_backtest_rows() -> None:
     rows = _zone_width_skipped_rows(
         market,
         ob_result,
-        build_params(),
+        build_params(max_zone_width_atr=LEGACY_ZONE_WIDTH_FILTER_ON),
         build_config(_TF),
         day_start_ms=times[10],
         day_end_ms=times[20],

@@ -70,9 +70,15 @@ _REAL_END = "2024-07-01"
 
 
 def test_adopted_base_matches_today_defaults() -> None:
-    """오늘의 기본값에서 통과한다 — 이 테스트가 깨지면 표의 제목이 거짓이 된 것이다."""
+    """오늘의 기본값에서 통과한다 — 이 테스트가 깨지면 표의 제목이 거짓이 된 것이다.
+
+    🚨 **존폭 축만은 예외다**(WAN-384) — 이 사다리는 필터를 켠 채(1.28) 낸 기록이라
+    문턱이 **명시 핀**이고, 그래서 「기본값과 같은가」가 아니라 「그 시절 채택값과 같은가」를
+    본다(`_assert_adopted_base`도 그렇게 검사한다).
+    """
     _assert_adopted_base()
-    assert ConfluenceParams().max_zone_width_atr == ADOPTED_ZONE_WIDTH
+    assert ConfluenceParams().max_zone_width_atr is None  # 오늘의 채택은 꺼짐
+    assert ADOPTED_ZONE_WIDTH == harness.LEGACY_ZONE_WIDTH_FILTER_ON == 1.28
     assert ConfluenceParams().invalidation_cancel == "bar_close"
     assert PositionSizingParams().min_stop_distance_fraction == ADOPTED_STOP_GUARD
 
@@ -280,7 +286,12 @@ def test_zone_width_filter_off_is_a_superset() -> None:
     쓴 불변식). 필터는 후보를 **거르기만** 하므로 상위집합이어야 맞다.
     """
     _skip_without_real_data()
-    on = run_cells([_REAL_SYMBOL], [_REAL_TF], **_shared_kwargs())
+    on = run_cells(
+        [_REAL_SYMBOL],
+        [_REAL_TF],
+        max_zone_width_atr=ADOPTED_ZONE_WIDTH,
+        **_shared_kwargs(),
+    )
     off = run_cells(
         [_REAL_SYMBOL],
         [_REAL_TF],

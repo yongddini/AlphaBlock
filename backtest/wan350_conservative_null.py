@@ -211,7 +211,8 @@ MOST_CONSERVATIVE_ARM = "D"
 
 def describe_engine() -> str:
     """이 리포트가 검정한 엔진의 지문 — 산출물만 봐도 어떤 존·밴드·필터로 돌았는지 드러나게."""
-    p = ConfluenceParams()
+    # WAN-384 명시 핀 — 이 지문은 존폭 필터를 켠 채(1.28) 낸 표의 것이다.
+    p = harness.pin_zone_width(ConfluenceParams(), harness.LEGACY_ZONE_WIDTH_FILTER_ON)
     band = p.deviation_filter.band_bar if p.deviation_filter else None
     return (
         f"entry_mode={p.entry_mode}, rsi_gate_mode={p.rsi_gate_mode}, "
@@ -812,7 +813,7 @@ def run_verify(*, jobs: int = 1) -> list[VerifyRow]:
         _verify_one(
             check="armA-filter-on-vs-wan176",
             reference_csv=WAN176_NULL_CSV,
-            max_zone_width_atr=ConfluenceParams().max_zone_width_atr,
+            max_zone_width_atr=harness.LEGACY_ZONE_WIDTH_FILTER_ON,
             jobs=jobs,
         ),
         _verify_one(

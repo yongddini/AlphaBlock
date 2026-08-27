@@ -281,6 +281,7 @@ def run_report(
         reentry=True,
         reentry_entry_rule="freeze",
         invalidation_cancel=harness.LEGACY_INVALIDATION_CANCEL,
+        max_zone_width_atr=harness.LEGACY_ZONE_WIDTH_FILTER_ON,
     )
     if funding_proxy:
         payloads, note = apply_funding_proxy(payloads)

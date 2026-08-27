@@ -186,7 +186,10 @@ def _metrics_row(
 
 def run_audit(*, funding: bool = True) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """감사 본체 — (후보 조인, 이벤트 거래, 집계) 프레임을 낸다."""
-    params: ConfluenceParams = harness.build_params()  # 채택 기본값 그대로.
+    # WAN-384 명시 핀: 이 표는 존폭 필터를 켠 채(1.28) 낸 기록이다.
+    params: ConfluenceParams = harness.build_params(
+        max_zone_width_atr=harness.LEGACY_ZONE_WIDTH_FILTER_ON
+    )
     cfg = harness.legacy_build_config(PILOT_TIMEFRAME, funding_enabled=funding)
     market = harness.load_market_data(
         PILOT_SYMBOL,

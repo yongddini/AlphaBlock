@@ -93,9 +93,14 @@ def _bare(candidates: Any) -> list[tuple[Any, ...]]:
 
 
 def test_labels_match_today_defaults() -> None:
-    """이 테스트가 깨지면 표의 제목(1.28 · 0.3%)이 거짓이 된 것이다."""
+    """이 테스트가 깨지면 표의 제목(1.28 · 0.3%)이 거짓이 된 것이다.
+
+    🚨 **존폭 축만 예외다**(WAN-384) — 이 격자는 필터를 켠 채(1.28) 낸 기록이라 중심점이
+    **명시 핀**이고, 그래서 「기본값과 같은가」가 아니라 「그 시절 채택값과 같은가」를 본다.
+    """
     assert_adopted_base()
-    assert ConfluenceParams().max_zone_width_atr == ADOPTED_ZONE_WIDTH
+    assert ConfluenceParams().max_zone_width_atr is None  # 오늘의 채택은 꺼짐
+    assert ADOPTED_ZONE_WIDTH == harness.LEGACY_ZONE_WIDTH_FILTER_ON == 1.28
     assert PositionSizingParams().min_stop_distance_fraction == ADOPTED_STOP_GUARD
     assert ADOPTED_ZONE_WIDTH in WIDTH_POINTS
     assert ADOPTED_STOP_GUARD in GUARD_POINTS
@@ -106,7 +111,7 @@ def test_adopted_base_rejects_a_moved_threshold(monkeypatch: pytest.MonkeyPatch)
     import backtest.wan376_zone_thickness as module
 
     monkeypatch.setattr(module, "ADOPTED_ZONE_WIDTH", 9.99)
-    with pytest.raises(AssertionError, match="채택 존폭 문턱이 움직였"):
+    with pytest.raises(AssertionError, match="존폭 중심점"):
         module.assert_adopted_base()
 
 
@@ -125,8 +130,21 @@ def test_width_label_separates_off_from_a_number() -> None:
 def test_observation_field_moves_nothing() -> None:
     """켜도 후보·체결·청산이 **비트 단위로 같다** — 관측이 대상을 바꾸면 이 측정은 무효다."""
     _skip_without_real_data()
-    off = run_cells([_REAL_SYMBOL], [_REAL_TF], **_shared_kwargs())
-    on = run_cells([_REAL_SYMBOL], [_REAL_TF], observe_zone_width_atr=True, **_shared_kwargs())
+    # ⚠️ 두 팔의 **문턱이 같아야** 이 검사가 「관측 축」을 재지 「필터 축」을 재지 않는다
+    # (WAN-384 이후 문턱은 명시다 — 기본값은 꺼짐).
+    off = run_cells(
+        [_REAL_SYMBOL],
+        [_REAL_TF],
+        max_zone_width_atr=ADOPTED_ZONE_WIDTH,
+        **_shared_kwargs(),
+    )
+    on = run_cells(
+        [_REAL_SYMBOL],
+        [_REAL_TF],
+        max_zone_width_atr=ADOPTED_ZONE_WIDTH,
+        observe_zone_width_atr=True,
+        **_shared_kwargs(),
+    )
     a = off[0].candidates[harness.SEGMENT_FULL]
     b = on[0].candidates[harness.SEGMENT_FULL]
     assert a, "후보가 없어 검사가 성립하지 않습니다."
@@ -142,7 +160,14 @@ def test_observation_field_moves_nothing() -> None:
 def test_observed_ratio_respects_the_adopted_threshold() -> None:
     """필터를 켠 판의 후보는 **정의상** 문턱 이하다 — 아니면 엔진과 관측이 다른 값을 본다."""
     _skip_without_real_data()
-    on = run_cells([_REAL_SYMBOL], [_REAL_TF], observe_zone_width_atr=True, **_shared_kwargs())
+    on = run_cells(
+        [_REAL_SYMBOL],
+        [_REAL_TF],
+        # WAN-384 이후 문턱은 명시다(기본값은 꺼짐) — 안 주면 「필터 켠 판」이 아니게 된다.
+        max_zone_width_atr=ADOPTED_ZONE_WIDTH,
+        observe_zone_width_atr=True,
+        **_shared_kwargs(),
+    )
     ratios = [
         c.zone_width_atr
         for c in on[0].candidates[harness.SEGMENT_FULL]
@@ -167,7 +192,8 @@ def test_shortcut_arm_reproduces_the_straight_arm() -> None:
     straight = run_cells(
         [_REAL_SYMBOL],
         [_REAL_TF],
-        max_zone_width_atr=harness.UNSET,
+        # WAN-384 이후 문턱은 명시다 — 센티넬은 「필터 꺼짐」으로 풀려 등식이 무의미해진다.
+        max_zone_width_atr=ADOPTED_ZONE_WIDTH,
         observe_zone_width_atr=True,
         **_shared_kwargs(),
     )

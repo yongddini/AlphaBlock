@@ -249,6 +249,8 @@ def build_payloads(
         jobs=jobs,
         take_profit_liquidity=harness.ADOPTED_TAKE_PROFIT_LIQUIDITY,
         observe_macd=True,
+        # WAN-384 명시 핀: 이 표는 존폭 필터를 켠 채(1.28) 낸 기록이다.
+        max_zone_width_atr=harness.LEGACY_ZONE_WIDTH_FILTER_ON,
         **ADOPTED_CELL_KWARGS,  # type: ignore[arg-type]
     )
 

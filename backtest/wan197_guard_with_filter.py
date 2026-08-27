@@ -256,6 +256,20 @@ class AuditResult:
     funding_note: str = ""
 
 
+def lens_params() -> dict[str, ConfluenceParams]:
+    """이 리포트가 렌즈마다 엔진에 넘기는 파라미터 — 테스트가 **값으로** 확인한다.
+
+    🚨 **WAN-384 명시 핀** — 이 표의 본문이 「필터 켠 오늘 엔진」이라 문턱이 곧 실험
+    조건이다. WAN-384가 채택 기본값을 꺼짐으로 되돌린 뒤 센티넬(`UNSET`)에 맡기면
+    **필터 없는 판이 돌아 본문과 어긋난다** — 그 시절 문턱(1.28)에 못 박는다.
+    """
+    pin = harness.LEGACY_ZONE_WIDTH_FILTER_ON
+    return {
+        LENS_PRIMARY: harness.build_params(max_zone_width_atr=pin),
+        LENS_PEN: harness.build_params(fill=harness.fill_preset(LENS_PEN), max_zone_width_atr=pin),
+    }
+
+
 def run_audit(
     *,
     symbols: tuple[str, ...] = harness.LEGACY_NINE_SYMBOLS,
@@ -280,11 +294,7 @@ def run_audit(
     result.funding_note = funding_note
     if funding_note:
         print(f"[wan197] {funding_note}", flush=True)
-    # 렌즈별 채택 파라미터 — 필터 1.28은 UNSET 규약으로 그대로 물려받는다(끄지 않는다).
-    params_by_lens = {
-        LENS_PRIMARY: harness.build_params(),
-        LENS_PEN: harness.build_params(fill=harness.fill_preset(LENS_PEN)),
-    }
+    params_by_lens = lens_params()
     for timeframe in timeframes:
         for symbol in symbols:
             # 6년 1분봉(심볼당 ~315만 행)은 두 심볼 몫이 겹치는 순간이 메모리 피크다 —

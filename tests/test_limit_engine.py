@@ -23,6 +23,7 @@ import pytest
 import backtest.zone_limit_backtest as zlb
 import strategy.confluence as confluence
 import strategy.realtime_band as realtime_band
+from backtest.harness import LEGACY_ZONE_WIDTH_FILTER_ON
 from backtest.substep import SubStep, simulate_zone_limit_trade
 from live import limit_engine
 from live.limit_engine import ZoneLimitLiveEngine
@@ -86,9 +87,16 @@ def _zone(top: float = 95.0, bottom: float = 90.0) -> OrderBlock:
 
 
 def _params(**kw: object) -> ConfluenceParams:
-    # 존폭 필터는 기본 켜짐(1.28, WAN-159)인데 이 합성 데이터의 ATR(≈1.0)로는 폭 5짜리
-    # 존이 걸러진다 — 필터 자체를 검증하는 테스트 말고는 명시적으로 끈다.
+    # 존폭 필터는 채택 기본값이 **꺼짐**(WAN-384)이다 — 명시적 끄기를 그대로 둔다
+    # (기본값이 또 움직여도 이 테스트들이 필터에 흔들리지 않게).
     kw.setdefault("max_zone_width_atr", None)
+    return ConfluenceParams(**kw)
+
+
+#: 존폭 필터를 **켠** 파라미터 — 필터 자체를 검증하는 테스트 전용(WAN-384 이후 옵트인).
+#: 라벨이 아니라 값으로 켜야 「필터를 켰다고 믿으면서 안 켜진」 사고가 안 난다.
+def _filter_on(**kw: object) -> ConfluenceParams:
+    kw.setdefault("max_zone_width_atr", LEGACY_ZONE_WIDTH_FILTER_ON)
     return ConfluenceParams(**kw)
 
 
@@ -340,7 +348,7 @@ def test_optin_gate_condition_fail_cancel(monkeypatch: pytest.MonkeyPatch) -> No
 def test_zone_width_filter_blocks_wide_zone(monkeypatch: pytest.MonkeyPatch) -> None:
     """존폭 필터(WAN-159 채택 기본값 1.28)가 라이브 예약 경로에도 걸린다."""
     wide = _zone(top=95.0, bottom=90.0)  # 폭 5 vs ATR≈1 → 5.0 > 1.28 기각.
-    engine = _engine(monkeypatch, [wide], params=ConfluenceParams())
+    engine = _engine(monkeypatch, [wide], params=_filter_on())
     events = engine.on_substep(_SYMBOL, _TF, time_ms=_FORMING, low=94.9, high=99.0, close=95.2)
     assert events == []
     assert engine.book.pending(_SYMBOL, _TF) is None
@@ -354,9 +362,7 @@ def test_zone_width_skip_is_journaled(monkeypatch: pytest.MonkeyPatch, tmp_path:
     journal = OrderJournal(tmp_path / "j.db")
     session = journal.start_session(now_ms=0)
     wide = _zone(top=95.0, bottom=90.0)  # 폭 5 vs ATR≈1 → 기각.
-    engine = _engine(
-        monkeypatch, [wide], params=ConfluenceParams(), journal=journal, session_id=session
-    )
+    engine = _engine(monkeypatch, [wide], params=_filter_on(), journal=journal, session_id=session)
     events = engine.on_substep(_SYMBOL, _TF, time_ms=_FORMING, low=94.9, high=99.0, close=95.2)
     assert events == []  # 이벤트 흐름은 옛 동작과 같다(부수효과만 추가).
     assert engine.book.pending(_SYMBOL, _TF) is None
@@ -380,7 +386,7 @@ def test_skip_listener_fires_once_per_bar_without_emitting_events(
     engine = _engine(
         monkeypatch,
         [wide],
-        params=ConfluenceParams(),
+        params=_filter_on(),
         journal=journal,
         session_id=session,
         skip_listener=lambda *a: seen.append(a),
@@ -424,7 +430,7 @@ def test_fill_carries_zone_width_atr_when_filter_on(monkeypatch: pytest.MonkeyPa
     통과한다 — 그 비율이 `LimitFill.zone_width_atr`에 그대로 실린다.
     """
     narrow = _zone(top=95.0, bottom=94.2)  # 폭 0.8, ATR≈1.0 → 0.8 ≤ 1.28 통과.
-    engine = _engine(monkeypatch, [narrow], params=ConfluenceParams())
+    engine = _engine(monkeypatch, [narrow], params=_filter_on())
     events = engine.on_substep(_SYMBOL, _TF, time_ms=_FORMING + _M, low=94.9, high=99.0, close=95.2)
     filled = [e for e in events if e.kind == "filled"]
     assert len(filled) == 1 and filled[0].fill is not None

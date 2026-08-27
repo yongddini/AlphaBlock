@@ -383,7 +383,12 @@ def run_null_cell(task: _NullTask, *, log: bool = True) -> NullDraws | None:
             print(f"[wan284] {task.symbol} {task.timeframe}: 데이터 없음 — 건너뜀", flush=True)
         return None
 
-    params = harness.build_params(fill=harness.fill_preset(task.fill_name), short_enabled=True)
+    # WAN-384 명시 핀: 이 표는 존폭 필터를 켠 채(1.28) 낸 기록이다.
+    params = harness.build_params(
+        fill=harness.fill_preset(task.fill_name),
+        short_enabled=True,
+        max_zone_width_atr=harness.LEGACY_ZONE_WIDTH_FILTER_ON,
+    )
     frame = _prepare_htf(market.htf_df)
     htf_times = [int(t) for t in frame["open_time"].astype("int64").tolist()]
     htf_closes = [float(v) for v in frame["close"].astype(float).tolist()]
@@ -1261,7 +1266,8 @@ def _p(value: float | None) -> str:
 
 
 def describe_engine() -> str:
-    p = ConfluenceParams()
+    # WAN-384 명시 핀 — 이 지문은 존폭 필터를 켠 채(1.28) 낸 표의 것이다.
+    p = harness.pin_zone_width(ConfluenceParams(), harness.LEGACY_ZONE_WIDTH_FILTER_ON)
     band = p.deviation_filter.band_bar if p.deviation_filter else None
     return (
         f"entry_mode={p.entry_mode}, rsi_gate_mode={p.rsi_gate_mode}, "

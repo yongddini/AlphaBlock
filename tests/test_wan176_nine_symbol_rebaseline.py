@@ -143,7 +143,8 @@ def test_zw_params_turn_the_adopted_filter_off() -> None:
     """§3 엔진은 존폭 필터를 명시적으로 끈다 — 켜져 있으면 매칭 대조군이 오염된다."""
     params = zw_params()
     assert params.max_zone_width_atr is None
-    assert ConfluenceParams().max_zone_width_atr == 1.28  # 채택 기본값은 그대로다
+    # WAN-384가 채택 기본값도 껐다 — 그래도 이 모듈은 **명시로** 끈다(핀이 라벨이 아니다).
+    assert ConfluenceParams().max_zone_width_atr is None
     assert params.deviation_filter is not None  # 볼린저는 끄지 않는다(§2와 다른 축)
     assert wan142.LENS_PRIMARY == "baseline"
 

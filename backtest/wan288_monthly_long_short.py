@@ -742,6 +742,7 @@ def main(argv: list[str] | None = None) -> int:
             short_enabled=True,
             reentry=False,
             invalidation_cancel=harness.LEGACY_INVALIDATION_CANCEL,
+            max_zone_width_atr=harness.LEGACY_ZONE_WIDTH_FILTER_ON,
         )
         if not args.no_funding_proxy:
             cells, funding_note = apply_funding_proxy(cells)

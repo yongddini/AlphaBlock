@@ -202,6 +202,7 @@ def run_arm_cells(
         fill=fill,
         short_enabled=short_enabled,
         invalidation_cancel=harness.LEGACY_INVALIDATION_CANCEL,
+        max_zone_width_atr=harness.LEGACY_ZONE_WIDTH_FILTER_ON,
     )
     if funding_proxy:
         cells, note = apply_funding_proxy(cells)
@@ -778,7 +779,8 @@ def _signed_pct(value: float | None) -> str:
 
 
 def describe_engine() -> str:
-    p = ConfluenceParams()
+    # WAN-384 명시 핀 — 이 지문은 존폭 필터를 켠 채(1.28) 낸 표의 것이다.
+    p = harness.pin_zone_width(ConfluenceParams(), harness.LEGACY_ZONE_WIDTH_FILTER_ON)
     band = p.deviation_filter.band_bar if p.deviation_filter else None
     return (
         f"entry_mode={p.entry_mode}, rsi_gate_mode={p.rsi_gate_mode}, "

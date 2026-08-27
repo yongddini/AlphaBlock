@@ -150,6 +150,7 @@ def build_rows_for_lens(
         cold_segments=False,
         engine_check=engine_check,
         invalidation_cancel=harness.LEGACY_INVALIDATION_CANCEL,
+        max_zone_width_atr=harness.LEGACY_ZONE_WIDTH_FILTER_ON,
     )
     notes: dict[str, str] = {}
     gapped = sorted({_short(c.symbol) for c in cells if not c.funding[SEGMENT_FULL]})

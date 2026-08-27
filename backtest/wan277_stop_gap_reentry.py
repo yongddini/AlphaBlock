@@ -401,6 +401,7 @@ def main(argv: list[str] | None = None) -> int:
             reentry=True,
             reentry_entry_rule=REENTRY_ENTRY_RULE,
             invalidation_cancel=harness.LEGACY_INVALIDATION_CANCEL,
+            max_zone_width_atr=harness.LEGACY_ZONE_WIDTH_FILTER_ON,
         )
         nonfill_payloads = run_cells(
             symbols,
@@ -412,6 +413,7 @@ def main(argv: list[str] | None = None) -> int:
             reentry_entry_rule=REENTRY_ENTRY_RULE,
             limit_stop_nonfill=True,
             invalidation_cancel=harness.LEGACY_INVALIDATION_CANCEL,
+            max_zone_width_atr=harness.LEGACY_ZONE_WIDTH_FILTER_ON,
         )
         funding_note = ""
         if not args.no_funding_proxy:

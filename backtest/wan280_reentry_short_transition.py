@@ -578,7 +578,14 @@ def run_cell(task: _Task, *, log: bool = True) -> Wan280Cell | None:
     )
     if market.empty or market.df_1m.empty:
         return None
-    params = harness.build_params() if task.fill is None else harness.build_params(fill=task.fill)
+    # WAN-384 명시 핀: 이 표는 존폭 필터를 켠 채(1.28) 낸 기록이다.
+    params = (
+        harness.build_params(max_zone_width_atr=harness.LEGACY_ZONE_WIDTH_FILTER_ON)
+        if task.fill is None
+        else harness.build_params(
+            fill=task.fill, max_zone_width_atr=harness.LEGACY_ZONE_WIDTH_FILTER_ON
+        )
+    )
     # 측정 모듈이라 유동성 한도는 명시적으로 끈다(옛 북 CSV 비트 재현 규약, wan169 참고).
     cfg = harness.legacy_build_config(task.timeframe)
 
@@ -1046,7 +1053,8 @@ def _rr(value: float | None) -> str:
 
 
 def describe_engine() -> str:
-    p = ConfluenceParams()
+    # WAN-384 명시 핀 — 이 지문은 존폭 필터를 켠 채(1.28) 낸 표의 것이다.
+    p = harness.pin_zone_width(ConfluenceParams(), harness.LEGACY_ZONE_WIDTH_FILTER_ON)
     band = p.deviation_filter.band_bar if p.deviation_filter else None
     return (
         f"entry_mode={p.entry_mode}, rsi_gate_mode={p.rsi_gate_mode}, "

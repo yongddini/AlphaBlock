@@ -109,7 +109,9 @@ VERIFY_TIMEFRAMES: tuple[str, ...] = ("1h",)
 
 #: 필터 축의 두 값. `None` = 끄기(새 모서리) · `1.28` = 채택 기본값(검산 팔).
 FILTER_OFF: float | None = None
-FILTER_ON: float | None = ConfluenceParams().max_zone_width_atr  # = 1.28 (채택 기본값에서 읽는다)
+# ⚠️ WAN-384가 채택 기본값을 `None`(꺼짐)으로 되돌렸으므로 더 이상 기본값에서 못 읽는다 —
+# 이 표의 「켜짐」 모서리는 그 시절 문턱(`1.28`)에 **명시 고정**한다.
+FILTER_ON: float | None = harness.LEGACY_ZONE_WIDTH_FILTER_ON  # = 1.28 (WAN-159~383 채택 문턱)
 
 #: 롱 축 하나(이슈 범위 — 숏은 WAN-145/164가 이미 (c)로 냈다).
 LONG_ARM = wan151.LONG_ARM

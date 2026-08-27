@@ -16,6 +16,7 @@ import pytest
 
 from backtest.harness import (
     BASELINE_FILL,
+    LEGACY_ZONE_WIDTH_FILTER_ON,
     SEGMENT_OOS_WARM,
     build_params,
     detect_order_blocks,
@@ -291,7 +292,9 @@ def test_fixed_arm_reproduces_run_once(_market) -> None:  # type: ignore[no-unty
             continue
         eval_ms = eval_boundary_ms(window, segment)
         obr = detect_order_blocks(window)
-        params = build_params()
+        # WAN-384: 이 모듈은 존폭 필터를 켠 채(1.28) 낸 리포트라 대조 쪽도 같은 핀이어야
+        # 이 등식이 「연장 훅 배선」을 재지 「필터 축」을 재지 않는다.
+        params = build_params(max_zone_width_atr=LEGACY_ZONE_WIDTH_FILTER_ON)
         outcome = run_once(
             window, params=params, cfg=cfg, order_block_result=obr, eval_from_ms=eval_ms
         )

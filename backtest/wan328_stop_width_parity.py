@@ -192,7 +192,12 @@ def run_cell(work: CellWork) -> list[SetupRow]:
         market.htf_df,
         market.df_1m,
         work.timeframe,
-        params=harness.pin_invalidation_cancel(harness.build_params(fill=harness.BASELINE_FILL)),
+        # WAN-384 명시 핀: 이 표는 존폭 필터를 켠 채(1.28) 낸 기록이다.
+        params=harness.pin_invalidation_cancel(
+            harness.build_params(
+                fill=harness.BASELINE_FILL, max_zone_width_atr=harness.LEGACY_ZONE_WIDTH_FILTER_ON
+            )
+        ),
         cfg=harness.legacy_build_config(work.timeframe),
         order_block_result=harness.detect_order_blocks(market),
         setup_sink=sink,

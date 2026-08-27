@@ -365,6 +365,7 @@ def run_book_impact(
             # `oos_warm` 산출은 이 노브와 무관하다(같은 전체 창 후보의 경계 필터).
             cold_segments=False,
             invalidation_cancel=harness.LEGACY_INVALIDATION_CANCEL,
+            max_zone_width_atr=harness.LEGACY_ZONE_WIDTH_FILTER_ON,
         )
         payloads, note = apply_funding_proxy(payloads)
         if note and log:

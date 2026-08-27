@@ -114,7 +114,7 @@ PARITY_CSV_PATH = REPORTS_DIR / "wan376_shortcut_parity.csv"
 SUMMARY_PATH = REPORTS_DIR / "wan376_zone_thickness_summary.md"
 
 #: 채택 존폭 문턱(WAN-159)과 손절폭 가드(WAN-79) — 지도의 「지금 여기」 점이다.
-ADOPTED_ZONE_WIDTH = 1.28
+ADOPTED_ZONE_WIDTH = harness.LEGACY_ZONE_WIDTH_FILTER_ON  # 1.28 — WAN-159~383 채택 문턱
 ADOPTED_STOP_GUARD = 0.003
 
 #: §0 지도의 존폭 문턱 점 — 채택값을 **가운데** 두고 양쪽으로 벌린다. `None` = 필터 끔.
@@ -420,8 +420,9 @@ def arm_payloads(
     """한 팔의 칸 후보 — 두 팔의 차이는 **필터를 어디서 거는가** 하나다."""
     kwargs = _cell_kwargs()
     if arm == "straight":
-        # 채택 문턱은 **센티넬로 물려받는다**(핀이 아니다) — `assert_adopted_base`가 그 값이
-        # 1.28임을 동작으로 고정하므로 라벨과 엔진이 갈라질 수 없다.
+        # 🚨 WAN-384가 채택 문턱을 껐으므로 여기서는 **명시 고정**한다 — 센티넬에 맡기면
+        # 「엔진이 1.28로 거른 팔」 라벨을 단 채 필터 없이 돌아 지름길 팔과의 등식이
+        # 무의미해진다(WAN-91/95/112/123/159 부류).
         return run_cells(
             symbols,
             timeframes,
@@ -429,7 +430,7 @@ def arm_payloads(
             end=end,
             jobs=jobs,
             engine_check=False,
-            max_zone_width_atr=harness.UNSET,
+            max_zone_width_atr=ADOPTED_ZONE_WIDTH,
             **kwargs,  # type: ignore[arg-type]
         )
     if arm == "shortcut":
@@ -448,16 +449,18 @@ def arm_payloads(
 
 
 def assert_adopted_base() -> None:
-    """라벨이 **오늘의 채택 기본값**과 같은지 — 어긋나면 시끄럽게 죽는다.
+    """라벨이 이 표가 잰 엔진과 같은지 — 어긋나면 시끄럽게 죽는다.
 
-    이 모듈은 핀을 하나도 안 쓰고 센티넬로 채택값을 물려받으므로(WAN-305), 기본값이 움직이면
-    표의 라벨(`1.28` · `0.3%`)만 낡고 숫자는 조용히 새 값으로 도는 사고가 난다.
+    기본값이 움직이면 표의 라벨(`1.28` · `0.3%`)만 낡고 숫자는 조용히 새 값으로 도는 사고가
+    난다. 🚨 **존폭 축은 WAN-384가 기본값을 껐으므로 이제 명시 핀이다** — 그래서 이 검사도
+    「기본값이 1.28인가」가 아니라 「이 모듈의 중심점이 그 시절 채택값과 같은가」를 본다.
     """
     base = ConfluenceParams()
-    if base.max_zone_width_atr != ADOPTED_ZONE_WIDTH:
+    if ADOPTED_ZONE_WIDTH != harness.LEGACY_ZONE_WIDTH_FILTER_ON:
         raise AssertionError(
-            f"채택 존폭 문턱이 움직였습니다({base.max_zone_width_atr!r} != {ADOPTED_ZONE_WIDTH}) "
-            "— 이 모듈의 라벨·격자 중심점을 함께 고치세요(WAN-159)."
+            f"이 격자의 존폭 중심점({ADOPTED_ZONE_WIDTH})이 WAN-159~383 채택값"
+            f"({harness.LEGACY_ZONE_WIDTH_FILTER_ON})과 어긋납니다 — 라벨·격자 중심점을 "
+            "함께 고치세요(WAN-384 §파급)."
         )
     if base.invalidation_cancel != "bar_close":
         raise AssertionError(

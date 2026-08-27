@@ -316,7 +316,10 @@ def run_cell(
         obr = ob_cache[ob_key]
         cfg = harness.legacy_build_config(window.timeframe, funding_enabled=True)
         for fill in fills:
-            params = harness.build_params(fill=fill)
+            # WAN-384 명시 핀: 이 표는 존폭 필터를 켠 채(1.28) 낸 기록이다.
+            params = harness.build_params(
+                fill=fill, max_zone_width_atr=harness.LEGACY_ZONE_WIDTH_FILTER_ON
+            )
             filled_entries: dict[str, list[int]] = {}
             for arm in ARMS:
                 t0 = time.time()

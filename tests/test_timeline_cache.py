@@ -108,7 +108,8 @@ def test_fingerprint_run_id_changes_with_warmup_and_day() -> None:
 def test_engine_name_reflects_adopted_knobs() -> None:
     """(Ⅰ) 설명형 이름은 실제 파라미터에서 나온다 — 채택 채택 노브가 그대로 보인다."""
     name = cell_fingerprint(_SYMBOL, _TF, _DAY, warmup_days=120, revision=_REV).engine_name()
-    assert name == "오프셋2bp · 라이브밴드 · 게이트없음 · 필터1.28 · 1.5R · 롱온리 · 단일포지션"
+    # WAN-384가 존폭 필터를 껐다 — 이름이 파라미터에서 나오므로 토큰도 저절로 바뀐다.
+    assert name == "오프셋2bp · 라이브밴드 · 게이트없음 · 필터없음 · 1.5R · 롱온리 · 단일포지션"
 
 
 def test_display_label_carries_hash() -> None:

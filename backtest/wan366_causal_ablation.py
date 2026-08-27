@@ -146,8 +146,15 @@ SUMMARY_PATH = REPORTS_DIR / "wan366_causal_ablation_summary.md"
 #: 파괴선 — MDD가 이 선을 넘으면 「청산 0건」이라도 계좌는 사실상 끝났다(WAN-312 §4).
 RUIN_MDD = 0.50
 
-#: 채택 존폭 문턱(WAN-159). §0의 「좁다/넓다」 경계이자 사다리 `L2`가 켜는 값이다.
-ADOPTED_ZONE_WIDTH = 1.28
+#: 사다리 `L2`가 켜는 존폭 문턱이자 §0의 「좁다/넓다」 경계 — **WAN-159~WAN-383 시절의 채택
+#: 값(1.28)**이다.
+#:
+#: 🚨 **WAN-384가 그 필터를 껐다**(`ConfluenceParams().max_zone_width_atr`는 이제 `None`).
+#: 이 표는 필터를 켠 채 낸 기록이라 문턱을 **명시 고정**해 그 시절 엔진으로 보존한다
+#: (`harness.LEGACY_ZONE_WIDTH_FILTER_ON`과 같은 값이고, `_assert_adopted_base`가 둘이
+#: 갈라지지 않는지 동작으로 지킨다). ⚠️ 그래서 **`L4`는 더 이상 「인자 없는 채택 북」이
+#: 아니다** — 오늘 기준으로는 「채택 북 ＋ 존폭 필터 1.28」이다(라벨을 그렇게 고쳤다).
+ADOPTED_ZONE_WIDTH = harness.LEGACY_ZONE_WIDTH_FILTER_ON
 
 #: 채택 손절폭 가드(WAN-79). 사다리 `L3`가 켜는 값이고 `0.0`이 끔이다.
 ADOPTED_STOP_GUARD = 0.003
@@ -186,7 +193,13 @@ class Rung:
 
     @property
     def is_adopted(self) -> bool:
-        """이 단이 **인자 없는 채택 북** 그 자체인가 — 검산 (a)를 걸 수 있는 유일한 단."""
+        """이 단이 이 사다리의 **꼭대기**(WAN-383까지의 채택 북)인가.
+
+        🚨 **WAN-384 이후 이 단은 「인자 없는 채택 북」이 아니다** — 존폭 필터가 꺼진 것이
+        오늘의 채택이라, 이 단은 「채택 북 ＋ 존폭 필터 1.28」이다. 검산 (a)(격리 성과가
+        `harness.run_once`와 비트 일치하는지)는 **같은 문턱을 넘겨야** 성립하므로 여전히
+        이 단에서만 건다.
+        """
         return (
             self.bollinger
             and self.zone_width == ADOPTED_ZONE_WIDTH
@@ -225,7 +238,8 @@ RUNGS: tuple[Rung, ...] = (
     ),
     Rung(
         "L4",
-        "＋ 재진입 ON(band) = 오늘의 채택 기본값",
+        # ⚠️ WAN-384 이후 이 단은 「오늘의 채택 기본값」이 아니다(존폭 필터가 꺼졌다).
+        f"＋ 재진입 ON(band) = WAN-383까지의 채택 기본값(존폭 {ADOPTED_ZONE_WIDTH})",
         "G2",
         True,
         ADOPTED_ZONE_WIDTH,
@@ -462,10 +476,11 @@ def _assert_adopted_base() -> None:
     자리) 여기서 **동작으로** 막는다.
     """
     params = ConfluenceParams()
-    if params.max_zone_width_atr != ADOPTED_ZONE_WIDTH:
+    if ADOPTED_ZONE_WIDTH != harness.LEGACY_ZONE_WIDTH_FILTER_ON:
         raise AssertionError(
-            f"채택 존폭 문턱이 {params.max_zone_width_atr}로 바뀌었습니다 — 이 모듈의 "
-            f"`ADOPTED_ZONE_WIDTH`({ADOPTED_ZONE_WIDTH})와 라벨을 함께 고치세요."
+            f"이 사다리의 존폭 문턱({ADOPTED_ZONE_WIDTH})이 WAN-159~383 채택값"
+            f"({harness.LEGACY_ZONE_WIDTH_FILTER_ON})과 어긋납니다 — 이 표는 필터를 켠 채 낸 "
+            "기록이라 그 시절 문턱에 고정돼 있어야 합니다(WAN-384 §파급)."
         )
     if params.invalidation_cancel != "bar_close":
         raise AssertionError(
@@ -536,11 +551,9 @@ def generation_payloads(
         jobs=jobs,
         engine_check=any(r.is_adopted for r in rungs),
         bollinger=head.bollinger,
-        # 채택 문턱은 **센티넬로 물려받는다**(핀이 아니다) — `_assert_adopted_base`가 그
-        # 값이 1.28임을 동작으로 고정하므로 라벨과 엔진이 갈라질 수 없다.
-        max_zone_width_atr=(
-            harness.UNSET if head.zone_width == ADOPTED_ZONE_WIDTH else head.zone_width
-        ),
+        # 🚨 WAN-384 이후 문턱은 **언제나 명시**다 — 채택 기본값이 꺼짐이라 센티넬에 맡기면
+        # `L2`~`L4`가 라벨만 「필터 1.28」인 채 필터 없이 돈다(WAN-91/95/112/123/159 부류).
+        max_zone_width_atr=head.zone_width,
         **kwargs,  # type: ignore[arg-type]
     )
 

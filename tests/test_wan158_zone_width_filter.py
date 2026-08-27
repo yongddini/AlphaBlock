@@ -143,9 +143,13 @@ def _atr_at(htf: pd.DataFrame, pos: int, length: int = 14) -> float:
 # --------------------------------------------------------------------------- #
 
 
-def test_adopted_default_now_filters_at_1_28() -> None:
-    """WAN-159가 기본값을 옵트인(꺼짐) → 채택(1.28, 좁은 존만)으로 승격했다."""
-    assert ConfluenceParams().max_zone_width_atr == 1.28
+def test_adopted_default_is_off_again() -> None:
+    """WAN-159가 채택(1.28)으로 올렸던 기본값을 **WAN-384가 다시 껐다**.
+
+    필터 자체는 옵트인으로 존치한다(아래 테스트들이 그 동작을 계속 지킨다) — 바뀐 것은
+    「아무것도 안 주면 무엇이 도는가」 하나다.
+    """
+    assert ConfluenceParams().max_zone_width_atr is None
 
 
 def test_off_reproduces_the_old_candidate_set() -> None:
@@ -297,14 +301,18 @@ def test_threshold_must_be_positive() -> None:
 
 
 def test_cli_axis_defaults_to_the_adopted_engine() -> None:
-    """인자를 안 주면 축이 `(UNSET,)` — 채택 기본값(1.28)으로 도는 행이 나온다(WAN-159)."""
+    """인자를 안 주면 축이 `(UNSET,)` — 채택 기본값(WAN-384: 꺼짐)으로 도는 행이 나온다."""
     args = build_parser().parse_args(["--symbol", "BTCUSDT"])
     grid = grid_from_args(args)
     assert grid.max_zone_widths_atr == (UNSET,)
     combos = iter_combos(grid)
     assert [c.max_zone_width_atr for c in combos] == [UNSET]
-    # 센티넬은 build_params에서 채택 기본값으로 풀린다.
-    assert build_params(max_zone_width_atr=combos[0].max_zone_width_atr).max_zone_width_atr == 1.28
+    # 센티넬은 build_params에서 채택 기본값으로 풀린다 — 지금은 꺼짐이다.
+    assert build_params(max_zone_width_atr=combos[0].max_zone_width_atr).max_zone_width_atr is None
+    # ⚠️ 그래도 센티넬과 명시적 `None`은 규약상 다르다 — `base`가 핀된 파라미터면 갈린다.
+    pinned = ConfluenceParams(max_zone_width_atr=1.28)
+    assert build_params(base=pinned).max_zone_width_atr == 1.28
+    assert build_params(max_zone_width_atr=None, base=pinned).max_zone_width_atr is None
 
 
 def test_cli_axis_parses_none_and_numbers() -> None:
