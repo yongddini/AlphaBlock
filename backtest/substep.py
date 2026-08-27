@@ -895,3 +895,131 @@ def simulate_zone_limit_trade(
             order_rested=order_rested,
         )
     return ZoneLimitOutcome(status=ZoneLimitStatus.NO_TOUCH, order_rested=order_rested)
+
+
+@dataclass(frozen=True)
+class FixedEntryExit:
+    """진입이 **이미 확정된** 포지션 하나의 청산 (WAN-386 §0).
+
+    `simulate_zone_limit_trade`가 「주문을 걸고 기다렸다가 체결하고 청산한다」라면, 이쪽은
+    **체결 시각·가격·손절선을 인자로 받아 청산만** 낸다. 확인 진입 팔(WAN-383 §3)은 트리거가
+    발동한 순간의 **시장가 진입**이라 대기·게이트·밴드 층이 통째로 없고, 남는 것이 이 청산
+    판정뿐이기 때문이다.
+
+    🚨 **판정 규칙은 `simulate_zone_limit_trade`의 그것과 글자 그대로 같다** — 진입 스텝부터
+    보고(관통 감사 WAN-46의 그 자리), 같은 스텝에서 손절·익절이 함께 닿으면 `stop_before_tp`가
+    손절을 이기게 하며, 데이터 종료까지 안 닫히면 `FILLED_OPEN`이다. 두 경로가 갈라지면
+    「기준 팔 ≡ 인자 없는 채택 북」 검산이 깨지므로 회귀 테스트가 **값으로** 고정한다.
+    """
+
+    status: ZoneLimitStatus
+    """`FILLED_EXITED` 또는 `FILLED_OPEN` 둘 중 하나(진입은 전제라 미체결 상태가 없다)."""
+    exit_time: int | None = None
+    exit_price: float | None = None
+    exit_reason: SignalExitReason | None = None
+    mfe_r: float | None = None
+    mae_r: float | None = None
+    exit_extreme: float | None = None
+    """손절 청산 봉의 불리 극값(롱=저가) — `ZoneLimitOutcome.exit_extreme`과 같은 규약."""
+    same_step_take_profit: bool = False
+    """진입과 익절이 **같은 1분 스텝**인가 (WAN-336의 자를 이 경로에도)."""
+    penetration: bool = False
+    """진입과 손절이 **같은 1분 스텝**인가 (WAN-46 관통 감사의 자를 이 경로에도)."""
+
+
+def simulate_fixed_entry_exits(
+    *,
+    direction: OrderBlockDirection,
+    entry_index: int,
+    entry_price: float,
+    stop_price: float,
+    take_profit_prices: Sequence[float | None],
+    substeps: Sequence[SubStep],
+    stop_before_tp: bool = True,
+) -> list[FixedEntryExit]:
+    """확정 진입 하나를 **여러 익절 목표로 동시에** 청산 판정한다 (WAN-386 §0, 순수 함수).
+
+    📌 **한 번의 순회로 목표 여러 개를 낸다** — 익절 배수는 청산만 바꾸고(WAN-137/143 훅)
+    손절선·진입가는 공유하므로, 목표마다 서브스텝을 다시 훑는 것은 같은 일을 N번 하는 것이다.
+    반환 순서는 `take_profit_prices` 순서 그대로다.
+
+    `entry_index`는 **진입이 일어난 스텝의 인덱스**다(그 스텝부터 판정한다). `stop_price`는
+    진입 시점 손절 참조가이고 MFE/MAE의 자(1R)도 그것이다 — 이 함수는 손절선을 옮기지 않는다
+    (본절 스탑·부분 청산은 이 경로의 관심사가 아니다).
+
+    ⚠️ MFE/MAE는 **목표마다 다르다**(보유 구간이 다르므로) — 청산 스텝까지만 보고 그 이후는
+    보지 않는다는 WAN-90 규약을 목표별로 지킨다.
+    """
+    if entry_index < 0 or entry_index >= len(substeps):
+        raise ValueError(f"entry_index가 서브스텝 범위 밖입니다: {entry_index}")
+    is_long = direction is OrderBlockDirection.BULLISH
+    risk = abs(entry_price - stop_price)
+    count = len(take_profit_prices)
+    entry_time = substeps[entry_index].time
+
+    resolved: list[FixedEntryExit | None] = [None] * count
+    hold_high = [0.0] * count
+    hold_low = [0.0] * count
+    started = False
+    remaining = count
+
+    def _excursions(idx: int) -> tuple[float | None, float | None]:
+        if risk <= 0:
+            return None, None
+        if is_long:
+            return (hold_high[idx] - entry_price) / risk, (hold_low[idx] - entry_price) / risk
+        return (entry_price - hold_low[idx]) / risk, (entry_price - hold_high[idx]) / risk
+
+    for step in islice(substeps, entry_index, None):
+        if remaining == 0:
+            break
+        stop_hit = step.low <= stop_price if is_long else step.high >= stop_price
+        for idx, tp_price in enumerate(take_profit_prices):
+            if resolved[idx] is not None:
+                continue
+            if not started:
+                hold_high[idx] = step.high
+                hold_low[idx] = step.low
+            else:
+                hold_high[idx] = max(hold_high[idx], step.high)
+                hold_low[idx] = min(hold_low[idx], step.low)
+            tp_hit = tp_price is not None and (
+                step.high >= tp_price if is_long else step.low <= tp_price
+            )
+            if stop_hit and (not tp_hit or stop_before_tp):
+                mfe_r, mae_r = _excursions(idx)
+                resolved[idx] = FixedEntryExit(
+                    status=ZoneLimitStatus.FILLED_EXITED,
+                    exit_time=step.time,
+                    exit_price=stop_price,
+                    exit_reason=SignalExitReason.STOP_LOSS,
+                    mfe_r=mfe_r,
+                    mae_r=mae_r,
+                    exit_extreme=step.low if is_long else step.high,
+                    penetration=step.time == entry_time,
+                )
+                remaining -= 1
+            elif tp_hit:
+                assert tp_price is not None
+                mfe_r, mae_r = _excursions(idx)
+                resolved[idx] = FixedEntryExit(
+                    status=ZoneLimitStatus.FILLED_EXITED,
+                    exit_time=step.time,
+                    exit_price=tp_price,
+                    exit_reason=SignalExitReason.TAKE_PROFIT,
+                    mfe_r=mfe_r,
+                    mae_r=mae_r,
+                    same_step_take_profit=step.time == entry_time,
+                )
+                remaining -= 1
+        started = True
+
+    out: list[FixedEntryExit] = []
+    for idx in range(count):
+        done = resolved[idx]
+        if done is not None:
+            out.append(done)
+            continue
+        mfe_r, mae_r = _excursions(idx)
+        out.append(FixedEntryExit(status=ZoneLimitStatus.FILLED_OPEN, mfe_r=mfe_r, mae_r=mae_r))
+    return out

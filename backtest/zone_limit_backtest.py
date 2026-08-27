@@ -136,6 +136,17 @@ class _Candidate:
 
     체결·청산·손익 어디에도 쓰이지 않는다. 북 거래별 CSV(WAN-346 §0)가 「익절가」 열을
     지어내지 않게 하려고 싣는다 — 손절가는 `stop_price`가 이미 그렇게 하고 있었다."""
+    entry_liquidity: Liquidity = Liquidity.MAKER
+    """이 후보의 **진입** 체결 유동성 (WAN-386 §0).
+
+    B안 채택 진입은 존 근단에 지정가를 걸어 두고 가격이 내려오면 체결이라 **메이커**
+    (슬리피지 0 · 2bp)이고, 그것이 기본값이라 예전 CSV가 비트 재현된다. 확인 진입 팔
+    (WAN-383/386)은 가격이 **올라갈 때** 발동하는 트리거라 지정가로 걸면 즉시 시장가로
+    체결된다 — 주문 종류가 물리적으로 다르므로 **테이커**(4bp + 슬리피지 5bp)를 문다.
+
+    🚨 이 필드가 없으면 확인 팔이 「메이커 라벨로 테이커 매매」를 하게 된다 — 이 이슈가
+    지는 가장 흔한 방식이 「비용을 실제보다 싸게 잡는 것」이다(WAN-370). 청산 쪽 분기는
+    `cfg.exit_liquidity(reason)`가 이미 한 곳에서 하고 있고, 이것이 그 진입 판이다."""
     is_reentry: bool = False
     """이 후보가 「익절 후 존 내 재진입」인지(WAN-346 · 라벨 전용).
 
@@ -1779,7 +1790,9 @@ def _to_trade(
     """공용 비용 모델로 셋업을 `Trade`로 변환한다(WAN-37).
 
     B안은 **지정가(메이커) 진입**이므로 진입에는 슬리피지가 붙지 않고 메이커 수수료가
-    적용된다. 청산은 **사유별로 갈린다**(WAN-370): 익절(부분 익절 포함)은 목표가를 미리
+    적용된다 — 다만 그 유동성은 후보가 `entry_liquidity`로 들고 온다(WAN-386: 확인 진입
+    팔은 올라갈 때 발동하는 트리거라 **테이커**다). 기본값이 메이커라 예전과 비트 동일.
+    청산은 **사유별로 갈린다**(WAN-370): 익절(부분 익절 포함)은 목표가를 미리
     아는 청산이라 지정가 reduce-only = **메이커(슬리피지 0)**, 손절·만료·데이터 종료는
     시장가 성격이라 **테이커(수수료+슬리피지)** 다. 분기는 `cfg.exit_liquidity` 한 곳에
     있고, 옛 동작(익절도 테이커)은 `harness.LEGACY_TAKE_PROFIT_LIQUIDITY`로 고정한다.
@@ -1800,7 +1813,9 @@ def _to_trade(
     side = cand.side
     is_long = side is PositionSide.LONG
     costs = cfg.cost_model
-    entry_fill = costs.entry_fill(cand.entry_price, is_long=is_long, liquidity=Liquidity.MAKER)
+    # WAN-386: 진입 유동성은 후보가 들고 온다 — 기본값이 메이커라 예전과 비트 단위로 같다.
+    entry_liquidity = cand.entry_liquidity
+    entry_fill = costs.entry_fill(cand.entry_price, is_long=is_long, liquidity=entry_liquidity)
     if cfg.risk_sizing is not None:
         qty = position_size(
             equity=equity,
@@ -1821,7 +1836,7 @@ def _to_trade(
         # 보지 않는다(WAN-65가 경고하는 대로 이 모드 자체가 리스크 정규화되지 않은 경로다).
         qty = (equity * cfg.position_fraction) / entry_fill
     entry_notional = entry_fill * qty
-    entry_fee = costs.fee(entry_notional, Liquidity.MAKER)
+    entry_fee = costs.fee(entry_notional, entry_liquidity)
 
     # WAN-323: 부분 청산(있으면)을 먼저 체결시키고 **잔량**으로 최종 청산한다. 래더를
     # 안 켜면 `partial_exits`가 비어 있어 아래 루프가 돌지 않고 remaining == qty라
