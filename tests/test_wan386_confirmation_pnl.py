@@ -52,9 +52,11 @@ from backtest.wan386_confirmation_pnl import (
     ADOPTED_MULTIPLE,
     GUARD_POINTS,
     MULTIPLES,
+    GridRow,
     build_summary_markdown,
     guard_census,
     rank_stability,
+    wallet_defined,
 )
 from backtest.zone_limit_backtest import ConfirmationProbe, _Candidate
 from common.costs import Liquidity
@@ -549,3 +551,61 @@ def test_future_cut_leaves_finished_arm_candidates_untouched() -> None:
     assert long_run[0].exit_time == short_run[0].exit_time
     assert long_run[0].exit_price == short_run[0].exit_price
     assert long_run[0].reason is short_run[0].reason
+
+
+# --------------------------------------------------------------------------- #
+# 지갑 층 열은 뜻을 잃으면 **숫자를 내지 않는다** (WAN-115 관행의 이 축 판)
+# --------------------------------------------------------------------------- #
+
+
+def _grid_row(**overrides: Any) -> GridRow:
+    base: dict[str, Any] = {
+        "arm": ARM_BASE,
+        "guard": 0.003,
+        "multiple": ADOPTED_MULTIPLE,
+        "segment": "oos_warm",
+        "adopted_point": True,
+        "num_cells": 48,
+        "num_symbols": 12,
+        "num_trades": 100,
+        "win_rate": 0.4,
+        "mean_net_r": -0.1,
+        "mean_gross_r": -0.05,
+        "total_return_flat": -0.3,
+        "max_drawdown": 0.4,
+        "return_over_mdd": -0.75,
+        "peak_concurrency": 8,
+        "max_concurrent_risk": 0.05,
+        "max_effective_concurrent_risk": 0.05,
+        "clamp_rate": 0.5,
+        "mean_effective_risk": 0.01,
+        "liquidation_events": 0,
+        "guard_cut": 10,
+        "guard_kept": 90,
+        "symbols_below_gate": 0,
+        "min_symbol_trades": 5,
+    }
+    base.update(overrides)
+    return GridRow(**base)
+
+
+def test_wallet_columns_are_suppressed_once_the_wallet_goes_through_zero() -> None:
+    """잔고가 0을 뚫으면 「자본 대비 비율」은 분모가 부호를 바꿔 무의미해진다 — 안 낸다."""
+    assert wallet_defined(_grid_row()) is True
+    assert wallet_defined(_grid_row(total_return_flat=-11.06, max_drawdown=9.96)) is False
+    # 경계: 정확히 −100%면 이미 자본이 없다.
+    assert wallet_defined(_grid_row(total_return_flat=-1.0)) is False
+
+
+def test_summary_prints_loss_of_definition_instead_of_a_misleading_ratio() -> None:
+    """🚨 「MDD 995%」 같은 수를 그대로 찍으면 다음 사람이 그걸 위험의 크기로 읽는다."""
+    ruined = [
+        _grid_row(arm=arm, total_return_flat=-11.06, max_drawdown=9.96, liquidation_events=12185)
+        for arm in ARM_ORDER
+    ]
+    text = build_summary_markdown(ruined, [], [])
+    assert "정의 상실" in text
+    assert "995" not in text and "1106" not in text  # 오해를 부르는 비율은 아예 안 나온다
+    # 반대로 뜻이 있는 판에서는 숫자를 낸다(가드가 통째로 열을 죽이지 않는다).
+    healthy = [_grid_row(arm=arm) for arm in ARM_ORDER]
+    assert "정의 상실" not in build_summary_markdown(healthy, [], [])

@@ -658,6 +658,21 @@ def checksum_from_csv(path: Path) -> list[ChecksumRow]:
     return [ChecksumRow.model_validate(rec) for rec in frame.to_dict(orient="records")]
 
 
+def wallet_defined(row: GridRow) -> bool:
+    """이 행의 **지갑 층** 열(총수익·MDD·수익/MDD·동시 리스크·실효 리스크)이 뜻을 갖는가.
+
+    🚨 복리를 꺼도 이 좌표에서는 지갑이 **0을 뚫는다** — 사이징은 초기 자본에 못 박혀 있지만
+    (`compound_sizing=False`, WAN-346 §2) 잔고 자체는 손익을 따라가므로, 6년 음의 기대값을
+    5배 북으로 돌리면 자본이 음수가 되고 그 뒤의 「자본 대비 비율」은 전부 뜻을 잃는다
+    (분모가 0을 지나며 부호가 뒤집힌다). **비율을 안 내고 「정의 상실」이라 찍는다** —
+    WAN-115가 증분 부호 함정에서 세운 관행(뜻을 잃은 비율은 계산하지 않는다)의 이 축 판이다.
+
+    ⚠️ **거래당 net R은 이 함정에 안 걸린다** — 분모(`risk_amount`)가 초기 자본으로 사이징된
+    값이라 잔고와 무관하다. 그래서 이 표의 판정 자가 처음부터 그것이다.
+    """
+    return row.total_return_flat > -1.0 and row.max_drawdown < 1.0
+
+
 def _pick(
     rows: Sequence[GridRow], *, arm: str, guard: float, multiple: float, segment: str
 ) -> GridRow | None:
@@ -735,6 +750,43 @@ def _grid_table(rows: Sequence[GridRow], *, guard: float, segment: str) -> list[
             cells.append(f"{_r(row.mean_net_r)} ({row.num_trades:,})" if row else "—")
         head.append(f"| `{arm}` | " + " | ".join(cells) + " |")
     return head
+
+
+def _wallet_note(rows: Sequence[GridRow], ruined: Sequence[str], *, segment: str) -> str:
+    """지갑 층 열을 어떻게 읽어야 하는지 — 뜻을 잃었으면 그 사실을 **먼저** 말한다."""
+    if not ruined:
+        return (
+            "🚨 **복리 끈 판의 MDD는 복리 켠 판(채택 북 보고값)과 비교 불가**다(WAN-346: 베팅은 "
+            "고정인데 지갑이 커져 분모만 커진다) — 이 표 **안에서** 팔끼리만 비교한다."
+        )
+    worst = min(
+        (
+            r
+            for r in rows
+            if r.segment == segment
+            and r.guard == ADOPTED_STOP_GUARD
+            and r.multiple == ADOPTED_MULTIPLE
+        ),
+        key=lambda r: r.total_return_flat,
+        default=None,
+    )
+    lost = f"{worst.total_return_flat * 100:,.0f}%" if worst is not None else "—"
+    return (
+        f"🚨 **지갑 층 열이 이 좌표에서 뜻을 잃었다 — {len(ruined)}팔 전부**(`"
+        + "` · `".join(ruined)
+        + "`). 복리를 껐는데도(사이징은 초기 자본 고정, WAN-346 §2) **잔고가 0을 뚫는다** — "
+        f"최악 팔이 {lost}다. 자본이 음수를 지나면 「자본 대비 비율」(MDD·수익/MDD·동시 "
+        "리스크·실효 리스크)은 분모가 부호를 바꾸며 무의미해지므로 **비율을 내지 않고 "
+        "「정의 상실」로 찍는다**(WAN-115가 증분 부호 함정에서 세운 관행의 이 축 판). "
+        "청산 건수도 같은 이유로 못 읽는다.\n\n"
+        "📌 **그래서 판정 자가 처음부터 거래당 net R이다** — 그 분모(`risk_amount`)는 초기 "
+        "자본으로 사이징된 값이라 잔고와 무관하고, 승률·거래 수·최대 동시 칸·상한 발동률도 "
+        "잔고를 안 본다. 위 표에서 읽을 수 있는 것은 그 넷뿐이다.\n\n"
+        "⚠️ **이것은 팔의 성질이 아니라 좌표의 성질이다** — 존폭 필터를 끈 오늘 엔진(WAN-384)의 "
+        "채택 북은 6년 `full`에서 **모든 팔이** 초기 자본을 넘겨 잃는다(WAN-378의 「108팔 전부 "
+        "음수」·WAN-370의 「비용 0에서도 천장 ＋0.09R」과 같은 자리). 확인 진입이 만든 결과가 "
+        "아니다."
+    )
 
 
 def build_summary_markdown(
@@ -829,9 +881,18 @@ def build_summary_markdown(
         "상한 발동률 | 실효 리스크 | 청산 |",
         "| -- | --: | --: | --: | --: | --: | --: | --: | --: | --: |",
     ]
+    ruined: list[str] = []
     for arm in ARM_ORDER:
         row = _pick(rows, arm=arm, guard=ADOPTED_STOP_GUARD, multiple=ADOPTED_MULTIPLE, segment=seg)
         if row is None:
+            continue
+        if not wallet_defined(row):
+            ruined.append(arm)
+            lost = "🚨 정의 상실"
+            out.append(
+                f"| `{arm}` | {_pct(row.win_rate)} | {lost} | {lost} | {lost} | "
+                f"{row.peak_concurrency} | {lost} | {_pct(row.clamp_rate)} | {lost} | {lost} |"
+            )
             continue
         rom = f"{row.return_over_mdd:.2f}x" if row.return_over_mdd is not None else "—"
         out.append(
@@ -844,8 +905,7 @@ def build_summary_markdown(
     flipped = sum(1 for is_best, oos_best in flips.values() if is_best != oos_best)
     out += [
         "",
-        "🚨 **복리 끈 판의 MDD는 복리 켠 판(채택 북 보고값)과 비교 불가**다(WAN-346: 베팅은 "
-        "고정인데 지갑이 커져 분모만 커진다) — 이 표 **안에서** 팔끼리만 비교한다.",
+        _wallet_note(rows, ruined, segment=seg),
         "",
         "## 5. IS→OOS 뒤집힘 (완료기준 4 · WAN-161 관행)",
         "",
