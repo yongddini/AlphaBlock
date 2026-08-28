@@ -1,0 +1,34 @@
+check,segment,metric,left,right,abs_diff
+(a-1) 기준 팔 후보 ≡ 엔진 base+재진입 (칸·구간별),all,mismatched_cells,0.0,0.0,0.0
+(a-2) 기준 팔 지갑 ≡ 채택 북 지갑,full,num_trades,49432.0,49432.0,0.0
+(a-2) 기준 팔 지갑 ≡ 채택 북 지갑,full,win_rate,0.4041106975238712,0.4041106975238712,0.0
+(a-2) 기준 팔 지갑 ≡ 채택 북 지갑,full,total_return,-0.9999999999999997,-0.9999999999999997,0.0
+(a-2) 기준 팔 지갑 ≡ 채택 북 지갑,full,max_drawdown,0.9999999999999997,0.9999999999999997,0.0
+(a-2) 기준 팔 지갑 ≡ 채택 북 지갑,full,peak_concurrency,24.0,24.0,0.0
+(a-2) 기준 팔 지갑 ≡ 채택 북 지갑,full,liquidation_events,0.0,0.0,0.0
+(a-2) 기준 팔 지갑 ≡ 채택 북 지갑,is,num_trades,34589.0,34589.0,0.0
+(a-2) 기준 팔 지갑 ≡ 채택 북 지갑,is,win_rate,0.4057359276070427,0.4057359276070427,0.0
+(a-2) 기준 팔 지갑 ≡ 채택 북 지갑,is,total_return,-0.9999999999875893,-0.9999999999875893,0.0
+(a-2) 기준 팔 지갑 ≡ 채택 북 지갑,is,max_drawdown,0.9999999999910006,0.9999999999910006,0.0
+(a-2) 기준 팔 지갑 ≡ 채택 북 지갑,is,peak_concurrency,24.0,24.0,0.0
+(a-2) 기준 팔 지갑 ≡ 채택 북 지갑,is,liquidation_events,0.0,0.0,0.0
+(a-2) 기준 팔 지갑 ≡ 채택 북 지갑,oos_warm,num_trades,14843.0,14843.0,0.0
+(a-2) 기준 팔 지갑 ≡ 채택 북 지갑,oos_warm,win_rate,0.4003233847604932,0.4003233847604932,0.0
+(a-2) 기준 팔 지갑 ≡ 채택 북 지갑,oos_warm,total_return,-0.9999985857315258,-0.9999985857315258,0.0
+(a-2) 기준 팔 지갑 ≡ 채택 북 지갑,oos_warm,max_drawdown,0.9999990779430545,0.9999990779430545,0.0
+(a-2) 기준 팔 지갑 ≡ 채택 북 지갑,oos_warm,peak_concurrency,17.0,17.0,0.0
+(a-2) 기준 팔 지갑 ≡ 채택 북 지갑,oos_warm,liquidation_events,0.0,0.0,0.0
+(a-2) 기준 팔 지갑 ≡ 채택 북 지갑,oos,num_trades,14534.0,14534.0,0.0
+(a-2) 기준 팔 지갑 ≡ 채택 북 지갑,oos,win_rate,0.3990642631071969,0.3990642631071969,0.0
+(a-2) 기준 팔 지갑 ≡ 채택 북 지갑,oos,total_return,-0.9999985524869902,-0.9999985524869902,0.0
+(a-2) 기준 팔 지갑 ≡ 채택 북 지갑,oos,max_drawdown,0.9999990865000083,0.9999990865000083,0.0
+(a-2) 기준 팔 지갑 ≡ 채택 북 지갑,oos,peak_concurrency,17.0,17.0,0.0
+(a-2) 기준 팔 지갑 ≡ 채택 북 지갑,oos,liquidation_events,0.0,0.0,0.0
+(b) 배수 불변 진입 집합 · 기준,full,distinct_entry_sets,1.0,1.0,0.0
+(b) 배수 불변 진입 집합 · 1_봉마감,full,distinct_entry_sets,1.0,1.0,0.0
+(b) 배수 불변 진입 집합 · 2_교차,full,distinct_entry_sets,1.0,1.0,0.0
+(b) 배수 불변 진입 집합 · C_고정오프셋,full,distinct_entry_sets,1.0,1.0,0.0
+(c) 진입 유동성 · 기준 = maker,full,wrong_liquidity,0.0,0.0,0.0
+(c) 진입 유동성 · 1_봉마감 = taker,full,wrong_liquidity,0.0,0.0,0.0
+(c) 진입 유동성 · 2_교차 = taker,full,wrong_liquidity,0.0,0.0,0.0
+(c) 진입 유동성 · C_고정오프셋 = taker,full,wrong_liquidity,0.0,0.0,0.0

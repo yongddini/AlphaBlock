@@ -133,6 +133,7 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 ENGINE_SOURCE_FILES: tuple[str, ...] = (
     "backtest/__init__.py",
     "backtest/book_cli.py",
+    "backtest/confirmation_arm.py",
     "backtest/harness.py",
     "backtest/leverage_book.py",
     "backtest/metrics.py",

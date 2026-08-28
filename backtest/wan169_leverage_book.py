@@ -45,6 +45,7 @@ import pandas as pd
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from backtest import harness
+from backtest.confirmation_arm import ARM_C_OFFSET, derive_arm_candidates
 from backtest.harness import (
     IS_FRACTION,
     SEGMENT_FULL,
@@ -352,6 +353,18 @@ class _Task:
     갈아끼운 사본으로 후보를 만든다(`harness.load_market_data(repair_htf_from_1m=True)`).
     「고치기 전후로 같은 좌표를 돌려 본다」(WAN-327 완료기준 2)를 위한 반사실이고 **DB는
     쓰지 않는다**. `False`(기본)면 저장 봉 그대로라 예전과 **비트 단위로 같다**."""
+    confirmation_arms: tuple[str, ...] = ()
+    """WAN-386 §0(옵트인): 「확인 진입」 팔 라벨들(`backtest.confirmation_arm.ARM_ORDER`).
+
+    비어 있으면(기본) 이 경로를 아예 타지 않아 예전과 **비트 단위로 같다**. 값을 주면
+    `observe_confirmation`이 자동으로 켜지고(트리거 관측 없이는 팔을 만들 수 없다), 각 팔 ×
+    익절 배수마다 **진입 시각·진입가·주문 종류·청산만** 갈아끼운 후보를
+    `CellPayload.arm_candidates`에 싣는다. **base 후보·재진입 후보·격리 성과 행은 불변**이다
+    (팔은 별도 dict) — 그래서 켜도 채택 북 행이 비트 재현된다."""
+    confirmation_multiples: tuple[float, ...] = ()
+    """WAN-386 §0: 확인 팔의 익절 배수 점들. `confirmation_arms`와 짝이라 한쪽만 주면 거부한다."""
+    confirmation_offset: float = ARM_C_OFFSET
+    """WAN-386 §0: 팔 `C`의 고정 오프셋(기본 = WAN-383 §1 실측 1.026%)."""
     engine_check: bool = True
     """WAN-301(옵트인 컴퓨트 노브): `False`면 full 구간의 표준 경로 검산(`harness.run_once`
     재실행 — 후보 생성과 맞먹는 비용)을 생략한다. 검산은 배선이 같은 한 렌즈·시드 축에서
@@ -381,6 +394,12 @@ class CellPayload:
     """구간 → 「익절 후 존 내 재진입」 후보(WAN-261, 옵트인). 빈 dict(기본)이면 예전과
     비트 단위로 같다 — `_segment_cells(include_reentry=True)`에서만 base 후보와 합쳐 북에
     들어간다. `oos_warm`은 base와 같은 규약으로 `full`을 칸별 경계로 걸러 만든다."""
+    arm_candidates: dict[str, dict[str, tuple[_Candidate, ...]]] = field(default_factory=dict)
+    """WAN-386 §0(옵트인): `팔|배수` → 구간 → 후보. 빈 dict(기본)이면 예전과 비트 동일.
+
+    base 후보와 재진입 후보를 **이미 합친** 목록이다(재무장 일정은 기준 팔의 것을 쓴다 —
+    `backtest.confirmation_arm` 독스트링의 알려진 한계). `oos_warm`은 base와 **같은 규약**으로
+    `full`을 칸별 경계로 걸러 만든다(`trigger_time`은 팔 사이에서 불변이라 경계가 같다)."""
 
 
 def _isolated_metrics(
@@ -510,6 +529,12 @@ def reentry_candidates_for_window(
     return out
 
 
+def arm_key(arm: str, multiple: float) -> str:
+    """`팔|배수` 라벨 — 두 축을 한 dict 키로 (WAN-386). 배수는 소수 둘로 고정해 `1.5`/`1.50`이
+    갈리지 않게 한다(`zone_width_label`이 문턱에서 쓴 규약과 같다)."""
+    return f"{arm}|{multiple:.2f}"
+
+
 def zone_width_label(threshold: float | None) -> str:
     """존폭 문턱을 표/딕셔너리 키로 — `None`(끔)과 숫자를 **문자로 가른다**.
 
@@ -554,6 +579,12 @@ def run_cell_variants(
     `thresholds`의 `None`은 「필터 끔」(컷 없음)이고 `run_cell`의 `post_filter_zone_width=None`
     과 **같은 뜻**이다. 같은 값을 두 번 주면 라벨이 겹치므로 거부한다.
     """
+    if bool(task.confirmation_arms) != bool(task.confirmation_multiples):
+        # 한쪽만 주면 팔이 조용히 0개가 되거나 배수가 무시된다 — 라벨만 남는 실패라 거부한다.
+        raise ValueError(
+            "confirmation_arms와 confirmation_multiples는 짝입니다(WAN-386) — "
+            f"arms={task.confirmation_arms} multiples={task.confirmation_multiples}"
+        )
     labels = [zone_width_label(t) for t in thresholds]
     if len(set(labels)) != len(labels):
         raise ValueError(f"존폭 문턱이 중복입니다: {labels} — 라벨이 겹치면 payload가 덮인다.")
@@ -622,6 +653,7 @@ def run_cell_variants(
 
     candidates: dict[str, dict[str, tuple[_Candidate, ...]]] = {ell: {} for ell in labels}
     reentry: dict[str, dict[str, tuple[_Candidate, ...]]] = {ell: {} for ell in labels}
+    arms: dict[str, dict[str, dict[str, tuple[_Candidate, ...]]]] = {ell: {} for ell in labels}
     rows: dict[str, list[CellRow]] = {ell: [] for ell in labels}
     funding: dict[str, tuple[FundingRate, ...]] = {}
 
@@ -653,7 +685,9 @@ def run_cell_variants(
                 task.observe_zone_width_atr or any(t is not None for t in thresholds)
             ),
             observe_macd=task.observe_macd,
-            observe_confirmation=task.observe_confirmation,
+            # WAN-386: 팔을 요청하면 관측이 **자동으로** 켜진다 — 트리거 없이는 팔을 만들
+            # 수 없는데 인자를 잊으면 팔이 조용히 0개가 된다(WAN-345 부류).
+            observe_confirmation=task.observe_confirmation or bool(task.confirmation_arms),
         )
         funding[segment_name] = tuple(window.funding_rates)
         engine_return: float | None = None
@@ -669,7 +703,7 @@ def run_cell_variants(
         # 만들지 않아 예전과 같은 호출 수다(비트 동일).
         reentry_ctx = (
             reentry_window_context(window, task.timeframe)
-            if task.reentry and len(thresholds) > 1
+            if (task.reentry and len(thresholds) > 1) or task.confirmation_arms
             else None
         )
         for threshold, label in zip(thresholds, labels, strict=True):
@@ -706,6 +740,25 @@ def run_cell_variants(
                         context=reentry_ctx,
                     )
                 )
+
+            if task.confirmation_arms:
+                # WAN-386 §0: 팔 변환은 **후보를 새로 만들지 않는다** — base + 재진입을 합친
+                # 그 목록의 진입·청산만 갈아끼운다(셋업은 팔 사이에서 불변).
+                assert reentry_ctx is not None
+                merged = [*cands, *reentry[label].get(segment_name, ())]
+                for arm in task.confirmation_arms:
+                    derived = derive_arm_candidates(
+                        merged,
+                        arm=arm,
+                        multiples=task.confirmation_multiples,
+                        substeps=reentry_ctx.substeps,
+                        substep_times=reentry_ctx.substep_times,
+                        offset=task.confirmation_offset,
+                    )
+                    for multiple, arm_cands in derived.items():
+                        arms[label].setdefault(arm_key(arm, multiple), {})[segment_name] = tuple(
+                            arm_cands
+                        )
 
             num_trades, win_rate, total_return, mdd = _isolated_metrics(
                 cands, cfg, task.timeframe, window.funding_rates
@@ -763,6 +816,7 @@ def run_cell_variants(
             funding=funding,
             rows=tuple(rows[label]),
             reentry_candidates=reentry[label],
+            arm_candidates=arms[label],
         )
     return payloads
 
@@ -815,6 +869,9 @@ def run_cells(
     observe_zone_width_atr: bool = False,
     observe_macd: bool = False,
     observe_confirmation: bool = False,
+    confirmation_arms: Sequence[str] = (),
+    confirmation_multiples: Sequence[float] = (),
+    confirmation_offset: float = ARM_C_OFFSET,
     post_filter_zone_width: float | None = None,
 ) -> list[CellPayload]:
     """전 칸을 돈다. `jobs`는 성능 노브이지 결과 축이 아니다(WAN-121).
@@ -877,6 +934,13 @@ def run_cells(
 
     `observe_confirmation`(WAN-383 §0, 옵트인)은 체결된 셋업마다 **확인 진입 세 팔의 트리거
     시각**을 후보에 실어 준다(base·재진입 양쪽). 순수 관측이라 켜도 후보·손익이 안 움직인다.
+
+    `confirmation_arms`·`confirmation_multiples`(WAN-386 §0, 옵트인)를 주면 그 관측 위에서
+    **실제로 늦게 진입하는 팔**을 만들어 `CellPayload.arm_candidates`에 싣는다(`팔|배수` →
+    구간 → 후보). base 후보·재진입 후보·격리 성과 행은 **불변**이라(팔은 별도 dict) 켜도 채택
+    북 행이 비트 재현된다. 팔은 후보를 **새로 만들지 않고** 진입 시각·진입가·주문 종류(테이커)·
+    청산만 갈아끼운다 — 셋업이 팔 사이에서 같아야 「진입 시점의 값어치」가 격리된다. 둘은
+    짝이라 한쪽만 주면 거부한다.
 
     `observe_macd`(WAN-372, 옵트인)는 후보에 **체결 순간의 MACD 히스토그램**을 실어 준다 —
     base 후보와 재진입 후보 양쪽에 같은 규칙이 걸리고, 순수 관측이라 켜도 후보·손익이 하나도
@@ -970,6 +1034,9 @@ def run_cells(
             observe_zone_width_atr=observe_zone_width_atr,
             observe_macd=observe_macd,
             observe_confirmation=observe_confirmation,
+            confirmation_arms=tuple(confirmation_arms),
+            confirmation_multiples=tuple(confirmation_multiples),
+            confirmation_offset=confirmation_offset,
             post_filter_zone_width=post_filter_zone_width,
         )
         for symbol in symbols
