@@ -457,3 +457,40 @@ def test_entry_depth_reads_warm_oos_from_the_full_candidates() -> None:
     payload = _payload({"full": (before, after)}, boundary=50)
     assert grid.entry_in_zone([payload], "full") == pytest.approx(0.4)  # 두 값의 중앙
     assert grid.entry_in_zone([payload], PRIMARY_OOS) == pytest.approx(0.8)
+
+
+# --------------------------------------------------------------------------- #
+# 지갑 층 열 — 뜻을 잃으면 비율을 내지 않는다 (WAN-115 관행 · wan386과 같은 술어)
+# --------------------------------------------------------------------------- #
+
+
+def test_wallet_columns_are_undefined_when_the_wallet_goes_negative() -> None:
+    """🚨 실측 그대로의 값 — 복리를 끄면 이 좌표에서 자본이 0을 뚫는다."""
+    row = _grid_row("split_every", net=-0.1194).model_copy(
+        update={"max_drawdown": 9.956213, "total_return_flat": -11.061572}
+    )
+    assert grid.wallet_defined(row) is False
+    text = grid.build_summary_markdown([row], [], [])
+    assert "정의 상실" in text
+    # 995.62%를 퍼센트처럼 찍으면 안 된다 — 그게 이 가드가 막는 실패다.
+    assert "995.62%" not in text
+    assert "이 격자는 위험의 모양을 재지 않았다" in text
+
+
+def test_wallet_columns_survive_when_the_wallet_stays_solvent() -> None:
+    row = _grid_row("split_every", net=0.05).model_copy(
+        update={"max_drawdown": 0.1543, "total_return_flat": 0.82, "liquidation_events": 0}
+    )
+    assert grid.wallet_defined(row) is True
+    text = grid.build_summary_markdown([row], [], [])
+    assert "15.43%" in text
+    assert "정의 상실" not in text
+
+
+def test_per_trade_columns_are_never_suppressed() -> None:
+    """⚠️ 판정 자는 잔고와 무관하다 — 지갑이 무너져도 net R은 그대로 찍혀야 한다."""
+    row = _grid_row("split_every", net=-0.1194).model_copy(
+        update={"max_drawdown": 9.956213, "total_return_flat": -11.061572}
+    )
+    text = grid.build_summary_markdown([row], [], [])
+    assert "-0.1194" in text

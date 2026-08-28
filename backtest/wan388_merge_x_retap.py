@@ -760,6 +760,26 @@ def checksum_from_csv(path: Path = CHECKSUM_CSV_PATH) -> list[ChecksumRow]:
     return [ChecksumRow.model_validate(rec) for rec in frame.to_dict("records")]
 
 
+def wallet_defined(row: GridRow) -> bool:
+    """이 행의 **지갑 층** 열(총수익·MDD·수익/MDD·동시 리스크·청산)이 뜻을 갖는가.
+
+    🚨 **이 좌표에서는 두 모드 다 못 잰다.** 복리를 끄면(`compound_sizing=False`, 이 격자의
+    판) 사이징은 초기 자본에 못 박히지만 잔고는 손익을 따라가므로, 6년 음의 기대값을 5배
+    북으로 돌리면 **자본이 0을 뚫고 −11배까지 간다** — 그 뒤의 「자본 대비 비율」은 전부 뜻을
+    잃는다(MDD 995% · 청산 카운터가 매 스텝 발동 · 동시 리스크가 분모 0을 스치며 폭주).
+    복리를 켜면 반대로 **네 팔 전부 −100%·MDD 100%로 포화**해 팔을 못 가른다(검산 (a-1)의
+    복리 판이 실측으로 그렇게 나온다). 즉 **기대값이 음수인 좌표에서 지갑 층 위험 지표는
+    원리적으로 팔을 구분하지 못한다.**
+
+    그래서 **비율을 내지 않고 「정의 상실」이라 찍는다** — WAN-115가 증분 부호 함정에서 세운
+    관행(뜻을 잃은 비율은 계산하지 않는다)의 이 축 판이고, wan386이 같은 술어를 쓴다.
+
+    ⚠️ **거래당 net R·gross·비용·승률은 이 함정에 안 걸린다** — 분모(`risk_amount`)가 초기
+    자본으로 사이징된 값이라 잔고와 무관하다. 그래서 이 표의 **판정 자가 처음부터 그것이다**.
+    """
+    return row.total_return_flat > -1.0 and row.max_drawdown < 1.0
+
+
 def build_summary_markdown(
     rows: Sequence[GridRow],
     loo: Sequence[LooRow],
@@ -803,14 +823,27 @@ def build_summary_markdown(
             row = next((r for r in rows if r.arm == arm.name and r.segment == segment), None)
             if row is None:
                 continue
+            risk = (
+                f"{row.max_drawdown:.2%} | {row.liquidation_events}"
+                if wallet_defined(row)
+                else "— | —"
+            )
             out.append(
                 f"| {arm.label} | {segment} | {row.num_trades:,} | {row.mean_net_r:+.4f} | "
                 f"{row.gross_r:+.4f} | {row.cost_r:.4f} | {row.win_rate:.2%} | "
                 f"{row.stop_width_p50:.3%} | {row.entry_in_zone_p50:.2f} | "
-                f"{row.retap_trades:,} ({row.retap_trade_share:.1%}) | "
-                f"{row.max_drawdown:.2%} | {row.liquidation_events} |"
+                f"{row.retap_trades:,} ({row.retap_trade_share:.1%}) | {risk} |"
             )
     out.append("")
+    if any(not wallet_defined(r) for r in rows):
+        out.append(
+            "🚨 **MDD·청산 열이 `—`인 행은 「정의 상실」이다 — 값이 없는 게 아니라 읽을 수 "
+            "없다.** 이 좌표는 거래당 기대값이 음수라 **복리를 꺼도 켜도 지갑 층 위험 지표가 "
+            "팔을 못 가른다**(끄면 자본이 0을 뚫어 비율이 뜻을 잃고, 켜면 네 팔 전부 −100%· "
+            "MDD 100%로 포화한다 — 검산 (a-1)의 복리 판이 실측). **이 격자는 위험의 모양을 "
+            "재지 않았다** — 판정 자는 거래당 net R이고 그것은 잔고와 무관하다."
+        )
+        out.append("")
 
     out.append("## 2. 판정 줄 — 병합의 몫 · 재탭 차단의 몫 · 상호작용")
     out.append("")
