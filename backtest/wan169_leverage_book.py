@@ -72,7 +72,7 @@ from backtest.zone_limit_backtest import (
 )
 from common.costs import Liquidity
 from data.models import FundingRate
-from strategy.models import ConfluenceParams, InvalidationCancel, ZoneLimitRef
+from strategy.models import ConfluenceParams, InvalidationCancel, OrderBlockParams, ZoneLimitRef
 
 REPORTS_DIR = Path("backtest/reports")
 DEFAULT_CELLS_CSV = REPORTS_DIR / "wan169_leverage_book_cells.csv"
@@ -227,6 +227,22 @@ class _Task:
     채택 기본값(= 0.005 = 유동성 한도 켜짐)을 물려받아 각 후보에 룩어헤드-안전 `adv_usd`를
     싣는다 — 채택 북(`book_cli.run_book`)이 이 경로로 옵트인한다. `float`이면 그 프랙션으로 켠다
     (wan244 측정)."""
+    combine_obs: bool = False
+    """존 병합(WAN-149 · WAN-388 옵트인). `False`(기본) = 채택 기본값(원본 존 단위 분리)이라
+    `OrderBlockParams()`와 같은 객체가 나가 예전과 **비트 단위로 같다**. `True`면 겹치는
+    오더블록을 하나로 접어 탐지하므로 `signals`/`retap_signals`가 통째로 달라진다 —
+    ⚠️ **탐지 파라미터라 값마다 오더블록을 다시 탐지해야 한다**(탐지 결과 공유 금지,
+    `harness.detect_order_blocks` docstring). 그래서 이 축은 팔마다 별도 `run_cells` 실행이다.
+    """
+    retap_mode: str | None = None
+    """재탭 정책(WAN-138 · WAN-388 옵트인). `None`(기본)이면 `build_params`가 손대지 않아
+    채택 기본값 `"every_tap"`이고 예전과 **비트 단위로 같다**. `"once"`면 존(병합 시 클러스터)
+    당 **첫 탭만** 진입 후보가 된다.
+
+    🚨 **`reentry`(WAN-273)와 다른 축이다** — 재진입은 *「익절로 나온 뒤 같은 존에 재무장」*
+    이고 재탭은 *「무효화 전까지 그 존을 다시 건드릴 때마다 새로 진입」*이다. `"once"`로 재탭을
+    꺼도 재진입은 그대로 돈다(WAN-388은 네 팔 전부 재진입을 채택값으로 켠다).
+    """
     reentry: bool = True
     """WAN-261에서 옵트인으로 태어나 **WAN-305가 기본 켬으로 승격**(채택 규칙 = 페이퍼와 같은
     선상). 켜면 각 구간의 base 후보에서 「익절 후 존 내 재진입」 후보(WAN-228 재무장 로직)를
@@ -609,9 +625,13 @@ def run_cell_variants(
         raise ValueError(f"{task.symbol} {task.timeframe}: 데이터가 없습니다(창 확인).")
     # 인자 없음 = 채택 기본값(옛 핀 물려받기 금지 — 완료기준). `fill`(WAN-264, 옵트인)을 주면
     # 체결 렌즈만 갈아끼운다 — `None`이면 `build_params(fill=BASELINE_FILL)`과 같아 비트 재현.
+    # `retap_mode`(WAN-388, 옵트인)는 `None`이면 `build_params`가 손대지 않아 채택
+    # 기본값(`"every_tap"`)이고 비트 재현된다.
     params = (
         harness.build_params(
-            take_profit_r=task.take_profit_r, max_zone_width_atr=task.max_zone_width_atr
+            take_profit_r=task.take_profit_r,
+            max_zone_width_atr=task.max_zone_width_atr,
+            retap_mode=task.retap_mode,
         )
         if task.fill is None
         else harness.build_params(
@@ -619,6 +639,7 @@ def run_cell_variants(
             seed=task.seed,
             take_profit_r=task.take_profit_r,
             max_zone_width_atr=task.max_zone_width_atr,
+            retap_mode=task.retap_mode,
         )
     )
     if not task.bollinger:
@@ -665,7 +686,11 @@ def run_cell_variants(
         segment_specs.extend([(SEGMENT_IS, IS_SEGMENT), (SEGMENT_OOS, OOS_SEGMENT)])
     for segment_name, segment in segment_specs:
         window = market if segment is None else harness.slice_market(market, segment)
-        ob_result = harness.detect_order_blocks(window)
+        # WAN-388(옵트인): 존 병합은 **탐지** 파라미터라 팔마다 다시 탐지해야 한다.
+        # `combine_obs=False`(기본)면 `OrderBlockParams()`와 같은 객체라 비트 동일.
+        ob_result = harness.detect_order_blocks(
+            window, OrderBlockParams(combine_obs=task.combine_obs)
+        )
         generated, _stats = build_zone_limit_candidates(
             window.htf_df,
             window.df_1m,
@@ -846,6 +871,8 @@ def run_cells(
     jobs: int = 1,
     adv_fraction: harness.AdvCapArg = harness.LEGACY_MAX_NOTIONAL_ADV_FRACTION,
     take_profit_liquidity: Liquidity = harness.LEGACY_TAKE_PROFIT_LIQUIDITY,
+    combine_obs: bool = False,
+    retap_mode: str | None = None,
     reentry: bool = True,
     reentry_entry_rule: ReentryEntryRule = "band",
     fill: harness.FillPreset | None = None,
@@ -964,6 +991,13 @@ def run_cells(
     넘겨 그 시절 엔진에 고정한다. base 후보와 재진입 후보 **양쪽에** 걸린다 — 한쪽만 걸면
     잡종 엔진이다(WAN-345 선례).
 
+    `combine_obs`·`retap_mode`(WAN-388, 옵트인)는 **후보 집합을 바꾸는 두 축**이다 — 전자는
+    겹치는 오더블록을 하나로 접고(탐지 층), 후자는 `"once"`로 존당 첫 탭만 남긴다(시그널 층).
+    둘 다 기본값(`False` · `None`)이면 채택 기본값이라 **비트 단위로 같다**. 🚨 전자는 **탐지**
+    파라미터라 값마다 오더블록을 다시 탐지한다(WAN-149) — 팔끼리 payload를 공유하지 말 것.
+    🚨 후자는 `reentry`(WAN-273)와 **다른 축이다**: 재탭을 꺼도 「익절 후 재무장」은 그대로
+    돈다. 둘을 섞어 「존에 한 번만」으로 읽지 말 것.
+
     `no_same_step_tp_minutes`(WAN-359, 옵트인)는 그 반사실을 **전부가 아니라 「틱이 지지하지
     않는 그 분들」에만** 거는 표적 팔이다 — 칸 `(정규화 심볼, TF)`마다 1분 `open_time` 집합을
     준다. `None`(기본)이면 비트 단위로 예전과 같다. 🚨 **아무 칸과도 안 맞는 키가 있으면
@@ -1009,6 +1043,8 @@ def run_cells(
             end_ms=parse_date_ms(end),
             adv_fraction=adv_fraction,
             take_profit_liquidity=take_profit_liquidity,
+            combine_obs=combine_obs,
+            retap_mode=retap_mode,
             reentry=reentry,
             reentry_entry_rule=reentry_entry_rule,
             fill=fill,

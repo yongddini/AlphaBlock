@@ -1,0 +1,41 @@
+check,arm,segment,metric,left,right,abs_diff
+a-1 채택 북(같은 payload),split_every,full,num_trades,49432.0,49432.0,0.0
+a-1 채택 북(같은 payload),split_every,full,win_rate,0.4041106975238712,0.4041106975238712,0.0
+a-1 채택 북(같은 payload),split_every,full,total_return,-0.9999999999999996,-0.9999999999999996,0.0
+a-1 채택 북(같은 payload),split_every,full,max_drawdown,0.9999999999999996,0.9999999999999996,0.0
+a-1 채택 북(같은 payload),split_every,full,peak_concurrency,24.0,24.0,0.0
+a-1 채택 북(같은 payload),split_every,full,liquidation_events,0.0,0.0,0.0
+a-1 채택 북(같은 payload),split_every,is,num_trades,34589.0,34589.0,0.0
+a-1 채택 북(같은 payload),split_every,is,win_rate,0.4057359276070427,0.4057359276070427,0.0
+a-1 채택 북(같은 payload),split_every,is,total_return,-0.9999999999875891,-0.9999999999875891,0.0
+a-1 채택 북(같은 payload),split_every,is,max_drawdown,0.9999999999910006,0.9999999999910006,0.0
+a-1 채택 북(같은 payload),split_every,is,peak_concurrency,24.0,24.0,0.0
+a-1 채택 북(같은 payload),split_every,is,liquidation_events,0.0,0.0,0.0
+a-1 채택 북(같은 payload),split_every,oos_warm,num_trades,14843.0,14843.0,0.0
+a-1 채택 북(같은 payload),split_every,oos_warm,win_rate,0.4003233847604932,0.4003233847604932,0.0
+a-1 채택 북(같은 payload),split_every,oos_warm,total_return,-0.9999985857315258,-0.9999985857315258,0.0
+a-1 채택 북(같은 payload),split_every,oos_warm,max_drawdown,0.9999990779430544,0.9999990779430544,0.0
+a-1 채택 북(같은 payload),split_every,oos_warm,peak_concurrency,17.0,17.0,0.0
+a-1 채택 북(같은 payload),split_every,oos_warm,liquidation_events,0.0,0.0,0.0
+a-1 채택 북(같은 payload),split_every,oos,num_trades,14534.0,14534.0,0.0
+a-1 채택 북(같은 payload),split_every,oos,win_rate,0.3990642631071969,0.3990642631071969,0.0
+a-1 채택 북(같은 payload),split_every,oos,total_return,-0.9999985524869902,-0.9999985524869902,0.0
+a-1 채택 북(같은 payload),split_every,oos,max_drawdown,0.9999990865000083,0.9999990865000083,0.0
+a-1 채택 북(같은 payload),split_every,oos,peak_concurrency,17.0,17.0,0.0
+a-1 채택 북(같은 payload),split_every,oos,liquidation_events,0.0,0.0,0.0
+b 팔 사이 좌표 불변,merge_every,full,num_cells,48.0,48.0,0.0
+b 팔 사이 좌표 불변,merge_every,full,num_symbols,12.0,12.0,0.0
+b 팔 사이 좌표 불변,merge_every,oos_warm,num_cells,48.0,48.0,0.0
+b 팔 사이 좌표 불변,merge_every,oos_warm,num_symbols,12.0,12.0,0.0
+b 팔 사이 좌표 불변,split_once,full,num_cells,48.0,48.0,0.0
+b 팔 사이 좌표 불변,split_once,full,num_symbols,12.0,12.0,0.0
+b 팔 사이 좌표 불변,split_once,oos_warm,num_cells,48.0,48.0,0.0
+b 팔 사이 좌표 불변,split_once,oos_warm,num_symbols,12.0,12.0,0.0
+b 팔 사이 좌표 불변,merge_once,full,num_cells,48.0,48.0,0.0
+b 팔 사이 좌표 불변,merge_once,full,num_symbols,12.0,12.0,0.0
+b 팔 사이 좌표 불변,merge_once,oos_warm,num_cells,48.0,48.0,0.0
+b 팔 사이 좌표 불변,merge_once,oos_warm,num_symbols,12.0,12.0,0.0
+c 재탭 축이 실제로 걸렸나,split_once,full,retap_trades,0.0,0.0,0.0
+c 재탭 축이 실제로 걸렸나,split_once,oos_warm,retap_trades,0.0,0.0,0.0
+c 재탭 축이 실제로 걸렸나,merge_once,full,retap_trades,0.0,0.0,0.0
+c 재탭 축이 실제로 걸렸나,merge_once,oos_warm,retap_trades,0.0,0.0,0.0

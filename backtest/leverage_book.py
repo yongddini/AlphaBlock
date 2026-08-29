@@ -171,6 +171,19 @@ class PlacedSetup:
     거짓이고, 인과 팔에서 되살아난 거래가 정확히 이 집합이다."""
     trigger_time: int = 0
     """이 셋업의 탭이 난 상위TF 봉 시각 — 진단 조인 키(`_Candidate.trigger_time` 그대로)."""
+    tap_index: int = 0
+    """이 셋업의 탭 순번(`_Candidate.tap_index` 그대로 · WAN-388 라벨 전용).
+
+    `0`이면 그 존(병합 시 클러스터)의 **첫 탭**이고 `>=1`이면 재탭이다. 「탭이 N% 준다」와
+    「북 거래가 N% 준다」는 다른 수인데(상당수 탭은 칸 점유로 버려진다) 그 차이를 북 층에서
+    직접 세려면 배치된 거래에 이 라벨이 있어야 한다. 배치·손익 어디에도 안 쓰이고 기본값이
+    후보 기본값과 같아 예전과 **비트 단위로 같다**."""
+    zone_key: frozenset[int] | None = None
+    """이 셋업이 속한 존의 안정적 식별자(`_Candidate.zone_key` 그대로 · WAN-388 라벨 전용).
+
+    같은 존의 재탭 거래와 「익절 후 재무장」 거래를 사후에 한 존으로 묶는 키다(WAN-83).
+    ⚠️ `(zone_key, tap_index)`는 유일하지 않다 — 병합 존은 새로 편입된 구성 존이 같은
+    클러스터 안에서 다시 `tap_index=0`을 받을 수 있다(WAN-81 §5)."""
     macd_hist: float | None = None
     """체결 순간의 봉내 라이브 MACD 히스토그램(WAN-372 · `observe_macd` 옵트인 관측).
 
@@ -603,6 +616,9 @@ def run_leverage_book(
                 same_step_take_profit=cand.same_step_take_profit,
                 entry_after_invalidation=cand.entry_after_invalidation,
                 trigger_time=cand.trigger_time,
+                # WAN-388: 재탭/존 라벨도 후보가 실은 값 그대로(순수 라벨).
+                tap_index=cand.tap_index,
+                zone_key=cand.zone_key,
                 macd_hist=cand.macd_hist,
                 macd_hist_prev=cand.macd_hist_prev,
                 confirmation=cand.confirmation,
