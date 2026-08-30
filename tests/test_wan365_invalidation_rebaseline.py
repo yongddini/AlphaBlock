@@ -183,6 +183,11 @@ _UNPINNED_BY_DESIGN: dict[str, str] = {
     # 네 팔이 **오늘 엔진** 위의 2×2다). `split_every` 팔 ≡ 인자 없는 채택 북을 검산 (a-1)
     # 로, `--checksum-book`이면 통째로 다시 만든 독립 판까지 (a-2)로 못 박는다.
     "wan388_merge_x_retap.py": "split_every 팔 ≡ 인자 없는 채택 북 (검산 a-1·a-2)",
+    # 재탭 × 재진입 귀속(WAN-389) — WAN-388의 후속이라 **같은 이유로** 핀이 없다(WAN-305 ·
+    # 인과 취소를 물려받아야 네 팔이 오늘 엔진 위의 2×2다). 그리고 이 모듈은 자기 `split_every`
+    # 팔이 **WAN-388 공개 CSV와 비트 일치**함을 검산 (a)로 못 박으므로, 핀을 걸면 그 등식이
+    # 오히려 깨진다(그쪽이 핀 없이 낸 표다).
+    "wan389_retap_attribution.py": "split_every 팔 ≡ WAN-388 CSV의 같은 팔 (검산 a)",
 }
 
 
