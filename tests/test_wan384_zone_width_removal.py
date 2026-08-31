@@ -186,6 +186,11 @@ _NO_PIN_NEEDED: frozenset[str] = frozenset(
         # 재탭 정책과 재진입 배치만 갈아끼운 표다(핀 없음이 설계, WAN-305). 핀을 걸면 검산 (a)
         # (`split_every` ≡ WAN-388 공개 CSV)가 오히려 깨진다 — 그쪽이 핀 없이 낸 표다.
         "wan389_retap_attribution",
+        # 세 축 격자(WAN-394 §1)도 같다 — 필터를 켠 채 낸 표가 아니라 **필터 꺼진 채택 북**
+        # 위에서 재탭 정책·재진입 배치·익절 배수만 갈아끼운 표다(핀 없음이 설계, WAN-305).
+        # 핀을 걸면 검산 (a)(1.5R 네 칸 ≡ WAN-389 CSV)와 (b)(배수 4점 ≡ WAN-381 CSV)가
+        # 오히려 깨진다 — 둘 다 핀 없이 낸 표다.
+        "wan394_retap_reentry_tp",
     }
 )
 
