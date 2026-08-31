@@ -785,14 +785,17 @@ class PaperTradeRecorder:
         self._funding_store = funding_store
         self._include_predicted = include_predicted
 
-    def record(
+    def build(
         self, trade: ClosedTrade, *, dollars: TradeDollars | None = None
     ) -> PaperTradeRecord | None:
-        """청산 거래를 기록한다. 성공 시 저장된 레코드, 실패 시 None.
+        """청산 거래의 장부 행을 **계산만** 한다(영속화하지 않음). 실패 시 None.
 
-        `dollars`(WAN-207)를 주면 청산 시 실제 지갑에서 집계한 달러 금액(투입 명목·리스크·
-        실현손익·직후 자본)을 함께 영속화한다 — 성과 곡선을 전액배팅이 아니라 실제 지갑
-        기준으로 재구성하는 데 쓴다. 안 주면 옛 %-only 행과 같다.
+        계산과 저장을 가른 이유는 페이퍼 **지갑 정산이 이 행을 기준으로 돌기** 때문이다
+        (WAN-392). 지갑은 청산을 정산하려면 비용(`net_pct`)을 **미리** 알아야 하는데
+        `equity_after`는 정산이 끝나야 정해진다 — 순서가 서로 맞물린다. 그래서 러너
+        (`live.executor`)는 `build` → 정산 → `persist` 순으로 쓴다. 한 벌의 `record`로
+        두 번 계산하면 비용을 계산하는 곳이 두 곳이 되고, 그게 정확히 WAN-392가 고친
+        사고다(장부는 비용을 아는데 지갑이 몰랐다).
         """
         try:
             funding_rates: list[FundingRate] | None = None
@@ -803,7 +806,7 @@ class PaperTradeRecorder:
                     end_ms=trade.exit_time,
                     include_predicted=self._include_predicted,
                 )
-            record = build_record(
+            return build_record(
                 trade,
                 fee_rate=self._fee_rate,
                 cost_model=self._cost_model,
@@ -813,12 +816,37 @@ class PaperTradeRecorder:
                 include_predicted=self._include_predicted,
                 dollars=dollars,
             )
+        except Exception:  # noqa: BLE001 — 기록 실패가 러너 루프를 멈추지 않도록.
+            _logger.exception(
+                "페이퍼 거래 비용 산정 실패: %s %s",
+                trade.position.symbol,
+                trade.position.timeframe,
+            )
+            return None
+
+    def persist(self, record: PaperTradeRecord) -> PaperTradeRecord | None:
+        """이미 계산된 장부 행을 영속화한다. 성공 시 그 레코드, 실패 시 None."""
+        try:
             self._store.upsert_record(record)
             return record
         except Exception:  # noqa: BLE001 — 기록 실패가 러너 루프를 멈추지 않도록.
             _logger.exception(
                 "페이퍼 거래 기록 실패: %s %s",
-                trade.position.symbol,
-                trade.position.timeframe,
+                record.symbol,
+                record.timeframe,
             )
             return None
+
+    def record(
+        self, trade: ClosedTrade, *, dollars: TradeDollars | None = None
+    ) -> PaperTradeRecord | None:
+        """청산 거래를 계산해 기록한다(= `build` → `persist`). 실패 시 None.
+
+        `dollars`(WAN-207)를 주면 청산 시 실제 지갑에서 집계한 달러 금액(투입 명목·리스크·
+        실현손익·직후 자본)을 함께 영속화한다 — 성과 곡선을 전액배팅이 아니라 실제 지갑
+        기준으로 재구성하는 데 쓴다. 안 주면 옛 %-only 행과 같다.
+        """
+        record = self.build(trade, dollars=dollars)
+        if record is None:
+            return None
+        return self.persist(record)
