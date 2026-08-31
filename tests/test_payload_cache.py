@@ -439,3 +439,79 @@ def test_each_cell_is_stored_as_soon_as_it_finishes(
     assert survived.load(tasks[0]) is not None
     assert survived.load(tasks[1]) is not None
     assert survived.load(tasks[2]) is None  # 죽은 칸은 안 남는다
+
+
+def test_the_base_arm_does_not_pay_for_the_confirmation_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """🚨 **기준 팔은 `cand.confirmation`을 아예 안 읽는다** — 그런데 옛 조건은 팔을 하나라도
+    요청하면 관측을 켰다.
+
+    그 관측(WAN-383 §0)은 체결 셋업마다 「탭 → 존 무효화」를 한 번 더 훑는 가장 비싼 패스 중
+    하나인데, 배수 축만 쓰는 격자(WAN-381 · WAN-394 §1)는 그 값을 **쓰지도 않으면서** 비용을
+    통째로 물고 있었다. BTC 4h 파일럿 실측 **4.4분 → 3.9분**이고, 격자 CSV는 39열 × 32행
+    **`0.00e+00`**로 비트 동일하다(순수 관측 필드라 후보의 진입·청산에 안 들어간다).
+
+    🚨 **소스의 식을 테스트에 옮겨 적으면 안 된다** — 그건 라벨이지 동작이 아니고, 소스가
+    바뀌어도 같이 통과한다. 엔진 호출을 **가로채** `observe_confirmation`이 실제로 무엇으로
+    넘어가는지 본다.
+    """
+    from backtest import wan169_leverage_book as book
+    from backtest.confirmation_arm import ARM_BASE, ARM_CROSS
+
+    seen: list[bool] = []
+
+    def _spy(*args: Any, **kwargs: Any) -> tuple[list[Any], object]:
+        seen.append(bool(kwargs["observe_confirmation"]))
+        raise _StopHere
+
+    class _StopHere(Exception):
+        """엔진 호출까지만 확인하고 멈춘다 — 뒤는 실데이터가 필요하다."""
+
+    monkeypatch.setattr(book, "build_zone_limit_candidates", _spy)
+    monkeypatch.setattr(harness, "load_market_data", lambda *a, **k: _market_stub())
+    monkeypatch.setattr(harness, "detect_order_blocks", lambda *a, **k: object())
+
+    for arms, expected in (
+        ((ARM_BASE,), False),  # 기준 팔만 → 관측 없음
+        ((ARM_BASE, ARM_CROSS), True),  # 확인 팔이 섞이면 반드시 켠다(WAN-345 부류 방지)
+    ):
+        seen.clear()
+        task = _task(confirmation_arms=arms, confirmation_multiples=(1.5,))
+        with pytest.raises(_StopHere):
+            book.run_cell(task)
+        assert seen == [expected], f"{arms} → {seen}"
+
+    # 명시하면 기준 팔만 요청해도 그대로 존중한다.
+    seen.clear()
+    explicit = _task(
+        observe_confirmation=True, confirmation_arms=(ARM_BASE,), confirmation_multiples=(1.5,)
+    )
+    with pytest.raises(_StopHere):
+        book.run_cell(explicit)
+    assert seen == [True]
+
+
+def _market_stub() -> Any:
+    """`run_cell`이 엔진 호출까지 가는 데 필요한 최소 시장 데이터 껍데기."""
+    import pandas as pd
+
+    frame = pd.DataFrame(
+        {
+            "open_time": [0, 60_000],
+            "open": [1.0, 1.0],
+            "high": [1.0, 1.0],
+            "low": [1.0, 1.0],
+            "close": [1.0, 1.0],
+            "volume": [1.0, 1.0],
+        }
+    )
+    from backtest.harness import MarketData
+
+    return MarketData(
+        symbol="BTC/USDT:USDT",
+        timeframe="4h",
+        htf_df=frame,
+        df_1m=frame,
+        funding_rates=[],
+    )

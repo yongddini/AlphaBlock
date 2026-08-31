@@ -45,7 +45,7 @@ import pandas as pd
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from backtest import harness
-from backtest.confirmation_arm import ARM_C_OFFSET, derive_arm_candidates
+from backtest.confirmation_arm import ARM_BASE, ARM_C_OFFSET, derive_arm_candidates
 from backtest.harness import (
     IS_FRACTION,
     SEGMENT_FULL,
@@ -711,9 +711,21 @@ def run_cell_variants(
                 task.observe_zone_width_atr or any(t is not None for t in thresholds)
             ),
             observe_macd=task.observe_macd,
-            # WAN-386: 팔을 요청하면 관측이 **자동으로** 켜진다 — 트리거 없이는 팔을 만들
-            # 수 없는데 인자를 잊으면 팔이 조용히 0개가 된다(WAN-345 부류).
-            observe_confirmation=task.observe_confirmation or bool(task.confirmation_arms),
+            # WAN-386: **확인** 팔을 요청하면 관측이 자동으로 켜진다 — 트리거 없이는 그 팔을
+            # 만들 수 없는데 인자를 잊으면 팔이 조용히 0개가 된다(WAN-345 부류).
+            #
+            # 🚨 **기준 팔(`ARM_BASE`)은 예외다** — `derive_arm_candidates`가 그 팔에서
+            # `cand.confirmation`을 **아예 읽지 않는다**(트리거 판독은 `taker` 팔 전용이고
+            # 기준 팔은 후보 자기 체결을 그대로 쓴다). 그런데 옛 조건은 `bool(arms)`라
+            # 기준 팔만 요청해도 관측을 켰고, 그 관측은 체결 셋업마다 「탭 → 존 무효화」를
+            # 한 번 더 훑는 **가장 비싼 패스 중 하나**다(WAN-383 §0). 배수 축만 쓰는 격자
+            # (WAN-381 · WAN-394 §1)가 쓰지도 않는 값을 위해 그 비용을 통째로 물고 있었다.
+            #
+            # ⚠️ 끄는 것이 **수치를 바꾸지 않는다**: `confirmation`은 순수 관측 필드라
+            # 후보의 진입·청산·손절·목표 어디에도 안 들어가고, 배치는 그것을 `PlacedSetup`에
+            # 옮겨 싣기만 한다. 실데이터로 비트 대조해 확인한다(회귀 테스트가 고정).
+            observe_confirmation=task.observe_confirmation
+            or any(arm != ARM_BASE for arm in task.confirmation_arms),
         )
         funding[segment_name] = tuple(window.funding_rates)
         engine_return: float | None = None
