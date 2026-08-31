@@ -872,6 +872,62 @@ def _points_present(rows: Sequence[TriaxialRow]) -> list[Point]:
     ]
 
 
+#: §2 판정 줄이 재는 그 점 — 결론이 이 점 하나에 걸려 있으므로 경고도 이 점에 건다.
+MEASURED_POINT = Point("once", False, LOW_MULTIPLE)
+
+
+def _measured_point_guards(
+    rows: Sequence[TriaxialRow], loo: Sequence[LooRow], verdict: Verdict
+) -> list[str]:
+    """실측 점을 「흑자」로 읽기 전에 반드시 함께 봐야 하는 것 둘.
+
+    🚨 **두 경고 다 결론을 뒤집을 수 있어서 §3에 찍는다** — §1 표에 열로만 있으면 읽는
+    사람이 판정 줄만 보고 지나간다(WAN-381이 「−0.0023R짜리 칸도 계좌는 −82%」로 겪은 자리).
+
+    1. **지갑 층** — 거래당 R이 0 언저리여도 계좌는 죽어 있을 수 있다. 이 좌표는 대부분의
+       점에서 지갑 지표가 「정의 상실」이라(자본이 0을 뚫는다) 값이 나오는 점은 더더욱
+       그 값으로 읽어야 한다.
+    2. **종목 leave-one-out** — 실측이 양수인데 종목 하나를 빼면 음수가 되면, 그 양수는
+       **한 종목이 만든 것**이다(WAN-111 이래 이 저장소가 반복해 만난 자리).
+    """
+    out: list[str] = []
+    row = _row_of(rows, MEASURED_POINT, PRIMARY_OOS)
+    if row is not None:
+        if wallet_defined(row):
+            out.append(
+                f"- 🚨 **지갑 층을 함께 읽는다** — 그 점의 계좌(복리 끔) "
+                f"{row.total_return_flat:+.1%} · MDD **{row.max_drawdown:.2%}** · 청산 "
+                f"**{row.liquidation_events:,}건**. **거래당 0 ≠ 계좌 본전**이다(WAN-381)."
+            )
+        else:
+            out.append(
+                "- 🚨 **그 점의 지갑 층 지표는 「정의 상실」이다** — 자본이 0을 뚫어 비율이 "
+                "뜻을 잃는다(WAN-388 §2). **위험의 모양은 이 좌표에서 못 잰다.**"
+            )
+    sub = [
+        r
+        for r in loo
+        if (r.retap_mode, r.reentry, round(r.multiple, 2))
+        == (MEASURED_POINT.retap_mode, MEASURED_POINT.reentry, round(MEASURED_POINT.multiple, 2))
+        and r.segment == PRIMARY_OOS
+    ]
+    if sub and verdict.measured is not None and verdict.measured > 0:
+        worst = min(sub, key=lambda r: r.mean_net_r)
+        if worst.mean_net_r < 0:
+            out.append(
+                f"- 🚨 **그 양수는 종목 하나에 걸려 있다** — `{worst.exclude}`를 빼고 지갑을 "
+                f"다시 배치하면 {worst.mean_net_r:+.4f}R로 **부호가 넘어간다**(기준 "
+                f"{verdict.measured:+.4f}R). WAN-111 이래 이 저장소가 반복해 만난 자리이고, "
+                "이것만으로도 채택 근거가 되지 않는다."
+            )
+        else:
+            out.append(
+                f"- 종목 leave-one-out {len(sub)}판 전부 **부호 유지**"
+                f"(최악 `{worst.exclude}` {worst.mean_net_r:+.4f}R) — 드물게 편중이 아니다."
+            )
+    return out
+
+
 def build_summary_markdown(
     rows: Sequence[TriaxialRow],
     loo: Sequence[LooRow],
@@ -1029,6 +1085,7 @@ def build_summary_markdown(
                 f"- 거래 수 병기(`{PRIMARY_OOS}`): 채택 {v.trades_adopted:,} → "
                 f"실측 점 {v.trades_measured:,}."
             )
+        out.extend(_measured_point_guards(rows, loo, v))
     out.append("")
 
     if loo:
