@@ -405,3 +405,37 @@ def test_stats_report_the_current_revision(tmp_path: Path) -> None:
     (stat,) = pc.revision_stats(tmp_path / "p", revision="pay:here")
     assert (stat.revision, stat.files, stat.current) == ("pay:here", 1, True)
     assert stat.bytes > 0
+
+
+def test_each_cell_is_stored_as_soon_as_it_finishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """🚨 **다 모아서 저장하면 4시간짜리 실행에서 캐시가 있으나 마나다.**
+
+    47칸 중 46칸을 돌고 마지막에 죽으면 아무것도 안 남는다 — 그래서 `executor.map`의 지연
+    이터레이터를 `list()`로 먼저 비우지 않고 **하나씩 받아 바로 적재**한다. 라벨이 아니라
+    **죽여 보고** 확인한다: 셋째 칸에서 터뜨리면 앞의 둘은 디스크에 남아 있어야 한다.
+    """
+
+    class _Boom(RuntimeError):
+        pass
+
+    def _spy(task: _Task, log: bool = False) -> CellPayload:
+        if task.symbol.startswith("SOL"):
+            raise _Boom("셋째 칸에서 죽는다")
+        return _payload(task, tag=float(len(task.symbol)))
+
+    monkeypatch.setattr("backtest.wan169_leverage_book.run_cell", _spy)
+    tasks = [
+        _task(),
+        _task(symbol="ETH/USDT:USDT"),
+        _task(symbol="SOL/USDT:USDT"),
+    ]
+    cache = pc.PayloadCache(tmp_path / "p", revision="pay:test")
+    with pytest.raises(_Boom):
+        _run_tasks(tasks, jobs=1, cache=cache)
+
+    survived = pc.PayloadCache(tmp_path / "p", revision="pay:test")
+    assert survived.load(tasks[0]) is not None
+    assert survived.load(tasks[1]) is not None
+    assert survived.load(tasks[2]) is None  # 죽은 칸은 안 남는다

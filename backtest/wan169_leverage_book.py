@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import argparse
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1120,15 +1120,30 @@ def _run_tasks(
     if pending:
         missing = [task for _i, task in pending]
         if jobs <= 1 or len(missing) <= 1:
-            computed = [run_cell(task) for task in missing]
+            _drain(pending, (run_cell(task) for task in missing), out, cache)
         else:
             with ProcessPoolExecutor(max_workers=min(jobs, len(missing))) as executor:
-                computed = list(executor.map(_run_task_logged, missing))
-        for (index, task), payload in zip(pending, computed, strict=True):
-            cache.store(task, payload)
-            out[index] = payload
+                _drain(pending, executor.map(_run_task_logged, missing), out, cache)
     print(f"[payload-cache] {cache.summary()}", flush=True)
     return [payload for payload in out if payload is not None]
+
+
+def _drain(
+    pending: Sequence[tuple[int, _Task]],
+    computed: Iterable[CellPayload],
+    out: list[CellPayload | None],
+    cache: PayloadCache,
+) -> None:
+    """🚨 **칸이 끝나는 대로 적재한다** — 다 모아서 저장하면 안 된다.
+
+    `executor.map`은 제출 순서대로 결과를 내는 **지연 이터레이터**다. 그걸 `list()`로 먼저
+    비우면 47칸 중 46칸을 돌고 마지막에 죽었을 때 **아무것도 안 남는다** — 4시간짜리 실행에서
+    그건 캐시가 있으나 마나라는 뜻이다. 하나씩 받아 바로 적재하면 죽은 자리까지가 남고 다음
+    실행이 그만큼 건너뛴다(WAN-394 §0).
+    """
+    for (index, task), payload in zip(pending, computed, strict=True):
+        cache.store(task, payload)
+        out[index] = payload
 
 
 def run_cells_multi(
