@@ -168,6 +168,12 @@ _ENGINE_NON_SOURCE: frozenset[str] = frozenset(
     {
         "backtest/run.py",
         "backtest/trade_store.py",
+        # 저장 계층(WAN-394 §0 후보 캐시) — 백테 수치를 만들지 않고 이미 만들어진 payload를
+        # 담을 뿐이다. 🚨 그래서 **엔진 목록에 넣지 않는다**: 넣으면 캐시 코드를 손볼 때마다
+        # 야간 타임라인 캐시(WAN-297/325)까지 통째로 무효화된다. 직렬화 형식이 바뀌면
+        # `payload_cache.CACHE_SCHEMA_VERSION`이 그 무효화를 담당한다(`timeline_cache`와 같은
+        # 규약). 반대로 그 캐시가 **읽는** 러너 소스는 `payload_cache.RUNNER_SOURCE_FILES`가 건다.
+        "backtest/payload_cache.py",
         "backtest/report.py",
         "backtest/synthetic.py",
         # 운영 표시 전용(WAN-309 드리프트 경고) — 설정값을 읽어 경고만 찍고 백테 수치에

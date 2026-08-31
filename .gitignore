@@ -37,6 +37,10 @@ data/.fuse_hidden*
 # 1분봉 등 전체 로드 parquet 캐시 (WAN-78) — data/*.parquet는 하위 디렉터리를 잡지 못함
 data/cache/
 
+# 북 후보 payload 캐시 (WAN-394 §0) — 재계산 가능한 산출물이고 GB 단위로 큰다.
+# 정리는 `uv run python -m backtest.payload_cache --prune-stale --apply`(명시 플래그).
+backtest/cache/
+
 # Report / analysis outputs (backtest·parity·walkforward)
 out/
 

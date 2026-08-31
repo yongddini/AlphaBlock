@@ -57,6 +57,7 @@ from backtest.harness import (
 )
 from backtest.leverage_book import BookCell, LeverageBookParams, run_leverage_book
 from backtest.models import BacktestConfig, ExitReason
+from backtest.payload_cache import PayloadCache
 from backtest.run import parse_date_ms
 from backtest.substep import SubStep, build_substeps
 from backtest.sweep import timeframe_to_ms
@@ -900,6 +901,7 @@ def run_cells(
     confirmation_multiples: Sequence[float] = (),
     confirmation_offset: float = ARM_C_OFFSET,
     post_filter_zone_width: float | None = None,
+    payload_cache: PayloadCache | None = None,
 ) -> list[CellPayload]:
     """전 칸을 돈다. `jobs`는 성능 노브이지 결과 축이 아니다(WAN-121).
 
@@ -1004,6 +1006,12 @@ def run_cells(
     거부한다** — 심볼 표기가 어긋나면 아무것도 안 걸린 채 「표적 팔」 라벨만 붙어 기준선과
     같은 수가 나오고, 그러면 「보간이 맞았다」가 근거 없이 만들어진다(WAN-91/95/112/123/159가
     반복해 경계한 자리 · `_loo_rows`의 같은 가드와 같은 부류).
+
+    `payload_cache`(WAN-394 §0, 옵트인)를 주면 이 함수가 **미스 칸만** 계산하고 나머지는
+    디스크에서 읽는다(`backtest.payload_cache`). 캐시 키는 **`_Task` 그 자체 + 엔진·러너 소스
+    지문**이라 *「payload를 바꾸는 것은 전부 키에 있다」*가 구조적으로 참이고, 반대로 손절폭
+    가드·재진입 **배치**·복리는 `_Task`에 아예 없어 **바꿔도 히트한다**(그것이 캐시의 존재
+    이유다). `None`(기본)이면 이 경로를 아예 타지 않아 예전과 **비트 단위로 같다**.
     """
     targeted: Mapping[tuple[str, str], frozenset[int]] = no_same_step_tp_minutes or {}
     if no_same_step_tp and targeted:
@@ -1078,10 +1086,49 @@ def run_cells(
         for symbol in symbols
         for timeframe in timeframes
     ]
-    if jobs <= 1 or len(tasks) <= 1:
-        return [run_cell(task) for task in tasks]
-    with ProcessPoolExecutor(max_workers=min(jobs, len(tasks))) as executor:
-        return list(executor.map(_run_task_logged, tasks))
+    return _run_tasks(tasks, jobs=jobs, cache=payload_cache)
+
+
+def _run_tasks(
+    tasks: Sequence[_Task], *, jobs: int, cache: PayloadCache | None = None
+) -> list[CellPayload]:
+    """칸들을 돈다 — 캐시가 있으면 **미스만** 돌고 히트는 디스크에서 온다(WAN-394 §0).
+
+    🚨 캐시는 `run_cell` **바깥**에 있다 — 워커에 들어가는 것은 예전과 같은 `_Task`뿐이고
+    무거운 함수는 한 글자도 안 바뀐다. 그래서 「캐시를 끄면 비트 재현」이 배선의 성질이지
+    지켜야 할 규칙이 아니다(캐시가 있어도 미스 칸은 **글자 그대로 같은 경로**를 돈다).
+
+    🚨 **미스를 조용히 메우지 않는다** — 몇 칸이 히트/미스인지 **계산 전에** 찍는다
+    (WAN-335 관행: 조용히 느려지면 「왜 안 끝나지」가 반복된다).
+    """
+    if cache is None:
+        if jobs <= 1 or len(tasks) <= 1:
+            return [run_cell(task) for task in tasks]
+        with ProcessPoolExecutor(max_workers=min(jobs, len(tasks))) as executor:
+            return list(executor.map(_run_task_logged, tasks))
+
+    hit_count, miss_count = cache.census(tasks)
+    print(
+        f"[payload-cache] {cache.directory} ({cache.revision}): "
+        f"히트 {hit_count}칸 · 미스 {miss_count}칸 — 미스만 계산합니다.",
+        flush=True,
+    )
+    out: list[CellPayload | None] = [cache.load(task) for task in tasks]
+    pending = [
+        (i, task) for i, (task, got) in enumerate(zip(tasks, out, strict=True)) if got is None
+    ]
+    if pending:
+        missing = [task for _i, task in pending]
+        if jobs <= 1 or len(missing) <= 1:
+            computed = [run_cell(task) for task in missing]
+        else:
+            with ProcessPoolExecutor(max_workers=min(jobs, len(missing))) as executor:
+                computed = list(executor.map(_run_task_logged, missing))
+        for (index, task), payload in zip(pending, computed, strict=True):
+            cache.store(task, payload)
+            out[index] = payload
+    print(f"[payload-cache] {cache.summary()}", flush=True)
+    return [payload for payload in out if payload is not None]
 
 
 def run_cells_multi(
