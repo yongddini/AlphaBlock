@@ -5,10 +5,18 @@
 
 * **진입**: 사이징·리스크 검사를 엔진에 위임하고, 체결되면 열린 포지션을
   `open_positions` 테이블에 저장한다(재시작 복구용).
-* **청산**: 엔진으로 정산한 뒤 라운드트립을 WAN-33 `PaperTradeRecorder`에 위임해
-  `paper_trades` 테이블에 기록한다 — 성과·패리티 리포트(WAN-33)가 읽는 바로 그
-  테이블이므로 집행 결과가 즉시 리포트에 집계된다. 동시에 열린 포지션 행을 지운다.
+* **청산**: 라운드트립을 WAN-33 `PaperTradeRecorder`로 계산해 `paper_trades` 테이블에
+  기록하고, **그 행의 순손익(`net_pct`)으로 지갑을 정산한다**(WAN-392) — 성과·패리티
+  리포트(WAN-33)가 읽는 바로 그 테이블이므로 집행 결과가 즉시 리포트에 집계된다.
+  동시에 열린 포지션 행을 지운다.
 * **복구**: 생성 시 저장소의 열린 포지션을 엔진 장부로 복구해 청산 평가를 잇는다.
+
+🚨 **비용을 계산하는 곳은 한 곳뿐이다**(WAN-392). 예전에는 장부가 `CostModel`로 수수료·
+슬리피지를 정확히 계산하는데 지갑은 브로커 수수료(페이퍼 기본 0)만 빼서, **장부는 아는데
+지갑은 모르는** 상태였다 — 잔고에 그로스가 쌓여 성적이 부풀려졌다(실측 100거래에 1,783 ·
++8.5% → −9.4%). 지금은 `_LedgerSettlement`이 장부 행을 먼저 계산해 엔진에 넘기고, 엔진은
+그 값을 그대로 정산한다. 그래서 `equity_after` 변화량 == `net_pct × 진입명목 / 100`이고
+`실현손익 ÷ (손절폭 × 수량) == r_multiple`이 항등식으로 성립한다.
 
 엔진은 기본이 페이퍼(`PaperBroker`)이므로 `live_trading=false`에서는 어떤 실주문
 API도 호출되지 않는다(안전 기본값은 `build_execution_engine`이 보장).
@@ -25,7 +33,7 @@ from execution.models import Position
 from execution.risk import CircuitBreakerStatus
 from execution.sizing import PositionSizingParams
 from live.paper import ClosedTrade, PaperPosition
-from paper.store import PaperTradeRecorder, PaperTradeStore, TradeDollars
+from paper.store import PaperTradeRecord, PaperTradeRecorder, PaperTradeStore, TradeDollars
 from strategy.models import SignalExitReason
 
 _logger = logging.getLogger(__name__)
@@ -69,6 +77,52 @@ def _to_closed_trade(
     return ClosedTrade(
         position=paper_position, exit_time=exit_time, exit_price=exit_price, reason=reason
     )
+
+
+class _LedgerSettlement:
+    """장부를 페이퍼 지갑의 **단일 비용 소스**로 쓰는 청산 정산기(WAN-392).
+
+    엔진이 청산 체결가를 넘기면 장부 행(`PaperTradeRecorder.build`)을 먼저 계산하고,
+    그 행의 `net_pct`(수수료·슬리피지·펀딩을 모두 반영한 순손익률)로 순실현손익을 낸다.
+    행 자체는 `record`에 남겨 두었다가 정산이 끝난 뒤 달러 금액(`TradeDollars`)을 얹어
+    영속화한다 — 그래서 **한 거래의 비용이 딱 한 번 계산된다.**
+
+    ## 왜 `net_pct × 진입 명목`인가
+
+    `common.costs.CostBreakdown`의 분수는 전부 **진입 원(raw) 노셔널** 대비다. 즉
+    `net_pct/100 × (진입가 × 수량)`이 백테스트가 내는 실현손익과 정확히 같은 값이고,
+    같은 이유로 `실현손익 ÷ (손절폭 × 수량) == r_multiple`이 항등식으로 성립한다
+    (예전에는 지갑이 그로스라 이 둘이 1.8배 어긋났다).
+
+    장부 산정이 실패하면 `None`을 돌려주고, 엔진은 옛 그로스 정산으로 되돌아간다
+    (기록 실패가 러너 루프를 멈추지 않게 하는 기존 관행과 같다).
+    """
+
+    def __init__(
+        self,
+        *,
+        recorder: PaperTradeRecorder,
+        exit_time: int,
+        reason: SignalExitReason,
+    ) -> None:
+        self._recorder = recorder
+        self._exit_time = exit_time
+        self._reason = reason
+        self.record: PaperTradeRecord | None = None
+        """정산에 쓴 장부 행(달러 금액 미포함). 산정 실패면 None."""
+
+    def __call__(self, position: Position, exit_fill_price: float) -> float | None:
+        closed = _to_closed_trade(
+            position,
+            exit_price=exit_fill_price,
+            exit_time=self._exit_time,
+            reason=self._reason,
+        )
+        record = self._recorder.build(closed)
+        self.record = record
+        if record is None:
+            return None
+        return record.net_pct / 100.0 * position.notional
 
 
 class PaperExecutor:
@@ -194,16 +248,17 @@ class PaperExecutor:
         # 진입 시 감수한 리스크 금액은 open_positions에만 있다 — 삭제 전에 회수해
         # 청산 기록에 실어 성과 곡선을 지갑 기준으로 재구성한다(WAN-207).
         open_pos = self._store.get_open_position(symbol, timeframe)
+        # 지갑은 비용을 스스로 계산하지 않는다 — 장부가 낸 순손익으로 정산한다(WAN-392).
+        settlement = _LedgerSettlement(recorder=self._recorder, exit_time=exit_time, reason=reason)
         outcome = self._engine.on_exit(
-            symbol, timeframe, exit_price=exit_price, reason=reason, now_ms=now_ms
+            symbol,
+            timeframe,
+            exit_price=exit_price,
+            reason=reason,
+            now_ms=now_ms,
+            settle=settlement,
         )
         if outcome.accepted and outcome.position is not None and outcome.fill is not None:
-            closed = _to_closed_trade(
-                outcome.position,
-                exit_price=outcome.fill.average_price,
-                exit_time=exit_time,
-                reason=reason,
-            )
             # 달러 금액: 명목·수량은 청산된 포지션에서, 실현손익은 엔진이 정산한 값,
             # 리스크 금액은 진입 때 저장분, equity_after는 정산 직후 자본(WAN-207).
             position = outcome.position
@@ -215,7 +270,18 @@ class PaperExecutor:
                 equity_after=self._engine.equity,
             )
             # WAN-33 성과 스키마(paper_trades)에 위임 — 리포트가 읽는 테이블과 동일.
-            self._recorder.record(closed, dollars=dollars)
+            # 정산에 쓴 그 행을 그대로 저장한다(다시 계산하지 않는다 — WAN-392).
+            settled = settlement.record
+            if settled is None:
+                closed = _to_closed_trade(
+                    position,
+                    exit_price=outcome.fill.average_price,
+                    exit_time=exit_time,
+                    reason=reason,
+                )
+                self._recorder.record(closed, dollars=dollars)
+            else:
+                self._recorder.persist(settled.model_copy(update=dollars.model_dump()))
             self._store.remove_open_position(symbol, timeframe)
         return TradeReport(
             outcome=outcome,

@@ -46,6 +46,15 @@ _logger = logging.getLogger(__name__)
 #: (symbol, timeframe) 시리즈 키.
 SeriesKey = tuple[str, str]
 
+#: 청산 정산 훅(WAN-392). `(청산된 포지션, 청산 체결가) -> 순실현손익(달러) | None`.
+#:
+#: 페이퍼 지갑은 비용을 **스스로 계산하지 않는다** — 장부(`paper.store.build_record`)가
+#: 백테스트와 같은 산식(`common.costs.CostModel`)으로 낸 순손익을 그대로 받아 정산한다.
+#: 그래서 비용을 계산하는 곳이 하나뿐이고, 「장부는 아는데 지갑은 모르는」 갈라짐이
+#: 구조적으로 생기지 않는다(WAN-392가 고친 사고가 정확히 그것이다).
+#: `None`을 돌려주면 엔진은 옛 정산(그로스 − 체결 수수료)으로 되돌아간다(안전 폴백).
+ExitSettlement = Callable[[Position, float], float | None]
+
 #: 진입 거부 **사유 코드**(WAN-221). `reason`(자유 텍스트, 사람용·WAN-194)와 별개로,
 #: 집계가 문자열을 파싱하지 않고 사유를 셀 수 있게 안정 코드를 함께 싣는다. 라이브 장부의
 #: `SKIP_REASON_*`(`live.order_journal`)와 같은 어휘를 쓴다 — 깔때기 상단(주문 걸기 전
@@ -363,8 +372,19 @@ class ExecutionEngine:
         exit_price: float,
         reason: SignalExitReason,
         now_ms: int,
+        settle: ExitSettlement | None = None,
     ) -> ExecutionOutcome:
-        """오픈 포지션을 청산하고 실현 손익을 정산한다."""
+        """오픈 포지션을 청산하고 실현 손익을 정산한다.
+
+        `settle`(WAN-392)을 주면 **그것이 비용의 단일 소스**다 — 엔진은 체결가만 넘기고,
+        수수료·슬리피지·펀딩을 반영한 순실현손익을 받아 그대로 지갑에 반영한다. 안 주면
+        옛 정산(그로스 − 브로커 체결 수수료)이라 예전과 비트 단위로 같다.
+
+        ⚠️ `settle`을 쓰는 경로에서는 브로커가 수수료를 물면 **안 된다**(진입 수수료는
+        `on_entry`에서 이미 자본에서 빠지는데 정산값에도 왕복 수수료가 들어 있어 이중
+        계상이 된다). 그래서 페이퍼 경로의 `PaperBroker`는 비용 모델 없이 만든다 —
+        `build_execution_engine` 참고.
+        """
         key = (symbol, timeframe)
         position = self._book.get(key)
         if position is None:
@@ -381,8 +401,17 @@ class ExecutionEngine:
         if not fill.is_filled:
             return ExecutionOutcome.rejected("청산 주문이 체결되지 않음(거부)")
 
-        gross = position.realized_pnl(fill.average_price)
-        realized = gross - fill.fee
+        # 비용의 단일 소스: `settle`이 있으면 장부가 낸 순손익을 그대로 쓴다(WAN-392).
+        # 없으면(또는 장부 산정이 실패해 None이면) 옛 정산으로 되돌아간다.
+        realized = position.realized_pnl(fill.average_price) - fill.fee
+        if settle is not None:
+            settled = settle(position, fill.average_price)
+            if settled is None:
+                _logger.warning(
+                    "청산 비용 산정 실패(%s %s) — 그로스 기준 폴백 정산", symbol, timeframe
+                )
+            else:
+                realized = settled
         self._equity += realized
         self._risk.register_realized_pnl(realized, now_ms=now_ms, equity=self._equity)
         del self._book[key]
@@ -462,6 +491,8 @@ def build_execution_engine(
                 "live_trading=True: 실거래 브로커를 명시적으로 주입해야 합니다(WAN-27). "
                 "자동으로 실거래 경로를 켜지 않습니다."
             )
+        # 비용 모델을 **일부러 넘기지 않는다**(WAN-392): 페이퍼 지갑의 비용 권위는
+        # 장부(`paper.store.build_record`)이고, 브로커가 수수료를 또 물면 이중 계상이다.
         broker = PaperBroker()
 
     resolved_equity = settings.paper_equity if equity is None else equity
