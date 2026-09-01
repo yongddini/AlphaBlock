@@ -198,6 +198,11 @@ _NO_PIN_NEEDED: frozenset[str] = frozenset(
         # 핀을 걸면 검산 (a)(1.5R 네 칸 ≡ WAN-389 CSV)와 (b)(배수 4점 ≡ WAN-381 CSV)가
         # 오히려 깨진다 — 둘 다 핀 없이 낸 표다.
         "wan394_retap_reentry_tp",
+        # 익절 배수 꺾임(WAN-395)도 같다 — WAN-381의 후속이고 **필터 꺼진 채택 북의 셋업**
+        # 위에서 익절 배수만 갈아끼운 표다(핀 없음이 설계, WAN-305). 핀을 걸면 검산 (a-2)
+        # (채택 점 지갑 ≡ 인자 없는 채택 북)와 (d)(겹치는 배수 4점 ≡ WAN-381 공개 CSV)가
+        # 오히려 깨진다 — 둘 다 핀 없이 낸 표다.
+        "wan395_exit_multiple_inflection",
     }
 )
 
