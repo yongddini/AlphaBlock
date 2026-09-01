@@ -733,11 +733,23 @@ def inflection_verdict(rows: Sequence[MultipleRow], *, segment: str) -> str:
     gain = deltas[best_new]
     listing = " → ".join(f"{m:g}R {_r(values[m])}" for m in MULTIPLES)
     if gain > NOISE_R:
+        # 🚨 「끝점이 최선」과 「아직 오르는 중」은 다르다 — **마지막 한 걸음**이 그것을 가른다.
+        last_step = values[MULTIPLES[0]] - values[MULTIPLES[1]]
+        flat = abs(last_step) < NOISE_R
+        tail = (
+            f"🚨 **다만 마지막 한 걸음({MULTIPLES[1]:g}R → {MULTIPLES[0]:g}R)이 {_r(last_step)}로 "
+            f"잡음선 안이라 공선은 이미 평평해졌다** — 「더 내려가면 더 좋아진다」가 아니라 "
+            "**「꺾임이 이 근방이고 여기서 멈췄다」**로 읽는다. "
+            if flat
+            else f"마지막 한 걸음({MULTIPLES[1]:g}R → {MULTIPLES[0]:g}R)도 {_r(last_step)}로 "
+            "잡음선 밖이라 아직 오르는 중이다. "
+        )
         return (
             f"**갈래 ①: 0.4~0.5R에서 더 좋아진다 — 꺾임이 아직 더 아래다.** {listing}. "
             f"{best_new:g}R이 0.6R보다 {_r(gain)} 낫다(잡음선 {NOISE_R}R 밖). "
-            "🚨 **끝점을 「최적값」으로 인용하지 말 것** — 이 격자도 거기서 끝났다. "
-            "⚠️ 다만 목표를 당길수록 **손익분기 승률이 가파르게 올라가고**(§2 표) 「같은 분 "
+            + tail
+            + "🚨 **끝점을 「최적값」으로 인용하지 말 것** — 이 격자도 거기서 끝났다. "
+            "⚠️ 목표를 당길수록 **손익분기 승률이 가파르게 올라가고**(§2 표) 「같은 분 "
             "익절」 낙관에 더 깊이 기댄다(§4) — 더 파려면 그 둘을 함께 본다."
         )
     if gain < -NOISE_R:
@@ -897,6 +909,28 @@ def _segment_table(rows: Sequence[MultipleRow]) -> list[str]:
     return out
 
 
+def identity_line(rows: Sequence[MultipleRow], *, segment: str) -> str:
+    """`gross_r(슬리피지 전) − cost_r == mean_net_r`이 닫히는가 — **공짜 검산**.
+
+    두 열이 서로 다른 경로에서 온다(`gross_r`·`cost_r`는 WAN-370 비용 분해, `mean_net_r`은
+    북이 실제로 실현한 손익 ÷ 리스크 금액). 그래서 이 항등식이 닫힌다는 것은 **분해가 그
+    거래를 제대로 읽었다**는 독립 증거이고, 격자를 다시 안 돌려도 낼 수 있다.
+
+    🚨 `mean_gross_r`(슬리피지 **후**)로는 안 닫힌다 — **다른 자**다(WAN-393 §2가 못 박은
+    「R이라 불리는 자가 셋」의 이 축 판).
+    """
+    points = curve(rows, segment=segment)
+    if not points:
+        return "판정 불가 — 행이 없다."
+    worst = max(abs(row.gross_r - row.cost_r - row.mean_net_r) for _m, row in points)
+    verdict = "**닫힌다**" if worst < 1e-9 else "🚨 **안 닫힌다 — 확인 필요**"
+    return (
+        f"항등식 `gross_r(슬리피지 전) − cost_r = 거래당 net R`이 여섯 점 전부에서 {verdict}"
+        f"(최대 차 {worst:.2e}). 두 열이 **다른 경로**에서 오므로(분해 vs 북이 실현한 손익) "
+        "이건 공짜로 얻은 독립 검산이다. ⚠️ `gross(슬립 후)` 열로는 안 닫힌다 — **다른 자**다."
+    )
+
+
 def same_step_share_cell(row: MultipleRow) -> str:
     """§4의 「net R 몫」 칸 — 🚨 **100%를 넘으면 퍼센트로 적지 않는다**.
 
@@ -971,6 +1005,8 @@ def build_summary_markdown(
         "",
         "❌ = 이 이슈가 **새로 연 점** · ✅ = 채택 배수. "
         "「손익분기(비용반영)」은 `(1 + 비용R) / (1 + 목표R)`이고 「여유」는 `승률 − 그 선`이다.",
+        "",
+        identity_line(rows, segment=seg),
         "",
     ]
     zero_cost = " · ".join(f"{m:g}R {_row_zero_cost_breakeven(m):.1%}" for m in MULTIPLES)

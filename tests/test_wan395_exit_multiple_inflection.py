@@ -469,3 +469,54 @@ def test_the_round_trip_guard_is_not_vacuous(tmp_path: Any) -> None:
     wan395.rows_to_frame([_with_share(0.48)]).to_csv(path, index=False)
     restored = wan395.grid_from_csv(path)[0]
     assert restored.same_step_tp_net_r_share == pytest.approx(0.48)
+
+
+# --------------------------------------------------------------------------- #
+# 10. 「끝점이 최선」과 「아직 오르는 중」을 가르는 마지막 한 걸음
+# --------------------------------------------------------------------------- #
+
+
+def test_branch_a_says_the_curve_already_flattened_when_the_last_step_is_noise() -> None:
+    """🚨 실측이 이 자리다 — 0.4R이 0.6R보다 낫지만 **0.5R → 0.4R이 ＋0.0031R**이다.
+
+    그 둘을 안 가르면 「더 내려가면 더 좋아진다」로 읽힌다. 갈래는 ①이되 **공선은 이미
+    평평하다**는 문장이 함께 나가야 한다.
+    """
+    flattening = {0.4: 0.0066, 0.5: 0.0035, 0.6: -0.0064, 0.8: -0.0395, 1.0: -0.0726, 1.5: -0.1194}
+    line = wan395.inflection_verdict(_curve(flattening), segment=PRIMARY_OOS)
+    assert "갈래 ①" in line
+    assert "평평해졌다" in line
+    assert "여기서 멈췄다" in line
+
+
+def test_branch_a_says_still_climbing_when_the_last_step_is_real() -> None:
+    """돌연변이 확인 — 마지막 걸음이 잡음선 밖이면 **반대 문장**이 나가야 한다."""
+    climbing = {0.4: 0.0400, 0.5: 0.0100, 0.6: -0.0064, 0.8: -0.0395, 1.0: -0.0726, 1.5: -0.1194}
+    line = wan395.inflection_verdict(_curve(climbing), segment=PRIMARY_OOS)
+    assert "갈래 ①" in line
+    assert "아직 오르는 중" in line
+    assert "평평해졌다" not in line
+
+
+# --------------------------------------------------------------------------- #
+# 11. 공짜 검산 — `gross_r − cost_r == mean_net_r`
+# --------------------------------------------------------------------------- #
+
+
+def test_identity_closes_on_a_consistent_row() -> None:
+    """두 열이 다른 경로에서 온다(분해 vs 북이 실현한 손익) — 닫히면 독립 검산이다."""
+    row = _row(0.4, 0.0066).model_copy(update={"gross_r": 0.0867, "cost_r": 0.0801})
+    assert "닫힌다" in wan395.identity_line([row], segment=PRIMARY_OOS)
+
+
+def test_identity_line_catches_a_broken_decomposition() -> None:
+    """돌연변이 확인 — 분해를 흔들면 **시끄럽게** 찍혀야 한다(조용히 통과하면 검산이 아니다)."""
+    row = _row(0.4, 0.0066).model_copy(update={"gross_r": 0.5000, "cost_r": 0.0801})
+    line = wan395.identity_line([row], segment=PRIMARY_OOS)
+    assert "안 닫힌다" in line
+
+
+def test_identity_is_not_claimed_for_the_after_slippage_ruler() -> None:
+    """🚨 자를 섞지 말라는 경고가 **문장에 실려 나가야** 한다(WAN-393 §2: R이 셋이다)."""
+    row = _row(0.4, 0.0066).model_copy(update={"gross_r": 0.0867, "cost_r": 0.0801})
+    assert "다른 자" in wan395.identity_line([row], segment=PRIMARY_OOS)
