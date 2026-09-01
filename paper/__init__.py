@@ -27,14 +27,24 @@ from paper.report import (
     records_to_dataframe,
 )
 from paper.store import (
+    ADOPTED_ENTRY_LIQUIDITY,
+    LEGACY_ENTRY_LIQUIDITY,
+    LEGACY_EXIT_LIQUIDITY,
+    ExitLiquidityFor,
     OpenPosition,
     PaperTradeRecord,
     PaperTradeRecorder,
     PaperTradeStore,
+    adopted_exit_liquidity,
     build_record,
+    legacy_exit_liquidity,
 )
 
 __all__ = [
+    "ADOPTED_ENTRY_LIQUIDITY",
+    "LEGACY_ENTRY_LIQUIDITY",
+    "LEGACY_EXIT_LIQUIDITY",
+    "ExitLiquidityFor",
     "OpenPosition",
     "PaperPerformance",
     "PaperTradeRecord",
@@ -43,10 +53,12 @@ __all__ = [
     "PerfMetrics",
     "SeriesPerformance",
     "TradeStat",
+    "adopted_exit_liquidity",
     "build_performance",
     "build_record",
     "compute_metrics",
     "format_performance",
+    "legacy_exit_liquidity",
     "performance_to_dataframe",
     "records_to_dataframe",
 ]
