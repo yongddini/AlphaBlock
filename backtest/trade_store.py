@@ -732,6 +732,9 @@ class BacktestRunStore:
             )
         trades: list[Trade] = []
         for row in trade_rows:
+            # ⚠️ `entry_liquidity`(WAN-396)는 스키마에 없어 기본값(**메이커**)으로 복원된다.
+            # 이 경로의 거래는 **표시 전용**이라 비용 분해에 안 들어간다 — 넣으려면 열을 먼저
+            # 만들어야 한다(안 그러면 테이커 진입 팔이 조용히 메이커로 복원된다).
             no = int(row[0])
             trades.append(
                 Trade(

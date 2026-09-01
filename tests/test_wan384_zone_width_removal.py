@@ -161,6 +161,10 @@ _NO_PIN_NEEDED: frozenset[str] = frozenset(
         "wan254_formation_census",
         "wan348_same_minute_tp",
         "wan362_same_minute_roundtrip",
+        # WAN-396은 **적재된 CSV의 열만 되계산한다** — 후보를 만들지도, 북을 돌리지도 않아
+        # 존폭 문턱이 닿을 자리가 없다. 읽는 표들이 각자 자기 좌표를 이미 들고 있고, 이 모듈은
+        # 그 좌표를 바꾸지 않고 허수 진입 슬리피지만 걷어낸다(`net_r`은 손도 안 댄다).
+        "wan396_entry_slippage_correction",
         # 채택된 것을 재는 리포트 — 기본값이 움직이면 낡아야 맞다
         "wan95_zone_limit_report",
         # 오늘 채택 북 위의 **순수 관측**이라 핀 없음이 설계다(WAN-305) — 필터를 켠 채 낸

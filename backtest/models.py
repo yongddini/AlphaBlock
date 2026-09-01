@@ -69,9 +69,24 @@ class BacktestConfig(BaseModel):
     메이커(지정가) 체결에는 적용되지 않는다(`entry_liquidity=maker`면 진입 슬리피지 0).
     """
     entry_liquidity: Liquidity = Field(default=Liquidity.TAKER)
-    """진입 체결의 유동성 구분(WAN-37). 시장가 진입(A안)=taker, 지정가 진입(B안)=maker.
+    """🚨 **읽지 마십시오 — 아무도 읽지 않는 사문화된 필드다**(WAN-396).
 
-    taker면 진입에 테이커 수수료+슬리피지가, maker면 메이커 수수료+슬리피지 0이 적용된다.
+    원래 뜻은 「진입 체결의 유동성 구분(WAN-37) — 시장가 진입(A안)=taker, 지정가
+    진입(B안)=maker」였다. 그런데 **A안은 제거됐고**(WAN-200/215) 남은 B안 엔진은 이 값이
+    아니라 **후보가 들고 오는 `_Candidate.entry_liquidity`**(기본 **메이커**)를 쓴다
+    (`zone_limit_backtest._to_trade`). `harness`는 이 필드를 아무 데도 안 넘기므로 여기
+    기본값 **테이커**가 그대로 남아 있고, 그래서 이 값을 읽는 코드는 **엔진이 실제로 한
+    것과 반대**를 본다.
+
+    실제로 그렇게 갈라진 적이 있다 — 비용 분해(WAN-370)가 이 필드를 읽어 붙지도 않은
+    진입 슬리피지 5bp를 계상했고, `gross`와 `slippage`가 **같은 크기로 부풀어 상쇄되므로
+    net R로는 안 보였다**(WAN-396 판정 (가)). 지금은 거래가 자기 값을 들고 다닌다
+    (`Trade.entry_liquidity`) — **그쪽이 정본**이다.
+
+    필드를 지우지 않는 이유는 `config_json` 실행 지문(WAN-106 `trade_store`)에 실려 있어
+    지우면 적재된 실행의 `run_id`가 통째로 바뀌기 때문이다. 새 코드가 이 필드를 읽지
+    않는지는 `tests/test_wan396_entry_liquidity.py`의 배선 가드가 **동작으로** 지킨다.
+
     ⚠️ **청산은 「항상 taker」가 아니다** — 사유별로 갈린다(`take_profit_liquidity` ·
     `exit_liquidity`, WAN-370).
     """
@@ -209,6 +224,20 @@ class Trade(BaseModel):
     quantity: float
     """진입 수량(부분 청산 전 전체)."""
     entry_fee: float
+    entry_liquidity: Liquidity = Liquidity.MAKER
+    """이 거래의 **진입** 체결 유동성 — 엔진이 실제로 쓴 값 그대로다 (WAN-396).
+
+    `entry_price`(슬리피지 반영 체결가)와 `entry_fee`를 만들어 낸 바로 그 구분이라,
+    사후에 비용을 분해하는 쪽은 **이 값을 봐야 한다**. 기본값은 `_Candidate.entry_liquidity`
+    와 같은 **메이커**(B안 지정가 진입)라 예전과 비트 단위로 같다.
+
+    🚨 **`BacktestConfig.entry_liquidity`를 보면 안 된다.** 그 필드의 기본값은 테이커인데
+    B안 엔진은 후보의 값(기본 메이커)을 쓴다 — 두 곳이 갈라져 있던 것이 WAN-396이 잡은
+    버그다(비용 분해가 붙지도 않은 진입 슬리피지 5bp를 계상했고, gross와 slippage가 같은
+    크기로 부풀어 **상쇄되므로 net R로는 안 보였다**). 「라벨과 동작이 어긋남」
+    (WAN-91/95/112/123/159/194)의 회계 축 변종이다.
+
+    ⚠️ 손익 계산에는 쓰이지 않는다(체결가·수수료에 이미 녹아 있다) — 순수 기록이다."""
     exits: list[TradeFill]
     funding_cost: float = 0.0
     """보유 구간 누적 펀딩비용(양수=지불, 음수=수취). `realized_pnl`에 이미 반영됨."""
