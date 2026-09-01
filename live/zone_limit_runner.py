@@ -65,6 +65,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import pandas as pd
 
@@ -85,6 +86,10 @@ from live.price_feed import PriceFeed
 from live.runtime_state import DataGapSkip, PendingOrderSnapshot, RuntimeStateStore
 from live.zone_limit_notifier import ZoneLimitNotifier
 from strategy.models import ConfluenceParams, OrderBlockDirection, SignalExitReason
+
+if TYPE_CHECKING:  # 무거운 임포트를 런타임 경로에 올리지 않는다(진입점이 지연 임포트한다).
+    from data.funding import FundingRateStore
+    from paper.store import PaperTradeRecorder, PaperTradeStore
 
 _logger = logging.getLogger(__name__)
 
@@ -820,21 +825,50 @@ def expire_stale_pending(
     return expired
 
 
+def build_paper_recorder(
+    paper_store: PaperTradeStore,
+    settings: Settings,
+    *,
+    funding_store: FundingRateStore | None = None,
+) -> PaperTradeRecorder:
+    """페이퍼 장부 기록기를 **채택 비용 회계**로 만든다(WAN-371).
+
+    🚨 **유동성 구분을 명시적으로 넘기는 것이 이 함수의 존재 이유다.** 기본값(테이커)에
+    맡기면 지정가로 도는 러너의 진입을 시장가로 계산하고(WAN-45 배선 · WAN-256 틱 승격 ·
+    채택 진입 방식은 존 근단 지정가 WAN-95/112), 익절도 백테스트(메이커, WAN-370)와
+    갈린다 — 같은 셋업·같은 가격인데 **다른 경기의 기록**이 된다(WAN-305).
+
+    ⚠️ WAN-392 이후 이 값은 **표시 층이 아니라 지갑 잔고를 직접 움직인다** — 지갑이 장부
+    행의 `net_pct`로 정산하기 때문이다. 그래서 자본곡선·MDD·다음 베팅 크기까지 따라간다.
+
+    청산 유동성은 고정값이 아니라 **사유별 함수**(`adopted_exit_liquidity`)를 넘긴다.
+    고정 `Liquidity` 하나를 주면 「청산」을 한 덩어리로 취급하게 되고, 그것이 WAN-370이
+    백테스트 쪽에서 명시적으로 금지한 실패다.
+    """
+    from paper.store import ADOPTED_ENTRY_LIQUIDITY, PaperTradeRecorder, adopted_exit_liquidity
+
+    return PaperTradeRecorder(
+        paper_store,
+        cost_model=settings.costs,
+        entry_liquidity=ADOPTED_ENTRY_LIQUIDITY,
+        exit_liquidity=adopted_exit_liquidity,
+        funding_store=funding_store,
+    )
+
+
 def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
     """존-지정가 페이퍼 러너를 실행한다(`live.runner`가 기본값에서 위임하는 진입점)."""
     from common.telegram import build_telegram_client
     from data.funding import FundingRateStore
     from execution.engine import build_execution_engine
     from execution.leverage import book_per_trade_sizing
-    from paper.store import PaperTradeRecorder, PaperTradeStore
+    from paper.store import PaperTradeStore
 
     store = OhlcvStore(settings.db_path)
     journal = OrderJournal(settings.db_path)
     paper_store = PaperTradeStore(settings.db_path)
     funding_store = FundingRateStore(settings.db_path) if settings.funding_enabled else None
-    recorder = PaperTradeRecorder(
-        paper_store, cost_model=settings.costs, funding_store=funding_store
-    )
+    recorder = build_paper_recorder(paper_store, settings, funding_store=funding_store)
     # try 이전에 정의한다 — try 안에서 예외가 나도 finally의 정리가 미정의를 참조하지 않게.
     price_feed: PriceFeed | None = None
     # 레버리지 북(WAN-171 = WAN-45의 2단계): 칸=(종목,TF)마다 1포지션 · 여러 칸 동시 · 한

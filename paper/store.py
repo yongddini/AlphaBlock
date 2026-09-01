@@ -22,6 +22,23 @@ exit_time)`을 기본키로 UPSERT하므로 러너 재시작·재평가로 같�
 정확히 일치**한다(둘 다 `common.costs`의 한 산식을 쓰므로). 그래서 패리티 리포트의
 잔여 차이는 비용 모델이 아니라 거래 선택·체결 타이밍에서만 비롯된다.
 
+## 유동성 구분 — 페이퍼가 백테스트에 맞춘다 (WAN-371)
+
+🚨 **일치는 「같은 산식」만으로 성립하지 않는다 — 같은 유동성 구분을 넣어야 한다.**
+WAN-371 이전에는 러너가 `entry_liquidity`를 안 넘겨 기본값(테이커)으로 갔고, 그래서
+**백테는 메이커 2bp·슬리피지 0인 진입을 페이퍼는 테이커 4bp＋슬리피지 5bp로 계산**했다
+(익절도 WAN-370 이후 백테는 메이커인데 페이퍼는 테이커였다). 지금 채택 회계는:
+
+- **진입** = `ADOPTED_ENTRY_LIQUIDITY`(메이커) — 러너가 존 근단에 지정가를 걸어 둔다
+  (WAN-45/95/112/256).
+- **청산** = `adopted_exit_liquidity(reason)` — 익절은 메이커, 손절은 테이커. 분기의
+  단일 소스는 `backtest.models.BacktestConfig.exit_liquidity`이고 페이퍼는 그것을
+  **물어보기만** 한다(WAN-370/305).
+
+⚠️ 이 값들은 **호출부가 명시적으로 넘긴다** — 기본값은 옛 회계(테이커) 그대로 두고
+(`LEGACY_ENTRY_LIQUIDITY`/`LEGACY_EXIT_LIQUIDITY`), 프로덕션 호출부가 명시를 빠뜨리면
+`tests/test_wan371_paper_liquidity_parity.py`의 배선 가드가 실패한다.
+
 리스크(손절 거리) 기준 **R 배수**도 함께 저장한다: ``risk_pct = |진입가 − 손절가| /
 진입가 × 100``, ``r_multiple = net_pct / risk_pct`` (손절 참조가가 없으면 둘 다 None).
 
@@ -39,13 +56,14 @@ from __future__ import annotations
 import logging
 import sqlite3
 import threading
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from types import TracebackType
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
+from backtest.models import BacktestConfig, ExitReason
 from common.costs import CostModel, Liquidity
 from data.funding import Direction, FundingRateStore, cumulative_funding_cost
 from data.models import FundingRate
@@ -55,6 +73,55 @@ from live.paper import ClosedTrade
 from strategy.models import OrderBlockDirection, SignalExitReason
 
 _logger = logging.getLogger(__name__)
+
+#: 청산 사유 하나를 유동성 구분으로 옮기는 함수(WAN-371). `PaperTradeRecorder`가
+#: 거래마다 호출하므로 **사유별로 다른 답**을 낼 수 있다 — 고정 `Liquidity` 하나를 주면
+#: 「청산」을 한 덩어리로 취급하게 되고, 그것이 WAN-370이 백테스트 쪽에서 금지한 실패다.
+ExitLiquidityFor = Callable[[SignalExitReason], Liquidity]
+
+#: 채택 **진입** 유동성 = 메이커(WAN-371). 페이퍼 러너는 존 근단에 지정가를 걸어 두고
+#: 가격이 내려오면 체결이라(WAN-45 배선 · WAN-95/112 채택 진입 방식) 메이커다.
+#: 백테스트 B안 후보(`backtest.zone_limit_backtest._Candidate.entry_liquidity`)의 기본값과
+#: **같은 값**이어야 두 성적표가 같은 경기의 기록이 된다(WAN-305).
+ADOPTED_ENTRY_LIQUIDITY: Liquidity = Liquidity.MAKER
+
+#: 옛 페이퍼 회계(진입·청산 모두 테이커, WAN-371 이전). 옛 장부 행을 재현하려는 호출부만
+#: **명시적으로** 쓴다 — 기본값으로 기대면 그게 바로 이 이슈가 고친 버그다.
+LEGACY_ENTRY_LIQUIDITY: Liquidity = Liquidity.TAKER
+LEGACY_EXIT_LIQUIDITY: Liquidity = Liquidity.TAKER
+
+#: 페이퍼 청산 사유 → 백테스트 청산 사유. 페이퍼는 `SignalExitReason`(전략 층), 백테스트는
+#: `ExitReason`(엔진 층)을 쓰는데 **값 문자열이 같다**. 그래도 `ExitReason(reason.value)`로
+#: 조용히 변환하지 않고 표를 명시한다 — 새 사유가 생기면 `KeyError`로 시끄럽게 죽어야
+#: 「모르는 사유가 조용히 테이커로 떨어지는」 일이 안 생긴다(WAN-367 「하드 제로」 규칙의
+#: 같은 정신: 설명을 붙이기 전에 코드에서 찾는다).
+_EXIT_REASON_BY_SIGNAL: dict[SignalExitReason, ExitReason] = {
+    SignalExitReason.TAKE_PROFIT: ExitReason.TAKE_PROFIT,
+    SignalExitReason.STOP_LOSS: ExitReason.STOP_LOSS,
+}
+
+#: 사유별 청산 유동성 판정의 **단일 소스**를 그대로 물어보기 위한 채택 설정(WAN-370).
+#: 기본값이 곧 채택 규칙(익절=메이커 · 손절=테이커)이라 여기서 요율·필드를 다시 적지 않는다.
+_ADOPTED_EXIT_CONFIG = BacktestConfig()
+
+
+def adopted_exit_liquidity(reason: SignalExitReason) -> Liquidity:
+    """채택 규칙의 청산 유동성 — 백테스트 단일 소스에 위임한다(WAN-371).
+
+    익절은 목표가를 미리 아는 청산이라 지정가 reduce-only = **메이커(슬리피지 0)**,
+    손절은 가격이 반대로 가서 시장가로 터는 청산이라 **테이커**다. 분기 자체는
+    `backtest.models.BacktestConfig.exit_liquidity` 한 곳에만 있고 이 함수는 페이퍼의
+    사유 타입(`SignalExitReason`)을 그 함수의 타입으로 옮기기만 한다 — 페이퍼가 자기
+    규칙을 따로 들면 두 성적표가 조용히 갈라진다(WAN-305).
+    """
+    return _ADOPTED_EXIT_CONFIG.exit_liquidity(_EXIT_REASON_BY_SIGNAL[reason])
+
+
+def legacy_exit_liquidity(reason: SignalExitReason) -> Liquidity:
+    """WAN-371 이전 페이퍼 회계 — 사유와 무관하게 **항상 테이커**(명시 고정용)."""
+    del reason  # 옛 회계는 사유를 보지 않았다.
+    return LEGACY_EXIT_LIQUIDITY
+
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS paper_trades (
@@ -314,6 +381,10 @@ def build_record(
       슬리피지를 백테스트와 **같은 산식**으로 반영한다. 진입·청산 유동성 구분
       (``entry_liquidity``/``exit_liquidity``)을 함께 지정한다(시장가 진입=taker,
       지정가 진입=maker). 이 경로의 순손익률은 백테스트 실현손익률과 정확히 일치한다.
+      🚨 **두 인자의 기본값(테이커)은 옛 회계다** — 채택 회계는 `ADOPTED_ENTRY_LIQUIDITY`
+      (메이커)와 `adopted_exit_liquidity(reason)`(사유별)이고, 이 함수는 사유를 모르는
+      저수준 변환기라 **호출부가 정한 값을 그대로 쓴다**(WAN-371). 사유별 분기가 필요하면
+      `PaperTradeRecorder`를 쓴다.
     * ``fee_rate``(레거시): 한 방향 수수료율을 왕복(``2 × fee_rate``)으로만 근사하고
       슬리피지는 반영하지 않는다(``cost_model``이 None일 때만 사용).
 
@@ -763,7 +834,20 @@ class PaperTradeRecorder:
     펀딩비용은 `funding_store`가 주어졌을 때만 반영한다(WAN-16 수집분). 없으면 0으로
     둔다. 비용 모델은 `cost_model`(공용 `CostModel`, WAN-37)을 주면 메이커/테이커
     수수료·슬리피지를 백테스트와 같은 산식으로 반영하고, 없으면 `fee_rate`(레거시)만
-    왕복으로 근사한다. 실시간 러너의 페이퍼 진입/청산은 시장가라 기본 유동성은 taker다.
+    왕복으로 근사한다.
+
+    🚨 **유동성 구분은 호출부가 명시적으로 넘긴다(WAN-371).** 옛 주석은 *「실시간 러너의
+    페이퍼 진입/청산은 시장가라 기본 유동성은 taker다」*였는데, **그건 종가 시장가로
+    진입하던 시절 이야기다** — 지금 페이퍼 러너는 지정가로 돌고(WAN-45 배선 · WAN-256 틱
+    승격) 익절도 지정가 reduce-only로 낸다(WAN-370). 그래서 채택 회계는
+    `entry_liquidity=ADOPTED_ENTRY_LIQUIDITY`(메이커) ·
+    `exit_liquidity=adopted_exit_liquidity`(사유별)이고, 기본값(테이커)은 **옛 장부를
+    재현하려는 호출부만** 쓰는 레거시다. 기본값에 기대면 이 이슈가 고친 버그가 그대로
+    되살아나므로 `tests/test_wan371_paper_liquidity_parity.py`의 배선 가드가 프로덕션
+    호출부를 AST로 훑어 막는다.
+
+    ⚠️ **`exit_liquidity`에 고정 `Liquidity` 하나를 주면 「청산」을 한 덩어리로 취급하게
+    된다** — 사유별로 갈리는 규칙(WAN-370)을 표현하려면 `ExitLiquidityFor` 함수를 준다.
     """
 
     def __init__(
@@ -772,8 +856,8 @@ class PaperTradeRecorder:
         *,
         fee_rate: float = 0.0,
         cost_model: CostModel | None = None,
-        entry_liquidity: Liquidity = Liquidity.TAKER,
-        exit_liquidity: Liquidity = Liquidity.TAKER,
+        entry_liquidity: Liquidity = LEGACY_ENTRY_LIQUIDITY,
+        exit_liquidity: Liquidity | ExitLiquidityFor = LEGACY_EXIT_LIQUIDITY,
         funding_store: FundingRateStore | None = None,
         include_predicted: bool = False,
     ) -> None:
@@ -784,6 +868,16 @@ class PaperTradeRecorder:
         self._exit_liquidity = exit_liquidity
         self._funding_store = funding_store
         self._include_predicted = include_predicted
+
+    def exit_liquidity_for(self, reason: SignalExitReason) -> Liquidity:
+        """이 기록기가 그 청산 사유에 매길 유동성 구분(WAN-371).
+
+        함수를 받았으면 사유를 넘겨 묻고, 고정값을 받았으면 그대로 쓴다(옛 회계).
+        """
+        resolver = self._exit_liquidity
+        if callable(resolver):
+            return resolver(reason)
+        return resolver
 
     def build(
         self, trade: ClosedTrade, *, dollars: TradeDollars | None = None
@@ -811,7 +905,8 @@ class PaperTradeRecorder:
                 fee_rate=self._fee_rate,
                 cost_model=self._cost_model,
                 entry_liquidity=self._entry_liquidity,
-                exit_liquidity=self._exit_liquidity,
+                # 사유별로 갈린다(WAN-370/371) — 거래마다 다시 묻는다.
+                exit_liquidity=self.exit_liquidity_for(trade.reason),
                 funding_rates=funding_rates,
                 include_predicted=self._include_predicted,
                 dollars=dollars,
