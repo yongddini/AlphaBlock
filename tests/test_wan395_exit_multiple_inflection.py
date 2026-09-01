@@ -418,3 +418,54 @@ def test_flip_row_names_the_reversal() -> None:
     is_best, oos_best, flipped = wan395.flip_rows(rows)
     assert (is_best, oos_best) == ("0.4R", "0.6R")
     assert flipped
+
+
+# --------------------------------------------------------------------------- #
+# 9. 「같은 분 익절」 net R 몫 — 100%를 넘으면 퍼센트가 아니다
+# --------------------------------------------------------------------------- #
+
+
+def _with_share(share: float | None) -> wan395.MultipleRow:
+    row = _row(0.4, 0.0066)
+    return row.model_copy(update={"same_step_tp_net_r_share": share})
+
+
+def test_share_above_one_is_not_printed_as_a_percentage() -> None:
+    """🚨 실측이 `1977%`를 냈다 — 그건 「몇 %쯤」이 아니라 **「나머지는 합쳐서 손실」**이다.
+
+    퍼센트로 적으면 40%쯤으로 읽히므로 배수와 문장으로 바꾼다(WAN-115가 잔존율 172%를
+    「유지」로 읽던 자리에서 세운 관행의 이 축 판).
+    """
+    cell = wan395.same_step_share_cell(_with_share(19.77))
+    assert "%" not in cell
+    assert "×19.8" in cell and "순손익 전부보다 크다" in cell
+
+
+def test_share_below_one_is_a_plain_percentage() -> None:
+    assert wan395.same_step_share_cell(_with_share(0.48)) == "48%"
+
+
+def test_negative_share_is_flagged_not_read() -> None:
+    """분모가 음수면 부호가 뒤집힌 채 나온다 — 숫자를 숨기지 않되 **읽지 말라고** 적는다."""
+    assert "읽지 말 것" in wan395.same_step_share_cell(_with_share(-0.30))
+
+
+def test_withheld_share_stays_withheld_through_a_csv_round_trip(tmp_path: Any) -> None:
+    """🚨 **실제로 뚫렸던 가드다** — pandas가 빈 칸을 NaN으로 읽고 pydantic이 유효한 float으로
+    받아 `--from-csv` 요약이 `nan%`를 찍었다(「라벨과 동작이 어긋남」의 직렬화 축 변종).
+
+    표시하는 쪽마다 막지 않고 **모델에서 한 번** 되돌리는지를 왕복으로 건다.
+    """
+    path = tmp_path / "grid.csv"
+    wan395.rows_to_frame([_with_share(None)]).to_csv(path, index=False)
+    restored = wan395.grid_from_csv(path)[0]
+    assert restored.same_step_tp_net_r_share is None
+    assert wan395.same_step_share_cell(restored) == "—(분모가 뜻을 잃음)"
+
+
+def test_the_round_trip_guard_is_not_vacuous(tmp_path: Any) -> None:
+    """돌연변이 확인 — 값이 있는 행은 왕복해도 **그대로 살아남아야** 한다."""
+    path = tmp_path / "grid.csv"
+    wan395.rows_to_frame([_with_share(0.48)]).to_csv(path, index=False)
+    restored = wan395.grid_from_csv(path)[0]
+    assert restored.same_step_tp_net_r_share == pytest.approx(0.48)

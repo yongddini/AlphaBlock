@@ -81,13 +81,14 @@ WAN-381이 가드 5점 × 배수 4점을 돌아 **가드 축은 닫고**(gross �
 from __future__ import annotations
 
 import argparse
+import math
 import statistics
 import time
 from collections.abc import Sequence
 from pathlib import Path
 
 import pandas as pd
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 
 from backtest import harness
 from backtest.book_cli import BookSegment, iter_book_segments, net_r
@@ -207,6 +208,20 @@ class MultipleRow(GridRow):
     언제나 정의된다(WAN-394 실측: 1.5R 7% → 0.6R 26%)."""
     same_step_tp_net_r_share: float | None
     """그 거래들이 만든 net R 합 ÷ 전체 net R 합. **분모가 양수이고 충분히 클 때만** 낸다."""
+
+    @field_validator("same_step_tp_net_r_share", mode="before")
+    @classmethod
+    def _nan_is_withheld(cls, value: object) -> object:
+        """🚨 CSV 왕복이 `None`을 **NaN으로 되살린다** — 그걸 그대로 두면 「내지 않는다」는
+        가드가 조용히 뚫린다(pandas가 빈 칸을 NaN으로 읽고 pydantic이 그것을 유효한 float으로
+        받는다). 실제로 `--from-csv` 요약이 `nan%`를 찍었다.
+
+        「라벨과 동작이 어긋남」(WAN-91/95/112/123/159/194)의 **직렬화 축 변종**이라, 표시하는
+        쪽마다 막지 않고 **모델에서 한 번** 되돌린다.
+        """
+        if isinstance(value, float) and math.isnan(value):
+            return None
+        return value
 
 
 class LooRow(MultipleRow):
@@ -882,6 +897,27 @@ def _segment_table(rows: Sequence[MultipleRow]) -> list[str]:
     return out
 
 
+def same_step_share_cell(row: MultipleRow) -> str:
+    """§4의 「net R 몫」 칸 — 🚨 **100%를 넘으면 퍼센트로 적지 않는다**.
+
+    이 좌표는 거래당 기대값이 0 언저리라 분모(구간 전체 net R 합)가 작다. 그러면 「같은 분
+    익절」이 만든 R이 **분모보다 커져** `1,977%` 같은 수가 나오는데, 그것은 계산이 틀린 게
+    아니라 *「그 거래들이 순손익 전부를 만들고 나머지 거래는 합쳐서 손실」*이라는 뜻이다.
+    퍼센트로 적으면 「40%쯤이겠거니」로 읽히므로 **배수와 문장으로 바꿔 적는다**
+    (WAN-115가 잔존율 172%를 「유지」로 읽던 자리에서 세운 관행의 이 축 판).
+
+    ⚠️ 음수도 같다 — 분모가 음수면 부호가 뒤집힌 채 나온다.
+    """
+    share = row.same_step_tp_net_r_share
+    if share is None or math.isnan(share):
+        return "—(분모가 뜻을 잃음)"
+    if share < 0.0:
+        return f"🚨 {share:.0%}(분모가 음수 — 읽지 말 것)"
+    if share > 1.0:
+        return f"🚨 ×{share:.1f} — 순손익 전부보다 크다"
+    return f"{share:.0%}"
+
+
 def gate_line(rows: Sequence[MultipleRow], *, segment: str) -> str:
     """표본 게이트가 어느 점에서 깨지는가. 깨지면 그것 자체가 답의 일부다."""
     subset = [r for r in rows if r.segment == segment and r.lens == BASELINE_LENS]
@@ -964,21 +1000,17 @@ def build_summary_markdown(
         "| -- | --: | --: | --: |",
     ]
     for multiple, row in curve(rows, segment=seg):
-        share = (
-            "—(분모가 뜻을 잃음)"
-            if row.same_step_tp_net_r_share is None
-            else f"{row.same_step_tp_net_r_share:.0%}"
-        )
         out.append(
             f"| {multiple:g}R | {row.same_step_tp_trades:,} | "
-            f"{row.same_step_tp_trade_share:.0%} | {share} |"
+            f"{row.same_step_tp_trade_share:.0%} | {same_step_share_cell(row)} |"
         )
     out += [
         "",
         "🚨 **진입한 그 1분 안의 익절은 「저가 먼저·고가 나중」을 가정한 값이고, 틱이 지지하는 "
         "것은 그중 약 30%뿐이다**(WAN-336/348/359). 목표를 당길수록 이 몫이 커지므로 **이 열은 "
         "위 표의 net R과 반드시 함께 읽는다.** ⚠️ net R 몫은 **분모가 음수·0 언저리면 내지 "
-        "않는다**(WAN-115 부호 함정).",
+        "않고**, **100%를 넘으면 퍼센트가 아니라 배수로** 적는다 — 그건 *「그 거래들이 순손익 "
+        "전부를 만들고 나머지는 합쳐서 손실」*이라는 뜻이지 「몇 %쯤」이 아니다(WAN-115 함정).",
         "",
         "## 5. 체결 보수화(`pen_5bp`) — §2",
         "",
