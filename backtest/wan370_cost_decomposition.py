@@ -198,11 +198,17 @@ def decompose_trade(trade: Trade, cfg: BacktestConfig) -> TradeCosts:
     🚨 **어느 청산이 메이커였는지를 이 함수가 다시 정하지 않는다** — `cfg.exit_liquidity`
     (WAN-370의 단일 소스)에 물어본다. 여기서 사유별 분기를 복제하면 엔진과 리포트가 서로 다른
     비용을 말하게 된다(WAN-77의 사본이 실제로 그렇게 갈라졌다).
+
+    🚨 **진입 쪽도 같은 규칙이다 — `trade.entry_liquidity`(엔진이 실제로 쓴 값)를 본다**
+    (WAN-396). 예전에는 `cfg.entry_liquidity`를 읽었는데 그 기본값이 **테이커**인 반면 B안
+    엔진은 후보의 값(기본 **메이커**)을 쓴다. 그래서 분해가 붙지도 않은 진입 슬리피지 5bp를
+    계상했고, `entry_ref`가 그만큼 밀려 **`gross`와 `slippage`가 똑같이 부풀었다** — 두 항이
+    상쇄되므로 `net`으로는 안 보인다(판정 (가): 손익은 맞고 진단만 틀렸다).
     """
     costs = cfg.cost_model
     is_long = trade.side.sign > 0
     sign = trade.side.sign
-    entry_slip = costs.slippage_for(cfg.entry_liquidity)
+    entry_slip = costs.slippage_for(trade.entry_liquidity)
     entry_ref = _reference_price(trade.entry_price, is_long=is_long, slip=entry_slip, entry=True)
 
     gross = 0.0

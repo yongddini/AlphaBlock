@@ -1888,6 +1888,9 @@ def _to_trade(
         entry_price=entry_fill,
         quantity=qty,
         entry_fee=entry_fee,
+        # WAN-396: 체결가·수수료를 만든 그 유동성을 거래가 들고 나간다 — 사후 비용 분해가
+        # `cfg.entry_liquidity`(기본 테이커)를 보고 붙지도 않은 슬리피지를 계상하던 자리다.
+        entry_liquidity=entry_liquidity,
         exits=fills,
         funding_cost=funding_cost,
         realized_pnl=realized,
