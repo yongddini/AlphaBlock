@@ -292,7 +292,7 @@ def test_merge_knobs_are_rejected_on_the_split_path() -> None:
         {"merged_tap_state": "zone"},
     ):
         with pytest.raises(ValidationError):
-            OrderBlockParams(combine_obs=False, **kwargs)  # type: ignore[arg-type]
+            OrderBlockParams(combine_obs=False, **kwargs)
 
 
 def test_split_path_signals_are_untouched_by_this_issue() -> None:
@@ -329,3 +329,37 @@ def test_first_taps_can_be_derived_from_all_taps() -> None:
         # 이 픽스처가 실제로 재탭을 내야 이 테스트가 무언가를 지킨다.
         if not kwargs:
             assert len(all_taps) > len(first)
+
+
+def test_zone_key_keeps_counting_retaps_across_a_composition_change() -> None:
+    """재탭 카운터가 구성 변경으로 **1로 되돌아가지 않는다**.
+
+    가격이 실제로 나갔다 들어왔으므로 두 모드 모두 탭을 내지만, 현행 `cluster`는 키가
+    바뀌어 「이 클러스터의 첫 재탭」이라고 세고(`tap_index=1`) `zone`은 구성 존이 들고
+    있던 횟수에서 이어 센다. `tap_index`는 재탭 정책이 소비하는 값이라(WAN-81/123)
+    이 되돌아감은 라벨이 아니라 **동작**이다.
+    """
+    archive = [
+        _bull(105.0, 100.0, confirmed=1, break_time=3, swept_time=7),  # A
+        _bull(103.0, 98.0, confirmed=1),  # B (distal · 살아 있음)
+    ]
+    times = list(range(10))
+    inside = [99.0, 104.0]
+    outside = [120.0, 125.0]
+    #        t0       t1       t2      t3       t4      t5       t6      t7       t8      t9
+    pattern = [False, False, True, False, True, False, True, False, True, True]
+    lows = [inside[0] if flag else outside[0] for flag in pattern]
+    highs = [inside[1] if flag else outside[1] for flag in pattern]
+    closes = [(lo + hi) / 2 for lo, hi in zip(lows, highs, strict=True)]
+
+    by_mode = {
+        mode: _generate_merged_signals(
+            archive, times, highs, lows, closes, include_retaps=True, tap_state=mode
+        )
+        for mode in ("cluster", "zone")
+    }
+    # 두 모드가 **같은 봉들에** 탭을 낸다 — 갈리는 것은 재탭 번호뿐이다.
+    for mode, signals in by_mode.items():
+        assert [sig.trigger_time for sig in signals] == [2, 4, 6, 8], mode
+    assert [sig.tap_index for sig in by_mode["cluster"]] == [0, 1, 2, 1]  # ← t8이 1로 리셋
+    assert [sig.tap_index for sig in by_mode["zone"]] == [0, 1, 2, 3]

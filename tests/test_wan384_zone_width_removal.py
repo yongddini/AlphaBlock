@@ -186,6 +186,9 @@ _NO_PIN_NEEDED: frozenset[str] = frozenset(
         # §1 인구조사는 **탐지만** 한다 — 존폭 필터는 진입 층(지정가 확정 이후)이라 이 표의
         # 탭 수·클러스터 분포에 아예 닿지 않는다.
         "wan388_merge_retap_census",
+        # WAN-400 §0도 같은 부류다 — `OrderBlockParams`만 쓰고 `ConfluenceParams`를 아예
+        # 만들지 않아 `max_zone_width_atr`이 읽힐 자리가 없다(탐지 층 탭만 센다).
+        "wan400_merge_parity_census",
         # 재탭 × 재진입 귀속(WAN-389)도 같다 — WAN-388의 후속이고 **필터 꺼진 채택 북** 위에서
         # 재탭 정책과 재진입 배치만 갈아끼운 표다(핀 없음이 설계, WAN-305). 핀을 걸면 검산 (a)
         # (`split_every` ≡ WAN-388 공개 CSV)가 오히려 깨진다 — 그쪽이 핀 없이 낸 표다.

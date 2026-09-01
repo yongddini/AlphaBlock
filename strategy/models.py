@@ -68,7 +68,7 @@ class OrderBlockParams(BaseModel):
 
     ⚠️ **기본값 전환은 재-베이스라인 = 사용자 결정이고 개발자 임의 선택 금지**
     (WAN-400 §2 ★). `break_time`은 `obs_touch`의 오른쪽 변이라 **겹침 판정 결과까지**
-    달라진다. 크기는 `backtest/reports/wan400_merge_parity_census.md`.
+    달라진다. 크기는 `backtest/reports/wan400_merge_parity_census_summary.md`.
     """
     merged_tap_state: Literal["cluster", "zone"] = "cluster"
     """병합 경로의 탭 상태(직전 봉 포함 여부·재탭 카운터)를 무엇으로 키잉할지 (WAN-400 §3).
