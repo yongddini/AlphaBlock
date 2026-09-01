@@ -53,6 +53,43 @@ class OrderBlockParams(BaseModel):
     `True` 옵트인 경로(`_generate_merged_signals`)는 **존치**한다 — 옛 수치를 결론에 박아
     둔 리포트는 `harness.LEGACY_COMBINE_OBS`로 이 값을 명시 고정한다.
     """
+    merged_break_time_rule: Literal["distal", "pine_max"] = "distal"
+    """병합 존의 무효화 시각(`break_time`)을 구성 존들에서 어떻게 접을지 (WAN-400 §2).
+
+    `combine_obs=True`일 때만 읽는다(분리 경로는 병합 존을 만들지 않는다).
+
+    * `"distal"` — **현행 기본값**. 합집합 경계를 정의하는 존(강세 = `bottom` 최저,
+      약세 = `top` 최고)의 `break_time`. 병합 존의 손절선이 곧 그 존의 경계이므로,
+      그 경계가 뚫리면 병합 존도 무효화된다는 **매매 규칙**의 논리다.
+    * `"pine_max"` — 원본 `combineOBsFunc`(`.pine:391-392`) 충실:
+      `math.max(nz(A.breakTime), nz(B.breakTime))` 뒤 `== 0 ? na`. `nz(na)=0`이라
+      **구성 존 중 하나라도 죽었으면 병합 존도 죽고**(그중 가장 늦은 시각으로),
+      **전부 살아 있을 때만** 살아 있다. 🚨 「늦게 죽는 쪽까지 살아 있다」가 아니다.
+
+    ⚠️ **기본값 전환은 재-베이스라인 = 사용자 결정이고 개발자 임의 선택 금지**
+    (WAN-400 §2 ★). `break_time`은 `obs_touch`의 오른쪽 변이라 **겹침 판정 결과까지**
+    달라진다. 크기는 `backtest/reports/wan400_merge_parity_census_summary.md`.
+    """
+    merged_tap_state: Literal["cluster", "zone"] = "cluster"
+    """병합 경로의 탭 상태(직전 봉 포함 여부·재탭 카운터)를 무엇으로 키잉할지 (WAN-400 §3).
+
+    `combine_obs=True`일 때만 읽는다. **원본에는 대응물이 없다** — 원본은 탭·재탭을
+    세지 않고 박스만 그린다(탭 카운팅은 WAN-56/81/82 확장).
+
+    * `"cluster"` — **현행 기본값**. 키가 그 시점 **구성 존 인덱스 집합**이라,
+      클러스터 구성이 바뀌면(존 하나가 소멸해 쪼개지는 등) 키가 달라져 「직전 봉에
+      안에 있었다」 기록이 **리셋**된다 → 가격이 계속 박스 안에 있었는데도 새 탭으로
+      셀 수 있다. 같은 구성이 나중에 다시 나타나면 **낡은 값이 되살아난다**.
+    * `"zone"` — 상태를 **아카이브 존 인덱스마다** 들고, 그룹의 「직전 봉에 안에
+      있었다」를 **구성 존 전부가 그랬는가**(`all`)로 정의한다. 구성이 안 바뀐 채
+      쪼개지기만 하면 탭이 안 생기고(리셋 제거), **새로 편입된 존은 기록이 없어
+      `all`이 거짓**이라 WAN-82의 「새 구성 존도 자기 몫의 첫 탭을 갖는다」는 유지된다.
+      재탭 카운터도 같은 방식(구성 존들의 최댓값에서 이어 센다)이라 병합·분리로
+      1로 되돌아가지 않는다.
+
+    ⚠️ **기본값 전환은 재-베이스라인이다** — `harness.LEGACY_COMBINE_OBS`로 병합을
+    고정한 옛 리포트(WAN-134/149/388 계열)의 탭 집합이 통째로 움직인다.
+    """
     max_atr_mult: float = Field(default=3.5, gt=0)
     atr_length: int = Field(default=10, ge=1)
     max_order_blocks: int = Field(default=30, ge=1)
@@ -62,6 +99,32 @@ class OrderBlockParams(BaseModel):
     """(WAN-47) 렌더 뷰의 **최근성 필터**: 마지막 봉에서 이 봉 수 이내에 확정된 존만
     "현재 그림"(`rendered_order_blocks`)에 그린다. 원본에서는 탐지 스캔 상한이었으나,
     탐지/렌더 분리 후 아카이브(`order_blocks`)는 전체 히스토리를 스캔한다."""
+
+    @model_validator(mode="after")
+    def _reject_merge_knobs_without_merging(self) -> OrderBlockParams:
+        """병합 노브를 **분리 경로에** 주면 거부한다 (WAN-400).
+
+        `merged_*`는 `combine_obs=True`일 때만 읽히므로, 분리 경로에 주면 **아무 일도
+        안 하면서 라벨만 붙는다** — 「pine 규칙으로 쟀다」고 믿으면서 현행 분리 엔진을
+        돌리게 된다(WAN-91/95/112/123/159가 반복해 겪은 조용한 실패). 기본값끼리는
+        당연히 통과하므로 채택 경로(`combine_obs=False`)는 영향받지 않는다.
+        """
+        if self.combine_obs:
+            return self
+        offenders = [
+            name
+            for name, value, default in (
+                ("merged_break_time_rule", self.merged_break_time_rule, "distal"),
+                ("merged_tap_state", self.merged_tap_state, "cluster"),
+            )
+            if value != default
+        ]
+        if offenders:
+            raise ValueError(
+                f"{', '.join(offenders)}는 병합 경로 전용입니다 — combine_obs=True가 아니면 "
+                "읽히지 않습니다(라벨만 붙는 실행 방지)."
+            )
+        return self
 
     @property
     def zone_limit(self) -> int:
@@ -73,8 +136,10 @@ class OrderBlock(BaseModel):
     """탐지된 오더블록 하나. 원본 `orderBlockInfo`에 대응.
 
     이 값 객체는 존의 **전체 생애주기**를 담는다 (WAN-47). 원본 인디케이터는
-    깨진 뒤 되쓸린 존을 `box.delete()`로 삭제하지만, 백테스트 신호원으로 쓰려면
-    생애 기록이 소실되면 안 된다(생존자 편향). 그래서 탐지기는 존을 지우지 않고
+    깨진 뒤 되쓸린 존을 `bullishOrderBlocksList.remove(i)`(`.pine:267`)로 **데이터
+    리스트에서** 뺀다(WAN-400 §1 정정 — `box.delete()`는 그와 별개인 렌더 정리다).
+    백테스트 신호원으로 쓰려면 생애 기록이 소실되면 안 되므로(생존자 편향) 탐지기는
+    존을 지우지 않고
     `break_time`(무효화)·`swept_time`(소멸)·`tapped_times`(재진입)로 상태 전이만
     기록한다. "지금 차트에 그릴 박스"는 `OrderBlockResult.active_at()` 렌더링
     뷰가 이 아카이브에서 파생한다.
