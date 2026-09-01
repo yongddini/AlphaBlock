@@ -36,7 +36,7 @@ from __future__ import annotations
 
 import argparse
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -45,7 +45,7 @@ import pandas as pd
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from backtest import harness
-from backtest.confirmation_arm import ARM_C_OFFSET, derive_arm_candidates
+from backtest.confirmation_arm import ARM_BASE, ARM_C_OFFSET, derive_arm_candidates
 from backtest.harness import (
     IS_FRACTION,
     SEGMENT_FULL,
@@ -57,6 +57,7 @@ from backtest.harness import (
 )
 from backtest.leverage_book import BookCell, LeverageBookParams, run_leverage_book
 from backtest.models import BacktestConfig, ExitReason
+from backtest.payload_cache import PayloadCache
 from backtest.run import parse_date_ms
 from backtest.substep import SubStep, build_substeps
 from backtest.sweep import timeframe_to_ms
@@ -710,9 +711,21 @@ def run_cell_variants(
                 task.observe_zone_width_atr or any(t is not None for t in thresholds)
             ),
             observe_macd=task.observe_macd,
-            # WAN-386: 팔을 요청하면 관측이 **자동으로** 켜진다 — 트리거 없이는 팔을 만들
-            # 수 없는데 인자를 잊으면 팔이 조용히 0개가 된다(WAN-345 부류).
-            observe_confirmation=task.observe_confirmation or bool(task.confirmation_arms),
+            # WAN-386: **확인** 팔을 요청하면 관측이 자동으로 켜진다 — 트리거 없이는 그 팔을
+            # 만들 수 없는데 인자를 잊으면 팔이 조용히 0개가 된다(WAN-345 부류).
+            #
+            # 🚨 **기준 팔(`ARM_BASE`)은 예외다** — `derive_arm_candidates`가 그 팔에서
+            # `cand.confirmation`을 **아예 읽지 않는다**(트리거 판독은 `taker` 팔 전용이고
+            # 기준 팔은 후보 자기 체결을 그대로 쓴다). 그런데 옛 조건은 `bool(arms)`라
+            # 기준 팔만 요청해도 관측을 켰고, 그 관측은 체결 셋업마다 「탭 → 존 무효화」를
+            # 한 번 더 훑는 **가장 비싼 패스 중 하나**다(WAN-383 §0). 배수 축만 쓰는 격자
+            # (WAN-381 · WAN-394 §1)가 쓰지도 않는 값을 위해 그 비용을 통째로 물고 있었다.
+            #
+            # ⚠️ 끄는 것이 **수치를 바꾸지 않는다**: `confirmation`은 순수 관측 필드라
+            # 후보의 진입·청산·손절·목표 어디에도 안 들어가고, 배치는 그것을 `PlacedSetup`에
+            # 옮겨 싣기만 한다. 실데이터로 비트 대조해 확인한다(회귀 테스트가 고정).
+            observe_confirmation=task.observe_confirmation
+            or any(arm != ARM_BASE for arm in task.confirmation_arms),
         )
         funding[segment_name] = tuple(window.funding_rates)
         engine_return: float | None = None
@@ -900,6 +913,7 @@ def run_cells(
     confirmation_multiples: Sequence[float] = (),
     confirmation_offset: float = ARM_C_OFFSET,
     post_filter_zone_width: float | None = None,
+    payload_cache: PayloadCache | None = None,
 ) -> list[CellPayload]:
     """전 칸을 돈다. `jobs`는 성능 노브이지 결과 축이 아니다(WAN-121).
 
@@ -1004,6 +1018,12 @@ def run_cells(
     거부한다** — 심볼 표기가 어긋나면 아무것도 안 걸린 채 「표적 팔」 라벨만 붙어 기준선과
     같은 수가 나오고, 그러면 「보간이 맞았다」가 근거 없이 만들어진다(WAN-91/95/112/123/159가
     반복해 경계한 자리 · `_loo_rows`의 같은 가드와 같은 부류).
+
+    `payload_cache`(WAN-394 §0, 옵트인)를 주면 이 함수가 **미스 칸만** 계산하고 나머지는
+    디스크에서 읽는다(`backtest.payload_cache`). 캐시 키는 **`_Task` 그 자체 + 엔진·러너 소스
+    지문**이라 *「payload를 바꾸는 것은 전부 키에 있다」*가 구조적으로 참이고, 반대로 손절폭
+    가드·재진입 **배치**·복리는 `_Task`에 아예 없어 **바꿔도 히트한다**(그것이 캐시의 존재
+    이유다). `None`(기본)이면 이 경로를 아예 타지 않아 예전과 **비트 단위로 같다**.
     """
     targeted: Mapping[tuple[str, str], frozenset[int]] = no_same_step_tp_minutes or {}
     if no_same_step_tp and targeted:
@@ -1078,10 +1098,68 @@ def run_cells(
         for symbol in symbols
         for timeframe in timeframes
     ]
-    if jobs <= 1 or len(tasks) <= 1:
-        return [run_cell(task) for task in tasks]
-    with ProcessPoolExecutor(max_workers=min(jobs, len(tasks))) as executor:
-        return list(executor.map(_run_task_logged, tasks))
+    return _run_tasks(tasks, jobs=jobs, cache=payload_cache)
+
+
+def _run_tasks(
+    tasks: Sequence[_Task], *, jobs: int, cache: PayloadCache | None = None
+) -> list[CellPayload]:
+    """칸들을 돈다 — 캐시가 있으면 **미스만** 돌고 히트는 디스크에서 온다(WAN-394 §0).
+
+    🚨 캐시는 `run_cell` **바깥**에 있다 — 워커에 들어가는 것은 예전과 같은 `_Task`뿐이고
+    무거운 함수는 한 글자도 안 바뀐다. 그래서 「캐시를 끄면 비트 재현」이 배선의 성질이지
+    지켜야 할 규칙이 아니다(캐시가 있어도 미스 칸은 **글자 그대로 같은 경로**를 돈다).
+
+    🚨 **미스를 조용히 메우지 않는다** — 몇 칸이 히트/미스인지 **계산 전에** 찍는다
+    (WAN-335 관행: 조용히 느려지면 「왜 안 끝나지」가 반복된다).
+    """
+    if cache is None:
+        if jobs <= 1 or len(tasks) <= 1:
+            return [run_cell(task) for task in tasks]
+        with ProcessPoolExecutor(max_workers=min(jobs, len(tasks))) as executor:
+            return list(executor.map(_run_task_logged, tasks))
+
+    hit_count, miss_count = cache.census(tasks)
+    print(
+        f"[payload-cache] {cache.directory} ({cache.revision}): "
+        f"히트 {hit_count}칸 · 미스 {miss_count}칸 — 미스만 계산합니다.",
+        flush=True,
+    )
+    out: list[CellPayload | None] = [cache.load(task) for task in tasks]
+    pending = [
+        (i, task) for i, (task, got) in enumerate(zip(tasks, out, strict=True)) if got is None
+    ]
+    if pending:
+        missing = [task for _i, task in pending]
+        if jobs <= 1 or len(missing) <= 1:
+            _drain(pending, (run_cell(task) for task in missing), out, cache)
+        else:
+            with ProcessPoolExecutor(max_workers=min(jobs, len(missing))) as executor:
+                _drain(pending, executor.map(_run_task_logged, missing), out, cache)
+    print(f"[payload-cache] {cache.summary()}", flush=True)
+    return [payload for payload in out if payload is not None]
+
+
+def _drain(
+    pending: Sequence[tuple[int, _Task]],
+    computed: Iterable[CellPayload],
+    out: list[CellPayload | None],
+    cache: PayloadCache,
+) -> None:
+    """🚨 **칸이 나오는 대로 적재한다** — 다 모아서 저장하면 안 된다.
+
+    `executor.map`은 지연 이터레이터라 `list()`로 먼저 비우면 47칸 중 46칸을 돌고 마지막에
+    죽었을 때 **아무것도 안 남는다** — 4시간짜리 실행에서 그건 캐시가 있으나 마나라는 뜻이다
+    (48칸 격자를 실제로 돌리다 25분 동안 새 파일이 한 개도 안 생겨 발견했다).
+
+    ⚠️ **「완료 순서대로」가 아니라 「제출 순서대로 나오는 대로」다** — `executor.map`은 결과를
+    **제출 순서**로 내보내므로, 빠른 칸이 먼저 끝나도 앞 칸이 끝나야 그것까지 함께 적재된다
+    (실측: BTC 4h·2h·1h가 다 끝났는데 BTC 15m이 도는 동안 적재 0칸). 잃는 범위가 크게 줄
+    뿐 0은 아니다 — 진짜 완료 순서로 바꾸려면 `as_completed`이고 그건 별건이다.
+    """
+    for (index, task), payload in zip(pending, computed, strict=True):
+        cache.store(task, payload)
+        out[index] = payload
 
 
 def run_cells_multi(
