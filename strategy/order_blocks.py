@@ -422,11 +422,14 @@ def _generate_merged_signals(
     # `tap_state="cluster"`(기본): 키가 그 시점 구성 존 집합 — 구성이 바뀌면 리셋된다.
     inside_state: dict[frozenset[int], bool] = {}
     retap_counter: dict[frozenset[int], int] = {}
-    # `tap_state="zone"`(옵트인, WAN-400 §3): 상태를 아카이브 존 인덱스마다 들고,
-    # 그룹의 값은 구성 존들에서 접는다(포함은 `all` · 재탭 카운터는 `max`).
+    # `tap_state="zone"`/`"zone_all"`(옵트인, WAN-400 §3): 상태를 아카이브 존 인덱스마다
+    # 들고, 그룹의 값은 구성 존들에서 접는다(재탭 카운터는 `max`).
     inside_by_zone: dict[int, bool] = {}
     retap_by_zone: dict[int, int] = {}
-    by_zone = tap_state == "zone"
+    by_zone = tap_state in ("zone", "zone_all")
+    # 포함 여부를 접는 방식이 두 규칙을 가른다 — `any`가 사용자 결정(2026-09-01)이고
+    # `all`은 그것으로 대체된 개발자 초안이다(크기를 재려고 측정 대조로만 존치).
+    fold_inside = all if tap_state == "zone_all" else any
     groups: list[_MergedGroup] = []
     dirty = True
     signals: list[OrderBlockSignal] = []
@@ -460,9 +463,12 @@ def _generate_merged_signals(
             in_window = g.break_time is None or now <= g.break_time
             is_inside = lows[t] <= g.top and highs[t] >= g.bottom
             if by_zone:
-                # `all`이라야 WAN-82가 유지된다 — 새로 편입된 존은 기록이 없어(`False`)
-                # 클러스터가 「계속 안에 있었다」로 접히지 않고 그 존 몫의 첫 탭이 난다.
-                was_inside = all(inside_by_zone.get(i, False) for i in g.member_indices)
+                # 🚨 `any`(사용자 결정): 병합된 것은 **하나의 박스**이고 커져도 같은
+                # 박스다 — 가격이 안 움직였으면 새 진입 기회가 아니다. 새 존이 합류해도
+                # 기존 구성 존이 직전 봉에 안에 있었으면 「계속 안에 있었다」로 본다.
+                # WAN-82는 그대로다: 가격이 **나갔다 다시 들어오면** 그때 탭이 나고
+                # `member_indices - entered`가 미진입 구성 존에 기회를 준다.
+                was_inside = fold_inside(inside_by_zone.get(i, False) for i in g.member_indices)
             else:
                 was_inside = inside_state.get(g.member_indices, False)
             if in_window and is_inside and not was_inside:
