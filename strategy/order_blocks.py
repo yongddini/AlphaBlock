@@ -236,16 +236,38 @@ class _MergedGroup:
     merged_ob: OrderBlock
 
 
+def _pine_max_break_time(obs: list[OrderBlock]) -> int | None:
+    """원본 `combineOBsFunc`의 `breakTime` 접기 (`.pine:391-392`, WAN-400 §2).
+
+    원본은 쌍 병합마다 `math.max(nz(A.breakTime), nz(B.breakTime))`을 취하고 그 결과가
+    `0`이면 `na`로 되돌린다. `nz(na) = 0`이고 실제 시각은 항상 양수이므로, 이 접기는
+    구성원 수·병합 순서와 무관하게 다음과 **정확히 같다**:
+
+    * 구성 존이 **전부 살아 있으면**(`break_time`이 전부 `None`) 병합 존도 살아 있다.
+    * 하나라도 죽었으면 병합 존은 **죽은 것들 중 가장 늦은 시각**에 죽는다 —
+      🚨 아직 살아 있는 구성 존이 있어도 그렇다(`nz(na)=0`은 최댓값을 못 올린다).
+    """
+    dead = [ob.break_time for ob in obs if ob.break_time is not None]
+    return max(dead) if dead else None
+
+
 def _make_merged_group(
-    direction: OrderBlockDirection, members: list[tuple[int, OrderBlock]]
+    direction: OrderBlockDirection,
+    members: list[tuple[int, OrderBlock]],
+    *,
+    break_time_rule: str = "distal",
 ) -> _MergedGroup:
     """연결 요소(같은 방향, 서로 touch) 존들을 하나의 병합 존으로 접는다.
 
-    병합 존의 무효화(`break_time`)는 **원단(distal) 경계를 정의하는 구성 존**의 무효화와
-    같다. 강세 병합 존의 distal은 `bottom = min(구성 bottom)`이고, 그 최저 bottom을 가진
-    구성 존이 깨지는 순간(가격이 그 bottom 아래로) 병합 존도 무효화된다(합집합 경계 이탈).
-    약세는 `top = max(구성 top)`의 최고 top 존이 distal이다. 따라서 병합 존의 손절선은
-    구성 존 중 가장 바깥 존의 손절선과 일치한다(WAN-56 영향 #2: 손절 거리 확장).
+    병합 존의 무효화(`break_time`)는 기본값(`break_time_rule="distal"`)에서 **원단(distal)
+    경계를 정의하는 구성 존**의 무효화와 같다. 강세 병합 존의 distal은
+    `bottom = min(구성 bottom)`이고, 그 최저 bottom을 가진 구성 존이 깨지는 순간(가격이 그
+    bottom 아래로) 병합 존도 무효화된다(합집합 경계 이탈). 약세는 `top = max(구성 top)`의
+    최고 top 존이 distal이다. 따라서 병합 존의 손절선은 구성 존 중 가장 바깥 존의 손절선과
+    일치한다(WAN-56 영향 #2: 손절 거리 확장).
+
+    `break_time_rule="pine_max"`(옵트인, WAN-400 §2)는 그 자리에 원본 규칙
+    (`_pine_max_break_time`)을 쓴다 — ⚠️ 기본값 전환은 **사용자 결정**이다.
     """
     obs = [ob for _, ob in members]
     indices = frozenset(idx for idx, _ in members)
@@ -267,6 +289,7 @@ def _make_merged_group(
     bottom = min(ob.bottom for ob in obs)
     # 원단(distal) 경계를 정의하는 구성 존 → 병합 존의 무효화/소멸 시각을 이 존에서 취한다.
     distal = min(obs, key=lambda ob: ob.bottom) if is_bullish else max(obs, key=lambda ob: ob.top)
+    break_time = _pine_max_break_time(obs) if break_time_rule == "pine_max" else distal.break_time
     tapped: set[int] = set()
     for ob in obs:
         tapped.update(ob.tapped_times)
@@ -279,8 +302,9 @@ def _make_merged_group(
         ob_volume=sum(ob.ob_volume for ob in obs),
         ob_low_volume=sum(ob.ob_low_volume for ob in obs),
         ob_high_volume=sum(ob.ob_high_volume for ob in obs),
-        breaker=distal.break_time is not None,
-        break_time=distal.break_time,
+        # 원본은 `breaker := A.breaker or B.breaker`(`.pine:399`)라 `pine_max`와 짝이 맞는다.
+        breaker=break_time is not None,
+        break_time=break_time,
         swept_time=distal.swept_time,
         tapped_times=tuple(sorted(tapped)),
         combined=True,
@@ -291,13 +315,15 @@ def _make_merged_group(
         top=top,
         bottom=bottom,
         latest_confirmed=max(ob.confirmed_time for ob in obs),
-        break_time=distal.break_time,
+        break_time=break_time,
         member_indices=indices,
         merged_ob=merged_ob,
     )
 
 
-def _build_merged_groups(alive: list[tuple[int, OrderBlock]], now: int) -> list[_MergedGroup]:
+def _build_merged_groups(
+    alive: list[tuple[int, OrderBlock]], now: int, *, break_time_rule: str = "distal"
+) -> list[_MergedGroup]:
     """현재 활성 존들을 방향별로 touch 연결 요소(병합 단위)로 묶는다.
 
     원본 `combineOBsFunc`는 매 봉 병합을 처음부터 다시 계산하므로, 여기서도 그 시점의
@@ -341,7 +367,7 @@ def _build_merged_groups(alive: list[tuple[int, OrderBlock]], now: int) -> list[
         for i in range(m):
             components.setdefault(find(i), []).append(members[i])
         for comp in components.values():
-            groups.append(_make_merged_group(direction, comp))
+            groups.append(_make_merged_group(direction, comp, break_time_rule=break_time_rule))
     return groups
 
 
@@ -353,6 +379,8 @@ def _generate_merged_signals(
     closes: list[float],
     *,
     include_retaps: bool = False,
+    break_time_rule: str = "distal",
+    tap_state: str = "cluster",
 ) -> list[OrderBlockSignal]:
     """병합 존(combine_obs) 기준으로 탭 진입 시그널을 **시간 순 재생**으로 생성한다 (WAN-56).
 
@@ -372,9 +400,11 @@ def _generate_merged_signals(
     추가 시그널을 낸다(`include_retaps=False`면 스킵 — `OrderBlockResult.signals`가
     쓰는 경로로, "병합 단위당 존별 첫 탭만" 유지).
 
-    탭은 **바깥→안 전이**만 센다(`inside_state`로 직전 봉의 포함 여부를 병합
-    구성(`member_indices`) 단위로 추적) — 그렇지 않으면 가격이 며칠씩 존 안에
-    머무는 매 봉마다 재탭이 발생해 버린다.
+    탭은 **바깥→안 전이**만 센다(직전 봉의 포함 여부를 추적) — 그렇지 않으면 가격이
+    며칠씩 존 안에 머무는 매 봉마다 재탭이 발생해 버린다. 그 상태를 무엇으로 키잉할지가
+    `tap_state`다(WAN-400 §3): 기본 `"cluster"`는 구성 존 집합(`member_indices`)이라
+    **구성이 바뀌면 리셋**되고, 옵트인 `"zone"`은 아카이브 존 인덱스마다 들고 그룹 값을
+    구성 존들에서 접는다(`all`). 크기는 `wan400_merge_parity_census`가 낸다.
 
     성능(WAN-49): 병합 상태는 활성 집합이 바뀔 때(존 확정·무효화·소멸)만 재계산하고,
     변화 없는 봉에서는 캐시한 병합 존에 탭만 확인한다. 겹치지 않는(단일) 존은
@@ -389,8 +419,14 @@ def _generate_merged_signals(
     add_ptr = 0
     alive: list[tuple[int, OrderBlock]] = []
     entered: set[int] = set()
+    # `tap_state="cluster"`(기본): 키가 그 시점 구성 존 집합 — 구성이 바뀌면 리셋된다.
     inside_state: dict[frozenset[int], bool] = {}
     retap_counter: dict[frozenset[int], int] = {}
+    # `tap_state="zone"`(옵트인, WAN-400 §3): 상태를 아카이브 존 인덱스마다 들고,
+    # 그룹의 값은 구성 존들에서 접는다(포함은 `all` · 재탭 카운터는 `max`).
+    inside_by_zone: dict[int, bool] = {}
+    retap_by_zone: dict[int, int] = {}
+    by_zone = tap_state == "zone"
     groups: list[_MergedGroup] = []
     dirty = True
     signals: list[OrderBlockSignal] = []
@@ -404,7 +440,10 @@ def _generate_merged_signals(
         kept: list[tuple[int, OrderBlock]] = []
         for idx, ob in alive:
             if ob.swept_time is not None and ob.swept_time <= now:
-                dirty = True  # 소멸 → 활성 집합에서 제외(원본 box.delete와 동일).
+                # 소멸 → 병합 후보 집합에서 제외. WAN-400 §1: 이것이 **원본과 같다** —
+                # 원본도 `bullishOrderBlocksList.remove(i)`(`.pine:267`)로 데이터 리스트에서
+                # 빼고, `handleOrderBlocksFinal`이 그 리스트에서만 병합 입력을 만든다.
+                dirty = True
                 continue
             if ob.break_time is not None and ob.break_time == now:
                 dirty = True  # 무효화 상태 전이 → 병합 경계(면적/end) 재계산 필요.
@@ -412,7 +451,7 @@ def _generate_merged_signals(
         alive = kept
 
         if dirty:
-            groups = _build_merged_groups(alive, now)
+            groups = _build_merged_groups(alive, now, break_time_rule=break_time_rule)
             dirty = False
 
         for g in groups:
@@ -420,17 +459,32 @@ def _generate_merged_signals(
                 continue  # 병합 존 형성 봉의 자기-포함 탭 배제(원본 확정 봉 제외와 동일).
             in_window = g.break_time is None or now <= g.break_time
             is_inside = lows[t] <= g.top and highs[t] >= g.bottom
-            was_inside = inside_state.get(g.member_indices, False)
+            if by_zone:
+                # `all`이라야 WAN-82가 유지된다 — 새로 편입된 존은 기록이 없어(`False`)
+                # 클러스터가 「계속 안에 있었다」로 접히지 않고 그 존 몫의 첫 탭이 난다.
+                was_inside = all(inside_by_zone.get(i, False) for i in g.member_indices)
+            else:
+                was_inside = inside_state.get(g.member_indices, False)
             if in_window and is_inside and not was_inside:
                 new_members = g.member_indices - entered
                 tap_index: int | None = None
                 if new_members:
                     tap_index = 0
                     entered |= g.member_indices
-                    retap_counter[g.member_indices] = 1
+                    if by_zone:
+                        for i in g.member_indices:
+                            retap_by_zone[i] = 1
+                    else:
+                        retap_counter[g.member_indices] = 1
                 elif include_retaps:
-                    tap_index = retap_counter.get(g.member_indices, 1)
-                    retap_counter[g.member_indices] = tap_index + 1
+                    if by_zone:
+                        # 구성 존들의 최댓값에서 이어 센다 — 병합·분리로 1로 안 돌아간다.
+                        tap_index = max(retap_by_zone.get(i, 1) for i in g.member_indices)
+                        for i in g.member_indices:
+                            retap_by_zone[i] = tap_index + 1
+                    else:
+                        tap_index = retap_counter.get(g.member_indices, 1)
+                        retap_counter[g.member_indices] = tap_index + 1
                 if tap_index is not None:
                     is_break_bar = g.break_time is not None and now >= g.break_time
                     signals.append(
@@ -444,7 +498,11 @@ def _generate_merged_signals(
                             zone_key=g.member_indices,
                         )
                     )
-            inside_state[g.member_indices] = is_inside
+            if by_zone:
+                for i in g.member_indices:
+                    inside_by_zone[i] = is_inside
+            else:
+                inside_state[g.member_indices] = is_inside
     return signals
 
 
@@ -566,9 +624,19 @@ class OrderBlockDetector:
         # 전체 탭(재탭 포함) 뷰 — combine_obs 여부에 따라 병합/원본 경로를 그대로 따른다
         # (갭B: 재탭 경로도 병합을 반영해야 한다).
         if params.combine_obs:
-            signals = _generate_merged_signals(archive, times, highs, lows, closes)
+            rule, state = params.merged_break_time_rule, params.merged_tap_state
+            signals = _generate_merged_signals(
+                archive, times, highs, lows, closes, break_time_rule=rule, tap_state=state
+            )
             retap_signals = _generate_merged_signals(
-                archive, times, highs, lows, closes, include_retaps=True
+                archive,
+                times,
+                highs,
+                lows,
+                closes,
+                include_retaps=True,
+                break_time_rule=rule,
+                tap_state=state,
             )
         else:
             signals = _generate_signals(archive, times, highs, lows, closes)
@@ -628,8 +696,15 @@ class OrderBlockDetector:
                         ob.breaker = True
                         ob.break_time = times[t]
             else:
-                # WAN-47: 되쓸린 존을 리스트에서 지우지 않고 소멸 시각만 기록한다.
-                # (원본은 여기서 box.delete() — 렌더링에는 옳지만 백테스트 기록을 지운다.)
+                # WAN-47: 되쓸린 존을 아카이브에서 지우지 않고 소멸 시각만 기록한다.
+                # 🚨 WAN-400 §1 정정: 원본은 여기서 `box.delete()`(렌더링)가 아니라
+                # `bullishOrderBlocksList.remove(i)`(`.pine:267` / 약세 `:308`)로 **데이터
+                # 리스트에서** 뺀다. 그 리스트가 곧 `handleOrderBlocksFinal`이 병합 입력
+                # (`allOrderBlocksList`)을 만드는 원천이므로, **원본에서도 소멸 존은 겹침
+                # 판정에 참여하지 않는다**. 우리 조건(`high > top` / `low < bottom`)도
+                # 원본과 글자 그대로 같다. 아카이브 보존은 생존자 편향을 없애려는 우리
+                # 확장이고, 병합 후보 집합은 `_generate_merged_signals`가 소멸 존을 빼서
+                # 원본과 맞춘다.
                 if is_bullish:
                     if highs[t] > ob.top:
                         ob.swept = True
@@ -759,3 +834,35 @@ def detect_order_blocks(
 ) -> OrderBlockResult:
     """`OrderBlockDetector(params).run(df)`의 편의 함수."""
     return OrderBlockDetector(params).run(df)
+
+
+def merged_signals_for_archive(
+    archive: list[OrderBlock],
+    df: pd.DataFrame,
+    *,
+    include_retaps: bool = False,
+    break_time_rule: str = "distal",
+    tap_state: str = "cluster",
+) -> list[OrderBlockSignal]:
+    """**측정용** 진입점 (WAN-400 §0): 탐지 아카이브를 직접 주고 병합 시그널만 다시 낸다.
+
+    탐지기가 만든 아카이브를 손봐 **반사실 팔**을 세울 때 쓴다. WAN-400 §0의 A 팔이
+    그 예다 — 아카이브의 `swept_time`을 전부 지우면 「소멸 존이 병합 후보에서 안 빠지는」
+    엔진이 되고, 그 팔과 기준 팔의 탭 차이가 곧 A의 크기다(엔진 기본값은 안 건드린다).
+
+    ⚠️ `df`는 탐지에 쓴 **그 프레임**이어야 한다 — 여기서도 같은 확정봉 필터·정렬을
+    적용하므로, 아카이브의 시각들이 이 프레임의 시간축과 어긋나면 결과가 무의미하다.
+    """
+    frame = OrderBlockDetector._prepare(df)
+    if frame.empty or not archive:
+        return []
+    return _generate_merged_signals(
+        archive,
+        frame["open_time"].astype("int64").tolist(),
+        frame["high"].astype(float).tolist(),
+        frame["low"].astype(float).tolist(),
+        frame["close"].astype(float).tolist(),
+        include_retaps=include_retaps,
+        break_time_rule=break_time_rule,
+        tap_state=tap_state,
+    )
