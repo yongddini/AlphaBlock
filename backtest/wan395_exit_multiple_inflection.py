@@ -837,18 +837,24 @@ def residual_line(rows: Sequence[MultipleRow], *, segment: str) -> str:
         if base is None:
             continue
         label = f"{row.multiple:g}R"
-        if abs(base.mean_net_r) < NOISE_R or (base.mean_net_r > 0) != (row.mean_net_r > 0):
-            parts.append(
-                f"**{label}**: {_r(base.mean_net_r)} → {_r(row.mean_net_r)} "
-                "(🚨 잔존율을 내지 않는다 — 기준이 0 언저리이거나 부호가 갈린다)"
-            )
-            continue
-        ratio = row.mean_net_r / base.mean_net_r
+        delta = row.mean_net_r - base.mean_net_r
         drop = row.num_trades / base.num_trades - 1
-        parts.append(
-            f"**{label}**: {_r(base.mean_net_r)} → {_r(row.mean_net_r)} (잔존 {ratio:.0%} · "
-            f"거래 {base.num_trades:,} → {row.num_trades:,} = {drop:+.1%})"
+        head = (
+            f"**{label}**: {_r(base.mean_net_r)} → {_r(row.mean_net_r)} "
+            f"(Δ{_r(delta)} · 거래 {base.num_trades:,} → {row.num_trades:,} = {drop:+.1%}"
         )
+        # 🚨 **잔존율은 기준이 「양수이고 잡음선 밖」일 때만 뜻이 있다.** 기준이 음수면
+        # 더 나빠졌는데도 100%가 넘게 나와 「유지」로 읽힌다 — WAN-115가 증분 부호 함정으로
+        # 문서화한 그 자리이고, 이 표에서 실제로 `잔존 156%`가 찍혔다(뜻은 「56% 더 나빠졌다」).
+        if base.mean_net_r > NOISE_R and row.mean_net_r > 0:
+            parts.append(f"{head} · 잔존 {row.mean_net_r / base.mean_net_r:.0%})")
+        elif base.mean_net_r > NOISE_R:
+            parts.append(f"{head} · 🚨 **부호가 넘어간다** — 잔존율은 뜻을 잃는다)")
+        else:
+            parts.append(
+                f"{head} · 🚨 잔존율을 내지 않는다 — 기준이 양수가 아니라 "
+                f"비율이 「유지」로 읽힌다(WAN-115))"
+            )
     return " · ".join(parts)
 
 

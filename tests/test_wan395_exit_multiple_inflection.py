@@ -285,15 +285,32 @@ def test_residual_ratio_is_withheld_when_the_base_is_near_zero() -> None:
     assert "잔존 " not in line
 
 
+def test_residual_ratio_is_withheld_when_the_base_is_negative() -> None:
+    """🚨 **실측에서 실제로 뚫렸다** — 채택 점이 −0.1194 → −0.1859인데 `잔존 156%`가 찍혔다.
+
+    뜻은 「56% 더 나빠졌다」인데 비율은 「유지」로 읽힌다. WAN-115가 증분 부호 함정으로
+    문서화한 그 자리이고, 기준이 **양수이고 잡음선 밖**일 때만 비율을 낸다.
+    """
+    rows = [_row(1.5, -0.1194), _row(1.5, -0.1859, lens=wan395.STRESS_LENS)]
+    line = wan395.residual_line(rows, segment=PRIMARY_OOS)
+    assert "잔존 " not in line
+    assert "잔존율을 내지 않는다" in line
+    assert "Δ-0.0665R" in line  # 대신 델타를 낸다 — 숫자를 숨기지는 않는다
+
+
 def test_residual_ratio_is_withheld_when_the_sign_flips() -> None:
+    """부호가 넘어가면 비율이 아니라 **그 사실**을 적는다 — 실측 0.4R이 그 자리다."""
     rows = [_row(0.6, 0.05), _row(0.6, -0.02, lens=wan395.STRESS_LENS)]
-    assert "잔존율을 내지 않는다" in wan395.residual_line(rows, segment=PRIMARY_OOS)
+    line = wan395.residual_line(rows, segment=PRIMARY_OOS)
+    assert "부호가 넘어간다" in line
+    assert "잔존 " not in line
 
 
 def test_residual_ratio_is_reported_when_it_means_something() -> None:
+    """기준이 **양수이고 잡음선 밖**이며 부호가 유지될 때만 비율이 뜻을 갖는다."""
     rows = [
-        _row(0.6, -0.10, trades=10_000),
-        _row(0.6, -0.05, lens=wan395.STRESS_LENS, trades=9_000),
+        _row(0.6, 0.10, trades=10_000),
+        _row(0.6, 0.05, lens=wan395.STRESS_LENS, trades=9_000),
     ]
     line = wan395.residual_line(rows, segment=PRIMARY_OOS)
     assert "잔존 50%" in line
