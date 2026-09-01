@@ -31,8 +31,13 @@
 ``base``     distal · cluster           현행 병합 경로(= 옛 병합 리포트가 돈 엔진)
 ``arm_a``    아카이브 `swept_time` 제거  소멸 존이 병합 후보에서 **안 빠지는** 반사실
 ``arm_b``    pine_max · cluster         원본 `breakTime` 접기(`.pine:391-392`)
-``arm_c``    distal · zone              탭 상태를 **아카이브 존 인덱스**마다 (§3 새 설계)
+``arm_c``    distal · zone              탭 상태를 **아카이브 존 인덱스**마다 (§3 · `any`)
+``arm_c0``   distal · zone_all          그 §3의 **개발자 초안**(`all`) — 대체된 규칙
 ===========  =========================  ==================================================
+
+📌 **`arm_c`와 `arm_c0`의 차이가 곧 「사용자 결정의 크기」다** — `all`은 새 존이 합류하면
+(그 존은 기록이 없어) 탭을 세고, `any`는 **가격이 안 움직였으면 안 센다**(사용자 결정
+2026-09-01: *"단순히 존만 넓어지는거야"* · *"기회를 안주는게 맞지"*).
 
 🚨 **A 팔은 15m에서 안 잰다**(기본값 `--a-arm-timeframes 1h,2h,4h`) — 그 팔은 **아무것도
 안 죽는** 반사실이라 활성 집합이 창 끝까지 계속 커져 비용이 **초선형**이다(BTC 실측 1h
@@ -128,13 +133,26 @@ class CensusRow(BaseModel):
     b_removed_taps: int
     b_added_taps: int
 
-    # C — 탭 상태 키를 존 단위로 바꾸면
+    # C — 탭 상태 키를 존 단위로 바꾸면 (사용자 결정 규칙 = `any`)
     c_first_taps: int
     c_all_taps: int
     c_first_tap_change: float
     c_all_tap_change: float
     c_removed_taps: int
     c_added_taps: int
+
+    # C0 — 그 §3의 개발자 초안(`all`). `c` 대비 차이가 곧 「사용자 결정의 크기」다.
+    c0_first_taps: int
+    c0_all_taps: int
+    c0_first_tap_change: float
+    c0_all_tap_change: float
+    c0_removed_taps: int
+    c0_added_taps: int
+    join_taps: int
+    """초안(`all`)이 「구성 변경 + 가격은 계속 안에」로 세던 탭 = `c0` − `c`(모든 탭)."""
+    join_first_taps: int
+    """그중 첫 탭. 🚨 0이면 「새 존 합류를 첫 탭으로 세던 것이 없었다」가 아니라
+    **순변화가 0**이라는 뜻일 수 있다 — 건수는 `join_taps`로 읽는다."""
 
 
 def _share(part: int, whole: int) -> float:
@@ -227,9 +245,13 @@ def census_for_cell(
     b_all = merged_signals_for_archive(archive, df, include_retaps=True, break_time_rule="pine_max")
     b_first = _first_taps(b_all)
 
-    # ── C 팔: 탭 상태를 아카이브 존 인덱스마다.
+    # ── C 팔: 탭 상태를 아카이브 존 인덱스마다(사용자 결정 = `any`).
     c_all = merged_signals_for_archive(archive, df, include_retaps=True, tap_state="zone")
     c_first = _first_taps(c_all)
+
+    # ── C0 팔: 같은 자리의 개발자 초안(`all`). 대체된 규칙이고 **크기를 재려고만** 돈다.
+    c0_all = merged_signals_for_archive(archive, df, include_retaps=True, tap_state="zone_all")
+    c0_first = _first_taps(c0_all)
 
     # ── A 팔: 아카이브의 `swept_time`을 지운 반사실(엔진 노브 아님 · 데이터 층 조작).
     #    소멸 존이 활성 집합에서 안 빠지므로 「원본이 소멸 존을 안 뺀다면」이 된다.
@@ -254,6 +276,15 @@ def census_for_cell(
 
     b_removed, b_added = _tap_diff(base.retap_signals, b_all)
     c_removed, c_added = _tap_diff(base.retap_signals, c_all)
+    c0_removed, c0_added = _tap_diff(base.retap_signals, c0_all)
+    # 초안이 더 세던 탭 = 「구성 변경 + 가격은 계속 안에」. `any`는 `all`보다 항상
+    # 덜 세므로(단조) 이 차이는 음수가 될 수 없다 — 되면 규칙 하나가 깨진 것이다.
+    join_removed, join_added = _tap_diff(c0_all, c_all)
+    if join_added:
+        raise AssertionError(
+            f"{symbol} {timeframe}: `any`가 `all`보다 더 센 탭이 {join_added}건 있습니다 — "
+            "단조성이 깨졌습니다(규칙 구현을 확인하십시오)."
+        )
 
     swept = sum(1 for ob in archive if ob.swept_time is not None)
     base_first, base_all = len(base.signals), len(base.retap_signals)
@@ -304,6 +335,14 @@ def census_for_cell(
         c_all_tap_change=_change(len(c_all), base_all),
         c_removed_taps=c_removed,
         c_added_taps=c_added,
+        c0_first_taps=len(c0_first),
+        c0_all_taps=len(c0_all),
+        c0_first_tap_change=_change(len(c0_first), base_first),
+        c0_all_tap_change=_change(len(c0_all), base_all),
+        c0_removed_taps=c0_removed,
+        c0_added_taps=c0_added,
+        join_taps=join_removed,
+        join_first_taps=len(c0_first) - len(c_first),
     )
 
 
@@ -392,8 +431,8 @@ def build_summary_markdown(rows: Sequence[CensusRow], *, elapsed: float | None =
     cells = len(rows)
     symbols = sorted({row.symbol for row in rows})
     tfs = sorted({row.timeframe for row in rows})
-    base_all = _total(rows, "base_all_taps")
-    base_first = _total(rows, "base_first_taps")
+    base_all = _total(rows, "base_all_taps") or 0
+    base_first = _total(rows, "base_first_taps") or 0
 
     out.append(
         f"좌표: {len(symbols)}종목 × {len(tfs)}TF = {cells}칸 · "
@@ -434,10 +473,42 @@ def build_summary_markdown(rows: Sequence[CensusRow], *, elapsed: float | None =
         f"병합이 문 탭의 {_pct(_weighted(rows, 'b_diff_taps', 'b_multi_taps'))} |"
     )
     out.append(
-        f"| **C** 탭 상태 존 단위 | "
+        f"| **C** 탭 상태 존 단위(`any` · 사용자 결정) | "
         f"{_pct(_delta(rows, 'c_first_taps', 'base_first_taps'), signed=True)} | "
         f"{_pct(_delta(rows, 'c_all_taps', 'base_all_taps'), signed=True)} | "
-        f"리셋 제거의 순효과 |"
+        f"리셋 제거 + 「합류는 새 기회가 아니다」 |"
+    )
+    out.append(
+        f"| **C0** 같은 자리의 초안(`all`) | "
+        f"{_pct(_delta(rows, 'c0_first_taps', 'base_first_taps'), signed=True)} | "
+        f"{_pct(_delta(rows, 'c0_all_taps', 'base_all_taps'), signed=True)} | "
+        f"대체된 규칙 — **차이가 곧 결정의 크기** |"
+    )
+    out.append("")
+    join = _total(rows, "join_taps") or 0
+    join_first = _total(rows, "join_first_taps") or 0
+    out.append("## ★ 사용자 결정의 크기 (C0 초안 − C 결정)")
+    out.append("")
+    out.append(
+        "사용자 결정(2026-09-01): *「새롭게 존이 병합하는 경우는 새로 탭을 셀 필요가 없지. "
+        "단순히 존만 넓어지는거야」* · *「기회를 안주는게 맞지」*. 초안(`all`)이 그 자리를 "
+        "**새 탭으로 세고 있었고**, 그 건수가 이것이다:"
+    )
+    out.append("")
+    out.append("| | 건수 | 기준 팔 대비 | C0 대비 |")
+    out.append("| -- | --: | --: | --: |")
+    out.append(
+        f"| 「구성 변경 + 가격은 계속 안에」로 세던 탭 | {join:,} | "
+        f"{_share(join, base_all):.2%} | {_share(join, _total(rows, 'c0_all_taps') or 0):.2%} |"
+    )
+    out.append(
+        f"| 그중 첫 탭(순변화) | {join_first:,} | {_share(join_first, base_first):.2%} | — |"
+    )
+    out.append("")
+    out.append(
+        "📌 **`any`는 `all`보다 항상 덜 센다(단조)** — 코드가 매 칸에서 그 성질을 확인하고 "
+        "깨지면 죽는다. 🚨 **WAN-82를 되돌리는 게 아니다**: 가격이 **밖으로 나갔다 다시 "
+        "들어오면** 탭이 나고 그때 미진입 구성 존이 기회를 갖는다."
     )
     out.append("")
     out.append(
@@ -456,7 +527,7 @@ def build_summary_markdown(rows: Sequence[CensusRow], *, elapsed: float | None =
     out.append("")
     out.append("| 자리 | 없어진 탭 | 새로 생긴 탭 | 합 | 기준 팔 대비 |")
     out.append("| -- | --: | --: | --: | --: |")
-    for label, prefix in (("A", "a"), ("B", "b"), ("C", "c")):
+    for label, prefix in (("A", "a"), ("B", "b"), ("C", "c"), ("C0", "c0")):
         removed = _total(rows, f"{prefix}_removed_taps")
         added = _total(rows, f"{prefix}_added_taps")
         if removed is None or added is None:
@@ -472,8 +543,8 @@ def build_summary_markdown(rows: Sequence[CensusRow], *, elapsed: float | None =
 
     out.append("## TF별")
     out.append("")
-    out.append("| TF | 칸 | 모든 탭 | A | B | B 갈림(병합 탭 중) | C |")
-    out.append("| -- | --: | --: | --: | --: | --: | --: |")
+    out.append("| TF | 칸 | 모든 탭 | A | B | B 갈림(병합 탭 중) | C | C0 | 결정 크기 |")
+    out.append("| -- | --: | --: | --: | --: | --: | --: | --: | --: |")
     for tf in harness.DEFAULT_TIMEFRAMES:
         sub = [row for row in rows if row.timeframe == tf]
         if not sub:
@@ -483,20 +554,22 @@ def build_summary_markdown(rows: Sequence[CensusRow], *, elapsed: float | None =
             f"{_pct(_delta(sub, 'a_all_taps', 'base_all_taps'), signed=True)} | "
             f"{_pct(_delta(sub, 'b_all_taps', 'base_all_taps'), signed=True)} | "
             f"{_pct(_weighted(sub, 'b_diff_taps', 'b_multi_taps'))} | "
-            f"{_pct(_delta(sub, 'c_all_taps', 'base_all_taps'), signed=True)} |"
+            f"{_pct(_delta(sub, 'c_all_taps', 'base_all_taps'), signed=True)} | "
+            f"{_pct(_delta(sub, 'c0_all_taps', 'base_all_taps'), signed=True)} | "
+            f"{_num(_total(sub, 'join_taps'))} |"
         )
     out.append("")
 
     out.append("## 칸별")
     out.append("")
-    out.append("| 종목 | TF | 봉 | 존 | 모든 탭 | A | B | B 갈림 | C |")
-    out.append("| -- | -- | --: | --: | --: | --: | --: | --: | --: |")
+    out.append("| 종목 | TF | 봉 | 존 | 모든 탭 | A | B | B 갈림 | C | 결정 크기 |")
+    out.append("| -- | -- | --: | --: | --: | --: | --: | --: | --: | --: |")
     for row in sorted(rows, key=lambda r: (r.timeframe, r.symbol)):
         out.append(
             f"| {row.symbol} | {row.timeframe} | {row.num_bars:,} | {row.num_zones:,} | "
             f"{row.base_all_taps:,} | {_pct(row.a_all_tap_change, signed=True)} | "
             f"{row.b_all_tap_change:+.2%} | {row.b_diff_share_of_multi:.2%} | "
-            f"{row.c_all_tap_change:+.2%} |"
+            f"{row.c_all_tap_change:+.2%} | {row.join_taps:,} |"
         )
     out.append("")
     out.append("## 읽는 법 · 범위")

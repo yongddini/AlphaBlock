@@ -128,8 +128,29 @@ def test_default_break_time_rule_is_still_distal() -> None:
     assert OrderBlockParams().merged_tap_state == "cluster"
 
 
-def test_pine_max_takes_the_latest_death_even_when_the_distal_died_first() -> None:
-    """이슈 §2의 반례: distal이 **먼저** 죽으면 두 규칙이 갈린다."""
+def test_pine_max_folds_to_the_latest_death_on_a_configuration_price_cannot_produce() -> None:
+    """🚨 이 배치는 **어떤 가격 경로로도 만들 수 없다** — 접기 함수의 단위 테스트일 뿐이다.
+
+    이슈 §2(그리고 이 PR의 초판 보고)가 *"distal이 먼저 죽고 다른 존이 나중에 죽으면
+    원본이 더 오래 산다"* 를 두 규칙의 갈림 중 하나로 적었는데, **사용자 지적대로 그
+    상황은 물리적으로 불가능하다.** 강세 기준 증명(약세는 대칭):
+
+    * A를 distal(`bottom` 최저), B를 같은 클러스터의 다른 구성 존(`bottom_B > bottom_A`)
+      이라 하자. A가 `t_A`에 깨지면 `low(t_A) < bottom_A < bottom_B`다.
+    * **B가 `t_A` 시점에 이미 확정돼 있었다면** 같은 봉이 `bottom_B`도 뚫으므로 B는
+      `t_A` **이전이나 같은 봉**에 깨진다 → 「B가 더 늦게」가 불가능하다.
+    * **B가 `t_A` 뒤에 확정됐다면** `_create_bullish`가 B의 `bottom`을 그 형성 창의
+      **최저 저가**로 잡고 `start_time`을 **바로 그 봉**으로 잡는다(원본 `boxBtm`/`boxLoc`와
+      같다). 그러면 둘 중 하나다:
+      - `t_A`가 그 창 **안**이면 `bottom_B <= low(t_A) < bottom_A`라 **B가 distal**이 된다
+        (가정 위배).
+      - `t_A`가 창 **밖**(앞)이면 `start_time_B > t_A = break_time_A`라 `obs_touch`의
+        시간축 교집합이 음수가 되어 **애초에 같은 클러스터가 아니다**.
+
+    📌 **그래서 두 규칙의 실제 차이는 「위쪽 존만 깨진 상태에서 계속 진입할 것인가」 하나뿐**
+    이고, 실측이 그 방향을 뒷받침한다(§0: 없어진 탭 6 · **새로 생긴 탭 0**).
+    여기서는 `break_time`을 가격 경로 없이 **직접 심어** 접기 규칙만 확인한다.
+    """
     a = _bull(105.0, 100.0, confirmed=0, break_time=10)  # distal(bottom 100) · 먼저 죽음
     b = _bull(107.0, 105.0, confirmed=0, break_time=15)  # 나중에 죽음
     members = [(0, a), (1, b)]
@@ -234,28 +255,96 @@ def test_zone_key_drops_the_spurious_retap() -> None:
     assert [sig.trigger_time for sig in signals] == [2]
 
 
-def test_zone_key_still_gives_a_newly_joined_zone_its_own_first_tap() -> None:
-    """WAN-82 유지 — 새로 편入된 존은 기록이 없어(`all`이 거짓) 자기 몫의 첫 탭을 갖는다.
+# ★ 사용자 결정(2026-09-01)이 가르는 두 상황. 하나만 고정하면 나머지가 조용히 무너진다.
+#
+#   가격이 계속 박스 안에 있는데 구성이 바뀜  → ❌ 탭 안 셈  ("존만 넓어지는 것")
+#   가격이 밖으로 나갔다가 다시 들어옴        → ✅ 탭 세고 미진입 구성 존에 기회 (WAN-82)
 
-    ⚠️ 여기서 `any`를 썼다면 이 탭이 사라진다(가격이 계속 안에 있으므로). `all`이라야
-    「구성이 줄기만 한 봉」(가짜 재탭)과 「새 존이 붙은 봉」(진짜 새 사건)이 갈린다.
+_JOIN_ARCHIVE = [
+    _bull(105.0, 100.0, confirmed=1),  # A — t2에 탭
+    _bull(103.0, 98.0, confirmed=3),  # B — t3에 확정되며 클러스터에 편입
+]
+_JOIN_TIMES = [0, 1, 2, 3, 4, 5, 6]
+
+
+def _join_bars(reentry: bool) -> tuple[list[float], list[float], list[float]]:
+    """`reentry=False`면 t2부터 계속 안에 있고, `True`면 t5에 나갔다 t6에 다시 들어온다."""
+    #          t0     t1     t2    t3    t4    t5                t6
+    inside = [False, False, True, True, True, not reentry, True]
+    lows = [101.0 if flag else 120.0 for flag in inside]
+    highs = [104.0 if flag else 125.0 for flag in inside]
+    closes = [(lo + hi) / 2 for lo, hi in zip(lows, highs, strict=True)]
+    return highs, lows, closes
+
+
+def test_a_zone_joining_while_price_stays_inside_does_not_count_a_tap() -> None:
+    """★ 사용자 결정: *"단순히 존만 넓어지는거야"* — 가격이 안 움직였으면 기회가 아니다.
+
+    현행 `cluster`와 초안 `zone_all`은 **여기서 탭을 셉니다**(합류한 존이 「안에 있었다」
+    기록이 없어서). 사용자 결정은 반대이고, `zone`이 그 결정입니다.
     """
-    archive = [
-        _bull(105.0, 100.0, confirmed=1),  # A — t2에 탭
-        _bull(103.0, 98.0, confirmed=3),  # B — t3에 확정되며 클러스터에 편입
-    ]
-    times = [0, 1, 2, 3, 4]
-    highs = [125.0, 115.0, 104.0, 104.0, 104.0]
-    lows = [120.0, 110.0, 101.0, 101.0, 101.0]
-    closes = [122.0, 112.0, 102.0, 102.0, 102.0]
+    highs, lows, closes = _join_bars(reentry=False)
 
-    for tap_state in ("cluster", "zone"):
+    def taps(tap_state: str) -> list[tuple[int, int | None]]:
         signals = _generate_merged_signals(
-            archive, times, highs, lows, closes, include_retaps=True, tap_state=tap_state
+            _JOIN_ARCHIVE,
+            _JOIN_TIMES,
+            highs,
+            lows,
+            closes,
+            include_retaps=True,
+            tap_state=tap_state,
         )
-        first = [(sig.trigger_time, sig.tap_index) for sig in signals if sig.tap_index == 0]
-        # t2: A 혼자의 첫 탭 · t4: B가 편입된 뒤 그 존 몫의 첫 탭(형성 봉 t3은 제외된다).
-        assert first == [(2, 0), (4, 0)], tap_state
+        return [(sig.trigger_time, sig.tap_index) for sig in signals]
+
+    # A 혼자의 첫 탭(t2) 하나뿐 — B 합류(t3)는 새 탭이 아니다.
+    assert taps("zone") == [(2, 0)]
+    # 대체된 두 규칙은 t4를 새 탭으로 센다(= 이 결정이 없애는 그 탭).
+    assert taps("zone_all") == [(2, 0), (4, 0)]
+    assert taps("cluster") == [(2, 0), (4, 0)]
+
+
+def test_a_newly_joined_zone_still_gets_its_chance_when_price_comes_back() -> None:
+    """🚨 WAN-82를 되돌리는 것이 아니다 — 가격이 **나갔다 다시 들어오면** 기회가 있다.
+
+    WAN-82의 원래 문제는 새로 편입된 존이 **영구적으로** 기회를 잃는 것이었다. 이번
+    결정은 「가격이 안 움직인 동안에는 기회를 만들지 않는다」까지이고, 이 테스트가
+    그 경계를 지킨다(이게 없으면 `any` 전환이 WAN-82를 조용히 되돌린다).
+    """
+    highs, lows, closes = _join_bars(reentry=True)
+    signals = _generate_merged_signals(
+        _JOIN_ARCHIVE,
+        _JOIN_TIMES,
+        highs,
+        lows,
+        closes,
+        include_retaps=True,
+        tap_state="zone",
+    )
+    # t2: A의 첫 탭 · t5에 밖으로 · t6에 다시 들어오며 **B가 자기 몫의 첫 탭**(tap_index=0).
+    assert [(sig.trigger_time, sig.tap_index) for sig in signals] == [(2, 0), (6, 0)]
+    assert signals[-1].zone_key == frozenset({0, 1})
+
+
+def test_the_new_rule_never_counts_more_taps_than_the_draft() -> None:
+    """단조성 — `any`는 `all`보다 항상 덜 센다. 인구조사가 이 성질에 기대고 있다."""
+    for reentry in (False, True):
+        highs, lows, closes = _join_bars(reentry=reentry)
+        counts = {
+            state: len(
+                _generate_merged_signals(
+                    _JOIN_ARCHIVE,
+                    _JOIN_TIMES,
+                    highs,
+                    lows,
+                    closes,
+                    include_retaps=True,
+                    tap_state=state,
+                )
+            )
+            for state in ("zone", "zone_all")
+        }
+        assert counts["zone"] <= counts["zone_all"], (reentry, counts)
 
 
 # --------------------------------------------------------------------------- #
