@@ -87,15 +87,15 @@ import pandas as pd
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from backtest import harness
-from backtest.models import BacktestConfig, PositionSide
+from backtest.models import BacktestConfig, PositionSide, Trade
 from backtest.run import parse_date_ms
 from backtest.wan70_random_control_b import _bucket_key
 from backtest.wan89_short_autopsy import ARMS_BY_NAME, Arm, _buy_hold
 from backtest.zone_limit_backtest import (
     _Candidate,
-    _sequence_and_cost,
     build_result_from_trades,
     build_zone_limit_candidates,
+    sequence_with_candidates,
 )
 from data.models import FundingRate
 from strategy.models import (
@@ -115,7 +115,12 @@ SUMMARY_MD = REPORTS_DIR / "wan248_zone_position_null_summary.md"
 #: WAN-307이 기본 유니버스를 12종목으로 옮겼다 — 이 리포트의 결론·CSV는 9종목 좌표라
 #: 당시 값으로 명시 고정한다(고정 원칙은 `harness.LEGACY_NINE_SYMBOLS` 문서 참고).
 NINE_SYMBOLS: tuple[str, ...] = harness.LEGACY_NINE_SYMBOLS
-WORK_TIMEFRAMES: tuple[str, ...] = harness.DEFAULT_TIMEFRAMES  # (15m, 1h, 4h)
+WORK_TIMEFRAMES: tuple[str, ...] = harness.DEFAULT_TIMEFRAMES
+"""작업 TF — `harness` 기본값을 따라간다(WAN-252 이후 15m·1h·2h·4h).
+
+⚠️ 이 리포트의 **공개 CSV는 3TF(15m·1h·4h) 시절 스냅샷**이다 — 상수가 채택 좌표를
+따라가므로 지금 돌리면 2h가 함께 들어온다(옛 표의 재현은 `--tf 15m,1h,4h`).
+오늘 좌표의 재측정은 WAN-403(`wan403_zone_position_null_today`) 소관이다."""
 DEFAULT_START: str = harness.DEFAULT_START
 DEFAULT_END: str = harness.DEFAULT_END
 
@@ -433,6 +438,19 @@ class PositionNullRow(BaseModel):
     iterations: int
     bucket_fallback_count: int
     buy_hold: float
+    real_mean_net_r: float | None = None
+    """실제 팔의 거래당 net R = 실현 손익 ÷ 리스크 금액(수량 × 손절 거리), WAN-152/154 산식.
+
+    ⚠️ `harness.mean_r`은 쓰지 않는다(청산 사유로 ±1.5/−1.0을 넣는 승률의 대수적 재탕).
+    총수익 %는 이 좌표에서 복리 착시가 있으므로(WAN-169/213) 판정은 이 열과 함께 읽는다."""
+    random_mean_net_r: float | None = None
+    """무작위(가짜 위치) 팔의 거래당 net R — 부트스트랩 반복별 평균의 평균."""
+    real_taps: int | None = None
+    """실제 존들의 전체 탭 수(탐지 층). 완료기준 5(대칭 확인)의 분모."""
+    real_invalidation_taps: int | None = None
+    """그중 **무효화 봉에서 난** 탭 수 — WAN-364의 소급 취소가 지우던 바로 그 탭이다."""
+    fake_taps: int | None = None
+    fake_invalidation_taps: int | None = None
 
     @field_validator("*", mode="before")
     @classmethod
@@ -456,6 +474,43 @@ class _SegmentResult:
     random_p_value: float | None
     iterations: int
     bucket_fallback_count: int
+    real_mean_net_r: float | None = None
+    random_mean_net_r: float | None = None
+    fake_taps: int = 0
+    fake_invalidation_taps: int = 0
+
+
+def mean_net_r(pairs: Sequence[tuple[_Candidate, Trade]]) -> float | None:
+    """거래당 net R 평균 = 실현 손익 ÷ 리스크 금액(수량 × |진입 체결가 − 손절 참조가|).
+
+    WAN-152/154와 **같은 산식**이다 — `harness.mean_r`은 쓰지 않는다(청산 사유로 ±1.5/−1.0을
+    넣는 승률의 대수적 재탕, WAN-154 PM 정정). 총수익 %는 수백 거래 복리라 착시가 있으므로
+    (WAN-169/213) 판정 열은 이쪽이다.
+    """
+    values: list[float] = []
+    for cand, trade in pairs:
+        risk_amount = trade.quantity * abs(trade.entry_price - cand.stop_price)
+        if risk_amount <= 0:
+            continue
+        values.append(trade.realized_pnl / risk_amount)
+    return sum(values) / len(values) if values else None
+
+
+def invalidation_tap_census(zones: Sequence[OrderBlock]) -> tuple[int, int]:
+    """(무효화 봉에서 난 탭 수, 전체 탭 수) — 탐지 층 인구조사(1분봉을 안 읽는다).
+
+    WAN-364가 이름 붙인 소급 취소 룩어헤드가 지우던 탭이 정확히 이 부분집합이다. 실제 존과
+    가짜 존에서 나란히 내면 **그 결함이 두 팔에 같은 정도로 걸렸었는지**가 보인다
+    (WAN-403 완료기준 5의 대칭 확인).
+    """
+    taps = 0
+    on_invalidation = 0
+    for zone in zones:
+        for tap in zone.tapped_times:
+            taps += 1
+            if zone.break_time is not None and tap == zone.break_time:
+                on_invalidation += 1
+    return on_invalidation, taps
 
 
 def _filter_eval(cands: list[_Candidate], eval_from_ms: int | None) -> list[_Candidate]:
@@ -495,7 +550,10 @@ def run_position_null_segment(
         order_block_result=real_ob,
     )
     real_candidates = _filter_eval(real_candidates, eval_from_ms)
-    real_trades = _sequence_and_cost(real_candidates, cfg, funding_rates)
+    # `_sequence_and_cost`는 이 함수에 위임하는 얇은 껍데기라 거래는 **비트 단위로 같다** —
+    # 짝을 함께 받는 것은 net R의 분모(그 거래 자신의 손절 거리)를 알기 위해서다.
+    real_pairs = sequence_with_candidates(real_candidates, cfg, funding_rates)
+    real_trades = [trade for _, trade in real_pairs]
     real_result = build_result_from_trades(real_trades, cfg, timeframe)
     real_long = sum(1 for t in real_trades if t.side is PositionSide.LONG)
     real_short = len(real_trades) - real_long
@@ -504,6 +562,8 @@ def run_position_null_segment(
     fake_ob = make_fake_result(
         real_ob, htf_seg, ob_params, rng=random.Random(pool_seed), pool_k=pool_k
     )
+    fake_inval_taps, fake_taps = invalidation_tap_census(fake_ob.order_blocks)
+    real_net_r = mean_net_r(real_pairs)
     if not real_trades:
         return _SegmentResult(
             real_total_return=real_total,
@@ -518,6 +578,10 @@ def run_position_null_segment(
             random_p_value=None,
             iterations=0,
             bucket_fallback_count=0,
+            real_mean_net_r=real_net_r,
+            random_mean_net_r=None,
+            fake_taps=fake_taps,
+            fake_invalidation_taps=fake_inval_taps,
         )
 
     pool_candidates, _ = build_zone_limit_candidates(
@@ -542,6 +606,7 @@ def run_position_null_segment(
 
     rng = random.Random(bootstrap_seed)
     random_returns: list[float] = []
+    random_net_rs: list[float] = []
     bucket_fallback_count = 0
     for _ in range(iterations):
         sampled: list[_Candidate] = []
@@ -562,9 +627,13 @@ def run_position_null_segment(
                 fill_picks = rng.sample(remaining, fill_k) if fill_k else []
                 sampled.extend(fill_picks)
                 used_by_side[side].update(id(c) for c in fill_picks)
-        sampled_trades = _sequence_and_cost(sampled, cfg, funding_rates)
+        sampled_pairs = sequence_with_candidates(sampled, cfg, funding_rates)
+        sampled_trades = [trade for _, trade in sampled_pairs]
         sampled_result = build_result_from_trades(sampled_trades, cfg, timeframe)
         random_returns.append(sampled_result.metrics.total_return)
+        iteration_net_r = mean_net_r(sampled_pairs)
+        if iteration_net_r is not None:
+            random_net_rs.append(iteration_net_r)
 
     random_returns.sort()
     m = len(random_returns)
@@ -586,6 +655,10 @@ def run_position_null_segment(
         random_p_value=p_value,
         iterations=m,
         bucket_fallback_count=bucket_fallback_count,
+        real_mean_net_r=real_net_r,
+        random_mean_net_r=(sum(random_net_rs) / len(random_net_rs) if random_net_rs else None),
+        fake_taps=fake_taps,
+        fake_invalidation_taps=fake_inval_taps,
     )
 
 
@@ -604,6 +677,13 @@ class _Task:
     lenses: tuple[str, ...]
     pool_k: int
     iterations: int
+    zone_width_pin: harness.ZoneWidthArg = harness.LEGACY_ZONE_WIDTH_FILTER_ON
+    """존폭 필터 문턱을 **명시로 고정**할지 — 기본값은 이 리포트가 낸 표의 값(1.28 켬).
+
+    🚨 `harness.UNSET`을 주면 **핀을 아예 안 건다**(= 채택 기본값을 그대로 따라간다,
+    WAN-305). 명시적 `None`(끄기)과 `UNSET`(미지정)은 다르다 — WAN-159/222/384가 세운
+    센티넬 규약 그대로이고, 오늘 좌표에서는 둘의 값이 같아 보이지만 **재-베이스라인이 오면
+    갈라진다**. WAN-403(오늘 좌표 재측정)이 `UNSET`을 넘긴다."""
 
 
 def _segment_window(
@@ -633,6 +713,18 @@ def _segment_window(
     return window, None, window.htf_df
 
 
+def resolve_params(zone_width_pin: harness.ZoneWidthArg) -> ConfluenceParams:
+    """롱 축 팔의 파라미터에 존폭 필터 핀만 얹는다(`UNSET`이면 **안 얹는다**).
+
+    한 곳에만 두는 이유는 이 저장소가 반복해 데인 자리라서다 — 핀 로직이 두 벌이면
+    「고정했다고 믿으면서 안 고정된」(또는 그 거울상) 실행이 조용히 생긴다(WAN-159 §파급).
+    """
+    params = arm_of(LONG_ARM).params()
+    if zone_width_pin is harness.UNSET:
+        return params
+    return harness.pin_zone_width(params, zone_width_pin)
+
+
 def run_cell(task: _Task, *, log: bool = True) -> list[PositionNullRow]:
     """한 (심볼, TF)의 구간 × 렌즈 위치 축 널을 낸다."""
     market = harness.load_market_data(
@@ -642,8 +734,8 @@ def run_cell(task: _Task, *, log: bool = True) -> list[PositionNullRow]:
         return []
 
     arm = arm_of(LONG_ARM)
-    # WAN-384 명시 핀: 이 표는 존폭 필터를 켠 채(1.28) 낸 기록이다.
-    base_params = harness.pin_zone_width(arm.params(), harness.LEGACY_ZONE_WIDTH_FILTER_ON)
+    # WAN-384 명시 핀: 이 표는 존폭 필터를 켠 채(1.28) 낸 기록이다. `UNSET`이면 핀을 안 건다.
+    base_params = resolve_params(task.zone_width_pin)
     cfg = arm.config(task.timeframe)
 
     rows: list[PositionNullRow] = []
@@ -652,6 +744,7 @@ def run_cell(task: _Task, *, log: bool = True) -> list[PositionNullRow]:
         if window.empty or window.df_1m.empty or bh_frame.empty:
             continue
         real_ob = harness.detect_order_blocks(window, _ADOPTED_OB)
+        real_inval_taps, real_taps = invalidation_tap_census(real_ob.order_blocks)
         buy_hold = _buy_hold(bh_frame)
         for lens in task.lenses:
             params = lens_params(base_params, lens)
@@ -691,6 +784,12 @@ def run_cell(task: _Task, *, log: bool = True) -> list[PositionNullRow]:
                 iterations=seg_result.iterations,
                 bucket_fallback_count=seg_result.bucket_fallback_count,
                 buy_hold=buy_hold,
+                real_mean_net_r=seg_result.real_mean_net_r,
+                random_mean_net_r=seg_result.random_mean_net_r,
+                real_taps=real_taps,
+                real_invalidation_taps=real_inval_taps,
+                fake_taps=seg_result.fake_taps,
+                fake_invalidation_taps=seg_result.fake_invalidation_taps,
             )
             rows.append(row)
             if log:
@@ -718,6 +817,7 @@ def run_null(
     end: str = DEFAULT_END,
     pool_k: int = DEFAULT_POOL_K,
     iterations: int = BOOTSTRAP_ITERATIONS,
+    zone_width_pin: harness.ZoneWidthArg = harness.LEGACY_ZONE_WIDTH_FILTER_ON,
     jobs: int = 1,
     log: bool = True,
 ) -> list[PositionNullRow]:
@@ -731,6 +831,7 @@ def run_null(
             lenses=tuple(lenses),
             pool_k=pool_k,
             iterations=iterations,
+            zone_width_pin=zone_width_pin,
         )
         for symbol in symbols
         for timeframe in timeframes
