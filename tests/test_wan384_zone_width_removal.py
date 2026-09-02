@@ -186,6 +186,11 @@ _NO_PIN_NEEDED: frozenset[str] = frozenset(
         # §1 인구조사는 **탐지만** 한다 — 존폭 필터는 진입 층(지정가 확정 이후)이라 이 표의
         # 탭 수·클러스터 분포에 아예 닿지 않는다.
         "wan388_merge_retap_census",
+        # 위치 축 널의 **오늘 좌표 재측정**(WAN-403)이다 — 필터를 켠 채 낸 표가 아니라 정확히
+        # 그 반대다: 옛 판(WAN-248)이 1.28을 켠 채 돌았기에 「필터를 끈 오늘 좌표에서 다시」가
+        # 이 이슈의 존재 이유이고, 핀 없음(`harness.UNSET`)이 **측정 대상 그 자체**다(WAN-305).
+        # 옛 판은 `wan248_zone_position_null`이 `LEGACY_ZONE_WIDTH_FILTER_ON`으로 계속 고정한다.
+        "wan403_zone_position_null_today",
         # WAN-400 §0도 같은 부류다 — `OrderBlockParams`만 쓰고 `ConfluenceParams`를 아예
         # 만들지 않아 `max_zone_width_atr`이 읽힐 자리가 없다(탐지 층 탭만 센다).
         "wan400_merge_parity_census",
