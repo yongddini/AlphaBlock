@@ -20,8 +20,10 @@
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 
 from backtest import harness
+from backtest import wan248_zone_position_null as wan248_module
 from backtest.models import ExitReason, PositionSide, Trade, TradeFill
 from backtest.wan248_zone_position_null import (
     ALPHA,
@@ -34,6 +36,11 @@ from backtest.wan248_zone_position_null import (
     mean_net_r,
     resolve_params,
 )
+from backtest.wan248_zone_position_null import (
+    NULL_CSV as WAN248_CSV,
+)
+from backtest.wan248_zone_position_null import rows_from_csv as wan248_rows_from_csv
+from backtest.wan248_zone_position_null import verdict as wan248_verdict
 from backtest.wan403_zone_position_null_today import (
     CHANCE_RATIO,
     GROWN_OOS_RATIO,
@@ -381,3 +388,32 @@ def test_summary_markdown_renders_a_pen_verdict_not_a_blank() -> None:
     text = build_summary_markdown(baseline + pen)
     assert "(pen_5bp 미측정)" not in text
     assert text.count("(나) 그대로 (c)") >= 2
+
+
+def test_old_wan248_csv_still_parses_and_reproduces_its_published_verdict() -> None:
+    """새 관측 열을 더해도 **옛 공개 CSV가 그대로 읽히고 같은 판정을 낸다**.
+
+    이 계열의 핵심 계약은 「옛 표는 그때의 기록으로 보존된다」이고, 열을 더하면서 그 표를
+    못 읽게 만드는 것이 가장 흔한 방식의 위반이다. 새 열은 전부 기본값 `None`이라 옛 행이
+    그대로 살아 있어야 한다.
+    """
+    if not WAN248_CSV.exists():  # pragma: no cover - 저장소에 항상 있다
+        pytest.skip("wan248 공개 CSV 없음")
+    rows = wan248_rows_from_csv(WAN248_CSV)
+    assert len(rows) == 108
+    assert all(r.real_mean_net_r is None and r.real_taps is None for r in rows)
+    baseline = [r for r in rows if r.lens == BASELINE_LENS]
+    assert "유효 셀 52개 중 유의 16개" in wan248_verdict(baseline)
+
+
+def test_the_old_module_still_pins_the_filter_on() -> None:
+    """면제의 짝 — **옛 판은 필터를 켠 채(1.28) 고정돼 있어야 한다**.
+
+    WAN-403이 WAN-384 존폭 핀 스캔에서 면제된 근거가 *「핀 없음이 측정 대상 그 자체」*인데,
+    그 면제는 **옛 판이 계속 고정돼 있을 때만** 정당하다. 둘이 같이 핀을 잃으면 두 표가 모두
+    조용히 오늘 엔진으로 돌아 「그때는 그랬다」가 사라진다.
+    """
+    assert wan248_module._Task.__dataclass_fields__["zone_width_pin"].default == (
+        harness.LEGACY_ZONE_WIDTH_FILTER_ON
+    )
+    assert resolve_params(harness.LEGACY_ZONE_WIDTH_FILTER_ON).max_zone_width_atr == 1.28
