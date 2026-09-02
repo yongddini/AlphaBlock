@@ -203,6 +203,10 @@ _NO_PIN_NEEDED: frozenset[str] = frozenset(
         # (채택 점 지갑 ≡ 인자 없는 채택 북)와 (d)(겹치는 배수 4점 ≡ WAN-381 공개 CSV)가
         # 오히려 깨진다 — 둘 다 핀 없이 낸 표다.
         "wan395_exit_multiple_inflection",
+        # 슬리피지 실측(WAN-397)도 같다 — 필터를 켠 채 낸 표가 아니라 **필터 꺼진 채택 북**의
+        # 손절 봉과 요율 민감도다(핀 없음이 설계, WAN-305). 핀을 걸면 검산 (a)(기준 팔 ≡
+        # WAN-395 공개 CSV의 채택 점)가 오히려 깨진다 — 그쪽도 핀 없이 낸 표다.
+        "wan397_stop_slippage",
     }
 )
 
