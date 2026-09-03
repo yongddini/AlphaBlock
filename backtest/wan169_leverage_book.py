@@ -73,7 +73,14 @@ from backtest.zone_limit_backtest import (
 )
 from common.costs import Liquidity
 from data.models import FundingRate
-from strategy.models import ConfluenceParams, InvalidationCancel, OrderBlockParams, ZoneLimitRef
+from strategy.lux_order_blocks import detect_lux_order_blocks
+from strategy.models import (
+    ConfluenceParams,
+    InvalidationCancel,
+    OrderBlockDirection,
+    OrderBlockParams,
+    ZoneLimitRef,
+)
 
 REPORTS_DIR = Path("backtest/reports")
 DEFAULT_CELLS_CSV = REPORTS_DIR / "wan169_leverage_book_cells.csv"
@@ -382,6 +389,27 @@ class _Task:
     """WAN-386 §0: 확인 팔의 익절 배수 점들. `confirmation_arms`와 짝이라 한쪽만 주면 거부한다."""
     confirmation_offset: float = ARM_C_OFFSET
     """WAN-386 §0: 팔 `C`의 고정 오프셋(기본 = WAN-383 §1 실측 1.026%)."""
+    detector: harness.Detector = harness.ADOPTED_DETECTOR
+    """WAN-405(옵트인): **무엇을 존이라 부를 것인가**. `"flux"`(기본 = 채택)면
+    `OrderBlockParams(combine_obs=...)`가 그대로 나가 예전과 **비트 단위로 같다**.
+    `"lux"`는 LuxAlgo 거래량 피벗 탐지기(`strategy.lux_order_blocks`)로 존 집합이 통째로
+    달라진다 — 🚨 **탐지 파라미터라 팔마다 다시 탐지해야 한다**(`combine_obs`와 같은 부류:
+    두 팔이 같은 `OrderBlockResult`를 공유하면 라벨만 다른 같은 숫자가 나온다, WAN-149).
+
+    ⚠️ 무효화·생애주기·손절선은 **바뀌지 않는다** — 축을 하나만 흔들어야 손익 차이를
+    「탐지의 몫」으로 귀속할 수 있다(WAN-405 §설계)."""
+    overlap_gate: bool = False
+    """WAN-405(옵트인 · **게이트**): 이 칸의 후보를 「같은 봉에 `lux` 탭도 났고 두 존의 가격
+    구간이 **조금이라도 겹친다**」로 거른다.
+
+    🚨 **존 기하는 하나도 안 바꾼다** — 겹친 구간을 새 존으로 만들지 않는다(사용자 결정
+    2026-09-02). 그래서 남은 후보의 진입가·손절폭이 게이트 없는 팔과 **비트 단위로 같고**,
+    두 팔의 차가 순수하게 「선별의 몫」이 된다(WAN-131/152가 데인 자리를 피한다).
+
+    ⚠️ 문턱이 없다 — 「겹침 > 0」 하나이고 **자유 파라미터가 아니다**(사용자 결정: 분포를
+    보고 고르면 사후 판단이 된다). 컷은 base 후보 직후 · 재진입 파생 **앞**이다(WAN-376 §1a
+    급소). `detector="lux"`와 함께 주면 거부한다 — 「lux 존을 lux로 거른다」는 뜻이 없다.
+    `False`(기본)면 이 경로를 아예 타지 않아 예전과 **비트 단위로 같다**."""
     engine_check: bool = True
     """WAN-301(옵트인 컴퓨트 노브): `False`면 full 구간의 표준 경로 검산(`harness.run_once`
     재실행 — 후보 생성과 맞먹는 비용)을 생략한다. 검산은 배선이 같은 한 렌즈·시드 축에서
@@ -561,6 +589,61 @@ def zone_width_label(threshold: float | None) -> str:
     return "off" if threshold is None else f"{threshold:.2f}"
 
 
+def lux_bullish_taps(window: harness.MarketData) -> dict[int, list[tuple[float, float]]]:
+    """이 창의 **LuxAlgo 강세 존 탭**을 `탭 봉 시각 → [(top, bottom), …]`으로 (WAN-405).
+
+    같은 창을 LuxAlgo 탐지기로 한 번 더 훑는다 — **1분봉을 안 읽는 탐지 층**이라 싸다
+    (BTC 4h 6년 실측 ~1초). 상태(`active`/`cancelled`)를 **가리지 않는다**: 게이트의 정의가
+    이슈 문장 그대로 *「같은 봉에 `lux` 탭도 났고 가격 구간이 겹친다」*이고, 상태는 우리
+    무효화 규약이 씌운 층이라 「두 탐지기가 같은 자리를 봤는가」와는 다른 축이다.
+    """
+    result = detect_lux_order_blocks(window.htf_df)
+    taps: dict[int, list[tuple[float, float]]] = {}
+    for signal in result.retap_signals:
+        if signal.direction is not OrderBlockDirection.BULLISH:
+            continue
+        zone = signal.order_block
+        taps.setdefault(signal.trigger_time, []).append((zone.top, zone.bottom))
+    return taps
+
+
+def zones_overlap(a_top: float, a_bottom: float, b_top: float, b_bottom: float) -> bool:
+    """두 가격 구간이 **조금이라도** 겹치는가 — 게이트의 정의(WAN-405 · 문턱 없음).
+
+    닿기만 한 것(경계가 같아 겹침 폭 0)은 겹침이 **아니다** — 사용자 결정이 「겹침 > 0」이다.
+    """
+    return min(a_top, b_top) - max(a_bottom, b_bottom) > 0.0
+
+
+def overlap_gated_candidates(
+    candidates: Sequence[_Candidate], window: harness.MarketData
+) -> list[_Candidate]:
+    """`flux` 후보 중 **`lux`도 동의한** 것만 남긴다 (WAN-405 겹침 게이트).
+
+    🚨 후보를 **손대지 않고 고르기만** 한다 — 진입가·손절가·목표가 하나도 안 바뀌므로 남은
+    후보는 게이트 없는 팔의 그 후보와 **비트 단위로 같다**. 그래야 두 팔의 차가 순수하게
+    「선별의 몫」이 된다(겹친 구간을 새 존으로 만들면 손절폭이 따라 움직여 축이 둘이 된다 —
+    WAN-131/152가 데인 자리).
+    """
+    taps = lux_bullish_taps(window)
+    kept: list[_Candidate] = []
+    for candidate in candidates:
+        zone = candidate.order_block
+        if zone is None:
+            # 근거 존이 없으면 겹침을 **판정할 수 없다**. 조용히 버리거나 통과시키면 게이트가
+            # 무엇을 셌는지 알 수 없게 된다(WAN-333 부류) — 배선 오류이므로 시끄럽게 죽는다.
+            raise AssertionError(
+                "겹침 게이트는 후보의 근거 오더블록을 요구합니다 — `order_block`이 없는 "
+                "후보가 있습니다(WAN-77 배선 확인)."
+            )
+        if any(
+            zones_overlap(zone.top, zone.bottom, top, bottom)
+            for top, bottom in taps.get(candidate.trigger_time, ())
+        ):
+            kept.append(candidate)
+    return kept
+
+
 def run_cell(task: _Task, *, log: bool = True) -> CellPayload:
     """한 칸의 구간별 후보·격리 성과·검산을 낸다 — 채택 기본값 그대로(옛 핀 없음).
 
@@ -690,7 +773,7 @@ def run_cell_variants(
         # WAN-388(옵트인): 존 병합은 **탐지** 파라미터라 팔마다 다시 탐지해야 한다.
         # `combine_obs=False`(기본)면 `OrderBlockParams()`와 같은 객체라 비트 동일.
         ob_result = harness.detect_order_blocks(
-            window, OrderBlockParams(combine_obs=task.combine_obs)
+            window, OrderBlockParams(combine_obs=task.combine_obs), detector=task.detector
         )
         generated, _stats = build_zone_limit_candidates(
             window.htf_df,
@@ -727,6 +810,10 @@ def run_cell_variants(
             observe_confirmation=task.observe_confirmation
             or any(arm != ARM_BASE for arm in task.confirmation_arms),
         )
+        if task.overlap_gate:
+            # WAN-405: 컷은 **base 후보 직후 · 재진입 파생 앞**이다(WAN-376 §1a 급소 —
+            # 뒤에 걸면 「빠진 셋업의 재진입이 살아남는」 잡종이 된다).
+            generated = overlap_gated_candidates(generated, window)
         funding[segment_name] = tuple(window.funding_rates)
         engine_return: float | None = None
         engine_trades: int | None = None
@@ -897,6 +984,8 @@ def run_cells(
     max_zone_width_atr: harness.ZoneWidthArg = harness.UNSET,
     seed: int = 0,
     cold_segments: bool = True,
+    detector: harness.Detector = harness.ADOPTED_DETECTOR,
+    overlap_gate: bool = False,
     engine_check: bool = True,
     take_profit_r: float | None = None,
     partial_take_profit_r: float | None = None,
@@ -1019,6 +1108,13 @@ def run_cells(
     같은 수가 나오고, 그러면 「보간이 맞았다」가 근거 없이 만들어진다(WAN-91/95/112/123/159가
     반복해 경계한 자리 · `_loo_rows`의 같은 가드와 같은 부류).
 
+    `detector`·`overlap_gate`(WAN-405, 옵트인)는 **탐지 축과 그 위의 게이트**다 — 전자는
+    「무엇을 존이라 부를 것인가」를 LuxAlgo 거래량 피벗으로 바꾸고(무효화·생애주기·손절선은
+    그대로), 후자는 `flux` 후보 중 「같은 봉에 `lux` 탭도 났고 가격 구간이 겹치는」 것만
+    남긴다(문턱 없음 · 존 기하 불변). 기본값이면 예전과 **비트 단위로 같다**. 🚨 전자는
+    **탐지 파라미터**라 팔마다 다시 탐지한다(`combine_obs`와 같은 부류, WAN-149) — 팔끼리
+    payload를 공유하지 말 것. 둘을 함께 주면 거부한다(「lux 존을 lux로 거른다」는 뜻이 없다).
+
     `payload_cache`(WAN-394 §0, 옵트인)를 주면 이 함수가 **미스 칸만** 계산하고 나머지는
     디스크에서 읽는다(`backtest.payload_cache`). 캐시 키는 **`_Task` 그 자체 + 엔진·러너 소스
     지문**이라 *「payload를 바꾸는 것은 전부 키에 있다」*가 구조적으로 참이고, 반대로 손절폭
@@ -1048,6 +1144,18 @@ def run_cells(
             "post_filter_zone_width는 엔진 필터를 끈 채(max_zone_width_atr=None) 씁니다 — "
             f"지금 max_zone_width_atr={max_zone_width_atr!r}이라 이중 필터가 됩니다(WAN-376)."
         )
+    if overlap_gate and detector != harness.ADOPTED_DETECTOR:
+        # 「lux 존을 lux 탭으로 거른다」는 뜻이 없다 — 게이트는 `flux` 후보에 거는 것이다.
+        raise ValueError(
+            f"overlap_gate는 detector={harness.ADOPTED_DETECTOR!r} 팔에만 겁니다 "
+            f"(지금 {detector!r}) — 겹침 게이트의 정의가 「flux 후보 중 lux도 동의한 것」"
+            "입니다(WAN-405)."
+        )
+    if overlap_gate and short_enabled:
+        # 판정 축은 롱(강세 존)이다 — 숏 후보를 강세 탭으로 거르면 라벨이 거짓이 된다.
+        raise ValueError(
+            "overlap_gate는 롱 축 전용입니다(WAN-405 §③) — short_enabled와 함께 쓸 수 없습니다."
+        )
     cells = {(harness.normalize_symbol(s), tf) for s in symbols for tf in timeframes}
     unmatched = sorted(key for key in targeted if key not in cells)
     if unmatched:
@@ -1076,6 +1184,8 @@ def run_cells(
             max_zone_width_atr=max_zone_width_atr,
             seed=seed,
             cold_segments=cold_segments,
+            detector=detector,
+            overlap_gate=overlap_gate,
             engine_check=engine_check,
             take_profit_r=take_profit_r,
             partial_take_profit_r=partial_take_profit_r,

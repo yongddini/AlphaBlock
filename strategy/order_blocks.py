@@ -842,6 +842,24 @@ def detect_order_blocks(
     return OrderBlockDetector(params).run(df)
 
 
+def signals_for_archive(
+    archive: list[OrderBlock],
+    times: list[int],
+    highs: list[float],
+    lows: list[float],
+    closes: list[float],
+    *,
+    include_retaps: bool = False,
+) -> list[OrderBlockSignal]:
+    """원본 단위(비병합) 탭 시그널의 **공개 진입점** (WAN-405).
+
+    `_generate_signals`를 그대로 위임한다 — 다른 탐지기(`strategy.lux_order_blocks`)가
+    **같은 시그널 층**을 쓰게 하려고 열어 둔 문이다. 🚨 사본을 만들면 두 탐지기의 탭·취소
+    규칙이 조용히 갈라져 손익 차이를 「탐지의 몫」이라 부를 수 없게 된다(WAN-405 §설계).
+    """
+    return _generate_signals(archive, times, highs, lows, closes, include_retaps=include_retaps)
+
+
 def merged_signals_for_archive(
     archive: list[OrderBlock],
     df: pd.DataFrame,

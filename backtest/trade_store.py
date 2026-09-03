@@ -152,6 +152,7 @@ ENGINE_SOURCE_FILES: tuple[str, ...] = (
     "strategy/__init__.py",
     "strategy/confluence.py",
     "strategy/indicators.py",
+    "strategy/lux_order_blocks.py",
     "strategy/models.py",
     "strategy/order_blocks.py",
     "strategy/realtime_band.py",
