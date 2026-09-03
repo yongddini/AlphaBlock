@@ -129,6 +129,7 @@ from backtest import harness
 from backtest.book_cli import BookSegment, iter_book_segments, net_r
 from backtest.leverage_book import LeverageBookParams, PlacedSetup
 from backtest.models import BacktestConfig, Trade
+from backtest.payload_cache import PayloadCache
 from backtest.run import parse_date_ms
 from backtest.wan143_zone_height_tp import MIN_TRADES_PER_SYMBOL
 from backtest.wan169_leverage_book import CellPayload, _segment_cells, run_cells
@@ -2017,11 +2018,22 @@ def detector_payloads(
     end: str,
     jobs: int,
     retap_mode: str = RAW_RETAP,
+    cache: PayloadCache | None = None,
 ) -> list[CellPayload]:
     """한 팔의 후보 — 🚨 팔마다 **다시 탐지**한다(탐지 축이라 공유 금지, WAN-149).
 
     나머지는 사다리 `L0` 그대로다: 볼린저 끔 · 존폭 필터 끔 · 재진입 끔 · 익절 1.5R.
     🚨 **재탭은 기본이 `once`(생짜 · 사용자 결정)** 라 `L0`과 그 축 하나가 다르다.
+
+    🚨 **`cache`를 안 주면 이 함수가 스스로 만든다**(WAN-394 §0). 사용자 지적 2026-09-03
+    (*「너 어차피 대화 까먹는거 아니야?」*)의 답이다 — 「다음엔 캐시를 켜겠다」는 **약속은
+    세션과 함께 사라지지만 기본값은 남는다**. 캐시는 **순수 성능 노브**라(키가 `_Task` 그
+    자체 ＋ 엔진·러너 소스 지문) 미스 칸은 **글자 그대로 같은 경로**를 돌고 산출은 비트
+    동일하다. 끄려면 `PayloadCache(read=False, write=False)`를 명시로 넘긴다.
+
+    ⚠️ **디스크를 쓴다** — 채택 좌표 48칸 한 판이 수백 MB다(`docs/ops/wan394-payload-cache.md`).
+    자동 삭제는 **없다**(WAN-194/297 원칙) — 정리는 `python -m backtest.payload_cache
+    --prune-stale --apply`이고 그건 **옛 리비전만** 본다.
     """
     kwargs = dict(ADOPTED_CELL_KWARGS)
     kwargs["reentry"] = False
@@ -2042,6 +2054,7 @@ def detector_payloads(
         # 같은 존에 몇 번씩 들어간다(WAN-91/95/112/123/159가 반복해 경계한 자리).
         retap_mode=retap_mode,
         take_profit_liquidity=harness.ADOPTED_TAKE_PROFIT_LIQUIDITY,
+        payload_cache=cache if cache is not None else PayloadCache(),
         **kwargs,  # type: ignore[arg-type]
     )
 
