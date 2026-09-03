@@ -20,12 +20,17 @@ from backtest.wan169_leverage_book import (
     zones_overlap,
 )
 from backtest.wan366_causal_ablation import (
+    ADOPTED_RETAP,
     BASE_ARM,
     DETECTOR_ARMS,
     DETECTOR_ARMS_BY_NAME,
+    DETECTOR_CSV_KEYS,
+    DETECTOR_LOO_KEYS,
     GATE_ARM,
     LUX_ARM,
     RANK_EDGES,
+    RAW_RETAP,
+    primary_retap_view,
 )
 from backtest.zone_limit_backtest import _Candidate
 from strategy.models import OrderBlock, OrderBlockDirection
@@ -194,3 +199,47 @@ def test_arms_change_exactly_one_thing_each() -> None:
 def test_rank_edges_include_the_original_render_count() -> None:
     """원본 파인이 그리는 개수(3)가 절단점에 있어야 그 표가 답이 된다."""
     assert 3 in RANK_EDGES
+
+
+# --------------------------------------------------------------------------- #
+# 4. 재탭 축 — 「생짜」는 존당 한 번이다 (사용자 결정 2026-09-03)
+# --------------------------------------------------------------------------- #
+
+
+def test_raw_arms_block_retaps_by_default() -> None:
+    """§3의 기본 재탭 정책이 `once`(존당 한 번)인가 — 🚨 채택 기본값과 **다르다**.
+
+    「생짜로 얼마나 먹나」를 묻는데 같은 존에 몇 번씩 들어가면 그 질문이 흐려진다. 특히
+    LuxAlgo는 존이 2.6배 많고 얇아 재탭이 거래 수를 크게 부풀린다.
+    """
+    from strategy.models import ConfluenceParams
+
+    assert RAW_RETAP == "once"
+    assert ADOPTED_RETAP == ConfluenceParams().retap_mode == "every_tap"
+    assert RAW_RETAP != ADOPTED_RETAP, "두 판이 같아지면 이 축의 라벨이 뜻을 잃는다."
+
+
+def test_retap_mode_is_part_of_the_row_key() -> None:
+    """두 판이 한 CSV에 살 수 있으므로 **키에 들어가야** 덮어쓰지 않는다.
+
+    🚨 키에서 빠지면 `once` 판이 `every_tap` 판을 **조용히 덮는다** — 그러면 「어느 표를
+    읽고 있는지」를 알 수 없게 된다(`timeframes` 축에서 WAN-316/330이 데인 자리).
+    """
+    assert "retap_mode" in DETECTOR_CSV_KEYS
+    assert "retap_mode" in DETECTOR_LOO_KEYS
+
+
+def test_summary_reads_only_the_judgment_view() -> None:
+    """렌더가 판정 판(`once`)만 본다 — 안 거르면 두 판이 한 표에 섞인다."""
+    frame = pd.DataFrame(
+        {
+            "arm": [BASE_ARM, BASE_ARM],
+            "retap_mode": [RAW_RETAP, ADOPTED_RETAP],
+            "timeframes": ["1h", "1h"],
+            "segment": ["oos_warm", "oos_warm"],
+            "mean_net_r": [-0.1, -0.2],
+        }
+    )
+    view = primary_retap_view(frame)
+    assert list(view["retap_mode"]) == [RAW_RETAP]
+    assert list(view["mean_net_r"]) == [-0.1]

@@ -66,3 +66,48 @@ WAN-7의 Python 이식은 이 명세를 기준으로 하며, 아래는 원문 �
 ## 패리티 테스트 방침
 - 동일 심볼·타임프레임 고정 구간(샘플 OHLCV 스냅샷)에 대해, 위 로직으로 산출한 OB의 top/bottom/방향/startTime/breaker 상태가 TradingView 원본 결과와 일치하는지 대조.
 - 부동소수/시간 단위 차이를 감안한 허용 오차를 명시한다.
+
+
+---
+
+# 참조 구현 2 — LuxAlgo *Order Block Detector* (WAN-405 · **옵트인 측정 전용**)
+
+원본: [Order Block Detector — LuxAlgo](https://www.tradingview.com/u/LuxAlgo/) · **CC BY-NC-SA
+4.0**, © LuxAlgo. 원문 Pine: [`luxalgo_ob_detector.pine`](./luxalgo_ob_detector.pine)
+(**사용자가 제공한 원문 그대로** · 라이선스 헤더 보존).
+이식: [`strategy/lux_order_blocks.py`](../lux_order_blocks.py).
+
+🚨 **채택 탐지기가 아니다** — 채택 경로는 위 FluxCharts 이식이고, 이쪽은
+`harness.detect_order_blocks(detector="lux")`로만 들어온다(안 켜면 비트 재현).
+
+## 탐지 규칙 (원문에서 추출 · 테스트가 조건식을 대조한다)
+
+* `length` = 5(원본 기본), 방향별 렌더 3개(`bull_ext_last`/`bear_ext_last`).
+* `upper = ta.highest(length)` · `lower = ta.lowest(length)` — 인자 하나짜리라 각각
+  `high`/`low`가 기본 소스다(현재 봉 **포함** 최근 `length`봉).
+* 추세 상태 `os := high[length] > upper ? 0 : low[length] < lower ? 1 : os[1]`.
+* 생성: `phv = ta.pivothigh(volume, length, length)`가 참일 때
+  **강세**(`os == 1`) `[hl2[length], low[length]]` · **약세**(`os == 0`) `[high[length], hl2[length]]`.
+  박스 왼쪽 변은 `time[length]`(피벗 봉) — 즉 **고정 `length`봉 지연**.
+* 소멸: `Wick`(기본)이면 `target_bull = lower` · `target_bear = upper`이고
+  `bull ? target < 존바닥 : target > 존천장`이면 배열에서 **제거**. `breaker` 단계가 없다.
+* 🚨 **생성 → 소멸이 같은 봉에서 연달아** 돈다 → 갓 태어난 존도 그 `length`봉 안에 바닥이
+  뚫렸으면 **태어나자마자 지워진다**(「탄생 시점 소급 검사」 · 우리 이식이 그대로 재현).
+
+## 이식이 원본과 **의도적으로** 다른 점 (★사용자 결정: 「(가) 의도를 이식」)
+
+1. **소멸 루프의 결함을 재현하지 않는다** — 원문은 `for element in target_array` 안에서 그
+   배열을 `array.remove` 하고(인덱스가 밀려 건너뛰는 원소가 생긴다) `array.indexof`가
+   **값**의 첫 인덱스를 돌려준다(바닥 값이 겹치면 엉뚱한 존을 지운다). 우리는 **의도**를
+   구현하므로 **원본보다 더 많이 죽인다**.
+2. **렌더링을 이식하지 않는다** — 원문은 `barstate.isfirst`에 박스를 만들고 `islast`에서
+   좌표만 갈아끼우며 `box.delete()`가 **없어** 존이 줄면 옛 박스가 화면에 남는다. 화면
+   아티팩트라 백테스트에 안 들어온다.
+3. **존의 생애를 지우지 않고 기록한다**(WAN-47 생존 편향) — 소멸 **시점**은 원본과 같다.
+4. **확정봉만 먹는다**(`closed=True`, WAN-314) — 원문은 형성 중인 봉을 틱마다 다시 계산해
+   `phv`가 켜졌다 꺼졌다 한다. 우리가 더 보수적인 쪽이고, **`length`봉 지연은 그대로**다.
+5. **`Mitigation Methods = Close` 옵션은 안 옮겼다** — 우리 쪽 같은 축
+   (`zone_invalidation`)의 기본값이 `wick`이라 원본 기본과 맞는다. 옮기려면 그 축과 **한
+   곳에서** 다뤄야 한다(두 곳에 같은 노브가 생기면 조용히 갈라진다).
+6. ⚠️ **`ta.pivothigh`의 동률 처리는 우리가 고른 해석이다** — 내장 함수라 원문에 구현이
+   없어 좌우 **모두 강부등호**로 갔다(거래량 동률은 드물다).

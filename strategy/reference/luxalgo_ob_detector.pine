@@ -1,107 +1,233 @@
-// 🚨 이 파일은 **원문 붙여넣기가 아니라 전사(transcription)** 다 — WAN-405 §부록의
-// 코드 대조표(PM이 원문 두 파일을 직접 읽고 작성)와 공개된 지표의 알고리즘 구조를
-// 그대로 옮겨 적은 것이다. 개발 세션에 사용자가 보여 준 **원문 텍스트가 전달되지
-// 않았으므로**, 이 파일은 「우리가 이식한 것이 무엇인가」의 **정본 사양**이고
-// 「LuxAlgo가 배포한 바이트」의 사본이 아니다.
-//
-// 📌 사용자가 원문을 이 경로에 덮어써 주면 `tests/test_lux_order_blocks.py`의 대조
-//    테스트가 **그 파일**을 읽어 파이썬 이식과 조건식이 같은지 다시 건다 —
-//    어긋나면 시끄럽게 실패한다(WAN-400이 쓴 방법).
-//
-// 출처: Order Block Detector — LuxAlgo (TradingView 공개 스크립트).
-//       라이선스는 LuxAlgo 배포본을 따른다(원문 헤더 참조).
-// AlphaBlock 이식: `strategy/lux_order_blocks.py` (WAN-405 · **옵트인 측정 전용**).
-//
-// ⚠️ 이식에서 **의도적으로 다르게** 한 것 두 가지는 아래 「알려진 차이」에 적었다.
+// This work is licensed under a Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0) https://creativecommons.org/licenses/by-nc-sa/4.0/
+// © LuxAlgo
 
 //@version=5
-indicator("Order Block Detector [LuxAlgo]", overlay = true, max_boxes_count = 500)
-
-//-----------------------------------------------------------------------------}
+indicator("Order Block Detector [LuxAlgo]"
+  , overlay = true
+  , max_boxes_count = 500
+  , max_labels_count = 500
+  , max_lines_count = 500)
+//------------------------------------------------------------------------------
 //Settings
 //-----------------------------------------------------------------------------{
-length        = input.int(5, 'Volume Pivot Length', minval = 1)
-bull_ext_last = input.int(3, 'Bullish OB', minval = 1)
-bear_ext_last = input.int(3, 'Bearish OB', minval = 1)
+length = input.int(5, 'Volume Pivot Length'
+  , minval = 1)
+
+bull_ext_last = input.int(3, 'Bullish OB '
+  , minval = 1
+  , inline = 'bull')
+
+bg_bull_css = input.color(color.new(#169400, 80), ''
+  , inline = 'bull')
+
+bull_css = input.color(#169400, ''
+  , inline = 'bull')
+
+bull_avg_css = input.color(color.new(#9598a1, 37), ''
+  , inline = 'bull')
+
+bear_ext_last = input.int(3, 'Bearish OB'
+  , minval = 1
+  , inline = 'bear')
+
+bg_bear_css = input.color(color.new(#ff1100, 80), ''
+  , inline = 'bear')
+
+bear_css = input.color(#ff1100, ''
+  , inline = 'bear')
+
+bear_avg_css = input.color(color.new(#9598a1, 37), ''
+  , inline = 'bear')
+
+line_style = input.string('⎯⎯⎯', 'Average Line Style'
+  , options = ['⎯⎯⎯', '----', '····'])
+
+line_width = input.int(1, 'Average Line Width'
+  , minval = 1)
+
+mitigation = input.string('Wick', 'Mitigation Methods'
+  , options = ['Wick', 'Close'])
 
 //-----------------------------------------------------------------------------}
-//Global variables
+//Functions 
 //-----------------------------------------------------------------------------{
-var os = 0
+//Line Style function
+get_line_style(style) =>
+    out = switch style
+        '⎯⎯⎯'  => line.style_solid
+        '----' => line.style_dashed
+        '····' => line.style_dotted
 
-var bull_top    = array.new_float(0)
-var bull_btm    = array.new_float(0)
-var bull_left   = array.new_int(0)
+//Function to get order block coordinates
+get_coordinates(condition, top, btm, ob_val)=>
+    var ob_top  = array.new_float(0)
+    var ob_btm  = array.new_float(0)
+    var ob_avg  = array.new_float(0)
+    var ob_left = array.new_int(0)
 
-var bear_top    = array.new_float(0)
-var bear_btm    = array.new_float(0)
-var bear_left   = array.new_int(0)
+    float ob = na
 
-//-----------------------------------------------------------------------------}
-//Functions
-//-----------------------------------------------------------------------------{
-// 존 좌표 적재 — 방향별 배열 맨 앞에 넣는다(최근 존이 앞).
-get_coordinates(condition, top, btm, left, top_array, btm_array, left_array) =>
+    //Append coordinates to arrays
     if condition
-        array.unshift(top_array,  top)
-        array.unshift(btm_array,  btm)
-        array.unshift(left_array, left)
+        avg = math.avg(top, btm)
+        
+        array.unshift(ob_top, top)
+        array.unshift(ob_btm, btm)
+        array.unshift(ob_avg, avg)
+        array.unshift(ob_left, time[length])
+        
+        ob := ob_val
+    
+    [ob_top, ob_btm, ob_avg, ob_left, ob]
 
-// 소멸(mitigation) — 강세는 `ta.lowest(low, length)`가 존 바닥 **아래**면 지운다.
-//
-// 🚨 원본 루프에는 결함이 둘 있다(WAN-405 §소멸 루프):
-//    ① 순회 중 `array.remove`로 그 배열을 수정한다(인덱스가 밀려 건너뛰는 원소가 생긴다).
-//    ② `array.indexof`가 「값」의 첫 인덱스를 돌려줘 바닥 값이 겹치면 엉뚱한 존을 지운다.
-//    우리는 **의도를 이식**한다(아래 「알려진 차이」 ②).
-remove_mitigated(top_array, btm_array, left_array, target, bull) =>
+//Function to remove mitigated order blocks from coordinate arrays
+remove_mitigated(ob_top, ob_btm, ob_left, ob_avg, target, bull)=>
     mitigated = false
-    for element in btm_array
-        idx = array.indexof(btm_array, element)
+    target_array = bull ? ob_btm : ob_top
+
+    for element in target_array
+        idx = array.indexof(target_array, element)
+
         if (bull ? target < element : target > element)
             mitigated := true
-            array.remove(top_array,  idx)
-            array.remove(btm_array,  idx)
-            array.remove(left_array, idx)
+
+            array.remove(ob_top, idx)
+            array.remove(ob_btm, idx)
+            array.remove(ob_avg, idx)
+            array.remove(ob_left, idx)
+    
     mitigated
 
+//Function to set order blocks
+set_order_blocks(ob_top, ob_btm, ob_left, ob_avg, ext_last, bg_css, border_css, lvl_css)=>
+    var ob_box = array.new_box(0)
+    var ob_lvl = array.new_line(0)
+
+    //Fill arrays with boxes/lines
+    if barstate.isfirst
+        for i = 0 to ext_last-1
+            array.unshift(ob_box, box.new(na,na,na,na
+              , xloc = xloc.bar_time
+              , extend= extend.right
+              , bgcolor = bg_css
+              , border_color = color.new(border_css, 70)))
+
+            array.unshift(ob_lvl, line.new(na,na,na,na
+              , xloc = xloc.bar_time
+              , extend = extend.right
+              , color = lvl_css
+              , style = get_line_style(line_style)
+              , width = line_width))
+
+    //Set order blocks
+    if barstate.islast
+        if array.size(ob_top) > 0
+            for i = 0 to math.min(ext_last-1, array.size(ob_top)-1)
+                get_box = array.get(ob_box, i)
+                get_lvl = array.get(ob_lvl, i)
+
+                box.set_lefttop(get_box, array.get(ob_left, i), array.get(ob_top, i))
+                box.set_rightbottom(get_box, array.get(ob_left, i), array.get(ob_btm, i))
+
+                line.set_xy1(get_lvl, array.get(ob_left, i), array.get(ob_avg, i))
+                line.set_xy2(get_lvl, array.get(ob_left, i)+1, array.get(ob_avg, i))
+
+
 //-----------------------------------------------------------------------------}
-//Detection
+//Global elements 
 //-----------------------------------------------------------------------------{
-// 거래량의 국소 최대(피벗 하이) — 이것이 「존을 만드는 사건」이다.
+var os = 0
+var target_bull = 0.
+var target_bear = 0.
+
+n = bar_index
+upper = ta.highest(length)
+lower = ta.lowest(length)
+
+if mitigation == 'Close'
+    target_bull := ta.lowest(close, length)
+    target_bear := ta.highest(close, length)
+else
+    target_bull := lower
+    target_bear := upper
+
+os := high[length] > upper ? 0 : low[length] < lower ? 1 : os[1]
+
 phv = ta.pivothigh(volume, length, length)
 
-// 추세 상태: 0 = 고점형(직전 스윙고를 아직 못 깼다) · 1 = 저점형.
-os := high[length] > ta.highest(high, length) ? 0 :
-      low[length]  < ta.lowest(low,  length)  ? 1 : os[1]
+//-----------------------------------------------------------------------------}
+//Get bullish/bearish order blocks coordinates 
+//-----------------------------------------------------------------------------{
+[bull_top
+  , bull_btm
+  , bull_avg
+  , bull_left
+  , bull_ob] = get_coordinates(phv and os == 1, hl2[length], low[length], low[length])
 
-// 강세 OB = 거래량 피벗 봉의 **아래 절반** `[hl2[length], low[length]]`.
-get_coordinates(phv and os == 1, hl2[length], low[length], n - length,
-                bull_top, bull_btm, bull_left)
-
-// 약세 OB = 그 봉의 **위 절반** `[high[length], hl2[length]]`.
-get_coordinates(phv and os == 0, high[length], hl2[length], n - length,
-                bear_top, bear_btm, bear_left)
-
-// 🚨 소멸 검사는 **생성과 같은 봉에서 연달아** 돈다 — 그래서 갓 태어난 존도
-//    그 5봉 안에 가격이 바닥을 뚫었으면 태어나자마자 지워진다(「탄생 시점 소급 검사」).
-remove_mitigated(bull_top, bull_btm, bull_left, ta.lowest(low,  length), true)
-remove_mitigated(bear_top, bear_btm, bear_left, ta.highest(high, length), false)
+[bear_top
+  , bear_btm
+  , bear_avg
+  , bear_left
+  , bear_ob] = get_coordinates(phv and os == 0, high[length], hl2[length], high[length])
 
 //-----------------------------------------------------------------------------}
-//알려진 차이 (AlphaBlock 이식이 원본과 **의도적으로** 다른 점)
+//Remove mitigated order blocks
 //-----------------------------------------------------------------------------{
-// ① 렌더링을 이식하지 않는다. 원본은 `barstate.isfirst`에서 박스를 미리 만들고
-//    `barstate.islast`에서 좌표만 갈아끼우며 `box.delete()`가 없어, 존이 줄면 옛
-//    좌표의 박스가 화면에 남는다. 이건 화면 아티팩트라 백테스트에 안 들어온다.
-//
-// ② 소멸 루프의 결함(위 ①②)을 **재현하지 않는다** — 우리 이식은 「최근 length봉
-//    최저가 존 바닥 아래면 소멸」을 **제대로** 구현하므로 원본보다 **더 많이 죽는다**.
-//    (사용자 결정: 「(가) 의도를 이식」.)
-//
-// ③ 존의 **생애를 지우지 않고 기록**한다(WAN-47). 원본은 배열에서 빼 버리지만
-//    백테스트는 생존자 편향을 피해야 하므로 `break_time`을 남긴다. 소멸 **시점**은
-//    원본과 같다.
-//
-// ④ 확정봉만 먹는다(`closed=True`, WAN-314). 원본은 형성 중인 봉을 틱마다 다시
-//    계산해 `phv`가 켜졌다 꺼졌다 하지만 우리는 더 보수적인 쪽으로 고정한다.
-//    **`length`봉 지연은 원본 그대로 재현한다.**
+mitigated_bull = remove_mitigated(bull_top
+  , bull_btm
+  , bull_left
+  , bull_avg
+  , target_bull
+  , true)
+
+mitigated_bear = remove_mitigated(bear_top
+  , bear_btm
+  , bear_left
+  , bear_avg
+  , target_bear
+  , false)
+
+//-----------------------------------------------------------------------------}
+//Display order blocks
+//-----------------------------------------------------------------------------{
+//Set bullish order blocks
+set_order_blocks(bull_top
+  , bull_btm
+  , bull_left
+  , bull_avg
+  , bull_ext_last
+  , bg_bull_css
+  , bull_css
+  , bull_avg_css)
+
+//Set bearish order blocks
+set_order_blocks(bear_top
+  , bear_btm
+  , bear_left
+  , bear_avg
+  , bear_ext_last
+  , bg_bear_css
+  , bear_css
+  , bear_avg_css)
+        
+//Show detected order blocks
+plot(bull_ob, 'Bull OB', bull_css, 2, plot.style_linebr
+  , offset = -length
+  , display = display.none)
+
+plot(bear_ob, 'Bear OB', bear_css, 2, plot.style_linebr
+  , offset = -length
+  , display = display.none)
+
+//-----------------------------------------------------------------------------}
+//Alerts
+//-----------------------------------------------------------------------------{
+alertcondition(bull_ob, 'Bullish OB Formed', 'Bullish order block detected')
+
+alertcondition(bear_ob, 'Bearish OB Formed', 'bearish order block detected')
+
+alertcondition(mitigated_bull, 'Bullish OB Mitigated', 'Bullish order block mitigated')
+
+alertcondition(mitigated_bear, 'Bearish OB Mitigated', 'bearish order block mitigated')
+
+//-----------------------------------------------------------------------------}

@@ -57,18 +57,76 @@ def test_pine_reference_is_vendored() -> None:
 @pytest.mark.parametrize(
     "fragment",
     [
-        "ta.pivothigh(volume, length, length)",  # 존을 만드는 사건
-        "high[length] > ta.highest(high, length)",  # 추세 상태 os
-        "low[length]  < ta.lowest(low,  length)",
-        "hl2[length], low[length]",  # 강세 존 = 봉의 아래 절반
-        "high[length], hl2[length]",  # 약세 존 = 봉의 위 절반
-        "ta.lowest(low,  length)",  # 소멸 비교 대상
-        "ta.highest(high, length)",
+        # 존을 만드는 사건 — 거래량의 국소 최대
+        "phv = ta.pivothigh(volume, length, length)",
+        # 추세 상태 `os` — 인자 하나짜리 `ta.highest/lowest`는 각각 `high`/`low`가 기본이다
+        "upper = ta.highest(length)",
+        "lower = ta.lowest(length)",
+        "os := high[length] > upper ? 0 : low[length] < lower ? 1 : os[1]",
+        # 존 좌표 — 강세는 봉의 **아래 절반**, 약세는 **위 절반**
+        "get_coordinates(phv and os == 1, hl2[length], low[length], low[length])",
+        "get_coordinates(phv and os == 0, high[length], hl2[length], high[length])",
+        # 박스 왼쪽 변 = 피벗 봉(= length봉 전)의 시각
+        "array.unshift(ob_left, time[length])",
+        # 소멸 비교 대상 — 기본 `Wick`이면 최근 length봉 최저/최고
+        "target_bull := lower",
+        "target_bear := upper",
+        "if (bull ? target < element : target > element)",
     ],
 )
 def test_pine_carries_the_conditions_we_ported(fragment: str) -> None:
-    """이식의 근거가 되는 조건식이 **파일에 실제로** 있는가."""
+    """이식의 근거가 되는 조건식이 **원문에 실제로** 있는가.
+
+    🚨 사용자가 원문을 이 경로에 덮어쓰면 이 목록이 그 파일과 대조된다 — 어긋나면 여기서
+    시끄럽게 실패한다(WAN-400이 「이슈 전제가 틀렸다」를 잡은 방법).
+    """
     assert fragment in PINE.read_text(), fragment
+
+
+def test_pine_creates_zones_before_it_mitigates_them() -> None:
+    """🚨 **탄생 시점 소급 검사의 근거** — 원문이 같은 봉에서 생성 → 소멸 순으로 돈다.
+
+    이 순서가 뒤집히면 갓 태어난 존이 그 봉에 죽지 않으므로, 우리 `birth_mitigation`은
+    원본 정의가 아니라 **우리가 더한 규칙**이 된다. 그 구분이 이 이슈의 ★결정이라 순서를
+    문서가 아니라 **파일에서** 확인한다.
+    """
+    text = PINE.read_text()
+    assert text.index("get_coordinates(phv and os == 1") < text.index("remove_mitigated(bull_top")
+
+
+def test_pine_has_the_two_defects_we_deliberately_did_not_port() -> None:
+    """「알려진 차이」의 **근거가 원문에 있다** — 없어지면 우리 이식 사유가 사라진다.
+
+    ① 소멸 루프가 순회 중 그 배열을 수정하고 `array.indexof`가 **값**의 첫 인덱스를 돌려준다
+    (건너뛰는 존 · 엉뚱하게 지워지는 존). ② 박스를 지우는 코드가 **아예 없다**(존이 줄면 옛
+    좌표의 박스가 화면에 남는다). 우리는 ①의 **의도**만 이식했고 ②는 화면 아티팩트라 안 옮겼다.
+    """
+    text = PINE.read_text()
+    assert "for element in target_array" in text
+    assert "array.remove(ob_btm, idx)" in text
+    assert "idx = array.indexof(target_array, element)" in text
+    assert "box.delete" not in text, "원본에 박스 삭제가 생겼다면 렌더 결함 서술을 고쳐야 한다."
+
+
+def test_original_default_inputs_are_what_we_ported() -> None:
+    """원본 기본값 그대로 쓴다 — 🚨 스윕 금지(WAN-161: 앞구간에서 눈금을 고르는 위험)."""
+    text = PINE.read_text()
+    assert "length = input.int(5, 'Volume Pivot Length'" in text
+    assert "bull_ext_last = input.int(3, 'Bullish OB '" in text
+    assert "mitigation = input.string('Wick', 'Mitigation Methods'" in text
+    params = LuxOrderBlockParams()
+    assert (params.length, params.zone_limit) == (5, 3)
+    assert params.birth_mitigation is True
+
+
+def test_close_mitigation_option_is_out_of_scope() -> None:
+    """원본의 `Close` 옵션은 **안 옮겼다** — 우리 쪽 같은 축의 기본값이 `wick`이라 맞는다.
+
+    ⚠️ 그 축을 옮기려면 `ConfluenceParams`/`OrderBlockParams.zone_invalidation`과 **한 축**
+    으로 다뤄야 한다(두 곳에 같은 노브가 생기면 조용히 갈라진다).
+    """
+    assert "target_bull := ta.lowest(close, length)" in PINE.read_text()
+    assert OrderBlockParams().zone_invalidation == "wick"
 
 
 def test_python_port_matches_the_pine_zone_geometry() -> None:
@@ -96,7 +154,13 @@ def test_python_port_matches_the_pine_zone_geometry() -> None:
 
 
 def test_pivot_high_requires_strictly_greater_on_both_sides() -> None:
-    """`ta.pivothigh`는 동률을 피벗으로 세지 않는다 — 그 규약을 못 박는다."""
+    """동률은 피벗이 아니다 — 🚨 **우리가 고른 해석**이고 원문에는 근거가 없다.
+
+    `ta.pivothigh`는 트레이딩뷰 **내장 함수**라 벤더링한 원문에 구현이 없다. 좌우 동률을
+    어떻게 다루는지가 문서에 못 박혀 있지 않아 **양쪽 모두 강부등호**로 갔다(가장 흔한
+    해석이고, 거래량에서 정확한 동률은 드물어 실무 영향이 작다). 이 테스트는 「맞다」가
+    아니라 **「우리가 이걸 골랐다」**를 고정한다 — 나중에 조용히 바뀌면 잡힌다.
+    """
     values = [1.0, 2.0, 3.0, 2.0, 1.0]
     assert _pivot_high(values, t=4, length=2)
     tie = [1.0, 3.0, 3.0, 2.0, 1.0]

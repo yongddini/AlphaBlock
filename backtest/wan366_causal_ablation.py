@@ -1504,14 +1504,27 @@ OVERLAP_CENSUS_CSV_PATH = REPORTS_DIR / "wan405_overlap_census.csv"
 RANK_CENSUS_CSV_PATH = REPORTS_DIR / "wan405_rank_census.csv"
 DETECTOR_SUMMARY_PATH = REPORTS_DIR / "wan405_detector_summary.md"
 
-DETECTOR_CSV_KEYS: tuple[str, ...] = ("arm", "timeframes", "segment")
-DETECTOR_LOO_KEYS: tuple[str, ...] = ("arm", "timeframes", "segment", "excluded")
+DETECTOR_CSV_KEYS: tuple[str, ...] = ("arm", "retap_mode", "timeframes", "segment")
+DETECTOR_LOO_KEYS: tuple[str, ...] = ("arm", "retap_mode", "timeframes", "segment", "excluded")
 DETECTOR_CENSUS_KEYS: tuple[str, ...] = ("symbol", "timeframe", "detector", "direction")
 OVERLAP_CENSUS_KEYS: tuple[str, ...] = ("symbol", "timeframe", "direction")
 RANK_CENSUS_KEYS: tuple[str, ...] = ("symbol", "timeframe", "detector", "ruler")
 
 #: 「그 시점 순위」 누적 분포의 절단점 — 원본 파인이 그리는 개수(3)가 그중 하나다.
 RANK_EDGES: tuple[int, ...] = (1, 3, 5, 10)
+
+
+#: 재탭 정책 — 🚨 **사용자 결정 2026-09-03: 「생짜」는 존당 한 번이다**(`"once"`).
+#:
+#: 사다리 `L0`은 채택 기본값(`"every_tap"`)을 물려받지만, 이 표가 묻는 것은 *「존 하나가
+#: 얼마나 버나」*이고 같은 존에 몇 번씩 들어가면 그 질문이 흐려진다 — 특히 LuxAlgo는 존이
+#: 2.6배 많고 얇아 재탭이 거래 수를 크게 부풀린다(강세 탭 1h 19,535 → 32,628).
+#:
+#: ⚠️ 그래서 **이 표는 사다리 `L0`(−0.2367R)과 셀을 직접 비교할 수 없다** — 좌표가 하나 더
+#: 다르다. 그 대신 `retap_mode` 열이 행마다 실려 두 판이 **한 표에서 섞이지 않는다**
+#: (`timeframes` 열과 같은 규약 · WAN-316/330이 3TF·4TF를 섞어 데인 자리).
+ADOPTED_RETAP: str = "every_tap"
+RAW_RETAP: str = "once"
 
 
 @dataclass(frozen=True)
@@ -1550,6 +1563,9 @@ class DetectorRow(BaseModel):
     label: str
     detector: str
     overlap_gate: bool
+    retap_mode: str
+    """재탭 정책 — 🚨 `"once"`(생짜 · 존당 한 번)와 `"every_tap"`(채택 기본값)은 **다른 판**
+    이다. 행마다 실어서 한 표에서 섞이지 않게 한다(`timeframes`와 같은 규약)."""
     timeframes: str
     """🚨 이 지갑이 어느 TF들로 배치됐는지 — **3TF 판과 4TF 판을 한 표에서 섞지 않으려고**
     행에 싣는다(북은 이어붙일 수 없다, WAN-316 · 3TF→4TF에서 순위가 뒤집힌 선례 WAN-330)."""
@@ -1597,6 +1613,7 @@ class DetectorLooRow(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     arm: str
+    retap_mode: str
     timeframes: str
     segment: str
     excluded: str
@@ -1999,10 +2016,12 @@ def detector_payloads(
     start: str,
     end: str,
     jobs: int,
+    retap_mode: str = RAW_RETAP,
 ) -> list[CellPayload]:
     """한 팔의 후보 — 🚨 팔마다 **다시 탐지**한다(탐지 축이라 공유 금지, WAN-149).
 
     나머지는 사다리 `L0` 그대로다: 볼린저 끔 · 존폭 필터 끔 · 재진입 끔 · 익절 1.5R.
+    🚨 **재탭은 기본이 `once`(생짜 · 사용자 결정)** 라 `L0`과 그 축 하나가 다르다.
     """
     kwargs = dict(ADOPTED_CELL_KWARGS)
     kwargs["reentry"] = False
@@ -2019,6 +2038,9 @@ def detector_payloads(
         max_zone_width_atr=None,
         detector=arm.detector,
         overlap_gate=arm.overlap_gate,
+        # 🚨 채택 기본값(`every_tap`)이 아니라 **명시**다 — 미지정에 맡기면 라벨은 「생짜」인데
+        # 같은 존에 몇 번씩 들어간다(WAN-91/95/112/123/159가 반복해 경계한 자리).
+        retap_mode=retap_mode,
         take_profit_liquidity=harness.ADOPTED_TAKE_PROFIT_LIQUIDITY,
         **kwargs,  # type: ignore[arg-type]
     )
@@ -2060,6 +2082,7 @@ def _detector_row(
     payloads: Sequence[CellPayload],
     timeframes: Sequence[str],
     cfg: BacktestConfig,
+    retap_mode: str,
 ) -> DetectorRow:
     row = segment.row
     pairs: list[tuple[Trade, PlacedSetup]] = segment.trades_with_placements()
@@ -2091,6 +2114,7 @@ def _detector_row(
         label=arm.label,
         detector=arm.detector,
         overlap_gate=arm.overlap_gate,
+        retap_mode=retap_mode,
         timeframes=",".join(timeframes),
         segment=segment.segment,
         num_cells=row.num_cells,
@@ -2139,6 +2163,7 @@ def _detector_loo_rows(
     timeframes: Sequence[str],
     start_ms: int,
     end_ms: int,
+    retap_mode: str,
 ) -> list[DetectorLooRow]:
     """🚨 라벨 필터가 아니라 **지갑 재배치**다(WAN-316) — 뺀 칸의 자본·명목 자리를 남이 쓴다."""
     symbols = sorted({p.symbol for p in payloads})
@@ -2159,6 +2184,7 @@ def _detector_loo_rows(
             rows.append(
                 DetectorLooRow(
                     arm=arm.name,
+                    retap_mode=retap_mode,
                     timeframes=",".join(timeframes),
                     segment=seg.segment,
                     excluded=excluded,
@@ -2246,6 +2272,7 @@ def run_detector_arms(
     start: str,
     end: str,
     jobs: int,
+    retap_mode: str = RAW_RETAP,
     segments: Sequence[str] = SEGMENT_ORDER,
     on_arm: Callable[[list[DetectorRow], list[DetectorLooRow]], None] | None = None,
     log: bool = True,
@@ -2276,7 +2303,14 @@ def run_detector_arms(
                 print(f"[wan405] 검산(c) 게이트 부분집합: {gate_n}/{base_n}", flush=True)
         placed = place_detector_arm(payloads, start_ms=start_ms, end_ms=end_ms, segments=segments)
         arm_rows = [
-            _detector_row(arm=arm, segment=seg, payloads=payloads, timeframes=timeframes, cfg=cfg)
+            _detector_row(
+                arm=arm,
+                segment=seg,
+                payloads=payloads,
+                timeframes=timeframes,
+                cfg=cfg,
+                retap_mode=retap_mode,
+            )
             for seg in placed
         ]
         arm_loo = _detector_loo_rows(
@@ -2285,6 +2319,7 @@ def run_detector_arms(
             timeframes=timeframes,
             start_ms=start_ms,
             end_ms=end_ms,
+            retap_mode=retap_mode,
         )
         rows.extend(arm_rows)
         loo.extend(arm_loo)
@@ -2301,6 +2336,18 @@ def run_detector_arms(
 # --------------------------------------------------------------------------- #
 # §3 렌더
 # --------------------------------------------------------------------------- #
+
+
+def primary_retap_view(frame: pd.DataFrame) -> pd.DataFrame:
+    """판정에 쓰는 판만 남긴다 — **재탭 끔(`once`) = 생짜**(사용자 결정 2026-09-03).
+
+    🚨 두 판(`once`·`every_tap`)이 한 CSV에 살 수 있으므로 **렌더는 반드시 걸러서** 본다.
+    안 거르면 같은 팔 이름의 다른 판 행이 섞여 「어느 표를 읽고 있는지」를 알 수 없게 된다
+    (`timeframes` 축에서 WAN-316/330이 데인 자리와 같은 부류).
+    """
+    if frame.empty or "retap_mode" not in frame.columns:
+        return frame
+    return frame[frame["retap_mode"] == RAW_RETAP]
 
 
 def _detector_pick(frame: pd.DataFrame, arm: str, segment: str) -> pd.Series | None:
@@ -2345,6 +2392,16 @@ def _detector_verdict(frame: pd.DataFrame) -> str:
             "🚨 이슈의 선별 실행 규약대로 **여기서 닫는다** — 15m은 LuxAlgo에 더 불리한 축이라"
             "(얇은 존 × 좁은 손절폭) 뒤집힐 이유가 없다."
         )
+    if float(base["gross_r"]) > 0.0:
+        verdict += (
+            f"\n\n📌 **채택 탐지기는 이 판에서 gross가 처음으로 플러스다**"
+            f"(**{float(base['gross_r']):+.4f}R** · 승률 {float(base['win_rate']):.2%}로 고정 "
+            "1.5R의 손익분기 40.0%를 넘는다) — 즉 **시장에서는 번다**. ⚠️ 그런데 net은 여전히 "
+            f"**{float(base['mean_net_r']):+.4f}R**이다: 번 것보다 **비용이 "
+            f"{float(base['cost_r']) / float(base['gross_r']):.1f}배**"
+            f"({float(base['cost_r']):.4f}R). 🚨 **「흑자」로 읽지 말 것** — WAN-370이 잰 천장"
+            "(비용 0에서 +0.09R) 안쪽이고, 이 판은 **손절폭 가드가 꺼진 생짜**다."
+        )
     gate = _detector_pick(frame, GATE_ARM, PRIMARY_OOS)
     if gate is not None:
         g_delta = float(gate["mean_net_r"]) - float(base["mean_net_r"])
@@ -2353,11 +2410,17 @@ def _detector_verdict(frame: pd.DataFrame) -> str:
         )
         base_n = int(base["num_trades"])
         shrink = 1.0 - (int(gate["num_trades"]) / base_n if base_n else 0.0)
+        d_gross = float(gate["gross_r"]) - float(base["gross_r"])
+        d_cost = float(gate["cost_r"]) - float(base["cost_r"])
         verdict += (
             f"\n\n📌 **겹침 게이트**: `{GATE_ARM}` − `{BASE_ARM}` = **{g_delta:+.4f}R**"
-            f"({'부호 결정' if g_decided else '**0과 구분되지 않음**'}) — 🚨 그 대가로 거래가 "
-            f"**{shrink:.1%} 줄었다**(거래를 줄여 복리 손실 총액이 준 것을 「좋아졌다」로 읽지 "
-            "말 것 — WAN-378이 이름 붙인 함정)."
+            f"({'부호 결정' if g_decided else '**0과 구분되지 않음**'}) · 거래 "
+            f"**{shrink:.1%} 감소** · 승률 {float(base['win_rate']):.2%} → "
+            f"**{float(gate['win_rate']):.2%}**."
+            f"\n\n🚨 **그 차이는 gross에서 온다**(**{d_gross:+.4f}R**) — 비용은 거의 안 움직이고"
+            f"({d_cost:+.4f}R) 손절폭도 그대로다(존 기하 불변 = 검산 (c)). 즉 「거래를 줄여 "
+            "복리 손실 총액이 준 것」이 아니라(WAN-378 함정) **두 탐지기가 동의한 자리가 실제로 "
+            "더 못 번다**는 뜻이다 — 「컨플루언스」 직관과 **반대 방향**이다."
         )
     return verdict
 
@@ -2380,9 +2443,18 @@ def _cost_attribution(frame: pd.DataFrame) -> str:
     )
 
 
-def _render_detector_arms(frame: pd.DataFrame) -> list[str]:
-    if frame.empty:
+def _render_detector_arms(all_frame: pd.DataFrame) -> list[str]:
+    if all_frame.empty:
         return ["## §3 탐지기 팔", "", "⚠️ 아직 안 돌렸다.", ""]
+    frame = primary_retap_view(all_frame)
+    if frame.empty:
+        return [
+            "## §3 탐지기 팔",
+            "",
+            f"⚠️ **판정 판(`retap_mode={RAW_RETAP}`)이 아직 없다** — CSV에 있는 것은 "
+            f"`{sorted(set(all_frame['retap_mode'].astype(str)))}` 뿐이다.",
+            "",
+        ]
     shapes = sorted(set(frame["timeframes"].astype(str)))
     parts = [
         "## §3 탐지기 팔 — 「무엇을 존이라 부를 것인가」만 바꾼다",
@@ -2390,6 +2462,12 @@ def _render_detector_arms(frame: pd.DataFrame) -> list[str]:
         f"🚨 **이 표의 지갑 TF: {' / '.join(shapes)}** — 북은 이어붙일 수 없다(WAN-316). "
         "3TF 판과 4TF 판을 **한 줄로 비교하지 말 것**(WAN-330이 15m을 붙이자 헤드라인이 "
         "반토막 나고 팔 순위까지 뒤집혔다).",
+        "",
+        f"🚨 **재탭 끔(`{RAW_RETAP}`) 판이다 — 존 하나에 딱 한 번만 들어간다**(사용자 결정 "
+        "2026-09-03). 「생짜로 얼마나 먹나」를 묻는데 같은 존에 몇 번씩 들어가면 그 질문이 "
+        f"흐려지고, 특히 LuxAlgo는 존이 2.6배 많고 얇아 재탭이 거래 수를 크게 부풀린다. "
+        f"⚠️ 그래서 **사다리 `L0`(재탭 `{ADOPTED_RETAP}`)과 셀을 직접 비교할 수 없다** — "
+        "좌표가 하나 더 다르다.",
         "",
         _detector_verdict(frame),
         "",
@@ -2423,10 +2501,15 @@ def _render_detector_arms(frame: pd.DataFrame) -> list[str]:
     undefined = view[~view["wallet_defined"].astype(bool)]
     parts += [
         "",
-        "🚨 **지갑 층 열은 이 좌표에서 뜻을 잃는다** — 생짜는 거래당 기대값이 깊은 마이너스라 "
-        "잔고가 0을 뚫고 MDD·수익/MDD·청산이 전부 「정의 상실」이다(WAN-386 `wallet_defined`). "
-        f"실제로 {len(undefined)}/{len(view)}행이 그렇다. **청산 0건을 안전 신호로 읽지 말 것**"
-        "(WAN-312 §4 · WAN-367).",
+        (
+            f"🚨 **지갑 층 열을 판정에 쓰지 않는다** — 실측으로 {len(undefined)}/{len(view)}행이 "
+            "잔고가 0을 뚫어 MDD·수익/MDD·청산이 「정의 상실」이다(WAN-386 `wallet_defined`)."
+            if len(undefined)
+            else "🚨 **지갑 층 열을 판정에 쓰지 않는다** — 이 판은 잔고가 0을 안 뚫었지만"
+            "(12/12행 정의됨) 총수익 %는 6년 복리 착시라(WAN-169/213) 팔을 못 가른다. "
+            "판정 자는 처음부터 **거래당 net R**이다."
+        )
+        + " **청산 0건을 안전 신호로 읽지 말 것**(WAN-312 §4 · WAN-367).",
         "",
         "📌 **앞구간에서 보고 뒷구간에서 확인**(완료기준 5) — " + _is_oos_line(frame),
         "",
@@ -2450,7 +2533,10 @@ def _is_oos_line(frame: pd.DataFrame) -> str:
     )
 
 
-def _render_detector_loo(loo: pd.DataFrame) -> list[str]:
+def _render_detector_loo(all_loo: pd.DataFrame) -> list[str]:
+    if all_loo.empty:
+        return []
+    loo = primary_retap_view(all_loo)
     if loo.empty:
         return []
     parts = [
@@ -2761,6 +2847,13 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         default=None,
         help=f"§3 팔(쉼표 구분, 기본: {','.join(a.name for a in DETECTOR_ARMS)})",
     )
+    parser.add_argument(
+        "--retap",
+        default=RAW_RETAP,
+        choices=(RAW_RETAP, ADOPTED_RETAP),
+        help=f"§3 재탭 정책(기본 {RAW_RETAP!r} = 생짜 · 존당 한 번). "
+        f"{ADOPTED_RETAP!r}은 채택 기본값 판이고 **다른 표**다(행의 retap_mode 열로 갈린다).",
+    )
     return parser.parse_args(argv)
 
 
@@ -2856,6 +2949,7 @@ def _detector_main(
         start=args.start,
         end=args.end,
         jobs=args.jobs,
+        retap_mode=args.retap,
         on_arm=persist,
     )
     print(f"[wan405] §3 팔 완료 ({time.time() - t0:.0f}s)", flush=True)
