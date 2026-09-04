@@ -35,6 +35,7 @@ import math
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, field_validator
@@ -53,6 +54,7 @@ from config.settings import get_settings
 from data.funding import FundingRateStore
 from data.models import FundingRate
 from data.storage import OhlcvStore
+from strategy.lux_order_blocks import LuxOrderBlockDetector, LuxOrderBlockParams
 from strategy.models import (
     BandBar,
     ConfluenceParams,
@@ -473,6 +475,14 @@ class _Unset(enum.Enum):
 
 
 UNSET = _Unset.UNSET
+
+#: 오더블록 **탐지기** 축 (WAN-405, 옵트인 측정 전용). `"flux"` = FluxCharts 이식
+#: (`strategy.order_blocks`, WAN-7 = 채택) · `"lux"` = LuxAlgo 거래량 피벗
+#: (`strategy.lux_order_blocks`). 🚨 **탐지 축이라 값마다 다시 탐지해야 한다**(WAN-149).
+Detector = Literal["flux", "lux"]
+
+#: 채택 탐지기 — 「인자를 안 주면 페이퍼와 같은 선상」(WAN-305).
+ADOPTED_DETECTOR: Detector = "flux"
 
 #: 존폭 필터 인자의 타입 — 실제 문턱(`float`)·끄기(`None`)·미지정(`UNSET`). CLI 축이
 #: 「미지정」을 「끄기」와 갈라 나르려고 쓴다(run.py의 `Grid`/`Combo`).
@@ -1206,7 +1216,10 @@ def run_once(
 
 
 def detect_order_blocks(
-    market: MarketData, ob_params: OrderBlockParams | None = None
+    market: MarketData,
+    ob_params: OrderBlockParams | None = None,
+    *,
+    detector: Detector = ADOPTED_DETECTOR,
 ) -> OrderBlockResult:
     """구간의 오더블록을 탐지한다. 격자 안에서 한 번만 하고 조합들이 공유한다.
 
@@ -1216,7 +1229,22 @@ def detect_order_blocks(
     (WAN-149), 병합 여부에 따라 `signals`/`retap_signals`가 통째로 달라진다. 따라서
     이 인자가 다른 조합끼리는 탐지 결과를 공유하면 안 된다. `None`이면 채택 기본값
     (WAN-149: 분리)이고, 옛 수치를 결론에 박아 둔 리포트는 `LEGACY_OB_PARAMS`를 준다.
+
+    `detector`(WAN-405, 옵트인)는 **무엇을 존이라 부를 것인가**를 고른다 —
+    `"flux"`(기본 = 채택)면 예전과 **비트 단위로 같고**, `"lux"`는 LuxAlgo 거래량 피벗
+    탐지기다(`strategy.lux_order_blocks`). 🚨 **탐지 축이라 값마다 다시 탐지해야 한다**
+    (`combine_obs`와 같은 부류 — 두 팔이 같은 `OrderBlockResult`를 공유하면 라벨만 다른
+    같은 숫자가 나온다, WAN-149).
     """
+    if detector == "lux":
+        if ob_params is not None and ob_params.combine_obs:
+            # LuxAlgo에는 병합이 없다(WAN-405 §부록). 조용히 무시하면 「병합 켬」 라벨을
+            # 단 채 안 병합된 결과가 나온다 — WAN-91/95/112/123/159가 반복해 경계한 자리.
+            raise ValueError(
+                "detector='lux'는 존 병합(combine_obs=True)을 지원하지 않습니다 — "
+                "원본 LuxAlgo에 병합 규칙이 없습니다(WAN-405 §부록)."
+            )
+        return LuxOrderBlockDetector(LuxOrderBlockParams()).run(market.htf_df)
     return OrderBlockDetector(ob_params).run(market.htf_df)
 
 
