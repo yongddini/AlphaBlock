@@ -19,6 +19,7 @@ from live.paper_parity import (
     PaperParityCell,
     ParityReport,
     RStats,
+    _agg_paper,  # noqa: PLC2701  — 집계 규약을 렌더 문자열이 아니라 동작으로 고정한다(WAN-406)
     backtest_parity_cell,
     build_parity_report,
     paper_cells,
@@ -340,7 +341,7 @@ def test_render_full_synthetic_report_has_both_sides() -> None:
         entered=6,
         entry_rejected=2,
         marginal_fills=3,
-        r=RStats(n=6, wins=4, losses=2, mean_r=(4 * 1.5 - 2) / 6, net_mean_r=0.5),
+        r=RStats(n=6, wins=4, losses=2, mean_r=(4 * 1.5 - 2) / 6, net_n=6, net_sum=3.0),
     )
     backtest = BacktestParityCell(
         symbol=_SYMBOL,
@@ -436,3 +437,149 @@ def test_backtest_parity_cell_no_data_when_missing() -> None:
     assert not cell.has_data
     assert cell.taps == 0
     assert cell.r.n == 0
+
+
+# ---------------------------------------------------------------------------
+# WAN-406 — 합산 행의 net은 셀이 아니라 거래를 센다
+# ---------------------------------------------------------------------------
+
+
+def _paper_cell_with_net(
+    tf: str, *, wins: int, losses: int, net_values: list[float], n: int | None = None
+) -> PaperParityCell:
+    """실현 R만 채운 합성 페이퍼 셀(체결 깔때기는 이 절의 관심사가 아니다)."""
+    return PaperParityCell(
+        symbol=_SYMBOL,
+        timeframe=tf,
+        filled=0,
+        no_fill=0,
+        entered=0,
+        entry_rejected=0,
+        marginal_fills=0,
+        r=RStats(
+            n=wins + losses if n is None else n,
+            wins=wins,
+            losses=losses,
+            mean_r=(wins * 1.5 - losses) / (wins + losses) if (wins + losses) else None,
+            net_n=len(net_values),
+            net_sum=sum(net_values),
+        ),
+    )
+
+
+def test_aggregate_net_is_trade_weighted_not_cell_weighted() -> None:
+    """🚨 거래 1건짜리 셀이 10건짜리 셀과 같은 무게를 가지면 안 된다 (WAN-406).
+
+    비가중(셀별 평균의 평균) = (+1.50 + −1.00) / 2 = **+0.25**
+    가중(거래 단위)         = (+1.50 + 10 × −1.00) / 11 = **−0.7727**
+
+    두 값이 부호까지 갈리는 픽스처라, 옛 코드(`sum(nets) / len(nets)`)로 되돌리면 이
+    테스트는 반드시 실패한다 — 라벨이 아니라 동작으로 건다.
+    """
+    thin = _paper_cell_with_net("1h", wins=1, losses=0, net_values=[1.5])
+    thick = _paper_cell_with_net("15m", wins=0, losses=10, net_values=[-1.0] * 10)
+
+    *_, stats, _ = _agg_paper([thin, thick], 1.5)
+
+    assert stats.net_n == 11
+    assert stats.net_mean_r == pytest.approx((1.5 + 10 * -1.0) / 11)
+    # 돌연변이 방어: 비가중 평균이 나오면 안 된다(부호부터 다르다).
+    assert stats.net_mean_r is not None
+    assert stats.net_mean_r < 0.0
+    assert stats.net_mean_r != pytest.approx(0.25)
+
+
+def test_aggregate_net_population_differs_from_reason_population() -> None:
+    """⚠️ `r_multiple`이 None인 거래는 net에서 빠지고 사유에는 남는다 — `net_n != n` (WAN-406).
+
+    `c.r.n`으로 가중하면 틀린다: 셀 A는 사유 3건인데 net은 2건뿐이다.
+    """
+    # 사유 3건(익절 2 · 손절 1)인데 net은 2건만 확정.
+    partial = _paper_cell_with_net("1h", wins=2, losses=1, net_values=[1.4, -1.02])
+    full = _paper_cell_with_net("15m", wins=0, losses=4, net_values=[-1.2] * 4)
+
+    *_, stats, _ = _agg_paper([partial, full], 1.5)
+
+    assert stats.n == 7  # 사유 기준 모집단
+    assert stats.net_n == 6  # net 모집단 — 같다고 가정하면 안 된다
+    assert stats.net_mean_r == pytest.approx((1.4 - 1.02 + 4 * -1.2) / 6)
+    # `n`으로 가중한 잘못된 값과 실제로 갈린다.
+    wrong_by_n = (3 * ((1.4 - 1.02) / 2) + 4 * -1.2) / 7
+    assert stats.net_mean_r != pytest.approx(wrong_by_n)
+
+
+def test_aggregate_net_reproduces_server_ledger_measurement() -> None:
+    """실측 재현 (WAN-406 이슈 본문): 익절 36 @ +1.4393 · 손절 35 @ −1.2126 → **+0.1320R**.
+
+    거래를 여러 셀에 쪼개 담아도(얇은 셀 포함) 합산 행이 참값을 낸다.
+    """
+    tp_r, sl_r = 1.4393, -1.2126
+    # 36 익절 / 35 손절을 「얇은 셀 여럿 + 두꺼운 셀 하나」로 쪼갠다 — 비가중이면 위로 끌린다.
+    cells = [
+        _paper_cell_with_net(f"thin{i}", wins=1, losses=0, net_values=[tp_r]) for i in range(6)
+    ]
+    cells.append(
+        _paper_cell_with_net("15m", wins=30, losses=35, net_values=[tp_r] * 30 + [sl_r] * 35)
+    )
+
+    *_, stats, _ = _agg_paper(cells, 1.5)
+
+    assert stats.wins == 36
+    assert stats.losses == 35
+    assert stats.net_n == 71
+    assert stats.net_mean_r == pytest.approx((36 * tp_r + 35 * sl_r) / 71, abs=5e-5)
+    assert stats.net_mean_r == pytest.approx(0.1320, abs=5e-5)
+    # 사유 기준(+0.2676R)은 손대지 않았고, 비용을 뺀 net은 반드시 그보다 작다 (WAN-392 성질).
+    assert stats.mean_r == pytest.approx((36 * 1.5 - 35) / 71)
+    assert stats.mean_r is not None
+    assert stats.net_mean_r is not None
+    assert stats.net_mean_r < stats.mean_r
+
+
+def test_r_stats_net_mean_is_derived_not_stored() -> None:
+    """📌 `net_mean_r`은 저장 필드가 아니라 `net_sum / net_n` 파생이다 (WAN-406).
+
+    평균을 실을 수 있으면 「셀별 평균을 다시 평균」이 언제든 되살아난다 — 타입으로 막는다.
+    """
+    with pytest.raises(TypeError):
+        RStats(n=1, wins=1, losses=0, mean_r=1.5, net_mean_r=0.5)  # type: ignore[call-arg]
+
+    stats = r_stats_from_reasons([True, False], take_profit_r=1.5, net_r_values=[1.4, -1.02])
+    assert stats.net_n == 2
+    assert stats.net_sum == pytest.approx(1.4 - 1.02)
+    assert stats.net_mean_r == pytest.approx((1.4 - 1.02) / 2)
+
+
+def test_render_aggregate_flags_net_population_mismatch() -> None:
+    """`net_n != n`이면 표가 그 사실을 밝힌다(감추지 않는다) — 같으면 조용하다."""
+    mismatch = _paper_cell_with_net("1h", wins=2, losses=1, net_values=[1.4, -1.02])
+    matched = _paper_cell_with_net("1h", wins=2, losses=1, net_values=[1.4, 1.4, -1.02])
+    backtest = BacktestParityCell(
+        symbol=_SYMBOL,
+        timeframe=_TF,
+        taps=5,
+        reservations=5,
+        eligible=5,
+        fills_baseline=3,
+        fills_pen5=2,
+        entries=3,
+        r=RStats(n=3, wins=2, losses=1, mean_r=(2 * 1.5 - 1) / 3),
+    )
+
+    def _render(cell: PaperParityCell) -> str:
+        return render_parity(
+            ParityReport(
+                start_ms=0,
+                end_ms=_DAY_MS,
+                start_key="2026-09-01",
+                end_key="2026-09-02",
+                take_profit_r=1.5,
+                uptime_ms=_DAY_MS,
+                window_ms=_DAY_MS,
+                paper=(cell,),
+                backtest=(backtest,),
+            )
+        )
+
+    assert "net 표본 2" in _render(mismatch)
+    assert "net 표본" not in _render(matched)
