@@ -57,6 +57,7 @@ python -m live.paper_parity --db data/ohlcv.db --by-cell --jobs 6
 from __future__ import annotations
 
 import argparse
+import math
 from collections.abc import Iterable, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
@@ -75,6 +76,7 @@ from backtest.harness import (
 from backtest.models import BacktestResult, ExitReason
 from common.timefmt import KST, kst_day_bounds_for_date
 from config.settings import get_settings
+from live.benchmark import BuyHoldSummary, buy_hold_summary
 from live.live_vs_backtest import DEFAULT_WARMUP_DAYS, count_taps_reservations
 from live.order_journal import (
     LEDGER_REASON_ENTERED,
@@ -94,6 +96,7 @@ from strategy.models import (
 
 __all__ = [
     "BacktestParityCell",
+    "BuyHoldSummary",
     "PaperParityCell",
     "ParityReport",
     "RStats",
@@ -263,6 +266,8 @@ class ParityReport:
     window_ms: int
     paper: tuple[PaperParityCell, ...]
     backtest: tuple[BacktestParityCell, ...]
+    benchmark: BuyHoldSummary | None = None
+    """같은 창·같은 유니버스의 buy&hold(WAN-407 §4). 유니버스를 안 주면 None."""
 
     @property
     def has_paper(self) -> bool:
@@ -386,7 +391,17 @@ def _cell_from_market(
     end_ms: int,
 ) -> BacktestParityCell:
     """미리 로드·탐지된 셀의 백테스트 파리티 셀을 낸다(누수 0 회귀 테스트용 분리)."""
-    cfg = build_config(market.timeframe)
+    # 🚨 `funding_enabled=False`가 **라벨 맞추기**다(WAN-407 §1). 이 경로는 위
+    # `backtest_parity_cell`이 `load_market_data(..., funding=False)`로 펀딩을 **아예 읽지
+    # 않는데**, cfg를 채택 기본값(`settings.backtest_funding_enabled=True`)으로 두면 엔진이
+    # 「펀딩을 쓴다」고 믿고 빈 시계열의 커버리지를 재 **모든 셀에서 0.0%**를 경고한다 —
+    # 실제로는 펀딩이 100% 채워진 창에서도 그렇다(wan407.md §1의 재현). 그 거짓 경보가
+    # 2026-09-07에 「펀딩 수집이 멈췄다」는 의심의 유일한 근거였다. 끄면 커버리지가 0.0(=
+    # 「썼는데 결측」)이 아니라 None(= 「안 썼다」)이 되고, 펀딩 시계열이 비어 있으므로
+    # 손익·거래는 **비트 단위로 같다**(끈 것은 라벨이지 계산이 아니다).
+    # ⚠️ 그래서 이 표의 백테스트 쪽은 펀딩을 안 물고 페이퍼 쪽은 문다 — 그 비대칭은 지우지
+    # 않고 렌더러 각주가 밝힌다(대칭으로 맞추는 것은 파리티 수치를 움직이는 별도 결정이다).
+    cfg = build_config(market.timeframe, funding_enabled=False)
     params_base: ConfluenceParams = build_params(fill=BASELINE_FILL)
     params_pen5: ConfluenceParams = build_params(fill=fill_preset("pen_5bp"))
 
@@ -565,11 +580,17 @@ def build_parity_report(
     cells: Sequence[tuple[str, str]],
     warmup_days: int = DEFAULT_WARMUP_DAYS,
     jobs: int = 1,
+    db_path: str | None = None,
+    benchmark_symbols: Sequence[str] | None = None,
 ) -> ParityReport:
     """창 하나의 파리티 리포트를 계산한다 — 라이브는 조회, 백테스트는 채택 엔진 재산출.
 
     `cells`가 비면 백테스트를 돌리지 않는다(라이브 표본이 없어 대조할 것이 없다) — 빈 리포트가
     나오고 렌더러가 "표본 없음" 판정을 낸다.
+
+    `db_path`·`benchmark_symbols`를 둘 다 주면 **같은 창·같은 유니버스의 buy&hold**를 함께
+    낸다(WAN-407 §4 · CLAUDE.md WAN-393 원칙). 둘 중 하나라도 없으면 벤치마크는 None이고
+    렌더러가 그 절을 통째로 생략한다 — 없는 벤치마크를 지어내지 않는다.
     """
     take_profit_r = build_params(fill=BASELINE_FILL).take_profit_r
     entries = journal.ledger_entries(start_ms=start_ms, end_ms=end_ms)
@@ -590,6 +611,11 @@ def build_parity_report(
         window_ms=end_ms - start_ms,
         paper=tuple(paper),
         backtest=tuple(backtest),
+        benchmark=(
+            buy_hold_summary(db_path, benchmark_symbols, start_ms=start_ms, end_ms=end_ms)
+            if db_path is not None and benchmark_symbols
+            else None
+        ),
     )
 
 
@@ -636,6 +662,7 @@ def render_parity(report: ParityReport, *, by_cell: bool = False) -> str:
         return "\n".join(lines)
 
     lines.extend(_render_aggregate(report))
+    lines.extend(_render_benchmark(report))
     lines.extend(_render_verdict(report))
     if by_cell:
         lines.extend(_render_by_cell(report))
@@ -712,6 +739,13 @@ def _render_aggregate(report: ParityReport) -> list[str]:
         " 아니다, WAN-406). 백테스트 체결률은 filled/eligible,"
         " 페이퍼 체결률은 filled/(filled+미체결)이라 **분모 정의가 다르다**(각자 native).",
         "",
+        "⚠️ **펀딩 비대칭**(WAN-407 §1): 이 표의 **백테스트 쪽은 펀딩을 안 문다**(대조 셀을"
+        " `funding=False`로 로드한다) — 페이퍼 `net`은 문다. 사유 기준 R은 둘 다 청산 사유만"
+        " 보므로 영향이 없고, **`net` 열에만** 그 비대칭이 실린다(롱 온리라 펀딩은 대개 지불"
+        " 쪽이므로 백테스트에 **유리한** 방향이다). 크기는 WAN-91 기준 `total_return` ±0.1~2%p"
+        " 급이라 판정을 뒤집는 눈금이 아니다. 대칭으로 맞추는 것은 파리티 수치를 움직이는"
+        " **별도 결정**이라 이 이슈에서 하지 않았다.",
+        "",
     ]
     return lines
 
@@ -719,6 +753,94 @@ def _render_aggregate(report: ParityReport) -> list[str]:
 def _safe_rate(num: int, other: int) -> float | None:
     denom = num + other
     return num / denom if denom else None
+
+
+def _render_benchmark(report: ParityReport) -> list[str]:
+    """같은 창·같은 유니버스의 buy&hold 병기(WAN-407 §4 · CLAUDE.md WAN-393 원칙).
+
+    🚨 **이 절은 「엣지 있음」을 묻지 않는다** — buy&hold를 이겨도 「엣지 없음」(WAN-84/88/
+    111/114/124/151/201/248/386)은 안 뒤집힌다(그쪽은 *무작위 시각으로 들어가도 비슷한가*를
+    묻는 **다른 질문**). 이 표가 막는 것은 **한 방향의 오독**뿐이다: 오르는 장의 플러스를
+    실력으로 읽는 것.
+    """
+    bench = report.benchmark
+    if bench is None:
+        return []
+
+    lines = [
+        "## 같은 창 buy&hold (벤치마크)",
+        "",
+    ]
+    if bench.n == 0:
+        lines.extend(
+            [
+                "이 창에 종가가 없어 벤치마크를 낼 수 없다 — **지어내지 않는다**(WAN-194 원칙)."
+                + (
+                    f" 못 잰 종목: {', '.join(_short(x) for x in bench.missing)}."
+                    if bench.missing
+                    else ""
+                ),
+                "",
+            ]
+        )
+        return lines
+
+    tp = report.take_profit_r
+    _, _, _, _, p_r, _ = _agg_paper(report.paper, tp)
+    lines.extend(
+        [
+            "| 지표 | 값 | 참고 |",
+            "| -- | --: | -- |",
+            f"| buy&hold 단순평균 | {_pct(bench.mean)} | {bench.n}종목 |",
+            f"| buy&hold **중앙값** | {_pct(bench.median)} |"
+            f" 오른 종목 {bench.up_count}/{bench.n} |",
+            f"| 페이퍼 거래당 net R | {_r(p_r.net_mean_r)} | 거래 {p_r.net_n}건 |",
+            f"| 페이퍼 승률 | {_pct(p_r.win_rate)} | 표본 {p_r.n}건 |",
+            "",
+            "종목별: "
+            + " · ".join(
+                f"{_short(r.symbol)} {_pct(r.total_return)}"
+                for r in bench.rows
+                if r.total_return is not None
+            )
+            + ".",
+            "",
+        ]
+    )
+    if bench.missing:
+        lines.append(
+            "⚠️ 창에 봉이 없어 못 잰 종목: "
+            + ", ".join(_short(x) for x in bench.missing)
+            + " — 0%로 세지 않고 분모에서 뺐다.",
+        )
+        lines.append("")
+    lines.extend(
+        [
+            "🚨 **평균만 읽지 말 것** — 한 종목이 평균을 끌어올린다(WAN-346: 「평균 −6.6% vs"
+            " 중앙값 −26.6%」). 그래서 중앙값을 함께 낸다. 수치는 창 첫 종가 → 마지막 종가의"
+            " **그로스**이고 왕복 테이커 비용(≈0.18%)은 빼지 않았다 — 빼면 buy&hold가 그만큼"
+            " 더 나빠진다(= 이 병기는 buy&hold에 **유리한** 쪽으로 보수적이다).",
+            "",
+            "⚠️ **이 절은 엣지 판정이 아니다** — 우리는 롱 온리라 오르는 장에서는 실력 없이도"
+            " 계좌가 는다. buy&hold를 이겨도 「엣지 있음」이 아니고(다른 질문), 져도 「전략이"
+            " 틀렸다」가 아니다(노출이 다르다). 막는 것은 **오르는 장의 플러스를 실력으로"
+            " 읽는 오독** 하나다(2026-08-31 실사고 — WAN-392/393).",
+            "",
+        ]
+    )
+    return lines
+
+
+def _win_rate_band(p: float, n: int) -> tuple[float, float] | None:
+    """승률 `p`·표본 `n`의 95% 범위(정규근사). 표본이 없으면 None.
+
+    「페이퍼 승률이 백테스트와 다르다」를 **표본 잡음과 구분**하기 위한 자다 — 7일·수십 건
+    짜리 표본은 참값이 백테스트 값이어도 넓게 흔들린다(WAN-406/407 §4-4).
+    """
+    if n <= 0:
+        return None
+    half = 1.96 * math.sqrt(max(p * (1.0 - p), 0.0) / n)
+    return max(0.0, p - half), min(1.0, p + half)
 
 
 def _render_verdict(report: ParityReport) -> list[str]:
@@ -770,6 +892,34 @@ def _render_verdict(report: ParityReport) -> list[str]:
         )
     else:
         lines.append("- **집행 거부 분포**(체결 후): 창 안 거부 없음.")
+
+    band = _win_rate_band(bt_r.win_rate, p_r.n) if bt_r.win_rate is not None else None
+    if band is not None and p_r.win_rate is not None:
+        inside = band[0] <= p_r.win_rate <= band[1]
+        lines.append(
+            f"- **표본 경고**: 페이퍼 청산 표본은 **{p_r.n}건**이다. 참값이 백테스트 승률"
+            f"({_pct(bt_r.win_rate)})이라 해도 이 표본에서는 95%가 {_pct(band[0])}~"
+            f"{_pct(band[1])} 사이로 흔들린다(정규근사) — 페이퍼 {_pct(p_r.win_rate)}는 그"
+            + (
+                " **안**이다. 즉 **페이퍼는 아직 백테스트를 반박도 지지도 하지 않는다**."
+                if inside
+                else " **밖**이다. 다만 표본이 얇아 한 번의 관측으로 결론 내지 않는다."
+            )
+        )
+    elif p_r.n:
+        lines.append(
+            f"- **표본 경고**: 페이퍼 청산 표본 {p_r.n}건 — 백테스트 쪽 표본이 없어 범위를"
+            " 낼 수 없다. 며칠~몇 주 더 쌓아야 대조가 성립한다."
+        )
+
+    if report.benchmark is not None and report.benchmark.n:
+        bench = report.benchmark
+        lines.append(
+            f"- **벤치마크(같은 창 buy&hold)**: 단순평균 {_pct(bench.mean)} · 중앙값"
+            f" {_pct(bench.median)} (오른 종목 {bench.up_count}/{bench.n}). 롱 온리라 오르는"
+            " 장에서는 실력 없이도 계좌가 는다 — 이 줄은 **오독 방지**이지 엣지 판정이 아니다"
+            "(CLAUDE.md WAN-393 원칙)."
+        )
 
     lines.append(
         "- **파리티 종합**: 이 표는 엣지 판정이 아니다 — 「엣지 없음」(WAN-84/88/111/114/124)은"
@@ -902,6 +1052,8 @@ def main(argv: list[str] | None = None) -> int:
             cells=cells,
             warmup_days=args.warmup_days,
             jobs=args.jobs,
+            db_path=db_path,
+            benchmark_symbols=list(get_settings().symbols),
         )
     finally:
         journal.close()

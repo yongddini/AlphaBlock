@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from execution.engine import REJECT_CODE_SIZING
+from live.benchmark import BuyHoldSummary
 from live.limit_orders import LimitFill, LimitOrderStatus, PendingLimitOrder
 from live.order_journal import OrderJournal
 from live.paper_parity import (
@@ -583,3 +584,95 @@ def test_render_aggregate_flags_net_population_mismatch() -> None:
 
     assert "net 표본 2" in _render(mismatch)
     assert "net 표본" not in _render(matched)
+
+
+# ---------------------------------------------------------------------------
+# WAN-407 §4 — 롱온리 성과는 같은 창 buy&hold와 나란히 놓는다
+# ---------------------------------------------------------------------------
+
+
+def _report_with(benchmark: object | None) -> ParityReport:
+    paper = PaperParityCell(
+        symbol=_SYMBOL,
+        timeframe=_TF,
+        filled=8,
+        no_fill=2,
+        entered=6,
+        entry_rejected=2,
+        marginal_fills=3,
+        r=RStats(n=6, wins=4, losses=2, mean_r=(4 * 1.5 - 2) / 6, net_n=6, net_sum=3.0),
+    )
+    backtest = BacktestParityCell(
+        symbol=_SYMBOL,
+        timeframe=_TF,
+        taps=20,
+        reservations=15,
+        eligible=15,
+        fills_baseline=12,
+        fills_pen5=9,
+        entries=10,
+        r=RStats(n=10, wins=7, losses=3, mean_r=(7 * 1.5 - 3) / 10),
+    )
+    return ParityReport(
+        start_ms=0,
+        end_ms=100_000,
+        start_key="2026-09-01",
+        end_key="2026-09-07",
+        take_profit_r=1.5,
+        uptime_ms=90_000,
+        window_ms=100_000,
+        paper=(paper,),
+        backtest=(backtest,),
+        benchmark=benchmark,  # type: ignore[arg-type]
+    )
+
+
+def _summary(returns: dict[str, float | None]) -> BuyHoldSummary:
+    from live.benchmark import BuyHoldRow
+
+    rows = tuple(
+        BuyHoldRow(
+            symbol=sym,
+            timeframe="1h" if ret is not None else None,
+            first_close=100.0 if ret is not None else None,
+            last_close=100.0 * (1.0 + ret) if ret is not None else None,
+            bars=2 if ret is not None else 0,
+        )
+        for sym, ret in returns.items()
+    )
+    return BuyHoldSummary(start_ms=0, end_ms=100_000, rows=rows)
+
+
+def test_render_shows_buy_and_hold_beside_paper() -> None:
+    """롱온리 성과 옆에 같은 창 buy&hold가 **평균과 중앙값 둘 다** 뜬다(CLAUDE.md WAN-393).
+
+    🚨 2026-08-31에 난 오독이 정확히 이것이다 — 페이퍼가 +8.5%로 보였는데 시장은 +22.55%였다.
+    """
+    report = _report_with(_summary({"A/USDT:USDT": 3.0, "B/USDT:USDT": -0.2, "C/USDT:USDT": -0.2}))
+    text = render_parity(report)
+    assert "같은 창 buy&hold" in text
+    assert "중앙값" in text
+    # 평균(+86.7%)과 중앙값(−20.0%)이 **부호까지 갈린다** — 평균만 내면 오독한다(WAN-346).
+    assert "86.7%" in text and "-20.0%" in text
+    assert "오른 종목 1/3" in text
+    # 「엣지 있음」으로 읽히지 않게 못 박는 문장.
+    assert "엣지" in text
+
+
+def test_render_omits_benchmark_when_it_was_not_measured() -> None:
+    """벤치마크를 안 냈으면 그 절이 통째로 없다 — 없는 표를 지어내지 않는다."""
+    assert "같은 창 buy&hold" not in render_parity(_report_with(None))
+
+
+def test_render_names_symbols_missing_from_the_benchmark() -> None:
+    """창에 봉이 없어 못 잰 종목은 감추지 않고 밝힌다(0%로 세지 않는다)."""
+    text = render_parity(_report_with(_summary({"A/USDT:USDT": 0.1, "GONE/USDT:USDT": None})))
+    assert "GONE" in text.split("같은 창 buy&hold", 1)[1]
+
+
+def test_render_warns_that_the_paper_sample_is_too_thin() -> None:
+    """표본 경고 — 참값이 백테스트 승률이어도 이 표본에서는 넓게 흔들린다(WAN-407 §4-4)."""
+    text = render_parity(_report_with(None))
+    assert "표본 경고" in text
+    # 페이퍼 6건 · 백테스트 승률 70% → 95% 범위가 넓어 페이퍼 66.7%가 그 안이다.
+    assert "반박도 지지도" in text
