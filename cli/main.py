@@ -16,6 +16,7 @@ import shutil
 import socket
 import sys
 import tempfile
+import time
 from collections.abc import Sequence
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -31,6 +32,7 @@ from data.tick_probe import MARKET_LABEL, SOURCE_LABEL
 from live.timeline_profile import SHAPE_PER_CELL, SHAPE_SHARED
 
 if TYPE_CHECKING:
+    from data.funding import FundingRateStore
     from data.integrity import IntegrityReport
     from data.partial_bars import BarDiscrepancy, SeriesScan
     from data.tick_probe import ProbeResult, Projection, RestAvailability
@@ -71,6 +73,53 @@ def _fmt_lag(lag_ms: int | None) -> str:
     if hours < 48:
         return f"{hours:.1f}시간"
     return f"{hours / 24:.1f}일"
+
+
+def _funding_lines(view: HealthView) -> list[str]:
+    """펀딩 신선도 절(WAN-407 §2).
+
+    🚨 **판정 자를 새로 만드는 게 아니라 화면에 연결하는 일이다** — `HealthView.funding`은
+    이미 계산돼 있었고(`dashboard.health.compute_funding_status`) **종합 배지(`compute_overall`)
+    에도 이미 들어가 있었다**. 그런데 이 CLI는 OHLCV만 그려서, 펀딩이 멈추면 **배지만 노랗게
+    변하고 이유는 어디에도 안 보였다** — 이 저장소가 반복해 데인 「실패가 성공과 같은 모양」
+    (WAN-194/318 §3/321)의 펀딩 축이다.
+
+    ⚠️ **왜 이게 조용하면 위험한가**: 우리는 롱 온리이고 무기한선물에서 롱은 대개 펀딩을
+    **지불**한다. 페이퍼 장부는 펀딩 데이터가 없으면 `funding_pct`를 그냥 0으로 두므로
+    (`paper/store.py`), 수집이 멈추면 성과가 **항상 실제보다 좋게** 나온다.
+
+    📌 **예측 행 주의** — 거래소는 다음 정산을 미리 준다. 그 행의 `funding_time`은 **미래**라
+    지연이 음수로 나오므로 `(예측)`을 함께 찍는다(확정 이력이 아니라는 뜻).
+
+    ⚠️ **그래서 이 자는 최대 ~8시간 낙관이다**: 판정에 쓰는 행이 예측일 수 있어(대시보드
+    Health와 같은 규약 — `dashboard.health_data.funding_rows`가 `store.latest`를 쓴다) 수집이
+    막 멈춘 직후에는 아직 OK로 보인다. 문턱이 `stale_multiplier × 8시간`(기본 20시간)이라
+    **탐지가 그만큼 늦을 뿐 놓치지는 않고**, 화면에는 `(예측)`으로 그 사실이 드러난다.
+    「언제부터 멈췄나」를 정확히 세는 자리(포렌식 스크립트 §1)는 **확정 행만** 센다.
+    """
+    lines = ["펀딩 신선도:"]
+    if not view.funding:
+        lines.append("  대상 심볼 없음 — 수집 대상 설정을 확인하세요.")
+        return lines
+    for f in view.funding:
+        if f.funding_time is None:
+            lines.append(
+                f"  {_LEVEL_TEXT[f.level]} {f.symbol}  저장된 펀딩 없음"
+                " — 백테스트·페이퍼가 이 종목의 펀딩비를 0으로 계산합니다."
+            )
+            continue
+        predicted = " (예측)" if f.is_predicted else ""
+        lines.append(
+            f"  {_LEVEL_TEXT[f.level]} {f.symbol}"
+            f"  최신 {_fmt_time(f.funding_time)}{predicted} (지연 {_fmt_lag(f.lag_ms)})"
+        )
+    if any(f.level is HealthLevel.STALE for f in view.funding):
+        lines.append(
+            "  ⚠️ 펀딩 수집이 멈추면 결측 구간 펀딩비가 **0으로 계산**됩니다 — 롱 온리라"
+            " 성과가 실제보다 좋게 나옵니다"
+            " (`uv run python -m data.funding --backfill-only`로 메웁니다)."
+        )
+    return lines
 
 
 def format_status(view: HealthView, *, configured_symbols: Sequence[str] | None = None) -> str:
@@ -130,6 +179,8 @@ def format_status(view: HealthView, *, configured_symbols: Sequence[str] | None 
     else:
         lines.append("  저장된 OHLCV 없음 — 먼저 수집을 실행하세요.")
 
+    lines.extend(_funding_lines(view))
+
     if view.positions:
         lines.append(f"오픈 페이퍼 포지션: {len(view.positions)}건")
     else:
@@ -162,6 +213,11 @@ def _build_health_view(settings: Settings, *, include_bar_count: bool = False) -
     return build_health_view(
         settings.db_path,
         include_bar_count=include_bar_count,
+        # 펀딩 판정 대상은 **설정 유니버스**를 따라간다(WAN-407 §2, 리터럴 하드코딩 금지).
+        # 기본값(저장된 심볼 전체)으로 두면 옛 유니버스 잔재(수집 대상이 아닌 심볼)가 영원히
+        # STALE로 떠 상시 빨간불이 된다 — 진짜 이상과 구분되지 않는 그 실패를 WAN-321이
+        # 고쳤고, 여기서 되살리지 않는다.
+        funding_symbols=list(settings.symbols),
         runtime_state_path=settings.live_runtime_state_path,
         poll_interval_seconds=settings.live_poll_interval_seconds,
         stale_multiplier=settings.health_stale_multiplier,
@@ -1188,6 +1244,11 @@ def cmd_parity(args: argparse.Namespace, settings: Settings) -> int:
             cells=cells,
             warmup_days=warmup_days,
             jobs=args.jobs,
+            db_path=db_path,
+            # 벤치마크는 **설정 유니버스**를 따라간다(WAN-407 §4) — 리터럴 12를 박으면
+            # 좌표가 바뀔 때 표만 낡는다(WAN-318 §6 선례). 장부 셀이 아니라 유니버스인
+            # 이유는 「시장이 얼마나 올랐나」가 우리가 매매한 칸과 무관한 질문이기 때문이다.
+            benchmark_symbols=list(settings.symbols),
         )
     finally:
         journal.close()
@@ -1476,6 +1537,52 @@ def _coordinate_label(symbols: list[str] | None, timeframes: list[str] | None) -
     return f"{sym} × {tfs}"
 
 
+def _funding_census_lines(db_path: str, settings: Settings) -> list[str]:
+    """doctor에 찍는 펀딩 신선도 한 줄짜리 인구조사(WAN-407 §2).
+
+    🚨 **종료 코드에는 반영하지 않는다.** 바로 위 환경 드리프트(WAN-309)와 같은 규약이다 —
+    doctor의 종료 코드는 **DB 무결성 판정 전용**이고(`report.healthy`), 여기에 새 실패
+    조건을 얹으면 「점검 항목을 늘리는 것」과 「종료 코드를 바꾸는 것」이 한 번에 섞인다.
+    펀딩 정지의 **경보 경로는 이미 있다** — `alphablock watch`가 STALE 펀딩을 폰으로 보낸다
+    (`live.health_watch.evaluate_alerts`). doctor는 사람이 볼 때 **같은 화면에서 보이게**만 한다.
+
+    ⚠️ 판정 대상은 설정 유니버스다 — 저장된 심볼 전체로 하면 옛 유니버스 잔재가 영원히
+    STALE로 떠 상시 빨간불이 된다(WAN-321이 고친 실패 부류).
+    """
+    from data.freshness import find_stale_funding, format_stale
+    from data.funding import FundingRateStore
+
+    symbols = list(settings.symbols)
+    if not symbols:
+        return []
+    now_ms = int(time.time() * 1000)
+    with FundingRateStore(db_path) as store:
+        rows = [(symbol, _latest_funding_ms(store, symbol)) for symbol in symbols]
+    missing = [symbol for symbol, last in rows if last is None]
+    stale = find_stale_funding(
+        rows, now_ms=now_ms, stale_multiplier=settings.health_stale_multiplier
+    )
+    lines: list[str] = []
+    if not stale and not missing:
+        lines.append(f"✅ {len(symbols)}종목 전부 최신 — 결측 없음.")
+        return lines
+    for item in stale:
+        lines.append(f"⚠️ {format_stale(item)}")
+    for symbol in missing:
+        lines.append(f"⚠️ {symbol}: 저장된 펀딩이 하나도 없습니다(펀딩비가 0으로 계산됩니다).")
+    lines.append(
+        "ℹ️ 종료 코드에는 반영하지 않습니다(무결성 판정 전용) — 폰 경보는"
+        " `alphablock watch`가 보냅니다. 메우기: `uv run python -m data.funding --backfill-only`."
+    )
+    return lines
+
+
+def _latest_funding_ms(store: FundingRateStore, symbol: str) -> int | None:
+    """그 심볼의 마지막 펀딩 정산 시각(예측 행 포함 — 화면의 `status`와 같은 자)."""
+    latest = store.latest(symbol)
+    return latest.funding_time if latest is not None else None
+
+
 def cmd_doctor(args: argparse.Namespace, settings: Settings) -> int:
     """`alphablock doctor` — DB 무결성·위생 점검(WAN-194 §2·§4·§5).
 
@@ -1507,6 +1614,12 @@ def cmd_doctor(args: argparse.Namespace, settings: Settings) -> int:
         print("환경 설정 드리프트 (WAN-309):")
         print("\n".join(f"  {line}" for line in drift_lines))
         print()
+    funding_lines = _funding_census_lines(db_path, settings)
+    if funding_lines:
+        print("펀딩 수집 신선도 (WAN-407 §2):")
+        print("\n".join(f"  {line}" for line in funding_lines))
+        print()
+
     example_only = env_example_only_keys()
     if example_only:
         # 키 이름만 출력한다 — 값(비밀 포함)은 절대 싣지 않는다.

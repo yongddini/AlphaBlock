@@ -403,6 +403,11 @@ def build_view_provider(settings: Settings) -> Callable[[], HealthView]:
             stale_multiplier=settings.health_stale_multiplier,
             collector_heartbeat_path=settings.collector_heartbeat_path,
             collector_heartbeat_interval_seconds=settings.collector_heartbeat_interval_seconds,
+            # 펀딩 판정 대상을 **설정 유니버스**로 좁힌다(WAN-407 §2) — 화면(`alphablock
+            # status`)과 폰(이 워치)이 같은 대상을 봐야 한다. 기본값(저장된 심볼 전체)이면
+            # 옛 유니버스 잔재가 영원히 STALE로 떠 **상시 빨간불**이 되고, 그러면 진짜
+            # 펀딩 정지와 구분되지 않는다(WAN-321이 고친 실패 부류).
+            funding_symbols=list(settings.symbols),
             cycle_budget_ms=runner_cycle_budget_ms(settings.live_signal_timeframes),
         )
 
