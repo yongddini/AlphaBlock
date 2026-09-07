@@ -126,12 +126,32 @@ class RStats:
     """손절(SL) 청산 수."""
     mean_r: float | None
     """거래당 평균 R = (wins × tp_r − losses) / n. 표본이 없으면 None."""
-    net_mean_r: float | None = None
-    """비용-차감 실현 R 평균(페이퍼 `r_multiple`) — 참고용. 백테스트 쪽은 사유 기준이라 None."""
+    net_n: int = 0
+    """비용-차감 R(페이퍼 `r_multiple`)이 있는 거래 수.
+
+    🚨 **`n`과 다를 수 있다** — `r_multiple`이 `None`인 거래는 net에서 빠지지만 청산 사유는
+    남으므로 `n`에는 센다. 두 열은 **모집단이 다르다**(WAN-406).
+    """
+    net_sum: float = 0.0
+    """그 거래들의 `r_multiple` 합.
+
+    📌 **평균이 아니라 합을 싣는 것이 이 필드의 요점이다**(WAN-406). 평균만 들고 있으면
+    여러 셀을 합칠 때 원값을 복원할 수 없어 「셀별 평균을 다시 평균」하게 되고, 그러면
+    거래 1건짜리 셀이 11건짜리 셀과 같은 무게를 갖는다(실측 +0.132R → +0.29R로 2.2배).
+    """
 
     @property
     def win_rate(self) -> float | None:
         return self.wins / self.n if self.n else None
+
+    @property
+    def net_mean_r(self) -> float | None:
+        """비용-차감 실현 R 평균(참고용) — 백테스트 쪽은 사유 기준이라 None.
+
+        **저장된 값이 아니라 합÷개수로 파생된다.** 그래야 여러 `RStats`를 합칠 때
+        `net_sum`·`net_n`을 더해 거래 단위 가중 평균이 자동으로 나온다(WAN-406).
+        """
+        return self.net_sum / self.net_n if self.net_n else None
 
 
 def r_stats_from_reasons(
@@ -152,10 +172,15 @@ def r_stats_from_reasons(
             losses += 1
     n = wins + losses
     mean_r = (wins * take_profit_r - losses) / n if n else None
-    net_mean_r: float | None = None
-    if net_r_values:
-        net_mean_r = sum(net_r_values) / len(net_r_values)
-    return RStats(n=n, wins=wins, losses=losses, mean_r=mean_r, net_mean_r=net_mean_r)
+    nets = tuple(net_r_values or ())
+    return RStats(
+        n=n,
+        wins=wins,
+        losses=losses,
+        mean_r=mean_r,
+        net_n=len(nets),
+        net_sum=sum(nets),
+    )
 
 
 @dataclass(frozen=True)
@@ -629,9 +654,15 @@ def _agg_paper(
     losses = sum(c.r.losses for c in cells)
     n = wins + losses
     mean_r = (wins * tp_r - losses) / n if n else None
-    nets = [c.r.net_mean_r for c in cells if c.r.net_mean_r is not None and c.r.n]
-    net = sum(nets) / len(nets) if nets else None
-    return filled, no_fill, entered, rejected, RStats(n, wins, losses, mean_r, net), marginal
+    # 🚨 net도 **거래 단위로** 다시 더한다(WAN-406). 셀별 평균을 다시 평균하면 거래 1건짜리
+    # 셀이 11건짜리 셀과 같은 무게를 가져 얇은 셀이 과대 대표된다 — 바로 윗줄 `mean_r`이
+    # 거래를 세는데 net만 셀을 세던 것이 이 버그였다.
+    # ⚠️ `c.r.n`으로 가중하는 것은 답이 아니다 — 그건 사유 기준의 모집단이고 net의 모집단이
+    # 아니다(`r_multiple`이 None인 거래는 net에서 빠진다). 그래서 `net_n`을 따로 센다.
+    net_n = sum(c.r.net_n for c in cells)
+    net_sum = sum(c.r.net_sum for c in cells)
+    stats = RStats(n=n, wins=wins, losses=losses, mean_r=mean_r, net_n=net_n, net_sum=net_sum)
+    return filled, no_fill, entered, rejected, stats, marginal
 
 
 def _agg_backtest(
@@ -658,6 +689,9 @@ def _render_aggregate(report: ParityReport) -> list[str]:
     bt_fill_rate = bt_fills / bt_elig if bt_elig else None
     bt_pen5_rate = bt_pen5 / bt_elig if bt_elig else None
     p_marg_share = p_marg / p_filled if p_filled else None
+    # net과 사유 기준은 모집단이 다를 수 있다(`r_multiple`이 None인 거래는 net에서 빠진다).
+    # 같으면 조용히 두고, 갈리면 그 사실을 표에 밝힌다 — 지어내거나 감추지 않는다(WAN-406).
+    net_note = f" (net 표본 {p_r.net_n})" if p_r.net_n != p_r.n else ""
 
     lines = [
         "## 집계 대조 (전 셀 합산)",
@@ -669,11 +703,13 @@ def _render_aggregate(report: ParityReport) -> list[str]:
         f"| 진입률(체결→진입) | {_pct(_safe_rate(p_entered, p_rej))} | — |"
         f" 진입 {p_entered}/거부 {p_rej} |",
         f"| 스침 체결(관통<5bp) | {_pct(p_marg_share)} | — | {p_marg}건 |",
-        f"| 실현 R(사유 기준) | {_r(p_r.mean_r)} | {_r(bt_r.mean_r)} | net {_r(p_r.net_mean_r)} |",
+        f"| 실현 R(사유 기준) | {_r(p_r.mean_r)} | {_r(bt_r.mean_r)} | net {_r(p_r.net_mean_r)}"
+        f"{net_note} |",
         f"| 승률 | {_pct(p_r.win_rate)} | {_pct(bt_r.win_rate)} | 표본 L{p_r.n}/BT{bt_r.n} |",
         "",
         f"⚙️ 실현 R = 청산 사유 기준(손절 −1.0R · 익절 +{tp:g}R) — 양쪽 같은 자. 페이퍼 `net`은"
-        " 수수료·슬리피지·펀딩을 뺀 `r_multiple` 평균(참고). 백테스트 체결률은 filled/eligible,"
+        " 수수료·슬리피지·펀딩을 뺀 `r_multiple` **거래 단위** 평균(참고 · 셀별 평균의 평균이"
+        " 아니다, WAN-406). 백테스트 체결률은 filled/eligible,"
         " 페이퍼 체결률은 filled/(filled+미체결)이라 **분모 정의가 다르다**(각자 native).",
         "",
     ]
