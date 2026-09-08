@@ -1,0 +1,5 @@
+arm,segment,zone_id,chain_length,num_chains,num_trades
+base,full,proxy,2,1,2
+base,full,proxy,5,1,5
+base,full,real,2,1,2
+base,full,real,5,1,5
