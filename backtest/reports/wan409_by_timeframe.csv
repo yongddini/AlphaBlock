@@ -1,5 +1,0 @@
-arm,segment,zone_id,timeframe,num_cascade,num_classified,share_of_classified
-base,full,real,4h,5,210,2.380952380952381
-base,full,proxy,4h,5,210,2.380952380952381
-base,oos_warm,real,4h,0,61,0.0
-base,oos_warm,proxy,4h,0,61,0.0

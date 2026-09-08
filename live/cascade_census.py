@@ -131,6 +131,10 @@ def live_trade_facts(
                 entry_time=order.fill_ms,
                 exit_time=matched.exit_time,
                 is_stop=_is_stop(matched),
+                # 라이브도 백테와 **같은 자**를 싣는다 — 「같은 가격으로 반복 체결」 지문을
+                # 두 축에서 같은 술어로 볼 수 있어야 §3이 뜻을 갖는다(WAN-409 §2).
+                entry_price=matched.entry_price,
+                exit_price=matched.exit_price,
                 # WAN-393 §2: 페이퍼 `r_multiple` ↔ 백테 `net R`이 **맞대도 되는 두 자**다
                 # (`realized_pnl ÷ risk_amount`는 다른 자라 쓰지 않는다).
                 # 🚨 값이 없으면 `NaN`이다 — 0으로 채우면 그 거래가 「본전」으로 평균에 섞인다.

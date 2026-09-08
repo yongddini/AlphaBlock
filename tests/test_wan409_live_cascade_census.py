@@ -134,7 +134,9 @@ def test_reentry_origin_is_labelled() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _cascade_pair(index: int, *, zone: tuple[int, int] = (1_000, 2_000)) -> tuple[list, list]:
+def _cascade_pair(
+    index: int, *, zone: tuple[int, int] = (1_000, 2_000)
+) -> tuple[list[PlacedOrder], list[PaperTradeRecord]]:
     """같은 존에서 연달아 손절나는 두 거래 — 두 번째가 무더기 1건이 된다."""
     base = (100 + index * 10) * MINUTE
     orders = [
@@ -148,9 +150,9 @@ def _cascade_pair(index: int, *, zone: tuple[int, int] = (1_000, 2_000)) -> tupl
     return orders, records
 
 
-def _many_cascades(count: int) -> tuple[list, list]:
-    orders: list = []
-    records: list = []
+def _many_cascades(count: int) -> tuple[list[PlacedOrder], list[PaperTradeRecord]]:
+    orders: list[PlacedOrder] = []
+    records: list[PaperTradeRecord] = []
     for index in range(count):
         # 사슬이 이어지면 무더기가 2가 아니라 3, 4…로 커지므로 **존을 갈라** 1건씩 만든다.
         o, r = _cascade_pair(index, zone=(1_000 + index, 2_000 + index))

@@ -141,7 +141,8 @@ class SkippedSetup:
 
     cell: CellKey
     reason: str
-    """`"cell_busy"`(칸 점유) · `"notional"`(북 명목 상한 소진) · `"sizing"`(사이징 거부)."""
+    """`"cell_busy"`(칸 점유) · `"notional"`(북 명목 상한 소진) · `"sizing"`(사이징 거부) ·
+    `"same_step_reopen"`(WAN-409 옵트인: 같은 서브스텝에 같은 칸을 다시 여는 것)."""
     candidate: _Candidate
     equity: float
 
@@ -437,8 +438,19 @@ def run_leverage_book(
     eval_from_ms: int | None = None,
     stress_risk_multiple: float = 1.0,
     compound_sizing: bool = True,
+    one_entry_per_step: bool = False,
 ) -> BookOutcome:
     """칸별 후보를 하나의 공통 시간축에서 공유 자본으로 배치한다.
+
+    `one_entry_per_step`(WAN-409 · 옵트인 · 기본 꺼짐이라 예전과 **비트 단위로 같다**)은 **같은
+    시각에 같은 칸을 다시 여는 것**을 막는다. 반개구간 규약(`exit_time == now`도 닫는다)은
+    겹침을 옳게 세려고 넣은 것인데, 후보가 **각자 따로** 시뮬레이션된다는 성질과 만나면 한
+    1분봉의 저가 하나가 **같은 진입가·같은 청산가의 왕복을 N번** 만들어 낸다(WAN-409 §2 실측:
+    무더기 391건 중 318건이 직전 거래와 진입가·청산가·분이 **전부 같다**). 실제로 그 N번이
+    성립하려면 가격이 매번 지정가까지 되돌아와야 하는데 1분봉에는 그 증거가 없다.
+
+    🚨 **이 팔은 「고쳤다」가 아니라 「크기를 잰다」다** — 배치 규약을 기본에서 바꾸는 것은
+    6년치 표가 전부 움직이는 **재-베이스라인 = 사용자 결정**이다(WAN-365/384 부류).
 
     진입 시각 오름차순으로 훑으며(동률이면 청산 시각 → 칸 키 순 — 실행마다 같은 순서),
     새 진입 시각에 도달하면 그때까지 청산된 포지션의 손익을 공유 현금에 실현하고, **자기
@@ -506,6 +518,8 @@ def run_leverage_book(
             )
         last_event = end
 
+    last_exit_by_cell: dict[CellKey, int] = {}
+
     def settle_due(now: int) -> None:
         """`now` 이전의 **부분 청산(축소)과 최종 청산**을 시각순으로 반영한다.
 
@@ -541,11 +555,18 @@ def run_leverage_book(
             else:
                 advance(position.exit_time)
                 cash += position.trade.realized_pnl - position.credited
+                last_exit_by_cell[cell_key] = position.exit_time
                 del open_by_cell[cell_key]
 
     for cand, cell in merged:
         settle_due(cand.entry_time)
         advance(cand.entry_time)
+
+        if one_entry_per_step and last_exit_by_cell.get(cell.key) == cand.entry_time:
+            # WAN-409: 방금 이 칸에서 청산이 난 **그 서브스텝**에 다시 열지 않는다.
+            stats.skipped_cell_busy += 1
+            stats.skip_records.append(SkippedSetup(cell.key, "same_step_reopen", cand, cash))
+            continue
 
         if cell.key in open_by_cell:
             stats.skipped_cell_busy += 1  # 칸당 1포지션(사용자 정의).

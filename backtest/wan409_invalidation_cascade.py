@@ -58,6 +58,7 @@ WAN-83)로 갈아 끼워 다시 센다.
 from __future__ import annotations
 
 import argparse
+import math
 import statistics
 import time
 from collections.abc import Iterable, Sequence
@@ -66,7 +67,7 @@ from pathlib import Path
 from typing import TypeVar
 
 import pandas as pd
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 
 from backtest import harness
 from backtest.book_cli import BookSegment, iter_book_segments, net_r
@@ -91,7 +92,18 @@ SUMMARY_PATH = REPORTS_DIR / "wan409_invalidation_cascade_summary.md"
 ARM_BASE = "base"
 ARM_RETAP_ONCE = "retap_once"
 ARM_CANCEL_BAR_OPEN = "cancel_bar_open"
-ARM_ORDER: tuple[str, ...] = (ARM_BASE, ARM_RETAP_ONCE, ARM_CANCEL_BAR_OPEN)
+ARM_NO_SAME_STEP_REOPEN = "no_same_step_reopen"
+ARM_ORDER: tuple[str, ...] = (
+    ARM_BASE,
+    ARM_RETAP_ONCE,
+    ARM_CANCEL_BAR_OPEN,
+    ARM_NO_SAME_STEP_REOPEN,
+)
+
+#: 🚨 **배치 축 팔** — 후보 생성은 기준 팔과 **글자 그대로 같고** 배치 규약만 다르다
+#: (`one_entry_per_step`). 그래서 payload 캐시가 그대로 히트해 후보를 다시 만들지 않는다
+#: (WAN-394 §0 · `reentry`가 배치 축인 것과 같은 성질 — WAN-389).
+PLACEMENT_ARMS: frozenset[str] = frozenset({ARM_NO_SAME_STEP_REOPEN})
 
 #: 구간 순서 — `is`는 **차가운 절단**이라 `--cold-segments`를 켠 실행에만 나온다(아래 참고).
 SEGMENT_FULL = "full"
@@ -159,7 +171,23 @@ class CascadeRow(_ArmRow):
     median_gap_minutes: float
     invalidation_bar_share: float
     """`entry_after_invalidation` 비율 — 체결이 존 무효화 봉 안이었는가(WAN-364 관측)."""
+    duplicate_share: float
+    """🚨 직전 거래와 **분·진입가·청산가가 전부 같은** 비율 — 같은 가격 움직임의 중복 계상."""
     reentry_share: float
+
+    @field_validator("share_of_net_total", mode="before")
+    @classmethod
+    def _nan_is_not_a_number(cls, value: object) -> object:
+        """🚨 CSV 왕복이 `None`을 `NaN`으로 되살린다 — **모델에서 한 번** 되돌린다.
+
+        pandas가 빈 칸을 `NaN`으로 읽고 pydantic은 그것을 **유효한 float으로 받으므로**,
+        「비율을 내지 않는다」는 가드가 `--from-csv`·`--append` 경로에서 조용히 뚫려 표에
+        `nan%`가 찍힌다(WAN-395 §부수 수리 ②가 같은 자리에서 겪었다). 되돌리는 자리를 여기
+        하나로 두면 읽는 경로가 늘어도 새지 않는다.
+        """
+        if isinstance(value, float) and math.isnan(value):
+            return None
+        return value
 
 
 class AgreementRow(_ArmRow):
@@ -236,7 +264,7 @@ def _cell_kwargs(arm: str) -> dict[str, object]:
         kwargs["retap_mode"] = "once"
     elif arm == ARM_CANCEL_BAR_OPEN:
         kwargs["invalidation_cancel"] = "bar_open"
-    elif arm != ARM_BASE:
+    elif arm not in (ARM_BASE, *PLACEMENT_ARMS):
         raise ValueError(f"모르는 팔: {arm!r} (가능: {', '.join(ARM_ORDER)})")
     return kwargs
 
@@ -277,6 +305,7 @@ def place(
     start_ms: int,
     end_ms: int,
     segments: Sequence[str],
+    one_entry_per_step: bool = False,
 ) -> list[BookSegment]:
     """채택 북 배치 — 🚨 복리를 **켠다**(원 관측 CSV가 인자 없는 채택 북의 산출물이다).
 
@@ -294,6 +323,7 @@ def place(
         min_stop_distance_fraction=ADOPTED_STOP_GUARD,
         compound_sizing=True,
         take_profit_liquidity=harness.ADOPTED_TAKE_PROFIT_LIQUIDITY,
+        one_entry_per_step=one_entry_per_step,
     )
 
 
@@ -310,6 +340,8 @@ class TradeFact:
     entry_time: int
     exit_time: int
     is_stop: bool
+    entry_price: float
+    exit_price: float
     net_r: float
     """`book_cli.net_r`가 낸 값 그대로 — 원 관측 CSV의 `net R` 열과 **같은 자**다
     (리스크 0이면 그쪽도 0으로 본다). 두 벌로 갈라 두면 검산 (c)가 성립하지 않는다."""
@@ -327,6 +359,14 @@ class ClassifiedTrade:
     group_real: str
     group_proxy: str
     gap_minutes: float
+    duplicate_of_prev: bool
+    """🚨 직전 거래와 **분·진입가·청산가가 전부 같은가** — 「한 번의 가격 움직임을 두 번 청구」의
+    지문이다(WAN-409 §2).
+
+    같은 1분봉의 저가 하나로 A를 체결·손절시킨 뒤 **같은 지정가**에 B를 또 체결·손절시키면 이
+    셋이 정확히 일치한다. 실제로 그러려면 가격이 그 1분 안에서 지정가까지 **되돌아와야** 하는데
+    1분봉(시·고·저·종 네 값)에는 그 증거가 없다. 값이 소수점 끝자리까지 같은지로 보므로
+    「우연히 비슷한 두 거래」가 아니라 **같은 모델 사건의 반복**만 잡힌다."""
 
 
 def trade_facts(segment: BookSegment) -> list[TradeFact]:
@@ -339,6 +379,8 @@ def trade_facts(segment: BookSegment) -> list[TradeFact]:
                 entry_time=trade.entry_time,
                 exit_time=trade.exits[-1].time,
                 is_stop=trade.exits[-1].reason is ExitReason.STOP_LOSS,
+                entry_price=trade.entry_price,
+                exit_price=trade.exits[-1].price,
                 net_r=net_r(trade, placement),
                 zone_key=placement.zone_key,
                 stop_price=placement.stop_price,
@@ -392,6 +434,11 @@ def classify(facts: Iterable[TradeFact]) -> list[ClassifiedTrade]:
                     group_real=_group(prev.is_stop, _same_zone_real(prev, cur)),
                     group_proxy=_group(prev.is_stop, _same_zone_proxy(prev, cur)),
                     gap_minutes=(cur.entry_time - prev.exit_time) / MINUTE_MS,
+                    duplicate_of_prev=(
+                        cur.entry_time // MINUTE_MS == prev.exit_time // MINUTE_MS
+                        and cur.entry_price == prev.entry_price
+                        and cur.exit_price == prev.exit_price
+                    ),
                 )
             )
     return out
@@ -447,6 +494,7 @@ def census_rows(
                     invalidation_bar_share=_mean(
                         [100.0 if c.fact.entry_after_invalidation else 0.0 for c in members]
                     ),
+                    duplicate_share=_mean([100.0 if c.duplicate_of_prev else 0.0 for c in members]),
                     reentry_share=_mean([100.0 if c.fact.is_reentry else 0.0 for c in members]),
                 )
             )
@@ -562,7 +610,13 @@ def build_arm(
     agreement: list[AgreementRow] = []
     chains: list[ChainRow] = []
     tf_rows: list[TimeframeRow] = []
-    for book in place(payloads, start_ms=start_ms, end_ms=end_ms, segments=segments):
+    for book in place(
+        payloads,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        segments=segments,
+        one_entry_per_step=arm in PLACEMENT_ARMS,
+    ):
         facts = trade_facts(book)
         classified = classify(facts)
         net_total = sum(f.net_r for f in facts)
@@ -753,8 +807,8 @@ def build_summary_markdown(
             f"### {segment}",
             "",
             "| 팔 | 부류 | 건수 | 비중 | 손절률 | 거래당 net R | net R 합 |"
-            " 순손익 대비 | 같은 1분 | 무효화 봉 체결 |",
-            "| -- | -- | --: | --: | --: | --: | --: | --: | --: | --: |",
+            " 순손익 대비 | 같은 1분 | 무효화 봉 체결 | **완전 중복** |",
+            "| -- | -- | --: | --: | --: | --: | --: | --: | --: | --: | --: |",
         ]
         for arm in arms:
             for group in GROUP_ORDER:
@@ -768,6 +822,7 @@ def build_summary_markdown(
                     f" {row.share_of_classified:.2f}% | {row.stop_rate:.1f}% |"
                     f" {row.mean_net_r:+.4f} | {row.sum_net_r:+,.1f}R | {share} |"
                     f" {row.same_minute_share:.1f}% | {row.invalidation_bar_share:.1f}% |"
+                    f" **{row.duplicate_share:.1f}%** |"
                 )
         lines.append("")
 

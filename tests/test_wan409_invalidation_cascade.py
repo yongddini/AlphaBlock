@@ -56,12 +56,16 @@ def _fact(
     invalidation: bool = False,
     reentry: bool = False,
     cell: tuple[str, str] = CELL,
+    entry_price: float = 101.0,
+    exit_price: float = 100.0,
 ) -> TradeFact:
     return TradeFact(
         cell=cell,
         entry_time=entry * MINUTE,
         exit_time=exit_ * MINUTE,
         is_stop=is_stop,
+        entry_price=entry_price,
+        exit_price=exit_price,
         net_r=net_r,
         zone_key=None if zone is None else frozenset({zone}),
         stop_price=stop_price,
@@ -207,6 +211,7 @@ def test_summary_prints_a_dash_instead_of_a_misleading_ratio() -> None:
         same_minute_share=100.0,
         median_gap_minutes=0.0,
         invalidation_bar_share=100.0,
+        duplicate_share=0.0,
         reentry_share=0.0,
     )
     markdown = build_summary_markdown([row], [], [], [], [])
@@ -230,6 +235,7 @@ def test_summary_says_which_arms_lack_the_cold_segments() -> None:
         same_minute_share=0.0,
         median_gap_minutes=0.0,
         invalidation_bar_share=0.0,
+        duplicate_share=0.0,
         reentry_share=0.0,
     )
     markdown = build_summary_markdown([row], [], [], [], [])
@@ -383,3 +389,163 @@ def test_gap_minutes_measures_previous_exit_to_this_entry() -> None:
     ]
     assert classify(facts)[0].gap_minutes == 3.0
     assert not math.isnan(classify(facts)[0].gap_minutes)
+
+
+def test_csv_round_trip_keeps_none_instead_of_nan() -> None:
+    """🚨 `--from-csv`·`--append`가 「비율을 내지 않는다」를 `nan%`로 되살리지 않는다.
+
+    pandas가 빈 칸을 `NaN`으로 읽고 pydantic이 그것을 유효한 float으로 받는다 — 가드가
+    조용히 뚫리는 자리다(WAN-395가 같은 함정을 겪었다).
+    """
+    import tempfile
+    from pathlib import Path
+
+    from backtest.wan409_invalidation_cascade import _read, rows_to_frame
+
+    row = CascadeRow(
+        arm="base",
+        segment="full",
+        zone_id=ZONE_ID_REAL,
+        group=GROUP_CASCADE,
+        num_trades=1,
+        num_classified=2,
+        share_of_classified=50.0,
+        stop_rate=100.0,
+        mean_net_r=-1.0,
+        sum_net_r=-1.0,
+        share_of_net_total=None,
+        same_minute_share=100.0,
+        median_gap_minutes=0.0,
+        invalidation_bar_share=100.0,
+        duplicate_share=0.0,
+        reentry_share=0.0,
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "census.csv"
+        rows_to_frame([row]).to_csv(path, index=False)
+        back = _read(path, CascadeRow)[0]
+    assert back.share_of_net_total is None
+    assert "nan" not in build_summary_markdown([back], [], [], [], []).lower()
+
+
+# --------------------------------------------------------------------------- #
+# 6. 중복 계상 — 같은 가격 움직임이 두 번 청구되는가 (WAN-409 §2 후속)
+# --------------------------------------------------------------------------- #
+
+
+def test_identical_round_trip_in_the_same_minute_is_flagged_as_duplicate() -> None:
+    """🚨 같은 1분 · 같은 진입가 · 같은 청산가 = **같은 모델 사건의 반복**이다.
+
+    실제로 두 번 성립하려면 가격이 그 1분 안에서 지정가까지 되돌아와야 하는데 1분봉에는 그
+    증거가 없다. 이 술어가 없으면 「무더기」와 「중복 계상」이 표에서 구분되지 않는다.
+    """
+    facts = [
+        _fact(
+            entry=0,
+            exit_=0,
+            is_stop=True,
+            zone=1,
+            stop_price=100.0,
+            entry_price=101.0,
+            exit_price=99.5,
+        ),
+        _fact(
+            entry=0,
+            exit_=0,
+            is_stop=True,
+            zone=1,
+            stop_price=100.0,
+            entry_price=101.0,
+            exit_price=99.5,
+        ),
+    ]
+    item = classify(facts)[0]
+    assert item.group_real == GROUP_CASCADE
+    assert item.duplicate_of_prev
+
+
+def test_same_minute_but_a_different_price_is_not_a_duplicate() -> None:
+    """가격이 다르면 진짜 다른 체결일 수 있다 — 덧세지 않는다(보수적인 쪽)."""
+    facts = [
+        _fact(
+            entry=0,
+            exit_=0,
+            is_stop=True,
+            zone=1,
+            stop_price=100.0,
+            entry_price=101.0,
+            exit_price=99.5,
+        ),
+        _fact(
+            entry=0,
+            exit_=0,
+            is_stop=True,
+            zone=1,
+            stop_price=100.0,
+            entry_price=100.8,
+            exit_price=99.5,
+        ),
+    ]
+    assert not classify(facts)[0].duplicate_of_prev
+
+
+def test_same_price_in_a_later_minute_is_not_a_duplicate() -> None:
+    """분이 다르면 가격이 되돌아왔다는 증거가 봉 사이에 있다 — 중복이 아니다."""
+    facts = [
+        _fact(
+            entry=0,
+            exit_=0,
+            is_stop=True,
+            zone=1,
+            stop_price=100.0,
+            entry_price=101.0,
+            exit_price=99.5,
+        ),
+        _fact(
+            entry=5,
+            exit_=5,
+            is_stop=True,
+            zone=1,
+            stop_price=100.0,
+            entry_price=101.0,
+            exit_price=99.5,
+        ),
+    ]
+    assert not classify(facts)[0].duplicate_of_prev
+
+
+def test_duplicate_share_reaches_the_census_row() -> None:
+    facts = [
+        _fact(
+            entry=0,
+            exit_=0,
+            is_stop=True,
+            zone=1,
+            stop_price=100.0,
+            entry_price=101.0,
+            exit_price=99.5,
+        ),
+        _fact(
+            entry=0,
+            exit_=0,
+            is_stop=True,
+            zone=1,
+            stop_price=100.0,
+            entry_price=101.0,
+            exit_price=99.5,
+        ),
+    ]
+    rows = census_rows(classify(facts), arm="base", segment="full", net_total=-2.0)
+    cascade = next(r for r in rows if r.zone_id == ZONE_ID_REAL and r.group == GROUP_CASCADE)
+    assert cascade.duplicate_share == 100.0
+
+
+def test_placement_arm_shares_the_base_candidate_recipe() -> None:
+    """🚨 배치 축 팔은 후보를 **다시 만들지 않는다** — 캐시가 히트해야 분 단위로 끝난다.
+
+    후보 인자가 기준 팔과 한 글자라도 다르면 payload 키가 달라져 4~5시간짜리 재생성이 돈다.
+    """
+    from backtest.wan409_invalidation_cascade import ARM_NO_SAME_STEP_REOPEN, PLACEMENT_ARMS
+
+    assert ARM_NO_SAME_STEP_REOPEN in PLACEMENT_ARMS
+    assert _cell_kwargs(ARM_NO_SAME_STEP_REOPEN) == _cell_kwargs("base")

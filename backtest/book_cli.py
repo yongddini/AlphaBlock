@@ -281,6 +281,7 @@ def iter_book_segments(
     compound_sizing: bool = True,
     min_stop_distance_fraction: float | None = None,
     take_profit_liquidity: Liquidity = harness.LEGACY_TAKE_PROFIT_LIQUIDITY,
+    one_entry_per_step: bool = False,
 ) -> list[BookSegment]:
     """`build_book_rows`의 속 — 집계 행뿐 아니라 그 행을 만든 `BookOutcome`까지 돌려준다.
 
@@ -310,6 +311,7 @@ def iter_book_segments(
             book,
             stress_risk_multiple=stress_risk_multiple,
             compound_sizing=compound_sizing,
+            one_entry_per_step=one_entry_per_step,
         )
         result = build_result_from_trades(
             outcome.trades, outcome.effective_config, BOOK_ANNUALIZATION_TF
