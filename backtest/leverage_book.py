@@ -63,12 +63,14 @@ from __future__ import annotations
 
 import logging
 from bisect import bisect_left
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import Literal
 
-from backtest.models import BacktestConfig, Trade
+from backtest.models import BacktestConfig, ExitReason, Trade
 from backtest.portfolio import LiquidationEvent
 from backtest.zone_limit_backtest import ConfirmationProbe, _Candidate, _to_trade
+from common.timefmt import kst_day_key
 from data.models import FundingRate
 
 # 사이징 회계(배수·상한·cap-only 합성)의 정본은 `execution.leverage`다 — 백테스트 배치와
@@ -90,14 +92,26 @@ logger = logging.getLogger(__name__)
 #: 칸 식별자 = (종목, 타임프레임). 사용자 정의의 진입 단위다.
 CellKey = tuple[str, str]
 
+#: 서킷브레이커가 **무엇을** 막는가 (WAN-410 §1-1, 옵트인).
+#:
+#: 🚨 셋을 **반드시 가른다** — 신규 진입과 재진입 재무장을 함께 흔들면 「어느 쪽이 얼마를
+#: 움직였나」를 못 가른다(WAN-394: 세 축을 함께 흔들면 이득의 92%가 상호작용으로 사라진다).
+CircuitBreakerScope = Literal["entry", "reentry", "both"]
+CIRCUIT_BREAKER_SCOPES: tuple[CircuitBreakerScope, ...] = ("entry", "reentry", "both")
+
+#: 서킷브레이커가 막은 후보의 스킵 사유(`SkippedSetup.reason`).
+CIRCUIT_BREAKER_REASON = "circuit_breaker"
+
 # 하위 호환 재수출을 명시(정적 분석이 「미사용 import」로 오해하지 않게).
 __all__ = [
+    "CIRCUIT_BREAKER_SCOPES",
     "LEGACY_BOOK_PARAMS",
     "BookCell",
     "BookOutcome",
     "BookSizing",
     "BookStats",
     "CellKey",
+    "CircuitBreakerScope",
     "LeverageBookParams",
     "LeverageMode",
     "PlacedSetup",
@@ -142,7 +156,8 @@ class SkippedSetup:
     cell: CellKey
     reason: str
     """`"cell_busy"`(칸 점유) · `"notional"`(북 명목 상한 소진) · `"sizing"`(사이징 거부) ·
-    `"same_step_reopen"`(WAN-409 옵트인: 같은 서브스텝에 같은 칸을 다시 여는 것)."""
+    `"same_step_reopen"`(WAN-409 옵트인: 같은 서브스텝에 같은 칸을 다시 여는 것) ·
+    `"circuit_breaker"`(WAN-410 옵트인: 그날 실현손실이 문턱을 넘어 신규 진입을 멈춘 것)."""
     candidate: _Candidate
     equity: float
 
@@ -247,6 +262,22 @@ class BookStats:
     skipped_sizing: int = 0
     """사이징이 거부해 스킵된 건수(손절 거리 최소치 미달 등) — 상한과 무관하며 단일
     포지션 경로에서도 똑같이 일어난다(`backtest.portfolio.PortfolioStats`와 같은 분리)."""
+    skipped_circuit_breaker: int = 0
+    """하루 손실 서킷브레이커(WAN-410, 옵트인)가 막은 건수 — 꺼져 있으면 항상 0이라
+    기본 실행이 비트 재현된다. `skip_records`의 `"circuit_breaker"` 사유와 길이가 같다."""
+    circuit_breaker_days: dict[str, int] = field(default_factory=dict)
+    """서킷브레이커가 **발동한** KST 하루 → 그날 막은 건수 (WAN-410 실용성 열).
+
+    🚨 「개선폭」만 보고 문턱을 고르지 않기 위한 열이다 — 발동일이 710일 중 250일이면
+    *「거의 매일 반나절 쉰다」*에 가깝고 그건 개선폭과 별개의 정보다(이슈 §판정 규칙 5)."""
+    circuit_breaker_first_trip: dict[str, int] = field(default_factory=dict)
+    """발동한 KST 하루 → **처음 막은 시각**(ms). 매칭 대조군(§2겹)이 이 `(날짜, 시각)`
+    쌍을 다른 날로 재배정해 「같은 만큼 쉬되 손실과 무관하게」 쉬는 팔을 만든다.
+
+    ⚠️ **「문턱을 넘은 시각」이 아니라 「처음 막은 시각」이다** — 문턱을 넘은 뒤 후보가 한참
+    없으면 그 사이는 안 세어진다. 대조군이 맞춰야 하는 것이 *「하루 중 언제부터 매매가
+    끊겼나」*라 이쪽이 맞는 자다(발동해도 막을 것이 없으면 그 하루엔 아무 일도 안 일어난다).
+    래치라 이 값 **이후의 그 하루 진입은 정의상 전부 막힌다**(검산 (b))."""
     liquidations: list[LiquidationEvent] = field(default_factory=list)
     skip_records: list[SkippedSetup] = field(default_factory=list)
     """스킵된 후보 하나하나의 기록(WAN-180) — 카운터의 원자료라 합이 항상 카운터와 같다."""
@@ -329,7 +360,14 @@ class _OpenBookPosition:
     exit_time: int
     notional: float
     risk_amount: float
-    """손절까지 갔을 때의 손실(수수료·펀딩 제외). 최악 가정 청산 검사용."""
+    """손절까지 갔을 때의 손실(수수료·펀딩 제외). 최악 가정 청산 검사용. 부분 청산이
+    나면 그만큼 **줄어든다**(WAN-323)."""
+    entry_risk_amount: float = 0.0
+    """진입 순간의 리스크 금액 — **부분 청산에도 안 줄어드는** 값이다.
+
+    거래당 net R의 분모(`PlacedSetup.risk_amount` · `book_cli.net_r`)와 **같은 자**라야
+    서킷브레이커가 읽는 「그날 실현 R」이 리포트의 R과 갈라지지 않는다(WAN-393 §2 「R이라
+    불리는 자가 셋」 · WAN-406). 0이면 R을 정의할 수 없어 0R로 본다(`net_r`와 같은 방어)."""
     reductions: list[_Reduction] = field(default_factory=list)
     """아직 반영하지 않은 부분 청산(시각 오름차순). 래더를 안 켜면 **항상 비어 있다**."""
     credited: float = 0.0
@@ -360,6 +398,71 @@ def _reductions_for(
             )
         )
     return out
+
+
+@dataclass
+class _DailyLedger:
+    """그날 **이미 청산된** 거래의 실현 R·손절 건수와, 그것이 문턱을 넘었는지의 **래치**.
+
+    ## 정의를 여기 한 곳에 못 박는다 (WAN-410 §1-0)
+
+    * **하루 = KST 날짜**(`common.timefmt.kst_day_key`) — 사람이 읽는 하루와 같다(WAN-172).
+      자정(KST)에 리셋되고, 그 리셋이 곧 「하루 한도」의 뜻이다.
+    * **R의 자 = `실현손익 ÷ 진입 시점 리스크 금액`** — `book_cli.net_r`와 **같은 자**다
+      (WAN-393 §2가 경고한 「R이라 불리는 자가 셋」 함정을 피한다. 특히
+      `realized_pnl ÷ 걸려던 금액`은 **다른 자**라 여기서 쓰지 않는다).
+    * **「이미 청산된」의 경계는 북의 정산 규약 그대로** — `settle_due(t)`가 `exit_time <= t`
+      를 닫으므로, 시각 `t`의 후보가 보는 누계에는 **`exit_time == t`인 청산이 포함된다**.
+      🚨 이것은 WAN-408 §0-3의 관측(`bisect_left` = 엄격히 앞선 청산만)과 **경계 하나가
+      다르다** — 둘 다 인과적이지만 같은 수가 아니다. 스위치는 **북이 실제로 아는 것**을
+      읽어야 하므로 이쪽을 정본으로 삼고, 그 차이의 크기는 §1-0이 숫자로 낸다.
+    * **부분 청산은 최종 청산에 몰아 센다** — 축소 시점에 현금은 움직이지만(WAN-323) R은
+      거래 하나가 끝나야 정의된다. 래더를 안 켜면 축소 자체가 없어 이 선택은 무동작이다.
+
+    ## 🚨 래치는 **청산되는 그 순간** 내려간다 — 다음 주문 시도 때가 아니다
+
+    `credit()`이 손익을 기록하면서 **곧바로** 문턱을 확인하고, 넘었으면 그 KST 하루를 잠근다.
+    그 하루는 **자정까지 안 열린다**(늦은 익절로 누계가 회복돼도 그대로).
+
+    두 가지를 동시에 바로잡는다: (1) 「차단기」라는 이름의 뜻 그대로다 — 내려간 차단기는
+    스스로 올라오지 않는다. (2) **후보가 언제 오는지에 판정이 의존하지 않는다** — 문턱을 넘은
+    구간에 마침 후보가 없으면 영영 안 잠기는 판정은 *「손실이 문턱을 넘으면 멈춘다」*가
+    아니라 *「문턱을 넘은 채로 주문을 내려 하면 멈춘다」*다(4h 연기 시험에서 이 차이가 실제로
+    드러났다: 발동 뒤 진입이 12건 샜다).
+
+    ⚠️ **이 원장은 라이브 배선의 계약이기도 하다** — 페이퍼 지갑이 gross를 쌓던 시절
+    (WAN-392)의 값을 읽으면 **틀린 때에 발동한다**. 백테와 라이브가 같은 자를 읽어야
+    한다(WAN-305).
+    """
+
+    loss_limit_r: float | None = None
+    stop_limit: int | None = None
+    realized_r: dict[str, float] = field(default_factory=dict)
+    stops: dict[str, int] = field(default_factory=dict)
+    latched: dict[str, int] = field(default_factory=dict)
+    """발동한 KST 하루 → **그 하루가 잠긴 시각**(= 그 손익을 실현한 청산 시각)."""
+
+    def credit(self, position: _OpenBookPosition) -> None:
+        """최종 청산 하나를 그 **청산 시각의 KST 하루**에 기록하고, 넘었으면 **잠근다**."""
+        day = kst_day_key(position.exit_time)
+        risk = position.entry_risk_amount
+        self.realized_r[day] = self.realized_r.get(day, 0.0) + (
+            position.trade.realized_pnl / risk if risk > 0 else 0.0
+        )
+        if position.trade.exits and position.trade.exits[-1].reason is ExitReason.STOP_LOSS:
+            self.stops[day] = self.stops.get(day, 0) + 1
+        if day in self.latched:
+            return
+        # 🚨 경계는 **`<=`·`>=`** — 문턱에 **닿으면** 발동한다.
+        hit = (self.loss_limit_r is not None and self.realized_r[day] <= self.loss_limit_r) or (
+            self.stop_limit is not None and self.stops.get(day, 0) >= self.stop_limit
+        )
+        if hit:
+            self.latched[day] = position.exit_time
+
+    def tripped(self, day: str) -> bool:
+        """이 KST 하루가 이미 잠겼나."""
+        return day in self.latched
 
 
 def _validate_cells(cells: Sequence[BookCell]) -> None:
@@ -439,6 +542,10 @@ def run_leverage_book(
     stress_risk_multiple: float = 1.0,
     compound_sizing: bool = True,
     one_entry_per_step: bool = False,
+    daily_loss_limit_r: float | None = None,
+    daily_stop_limit: int | None = None,
+    circuit_breaker_scope: CircuitBreakerScope = "both",
+    blocked_from_by_day: Mapping[str, int] | None = None,
 ) -> BookOutcome:
     """칸별 후보를 하나의 공통 시간축에서 공유 자본으로 배치한다.
 
@@ -479,6 +586,29 @@ def run_leverage_book(
     **실제 현금** 기준 그대로다(고정 사이징에서 현금이 불면 비율이 자연히 작아진다).
     `True`(기본)면 예전과 **비트 단위로 같다**.
 
+    `daily_loss_limit_r`·`daily_stop_limit`·`blocked_from_by_day`(WAN-410 §1-1 · **옵트인** ·
+    셋 다 `None`(기본)이면 예전과 **비트 단위로 같다**)는 **그날 진입을 멈추는** 스위치다.
+
+    * **인과적이다** — 그 시각까지 **이미 청산된** 거래의 실현 R만 본다(`_DailyLedger`가
+      그 자를 한 곳에 못 박는다). 🚨 **그날의 첫 손실들은 못 막는다 — 그게 맞는 설계다**
+      (막을 수 있다면 그건 미래를 아는 것이다).
+    * **래치다** — 한 번 발동하면 **그 KST 하루가 끝날 때까지** 안 풀린다(늦은 익절로 누계가
+      회복돼도 그날은 다시 안 연다). 「차단기」라는 이름이 그 뜻이고, 그래야 *「발동 뒤 진입
+      0건」*이 검산으로 성립한다.
+    * **이미 열린 포지션은 건드리지 않는다** — 청산 규칙은 그대로다. 막는 것은 **그 뒤에
+      진입할 후보**뿐이고, 그래서 이 축은 「언제 매매를 멈추나」이지 「언제 던지나」가 아니다.
+    * `circuit_breaker_scope`는 무엇을 막을지 고른다(`"entry"` = 신규 진입만 ·
+      `"reentry"` = 재진입 재무장만 · `"both"` = 둘 다). 🚨 **셋을 반드시 가른다**
+      (WAN-394: 세 축을 함께 흔들면 이득의 92%가 상호작용으로 사라진다).
+    * `blocked_from_by_day`는 **매칭 대조군 전용**이다 — `KST 하루 → 그 시각(ms) 이후 차단`
+      스케줄을 손실과 **무관하게** 밖에서 주입한다. 손익을 안 읽으므로 「덜 매매해서 좋아진
+      것」과 「손실 뒤를 피해서 좋아진 것」을 가르는 팔이 된다(WAN-142와 같은 자).
+      🚨 손실 문턱과 **함께 줄 수 없다** — 두 규칙이 겹치면 어느 쪽이 막았는지 알 수 없고
+      그러면 대조군이 대조군이 아니다.
+
+    🚨 **이 팔은 「고쳤다」가 아니라 「크기를 잰다」다** — 기본값 전환은 **재-베이스라인 =
+    사용자 결정**이다(WAN-365/384 부류).
+
     반환 거래 목록은 **배치(진입 시각) 순**이다 — 자본곡선은 청산 시각 순으로 다시
     정렬해 만든다(`build_result_from_trades`가 그렇게 한다).
     """
@@ -487,6 +617,29 @@ def run_leverage_book(
             "stress_risk_multiple은 1.0 이상이어야 합니다(계획 1R보다 유리한 손절 체결은 "
             f"이 스트레스 축이 아닙니다): {stress_risk_multiple} (WAN-312)."
         )
+    if circuit_breaker_scope not in CIRCUIT_BREAKER_SCOPES:
+        raise ValueError(
+            f"circuit_breaker_scope는 {CIRCUIT_BREAKER_SCOPES} 중 하나여야 합니다: "
+            f"{circuit_breaker_scope!r} (WAN-410)."
+        )
+    if blocked_from_by_day is not None and (
+        daily_loss_limit_r is not None or daily_stop_limit is not None
+    ):
+        # 대조군은 「손실과 무관하게」 쉬는 팔이다 — 손실 문턱을 함께 걸면 어느 규칙이
+        # 막았는지 알 수 없어 그 팔이 대조군이기를 그만둔다(WAN-410 §2겹).
+        raise ValueError(
+            "blocked_from_by_day(매칭 대조군)는 daily_loss_limit_r·daily_stop_limit과 "
+            "함께 줄 수 없습니다 — 두 규칙이 겹치면 대조군이 대조군이 아닙니다(WAN-410)."
+        )
+    if daily_loss_limit_r is not None and daily_loss_limit_r > 0.0:
+        # 「하루 손실 한도」의 부호를 라벨이 아니라 **값으로** 강제한다 — 양수를 주면
+        # 「첫 거래부터 늘 발동」이 되어 라벨과 정반대로 돈다(WAN-112 단위 함정 부류).
+        raise ValueError(
+            f"daily_loss_limit_r은 손실 한도라 0 이하여야 합니다: {daily_loss_limit_r} "
+            "(예: -10.0 = 그날 실현 −10R에 닿으면 멈춤, WAN-410)."
+        )
+    if daily_stop_limit is not None and daily_stop_limit < 1:
+        raise ValueError(f"daily_stop_limit은 1 이상이어야 합니다: {daily_stop_limit} (WAN-410).")
     _validate_cells(cells)
     eff_cfg = apply_book_leverage(cfg, book)
     # cap-only(WAN-180 팔 B)는 북 상한만 N배다 — 거래당 사이징(크기·천장)은 원본 1배
@@ -508,6 +661,9 @@ def run_leverage_book(
     trades: list[Trade] = []
     stats = BookStats()
     last_event: int | None = None
+    ledger = _DailyLedger(loss_limit_r=daily_loss_limit_r, stop_limit=daily_stop_limit)
+    breaker_on = daily_loss_limit_r is not None or daily_stop_limit is not None
+    schedule: Mapping[str, int] = blocked_from_by_day or {}
 
     def advance(end: int) -> None:
         nonlocal last_event
@@ -556,11 +712,37 @@ def run_leverage_book(
                 advance(position.exit_time)
                 cash += position.trade.realized_pnl - position.credited
                 last_exit_by_cell[cell_key] = position.exit_time
+                if breaker_on:
+                    # WAN-410: 서킷브레이커가 켜져 있을 때만 원장을 쌓는다 — 꺼져 있으면
+                    # 이 줄이 아무것도 하지 않아 예전과 비트 단위로 같다.
+                    ledger.credit(position)
                 del open_by_cell[cell_key]
 
     for cand, cell in merged:
         settle_due(cand.entry_time)
         advance(cand.entry_time)
+
+        if breaker_on or schedule:
+            # 🚨 `settle_due` **뒤에** 판정한다 — 그 시각까지 실제로 닫힌 거래만 본다.
+            scoped = circuit_breaker_scope == "both" or (
+                cand.is_reentry
+                if circuit_breaker_scope == "reentry"
+                else not cand.is_reentry  # "entry" = 신규 진입만
+            )
+            day = kst_day_key(cand.entry_time)
+            blocked = scoped and (
+                ledger.tripped(day)
+                if breaker_on
+                else cand.entry_time >= schedule.get(day, _MAX_TIME)
+            )
+            if blocked:
+                stats.skipped_circuit_breaker += 1
+                stats.skip_records.append(
+                    SkippedSetup(cell.key, CIRCUIT_BREAKER_REASON, cand, cash)
+                )
+                stats.circuit_breaker_days[day] = stats.circuit_breaker_days.get(day, 0) + 1
+                stats.circuit_breaker_first_trip.setdefault(day, cand.entry_time)
+                continue
 
         if one_entry_per_step and last_exit_by_cell.get(cell.key) == cand.entry_time:
             # WAN-409: 방금 이 칸에서 청산이 난 **그 서브스텝**에 다시 열지 않는다.
@@ -618,6 +800,7 @@ def run_leverage_book(
             exit_time=cand.exit_time,
             notional=notional,
             risk_amount=risk_amount,
+            entry_risk_amount=risk_amount,
             # WAN-323: 부분 청산이 있으면 그 시각에 명목·리스크를 덜어내는 이벤트를 예약한다.
             reductions=_reductions_for(trade, len(cand.partial_exits), notional, risk_amount),
         )

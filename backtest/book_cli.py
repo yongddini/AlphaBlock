@@ -34,7 +34,7 @@ wan169가 칸마다 full·is·oos 후보와 따뜻한 경계(`boundary_ms`)를 �
 from __future__ import annotations
 
 import io
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 import pandas as pd
@@ -43,6 +43,7 @@ from pydantic import BaseModel, ConfigDict
 from backtest import harness
 from backtest.leverage_book import (
     BookOutcome,
+    CircuitBreakerScope,
     LeverageBookParams,
     PlacedSetup,
     run_leverage_book,
@@ -282,10 +283,19 @@ def iter_book_segments(
     min_stop_distance_fraction: float | None = None,
     take_profit_liquidity: Liquidity = harness.LEGACY_TAKE_PROFIT_LIQUIDITY,
     one_entry_per_step: bool = False,
+    daily_loss_limit_r: float | None = None,
+    daily_stop_limit: int | None = None,
+    circuit_breaker_scope: CircuitBreakerScope = "both",
+    blocked_from_by_day: Mapping[str, int] | None = None,
 ) -> list[BookSegment]:
     """`build_book_rows`의 속 — 집계 행뿐 아니라 그 행을 만든 `BookOutcome`까지 돌려준다.
 
     행만 필요하면 `build_book_rows`를 쓴다(그쪽이 이 함수의 얇은 래퍼라 **같은 숫자**다).
+
+    `daily_loss_limit_r`·`daily_stop_limit`·`circuit_breaker_scope`·`blocked_from_by_day`
+    (WAN-410 §1-1, 옵트인)는 **하루 손실 서킷브레이커**를 그대로 흘려보낸다 — 안 주면
+    예전과 **비트 단위로 같다**. 스위치의 뜻·경계는 `run_leverage_book` 독스트링이 정본이다
+    (여기서 다시 정의하지 않는다 — 두 벌로 적으면 갈라진다).
     """
     unknown = [s for s in segments if s not in SUPPORTED_SEGMENTS]
     if unknown:
@@ -312,6 +322,10 @@ def iter_book_segments(
             stress_risk_multiple=stress_risk_multiple,
             compound_sizing=compound_sizing,
             one_entry_per_step=one_entry_per_step,
+            daily_loss_limit_r=daily_loss_limit_r,
+            daily_stop_limit=daily_stop_limit,
+            circuit_breaker_scope=circuit_breaker_scope,
+            blocked_from_by_day=blocked_from_by_day,
         )
         result = build_result_from_trades(
             outcome.trades, outcome.effective_config, BOOK_ANNUALIZATION_TF
