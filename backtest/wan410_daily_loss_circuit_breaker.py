@@ -38,6 +38,11 @@ WAN-408 §0의 선행 지표 둘이 PM 독립 재현과 안 맞았다. §1의 �
   🚨 스위치는 `settled`를 읽는다 — 관측이 아니라 **집행**이라 「북이 그 순간 아는 것」이
   정본이어야 한다. 그 선택의 크기가 이 표에 숫자로 남는다.
 
+🚨 **§1-0은 복리를 켜고 잰다 — §1-1은 끄고 잰다. 일부러 다르다.** §1-0이 대조하는 WAN-408
+공개 표(그리고 사용자가 올린 `book_trades.csv`)가 **인자 없는 채택 북**의 산출물이라 같은
+발판 위에 서야 하고(검산 (a′)가 거래 수 14,843·거래당 net R을 대조한다), §1-1의 판정 자는
+거래당 net R이라 복리 총수익이 포화하는 것을 피해야 한다(WAN-346 §2 · WAN-388).
+
 ⚠️ **이 표는 관측이지 반사실이 아니다**(WAN-408 §0-3과 같은 경고) — 「그 문턱에서 막았다면」의
 손익은 막힌 거래가 비운 자본·슬롯을 다른 칸이 쓰기 때문에 여기서 읽을 수 없다. 그것이 §1-1이다.
 
@@ -135,6 +140,10 @@ from backtest.wan408_loss_clustering import (
     _bucket_order_int,
     _bucket_order_realized,
     trade_facts,
+)
+from backtest.wan409_invalidation_cascade import (
+    PUBLISHED_OOS_WARM_MEAN_NET_R,
+    PUBLISHED_OOS_WARM_TRADES,
 )
 from common.timefmt import kst_day_key
 
@@ -679,7 +688,12 @@ def trading_day_count(segment: BookSegment) -> int:
 
 
 def trip_schedule(segment: BookSegment) -> dict[str, int]:
-    """발동한 KST 하루 → **처음 막은 시각**(ms). §2겹 대조군의 입력이다."""
+    """발동한 KST 하루 → **처음 막은 시각**(ms). §2겹 대조군의 입력이다.
+
+    ⚠️ **「문턱을 넘은 시각」이 아니라 「처음 막은 시각」이다** — 문턱을 넘은 뒤 후보가 한참
+    없으면 그 사이는 안 세어진다. 대조군이 맞춰야 하는 것이 *「하루 중 언제부터 매매가
+    끊겼나」*라 이쪽이 맞는 자다(발동해도 막을 것이 없으면 그 하루는 아무 일도 안 일어난다).
+    """
     return dict(segment.outcome.stats.circuit_breaker_first_trip)
 
 
@@ -1504,6 +1518,17 @@ def _checks_section(checks: Sequence[ChecksumRow]) -> list[str]:
 # --------------------------------------------------------------------------- #
 
 
+def _use_smoke_paths() -> None:
+    """좁혀 돈 판의 산출물을 `*_smoke.csv`로 돌린다 — 공개 표를 **덮지 않는다**."""
+    global DEFS_CSV, GRID_CSV, NULL_CSV, LOO_CSV, CHECKSUM_CSV, SUMMARY_PATH
+    DEFS_CSV = REPORTS_DIR / "wan410_definitions_smoke.csv"
+    GRID_CSV = REPORTS_DIR / "wan410_grid_smoke.csv"
+    NULL_CSV = REPORTS_DIR / "wan410_null_smoke.csv"
+    LOO_CSV = REPORTS_DIR / "wan410_loo_smoke.csv"
+    CHECKSUM_CSV = REPORTS_DIR / "wan410_checksum_smoke.csv"
+    SUMMARY_PATH = REPORTS_DIR / "wan410_circuit_breaker_summary_smoke.md"
+
+
 def _write(frame: pd.DataFrame, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     frame.to_csv(path, index=False)
@@ -1569,6 +1594,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="대조군을 돌릴 문턱(콤마) — 비우면 전부",
     )
     parser.add_argument("--no-cache", action="store_true", help="후보 payload 디스크 캐시를 끈다")
+    parser.add_argument(
+        "--symbols",
+        default="",
+        help="좁혀 돌 종목(콤마) — 🚨 **탐색·연기 시험용**이다. 비우면 채택 좌표 전부.",
+    )
+    parser.add_argument("--timeframes", default="", help="좁혀 돌 TF(콤마). 비우면 채택 좌표 전부.")
     args = parser.parse_args(argv)
 
     if args.from_csv or args.part == "summary":
@@ -1581,8 +1612,24 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     started = time.time()
     jobs = args.jobs if args.jobs is not None else harness.default_jobs()
-    symbols = list(harness.DEFAULT_SYMBOLS)
-    timeframes = list(harness.DEFAULT_TIMEFRAMES)
+    symbols = [s.strip() for s in args.symbols.split(",") if s.strip()] or list(
+        harness.DEFAULT_SYMBOLS
+    )
+    timeframes = [t.strip() for t in args.timeframes.split(",") if t.strip()] or list(
+        harness.DEFAULT_TIMEFRAMES
+    )
+    narrowed = symbols != list(harness.DEFAULT_SYMBOLS) or timeframes != list(
+        harness.DEFAULT_TIMEFRAMES
+    )
+    if narrowed:
+        # 🚨 좁혀 돈 판은 **채택 좌표가 아니다** — 공개 CSV를 덮으면 그 표가 조용히 거짓이
+        # 된다(WAN-335가 「좁히기가 한쪽에만 걸려 정상 좁히기를 고장으로 읽은」 자리).
+        _use_smoke_paths()
+        print(
+            "[wan410] 🚨 좁혀 돕니다 — 채택 좌표가 아니라 **연기 시험**이고 산출물은 "
+            f"`*_smoke.csv`입니다({len(symbols)}종목 × {len(timeframes)}TF).",
+            flush=True,
+        )
     start, end = harness.DEFAULT_START, harness.DEFAULT_END
     start_ms, end_ms = parse_date_ms(start), parse_date_ms(end)
     print(
@@ -1601,11 +1648,48 @@ def main(argv: Sequence[str] | None = None) -> int:
     grid_arms = arms()
 
     if args.part == "defs":
-        segs = place(payloads, start_ms=start_ms, end_ms=end_ms, segments=list(SEGMENT_ORDER))
+        # 🚨 §1-0은 **복리를 켜고** 잰다 — WAN-408의 공개 표(그리고 사용자가 올린
+        # `book_trades.csv`)가 **인자 없는 채택 북**의 산출물이라, 그 관측을 대조하려면
+        # 같은 발판 위에 서야 한다. §1-1 격자는 반대로 복리를 끈다(판정 자가 거래당 net R).
+        segs = place(
+            payloads,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            segments=list(SEGMENT_ORDER),
+            compound=True,
+        )
         rows: list[DefinitionRow] = []
+        checks_defs: list[ChecksumRow] = []
         for seg in segs:
-            rows.extend(definition_rows(trade_facts(seg), segment=seg.segment))
+            facts = trade_facts(seg)
+            rows.extend(definition_rows(facts, segment=seg.segment))
+            if seg.segment != PRIMARY_SEGMENT:
+                continue
+            mean = _mean([f.net_r for f in facts])
+            checks_defs.append(
+                ChecksumRow(
+                    check="a′ §1-0 발판 ≡ 공개 채택 북",
+                    arm=BASE_ARM.name,
+                    segment=seg.segment,
+                    metric="num_trades",
+                    left=float(len(facts)),
+                    right=float(PUBLISHED_OOS_WARM_TRADES),
+                    abs_diff=abs(len(facts) - PUBLISHED_OOS_WARM_TRADES),
+                )
+            )
+            checks_defs.append(
+                ChecksumRow(
+                    check="a′ §1-0 발판 ≡ 공개 채택 북",
+                    arm=BASE_ARM.name,
+                    segment=seg.segment,
+                    metric="mean_net_r",
+                    left=mean,
+                    right=PUBLISHED_OOS_WARM_MEAN_NET_R,
+                    abs_diff=abs(mean - PUBLISHED_OOS_WARM_MEAN_NET_R),
+                )
+            )
         _append(rows, DEFS_CSV, ("segment", "indicator", "convention", "bucket"))
+        _append(checks_defs, CHECKSUM_CSV, ("check", "arm", "segment", "metric"))
         print(f"§1-0 {len(rows)}행 → {DEFS_CSV}")
     elif args.part == "grid":
         rows_grid, _placed = grid_rows(
