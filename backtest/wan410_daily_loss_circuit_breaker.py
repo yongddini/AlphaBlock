@@ -122,8 +122,9 @@ from backtest.leverage_book import (
     CIRCUIT_BREAKER_SCOPES,
     CircuitBreakerScope,
     LeverageBookParams,
+    PlacedSetup,
 )
-from backtest.models import BacktestConfig
+from backtest.models import BacktestConfig, Trade
 from backtest.payload_cache import PayloadCache
 from backtest.run import parse_date_ms
 from backtest.wan169_leverage_book import CellPayload, run_cells
@@ -1257,24 +1258,24 @@ def check_open_positions_untouched(
     base = placed.get((BASE_ARM.name, segment))
     if base is None:
         return []
-    base_exits = {
-        (p.cell, t.entry_time, t.entry_price): t.exits[-1].time
-        for t, p in base.trades_with_placements()
-    }
+    base_exits = _exit_index(base)
     out: list[ChecksumRow] = []
     for arm in grid:
         seg = placed.get((arm.name, segment))
         if seg is None or arm.is_base:
             continue
+        arm_exits = _exit_index(seg)
         first = seg.outcome.stats.circuit_breaker_first_trip
         mismatched = matched = 0
         for trade, placement in seg.trades_with_placements():
             trip = first.get(kst_day_key(trade.entry_time))
             if trip is not None and trade.entry_time >= trip:
                 continue
-            key = (placement.cell, trade.entry_time, trade.entry_price)
+            key = _setup_key(trade, placement)
             other = base_exits.get(key)
-            if other is None:
+            # 🚨 **양쪽에서 유일한 키만** 본다 — 같은 키가 두 번 나오면 그 짝은 「같은
+            # 셋업인가」가 정의되지 않는다(다른 셋업을 맞대고 「청산이 달라졌다」고 찍는다).
+            if other is None or arm_exits.get(key) is None:
                 continue
             matched += 1
             mismatched += 1 if other != trade.exits[-1].time else 0
@@ -1292,6 +1293,39 @@ def check_open_positions_untouched(
             )
         )
     return out
+
+
+def _setup_key(trade: Trade, placement: PlacedSetup) -> tuple[object, ...]:
+    """두 팔에서 **같은 셋업**을 알아보는 키.
+
+    🚨 `(칸, 진입 시각, 진입가)`만으로는 부족하다 — 같은 칸·같은 분·같은 가격에 base 후보와
+    재진입 후보가 함께 있을 수 있고(재무장 지정가가 같은 밴드가면 값까지 같다), 그러면 서로
+    **다른 셋업**을 맞대고 「청산이 달라졌다」고 찍는다. 그래서 손절가·탭 시각·재진입 여부·
+    탭 순번까지 넣는다(WAN-333/348이 파리티 조인에 쓴 정체성과 같은 부류).
+    """
+    return (
+        placement.cell,
+        trade.entry_time,
+        trade.entry_price,
+        placement.stop_price,
+        placement.trigger_time,
+        placement.is_reentry,
+        placement.tap_index,
+    )
+
+
+def _exit_index(segment: BookSegment) -> dict[tuple[object, ...], int]:
+    """`셋업 키 → 청산 시각`. **중복 키는 통째로 뺀다**(그 짝은 정의되지 않는다)."""
+    seen: dict[tuple[object, ...], int] = {}
+    duplicated: set[tuple[object, ...]] = set()
+    for trade, placement in segment.trades_with_placements():
+        key = _setup_key(trade, placement)
+        if key in seen:
+            duplicated.add(key)
+        seen[key] = trade.exits[-1].time
+    for key in duplicated:
+        seen.pop(key, None)
+    return seen
 
 
 def check_candidate_layer(
@@ -1506,27 +1540,44 @@ def _grid_section(rows: Sequence[GridRow]) -> list[str]:
     out.append(f"### 주 구간 `{PRIMARY_SEGMENT}`")
     out.append("")
     out.append(
-        "| 팔 | 거래 | 승률 | 거래당 net R | net R 합 | MDD | 발동일 | 차단 | gross | 비용 |"
+        "| 팔 | 거래 | 거래 감소 | 승률 | 거래당 net R | net R 합 | MDD | 발동일 | "
+        "차단 후보 | gross | 비용 |"
     )
-    out.append("| -- | --: | --: | --: | --: | --: | --: | --: | --: | --: |")
+    out.append("| -- | --: | --: | --: | --: | --: | --: | --: | --: | --: | --: |")
+    base_trades = base.num_trades if base is not None else 0
     for row in _segment_rows(rows, PRIMARY_SEGMENT):
         trips = (
             f"{row.trip_days:,}/{row.trading_days:,} ({_pct(row.trip_day_share)})"
             if row.kind != "base"
             else "—"
         )
-        blocked = (
-            f"{row.blocked_candidates:,} ({_pct(row.blocked_share_of_base)})"
-            if row.kind != "base"
-            else "—"
+        blocked = f"{row.blocked_candidates:,}" if row.kind != "base" else "—"
+        cut = (
+            _pct(1.0 - row.num_trades / base_trades) if row.kind != "base" and base_trades else "—"
         )
         out.append(
-            f"| {row.label} | {row.num_trades:,} | {_pct(row.win_rate)} | "
+            f"| {row.label} | {row.num_trades:,} | {cut} | {_pct(row.win_rate)} | "
             f"{_fmt(row.mean_net_r)} | {_fmt(row.sum_net_r, 1)} | "
             f"{_wallet_cell(row, row.max_drawdown)} | {trips} | {blocked} | "
             f"{_fmt(row.gross_r)} | {_fmt(row.cost_r)} |"
         )
     out.append("")
+    out.append(
+        "⚠️ **「차단 후보」는 거래 수가 아니다** — 막힌 것은 **후보**이고 그중 상당수는 막지 "
+        "않았어도 칸 점유·명목 상한·사이징에서 밀렸을 것들이다(그래서 기준 팔 거래 수보다 "
+        "클 수 있다). 「얼마나 쉬나」의 자는 **「거래 감소」와 「발동일」**이고, 「차단 후보」는 "
+        "게이트가 실제로 몇 번 발동했는지의 원자료다."
+    )
+    out.append("")
+    if base is not None:
+        out.append(
+            "📌 **개선분이 어디서 오나 — 비용이 아니라 gross다.** 기준 팔의 비용은 "
+            f"{_fmt(base.cost_r)}인데 어느 팔에서도 그 값이 뚜렷이 줄지 않는다(오히려 조금 "
+            "는다) — 막아서 **덜 낸 수수료**가 아니라 **안 한 나쁜 거래**가 차이를 만든다. "
+            "⚠️ 그래도 「선별이 있다」로 읽기 전에 §2겹을 볼 것 — 「덜 매매하면 남은 거래의 "
+            "평균이 좋아지는」 것과 이 표만으로는 구분되지 않는다(WAN-378)."
+        )
+        out.append("")
     best = argmax_arm(rows, PRIMARY_SEGMENT)
     if best is not None and base is not None:
         delta = best.mean_net_r - base.mean_net_r
@@ -1587,8 +1638,12 @@ def _null_section(nulls: Sequence[NullRow]) -> list[str]:
         f"{1 / (NULL_DRAWS + 1):.3f})."
     )
     out.append("")
-    out.append("| 문턱 | 실제 net R | 대조군 평균 | 대조군 최고 | p | 판정 |")
-    out.append("| -- | --: | --: | --: | --: | -- |")
+    out.append(
+        "| 문턱 | 실제 net R | 대조군 평균 | 대조군 최고 | 실제 거래 | 대조군 거래 | "
+        "거래 격차 | p | 판정 |"
+    )
+    out.append("| -- | --: | --: | --: | --: | --: | --: | --: | -- |")
+    gaps: list[float] = []
     for threshold in THRESHOLDS:
         scoped = [n for n in nulls if n.threshold == threshold]
         actual = next((n for n in scoped if n.is_actual), None)
@@ -1602,13 +1657,35 @@ def _null_section(nulls: Sequence[NullRow]) -> list[str]:
             verdict = "**대조군을 이긴다**"
         else:
             verdict = "🚨 못 이긴다 = 「덜 매매한 몫」"
+        ctrl_trades = _mean([float(d.num_trades) for d in draws])
+        gap = (ctrl_trades - actual.num_trades) / actual.num_trades if actual.num_trades else 0.0
+        gaps.append(gap)
         out.append(
             f"| {threshold:+.0f}R | {_fmt(actual.mean_net_r)} | "
             f"{_fmt(_mean([d.mean_net_r for d in draws]))} | "
             f"{_fmt(max((d.mean_net_r for d in draws), default=float('nan')))} | "
+            f"{actual.num_trades:,} | {ctrl_trades:,.0f} | {_pct(gap)} | "
             f"{'—' if count == 0 else f'{p:.3f}'} | {verdict} |"
         )
     out.append("")
+    if gaps:
+        out.append(
+            f"🚨 **대조군은 「얼마나 지웠나」로는 안 맞춰져 있다 — 그 어긋남이 실제 팔에 "
+            f"유리한 쪽이다.** 대조군이 실제보다 **{min(gaps):.0%}~{max(gaps):.0%} 더 "
+            "거래한다**(손실이 나는 날이 곧 **바쁜 날**이라, 같은 날짜 수를 무작위 날로 옮기면 "
+            "덜 지운다). 즉 이 표의 비교는 **깨끗하지 않다** — 「거래 수까지 맞춘 대조군」은 "
+            "후속이다."
+        )
+        out.append("")
+        out.append(
+            "📌 **그런데 대조군이 바로 그 걱정을 재고 있다** — 대조군은 거래를 크게 지우고도"
+            "(가장 조인 점에서 기준 팔의 절반 가까이) 거래당 net R이 기준선 언저리에 머문다. "
+            "**무작위로 덜 매매하는 것만으로는 이 자가 거의 안 움직인다**는 뜻이고, 그래서 "
+            "실제 팔의 개선을 「덜 매매한 몫」으로 전부 설명하기는 어렵다. ⚠️ 그래도 "
+            "**「손실 뒤라는 조건에 정보가 있다」로 확정하지 말 것** — 위 거래 격차가 남아 "
+            "있고, p는 20판의 하한(0.048)에 붙어 있어 **크기를 못 읽는다**(WAN-408 §0 관행)."
+        )
+        out.append("")
     out.append(
         "🚨 **널이 항등으로 퇴화하지 않았는지** — 대조군 행의 `blocked_candidates`·`trip_days`가 "
         "실제 팔과 **다른 값**이어야 한다(같으면 재배정이 아무것도 안 한 것이다 · WAN-408 §0-2 "
