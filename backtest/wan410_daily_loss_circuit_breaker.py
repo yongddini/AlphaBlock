@@ -1136,9 +1136,20 @@ def check_breaker_bound(
 ) -> list[ChecksumRow]:
     """검산 (b) — 팔이 **라벨이 아니라 동작으로** 걸렸다.
 
-    문턱을 넘은 **뒤에** 진입한 거래가 하나라도 남아 있으면 그 팔은 이름만 서킷브레이커이고
-    조용히 기준 팔로 돈 것이다. 🚨 그래서 「첫 발동 시각 이후 진입 · 범위에 해당」 거래를
-    직접 세어 **0이어야 한다**고 건다(WAN-388 검산 (c)와 같은 부류).
+    발동 시각보다 **엄격히 뒤에** 진입한 거래가 하나라도 남아 있으면 그 팔은 이름만
+    서킷브레이커이고 조용히 기준 팔로 돈 것이다(WAN-388 검산 (c)와 같은 부류).
+
+    🚨 **왜 「같은 ms」는 빼는가 — 손실을 만든 그 거래 자신은 자기 손실로 막힐 수 없다.**
+    북은 후보를 시각순으로 훑으며 후보마다 `settle_due(t)`로 그때까지의 청산을 반영한다.
+    그런데 **진입과 청산이 같은 1분인 거래**(「같은 분 익절/손절」 — WAN-336)는 그 자신이
+    배치된 **뒤에야** 정산되므로, 그 거래가 평가되는 순간 그 손익은 아직 없다. 그것을 막으려면
+    **같은 ms 안에서 나중에 일어날 일을 미리 알아야** 한다 — 룩어헤드다(WAN-364가 6년치 표를
+    얼린 그 부류). ⚠️ **같은 ms라도 그 정산 뒤에 평가되는 후보는 막힌다**(회귀 테스트가
+    양쪽으로 고정) — 남는 것은 그 경계에 걸린 **한 칸**이다.
+
+    그래서 이 검산은 **엄격히 뒤(`>`)만** 위반으로 세고, 같은 ms 진입은 **따로 관측만** 한다
+    (`same_instant_entries`). 실측(4h 연기 시험)에서 그 수는 팔당 0~2건이다. ⚠️ 이것을
+    「작으니 괜찮다」가 아니라 **「1분 해상도가 만드는 경계이고 크기는 이만큼」**으로 읽는다.
     """
     by_name = {arm.name: arm for arm in grid}
     out: list[ChecksumRow] = []
@@ -1147,21 +1158,35 @@ def check_breaker_bound(
         if arm is None or arm.is_base:
             continue
         first = seg.outcome.stats.circuit_breaker_first_trip
-        leaked = 0
+        leaked = same_instant = 0
         for trade, placement in seg.trades_with_placements():
             trip = first.get(kst_day_key(trade.entry_time))
-            if trip is None or trade.entry_time < trip:
+            if trip is None or trade.entry_time < trip or not arm.in_scope(placement.is_reentry):
                 continue
-            leaked += 1 if arm.in_scope(placement.is_reentry) else 0
+            if trade.entry_time > trip:
+                leaked += 1
+            else:
+                same_instant += 1
         out.append(
             ChecksumRow(
-                check="b 문턱 뒤 진입이 실제로 0건",
+                check="b 발동보다 뒤의 진입이 실제로 0건",
                 arm=arm_name,
                 segment=segment,
                 metric="leaked_entries",
                 left=float(leaked),
                 right=0.0,
                 abs_diff=float(leaked),
+            )
+        )
+        out.append(
+            ChecksumRow(
+                check="b′ 같은 ms 진입(관측 · 1분 해상도의 경계)",
+                arm=arm_name,
+                segment=segment,
+                metric="same_instant_entries",
+                left=float(same_instant),
+                right=float(same_instant),
+                abs_diff=0.0,
             )
         )
     return out
@@ -1607,9 +1632,12 @@ def _write(frame: pd.DataFrame, path: Path) -> None:
 def _append(rows: Sequence[BaseModel], path: Path, key: Sequence[str]) -> pd.DataFrame:
     """이미 있는 CSV에 **덮지 않고** 이어 붙인다 — `--part`를 나눠 돌려도 표가 안 깨진다.
 
-    같은 키가 다시 오면 **새 행이 이긴다**(다시 돌린 것을 채택). 🚨 `--append` 계열이 한
-    파일을 읽고 다시 쓰므로 **같은 파트를 동시에 두 번 돌리지 말 것**(잃어버린 갱신,
-    WAN-403 선례).
+    같은 키가 다시 오면 **새 행이 이긴다**(다시 돌린 것을 채택). 🚨 한 파일을 읽고 다시
+    쓰므로 **같은 파트를 동시에 두 번 돌리지 말 것**(잃어버린 갱신, WAN-403 선례).
+
+    ⚠️ **키가 바뀌면(예: 검산 이름을 고치면) 옛 행이 고아로 남는다** — 덮이지 않고 옆에
+    쌓인다. 그럴 때는 해당 CSV를 **지우고 다시 돌린다**(자동 삭제는 안 한다 — WAN-194/297
+    원칙: 무엇을 지웠는지 모르는 표를 저장소가 스스로 만들지 않는다).
     """
     fresh = pd.DataFrame([row.model_dump() for row in rows])
     if path.exists() and not fresh.empty:

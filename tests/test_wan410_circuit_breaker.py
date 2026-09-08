@@ -253,6 +253,35 @@ def test_breaker_is_a_latch_within_the_day() -> None:
     assert out.stats.circuit_breaker_days == {"2024-03-05": 1}  # type: ignore[attr-defined]
 
 
+def test_same_instant_entry_is_not_blocked_and_that_is_causal() -> None:
+    """🚨 **손실을 만든 그 거래 자신은 자기 손실로 막힐 수 없다 — 그게 인과다.**
+
+    진입과 청산이 같은 1분인 거래(WAN-336 「같은 분」 부류)는 **자신이 배치된 뒤에야** 정산
+    되므로, 그 거래가 평가되는 순간 그 손실은 아직 실현되지 않았다. 막으려면 같은 ms 안에서
+    나중에 일어날 일을 미리 알아야 하고 그건 룩어헤드다(WAN-364가 6년치 표를 얼린 그 부류).
+
+    그래서 `entry == 발동 시각`인 거래가 **하나 남고**, 검산 (b)는 그것을 위반으로 세지
+    않는다(**엄격히 뒤(`>`)만** 센다). 같은 ms라도 **그 정산 뒤에** 평가되는 후보는 막힌다 —
+    이 테스트가 그 경계를 양쪽으로 못 박는다.
+    """
+    t = DAY1 + 3 * _MINUTE
+    cells = _cells(
+        # 길이 0 손절(−1R) — 정렬상 먼저다(같은 시각이면 청산이 이른 쪽이 앞).
+        ("BTCUSDT", [_loser(t, t)]),
+        # 같은 ms · 정렬상 뒤 — 그때는 이미 그 손실이 **정산돼** 막힌다.
+        ("ETHUSDT", [_winner(t, t + 5 * _MINUTE)]),
+        # 한 스텝 뒤 — 당연히 막힌다.
+        ("SOLUSDT", [_winner(t + _MINUTE, t + 2 * _MINUTE)]),
+    )
+    entries, out = _run(cells, daily_loss_limit_r=-1.0)
+    # 🚨 **손실을 만든 그 거래 자신은 자기 손실로 막힐 수 없다** — 배치되는 순간 그 손익은
+    # 아직 없다. 그래서 `entry == 발동 시각`인 거래가 남고, 검산 (b)가 그 한 칸을 위반으로
+    # 세지 않는 이유가 이것이다.
+    assert entries == [t], "자기 손실로 자신을 막았거나(룩어헤드) 뒤 후보를 못 막았다"
+    assert out.stats.skipped_circuit_breaker == 2  # type: ignore[attr-defined]
+    assert out.stats.circuit_breaker_first_trip == {"2024-03-05": t}  # type: ignore[attr-defined]
+
+
 def test_stop_count_axis_counts_stops_not_losses() -> None:
     """대조군 B는 **손절 건수**를 센다 — 이긴 거래를 안 세므로 「버는 날」도 끈다."""
     # 크게 이긴 뒤 손절 하나 — 그날 누계는 여전히 **플러스**인데 B는 발동한다.
