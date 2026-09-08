@@ -1,0 +1,5 @@
+check,segment,metric,left,right,abs_diff
+(c) oos_warm ≡ 공개 book_trades.csv 집계,oos_warm,num_trades,14843.0,14843.0,0.0
+(c) oos_warm ≡ 공개 book_trades.csv 집계,oos_warm,mean_net_r,-0.12073851686076308,-0.12073851686076308,0.0
+(n) 널이 실제로 걸렸다(시프트 draw ≠ 실측),all,num_identical_draws,0.0,0.0,0.0
+(i) 종목 내 순열은 항등이다(함정의 기록),oos_warm,num_identical_permutations,30.0,30.0,0.0

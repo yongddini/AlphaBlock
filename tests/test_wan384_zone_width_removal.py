@@ -179,6 +179,10 @@ _NO_PIN_NEEDED: frozenset[str] = frozenset(
         # WAN-305). 검산 (a)가 「채택 북 인자」와의 등식을, (c)가 공개 `book_trades.csv`
         # 집계와의 일치를 못 박는다.
         "wan409_invalidation_cascade",
+        # WAN-408 §0도 같다 — **필터 꺼진 채택 북**이 실제로 한 거래를 시간축으로 다시
+        # 접는 관측이라 핀 없음이 설계다(WAN-305). 검산 (c)가 공개 `book_trades.csv` 집계와의
+        # 일치를 못 박고, 그 CSV가 곧 필터 꺼진 채택 기본값의 산출물이다.
+        "wan408_loss_clustering",
         # 존 병합 × 재탭 2×2(WAN-388)도 같다 — 필터를 켠 채 낸 표가 아니라 **필터 꺼진 채택
         # 북** 위에서 존 정의와 재탭 정책만 갈아끼운 표다(핀 없음이 설계, WAN-305). 검산
         # (a-1)/(a-2)가 `split_every` 팔 ≡ 인자 없는 채택 북을 못 박는다.
