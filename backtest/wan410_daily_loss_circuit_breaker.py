@@ -167,6 +167,7 @@ __all__ = [
     "grid_rows",
     "null_rows",
     "open_cells_before",
+    "open_cells_raw",
     "place",
     "realized_r_before",
     "trip_schedule",
@@ -389,8 +390,13 @@ def on_adopted_coordinates(symbols: Sequence[str], timeframes: Sequence[str]) ->
 # §1-0 정의를 못 박는다 — 두 규약을 **나란히** 낸다
 # --------------------------------------------------------------------------- #
 
-#: (b) 「그 순간 열린 칸 수」 규약.
-OPEN_CONVENTIONS: tuple[str, ...] = ("wan408", "interval")
+#: (b) 「그 순간 열린 칸 수」 규약 셋.
+#:
+#: 🚨 **결론이 이 셋에 갈린다** — 그래서 하나를 고르지 않고 **전부 낸다**(WAN-410 §1-0).
+#: * `wan408` — 공개 식 `max(0, #(진입 < t) − #(청산 ≤ t))`.
+#: * `interval` — `#{진입 < t < 청산}`. **북이 실제로 아는 것**(정본).
+#: * `open_end` — `#{진입 < t ≤ 청산}`. **막 닫힌 포지션도 열린 것으로 센다.**
+OPEN_CONVENTIONS: tuple[str, ...] = ("wan408", "interval", "open_end")
 
 #: (c) 「그날 실현 net R 누적」 규약.
 REALIZED_CONVENTIONS: tuple[str, ...] = ("strict", "settled")
@@ -405,17 +411,40 @@ def _zero_duration_times(facts: Sequence[TradeFact]) -> list[int]:
     return sorted(f.entry_time for f in facts if f.exit_time == f.entry_time)
 
 
+def open_cells_raw(facts: Sequence[TradeFact]) -> list[int]:
+    """공개 식의 **클램프 전** 값 `#(진입 < t) − #(청산 ≤ t)`.
+
+    🚨 **이 값은 음수가 된다** — 실측 `oos_warm`에서 **2,390건(16.1%)이 −1 이하이고 최소는
+    −131**이다. 「그 순간 열린 칸 수」가 음수인 것은 **물리적으로 불가능**하므로, 이 하나가
+    공개 식이 결함이라는 가장 직접적인 증거다(원인은 아래 대수 항등).
+
+    📌 **그 음수를 어떻게 처리하느냐로 「0–1」 버킷이 통째로 달라진다** — 공개 표는
+    `max(0, …)`로 **「0–1」에 쓸어담고**(그 버킷이 총손실의 46.5%가 되는 이유의 상당 부분),
+    버리면 같은 버킷이 −0.0490R·5.6%가 된다. **둘은 다른 표다.**
+    """
+    entries = sorted(f.entry_time for f in facts)
+    exits = sorted(f.exit_time for f in facts)
+    return [bisect_left(entries, f.entry_time) - bisect_right(exits, f.entry_time) for f in facts]
+
+
 def open_cells_before(facts: Sequence[TradeFact], *, convention: str = "interval") -> list[int]:
     """각 거래의 진입 순간에 **열려 있던 칸 수** — 규약을 명시로 받는다.
 
     * `"wan408"` — `max(0, #(진입 < t) − #(청산 ≤ t))`. 공개 `wan408_leading.csv`가 쓴 식.
-    * `"interval"` — `#{진입 < t < 청산}`. 「그 순간 실제로 열려 있는 포지션」이고, 칸당
-      1포지션이라 **곧 열린 칸 수**다.
+    * `"interval"` — `#{진입 < t < 청산}`. **정본**(아래).
+    * `"open_end"` — `#{진입 < t ≤ 청산}`. **막 닫힌 포지션도 열린 것으로 센다.**
 
-    🚨 **두 값의 차는 정확히 `#{진입 == 청산 == t}`다**(대수 항등):
+    🚨 **`wan408`과 `interval`의 차는 정확히 `#{진입 == 청산 == t}`다**(대수 항등):
     `#(청산 ≤ t) − #(진입 < t ∧ 청산 ≤ t) = #{진입 ≥ t ∧ 청산 ≤ t}`이고 `청산 ≥ 진입`이라
-    그 집합은 `진입 == 청산 == t`뿐이다. 즉 `wan408` 식은 **길이 0인 거래를 자기 자신의
-    열린 칸에서 빼고** 있었다 — 그리고 그 부류가 하필 「같은 분 익절」이다.
+    그 집합은 `진입 == 청산 == t`뿐이다. 즉 공개 식은 **길이 0인 거래를 자기 자신의 열린
+    칸에서 빼고** 있었고(그래서 음수가 난다 — `open_cells_raw`), 그 부류가 하필 「같은 분
+    익절/손절」이다.
+
+    🚨 **`interval`과 `open_end`는 부등호 하나 차이인데 결론이 뒤집힌다** — 실측에서 최악
+    버킷이 각각 「0–1」과 「11+」다. **정본은 `interval`이고 근거는 엔진이다**:
+    `run_leverage_book`은 후보를 판정하기 **전에** `settle_due(t)`로 `청산 ≤ t`를 **먼저
+    닫는다**. 즉 `t = 청산`인 포지션은 그 순간 **이미 닫혀 있다**. (c)에서 `settled` 경계를
+    고른 것과 **같은 규약**이다.
     """
     if convention not in OPEN_CONVENTIONS:
         raise ValueError(f"모르는 규약입니다: {convention!r} (가능: {OPEN_CONVENTIONS})")
@@ -425,6 +454,9 @@ def open_cells_before(facts: Sequence[TradeFact], *, convention: str = "interval
     out: list[int] = []
     for fact in facts:
         t = fact.entry_time
+        if convention == "open_end":
+            out.append(max(0, bisect_left(entries, t) - bisect_left(exits, t)))
+            continue
         raw = bisect_left(entries, t) - bisect_right(exits, t)
         if convention == "interval":
             raw += bisect_right(zero, t) - bisect_left(zero, t)
@@ -522,7 +554,14 @@ class DefinitionRow(_CsvRow):
     total_trades: int
     """🚨 버킷 합이 이 값과 같아야 한다 — 이슈가 지적한 「1,597건이 샜다」를 막는 열이다."""
     zero_duration_trades: int
-    """`진입 == 청산`인 거래 수 — 두 (b) 규약의 차를 만드는 그 집합의 크기."""
+    """`진입 == 청산`인 거래 수 — `wan408`과 `interval`의 차를 만드는 그 집합의 크기."""
+    negative_raw_trades: int
+    """공개 식이 **음수**를 낸 거래 수(`open_cells_raw` < 0) — 물리적으로 불가능한 값이다.
+
+    🚨 (b) 지표에만 뜻이 있다(다른 지표 행은 0). 공개 표는 이 거래들을 `max(0, …)`로
+    **「0–1」 버킷에 쓸어담는다** — 그 버킷을 읽을 때 반드시 함께 봐야 하는 수다."""
+    negative_raw_min: int
+    """그 음수의 최솟값 — 「조금 어긋난다」가 아니라 **−131까지 간다**는 것을 남긴다."""
 
 
 def definition_rows(facts: Sequence[TradeFact], *, segment: str) -> list[DefinitionRow]:
@@ -532,6 +571,8 @@ def definition_rows(facts: Sequence[TradeFact], *, segment: str) -> list[Definit
     total_net = sum(f.net_r for f in facts)
     total = len(facts)
     zero = len(_zero_duration_times(facts))
+    raw = open_cells_raw(facts)
+    negatives = [v for v in raw if v < 0]
 
     labelled: list[tuple[str, str, list[tuple[str, int]]]] = []
     for convention in OPEN_CONVENTIONS:
@@ -586,6 +627,10 @@ def definition_rows(facts: Sequence[TradeFact], *, segment: str) -> list[Definit
                     ),
                     total_trades=total,
                     zero_duration_trades=zero,
+                    negative_raw_trades=(len(negatives) if indicator == "open_cells_before" else 0),
+                    negative_raw_min=(
+                        min(negatives, default=0) if indicator == "open_cells_before" else 0
+                    ),
                 )
             )
     return rows
@@ -1472,13 +1517,25 @@ def _defs_section(defs: Sequence[DefinitionRow]) -> list[str]:
     primary = [d for d in defs if d.segment == PRIMARY_SEGMENT]
     zero = primary[0].zero_duration_trades if primary else 0
     total = primary[0].total_trades if primary else 0
+    negs = max((d.negative_raw_trades for d in primary), default=0)
+    neg_min = min((d.negative_raw_min for d in primary), default=0)
     out.append(
         f"주 구간(`{PRIMARY_SEGMENT}`) 거래 **{total:,}건** 중 `진입 == 청산`인 거래가 "
         f"**{zero:,}건**({zero / total:.2%})이다 — 「같은 1분에 열고 닫은」 부류이고 "
-        "**익절만이 아니라 손절·만료도 포함**한다. 🚨 **그 수가 곧 (b) 두 규약의 차다**"
-        "(§1-0 대수 항등). ⚠️ **WAN-336의 「같은 분 익절 7.37%」와 같은 수가 아니다** — "
-        "그쪽은 익절만 세고 **옛 좌표**(소급 취소 · 존폭 필터 켬 · 거래 6,336건)의 값이다."
+        "**익절만이 아니라 손절·만료도 포함**한다. ⚠️ **WAN-336의 「같은 분 익절 7.37%」와 "
+        "같은 수가 아니다**(그쪽은 익절만 세고 **옛 좌표**의 값이다)."
     )
+    out.append("")
+    if negs:
+        out.append(
+            f"🚨 **그리고 공개 식은 음수를 낸다 — {negs:,}건({negs / total:.1%}) · 최소 "
+            f"{neg_min}.** 「그 순간 열린 칸 수」가 음수인 것은 **물리적으로 불가능**하다. "
+            "원인은 위 길이 0 거래이고(대수 항등: 공개 식은 그 거래를 **자기 자신의 열린 "
+            "칸에서 뺀다**), 공개 표는 그 값을 `max(0, …)`로 **「0–1」 버킷에 쓸어담는다**. "
+            "🚨 **그래서 「0–1」이 총손실의 46.5%를 담는다는 수는 그 쓰레기통을 함께 읽어야 "
+            "한다** — 같은 거래를 버리면 그 버킷은 −0.0490R · 5.6%가 된다."
+        )
+        out.append("")
     out.append("")
     for indicator, title in (
         ("open_cells_before", "(b) 그 순간 열린 칸 수"),
@@ -1503,20 +1560,42 @@ def _defs_section(defs: Sequence[DefinitionRow]) -> list[str]:
         if any(b is None for b in worst.values()):
             verdict = "🚨 **판정 불가**(유효 버킷이 없다 — 표본 미달)"
         elif len(set(worst.values())) == 1:
-            verdict = "**두 규약이 같은 버킷을 가장 나쁘다고 본다**"
+            verdict = "**규약이 갈려도 같은 버킷을 가장 나쁘다고 본다**"
         else:
-            verdict = "🚨 **규약에 갈린다**"
+            verdict = (
+                "🚨 **규약에 갈린다 — 결론이 정의 하나에 달려 있다.** 이 표만으로 "
+                "「어느 버킷이 나쁘다」를 말할 수 없다(아래 정본 문단 참고)."
+            )
         out.append(
             f"가장 나쁜 버킷(**{MIN_BUCKET_TRADES}건 미만 버킷은 후보에서 뺀다**): "
             + " · ".join(f"`{c}` → {b or '—'}" for c, b in worst.items())
         )
         out.append("")
-        out.append(f"{verdict}.")
+        out.append(verdict if verdict.endswith(".") else f"{verdict}.")
         out.append("")
+    out.append("## 📌 정본은 무엇이고, 왜 — 두 지표 모두 **엔진이 정한다**")
+    out.append("")
     out.append(
-        "📌 **스위치는 `settled`를 읽는다** — 관측이 아니라 **집행**이라 「북이 그 순간 아는 "
-        "것」(`settle_due(t)`의 경계)이 정본이어야 한다. `strict`는 WAN-408 §0-3의 관측 규약이고 "
-        "둘 다 인과적이되 **같은 수가 아니다**."
+        "🚨 **(b)는 `interval`, (c)는 `settled`가 정본이고 근거는 같다** — "
+        "`run_leverage_book`은 후보를 판정하기 **전에** `settle_due(t)`로 `청산 ≤ t`를 "
+        "**먼저 닫는다**. 그러므로 `t = 청산`인 포지션은 그 순간 **이미 닫혀 있고**, 그 "
+        "청산의 손익은 **이미 누계에 들어 있다**. 관측이 아니라 **집행**이라 「북이 그 순간 "
+        "아는 것」이 정본이어야 한다."
+    )
+    out.append("")
+    out.append(
+        "⚠️ **그래도 (b)의 결론은 「미해결」로 남긴다.** `interval`과 `open_end`는 **부등호 "
+        "하나 차이인데 최악 버킷이 서로 다르고**(「0–1」 ↔ 「11+」), 위 음수 문제까지 겹쳐 "
+        "**공개 표의 「0–1」은 그 자체로 읽을 수 없다**. 📌 **다만 그 미해결이 §1-1을 막지 "
+        "않는다** — 이 이슈의 스위치는 처음부터 **(c)를 축으로** 삼았고, (b)는 "
+        "**어느 규약에서도 스위치로 쓰지 않는다**(WAN-408 §0의 경고 그대로)."
+    )
+    out.append("")
+    out.append(
+        "📌 **그리고 (b)가 애초에 지표가 아닐 가능성이 크다** — 폭락일(그날 마감 ≤ −30R · "
+        "15일)을 빼면 「0–1」이 −0.1976R → **−0.0383R**로 무너지고 버킷 간 차이가 통째로 "
+        "사라진다(2026-09-09 임시 측정 · 이 PR 범위 밖). 즉 **「열린 칸 수」는 「폭락일」의 "
+        "대리변수**일 수 있고, 그렇다면 규약 논쟁 자체가 부차적이다."
     )
     out.append("")
     return out

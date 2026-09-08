@@ -27,6 +27,7 @@ from backtest.wan410_daily_loss_circuit_breaker import (
     definition_rows,
     null_pvalue,
     open_cells_before,
+    open_cells_raw,
     realized_r_before,
     shuffled_schedule,
     wallet_defined,
@@ -370,6 +371,39 @@ def test_open_cells_conventions_differ_exactly_by_zero_duration_trades() -> None
     assert published[0] == interval[0] == 0
     with pytest.raises(ValueError, match="모르는 규약"):
         open_cells_before(facts, convention="whatever")
+
+
+def test_open_end_convention_counts_the_just_closed_position() -> None:
+    """🚨 **부등호 하나가 결론을 뒤집는다** — `interval`과 `open_end`를 동작으로 가른다.
+
+    `t = 청산`인 포지션을 「아직 열려 있다」고 볼 것인가. **정본은 `interval`(안 센다)**이고
+    근거는 엔진이다 — `run_leverage_book`은 후보를 판정하기 **전에** `settle_due(t)`로
+    `청산 ≤ t`를 먼저 닫는다. `open_end`는 그 규약을 **일부러 어긴 팔**이고, 실측에서
+    최악 버킷이 갈리므로(「0–1」 ↔ 「11+」) **표에 나란히 낸다**.
+    """
+    t = DAY1 + 10 * _MINUTE
+    facts = [
+        _fact(DAY1, t),  # 정확히 t에 닫힌다 — `interval`은 안 세고 `open_end`는 센다
+        _fact(DAY1, t + _MINUTE),  # t에 확실히 열려 있다 — 둘 다 센다
+        _fact(t, t + 2 * _MINUTE),
+    ]
+    assert open_cells_before(facts, convention="interval")[2] == 1
+    assert open_cells_before(facts, convention="open_end")[2] == 2
+
+
+def test_raw_formula_goes_negative_and_that_is_impossible() -> None:
+    """🚨 공개 식이 **음수**를 낸다 — 「열린 칸 수」가 음수인 것은 물리적으로 불가능하다.
+
+    같은 ms에 열고 닫는 거래가 여럿이면 `#(진입 < t) − #(청산 ≤ t)`가 그만큼 내려간다.
+    공개 표는 그것을 `max(0, …)`로 **「0–1」 버킷에 쓸어담으므로**, 그 버킷을 읽을 때는
+    이 수를 함께 봐야 한다(실측 `oos_warm` 2,390건 · 최소 −131).
+    """
+    t = DAY1 + 5 * _MINUTE
+    facts = [_fact(t, t) for _ in range(3)] + [_fact(t, t + _MINUTE)]
+    raw = open_cells_raw(facts)
+    assert min(raw) < 0, "길이 0 거래가 셋인데 공개 식이 음수를 안 냈다"
+    # 🚨 정본 규약은 그 함정에 안 걸린다 — 정의상 0 이상이다.
+    assert min(open_cells_before(facts, convention="interval")) >= 0
 
 
 def test_realized_conventions_differ_at_the_same_instant() -> None:
