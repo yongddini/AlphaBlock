@@ -12,13 +12,9 @@
 
 from __future__ import annotations
 
-from backtest.leverage_book import (
-    BookCell,
-    LeverageBookParams,
-    _Candidate,
-    run_leverage_book,
-)
+from backtest.leverage_book import BookCell, LeverageBookParams, run_leverage_book
 from backtest.models import BacktestConfig, ExitReason, PositionSide
+from backtest.zone_limit_backtest import _Candidate
 from execution.sizing import PositionSizingParams
 
 MINUTE = 60_000

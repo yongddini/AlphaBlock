@@ -2,71 +2,68 @@
 
 채택 좌표(12종목 × 4TF 한 지갑 · 못 박은 6년 · 존폭 필터 끔 · 인과 취소 · 재진입 band · cap_only 5배 · 복리 켬) · **핀 없음**. 재현: 모듈 독스트링.
 
-팔: base, retap_once, cancel_bar_open · 구간: full, is, oos_warm, oos
+팔: base, no_same_step_reopen · 구간: full, is, oos_warm, oos
 
 🚨 **판정 자는 「몇 건인가」가 아니라 「어느 코드 경로인가」다**(WAN-367). 이 표는 기본값을 하나도 안 바꾸고, `retap_mode`·`invalidation_cancel` 전환은 **재-베이스라인 = 사용자 결정**이다(WAN-404 · WAN-365 소관).
 
 | 팔 | 가진 구간 |
 | -- | -- |
 | base | full, is, oos_warm, oos |
-| retap_once | full, oos_warm |
-| cancel_bar_open | full, oos_warm |
-
-⚠️ **차가운 `is`/`oos` 구간이 없는 팔이 있다** — `--cold-segments` 없이 돈 팔은 차가운 절단 후보를 만들지 않는다(WAN-301 노브 · 셀 비용이 두 배다). 완료기준 5의 `is`는 그 플래그를 켠 팔만 낸다 — 없는 구간을 빈 값으로 위장하지 않는다.
+| no_same_step_reopen | full, is, oos_warm, oos |
 
 ## §1 무더기 인구조사 (진짜 존 식별자)
 
 ### full
 
-| 팔 | 부류 | 건수 | 비중 | 손절률 | 거래당 net R | net R 합 | 순손익 대비 | 같은 1분 | 무효화 봉 체결 |
-| -- | -- | --: | --: | --: | --: | --: | --: | --: | --: |
-| base | **prev_stop_same_zone** | 1,711 | 3.46% | 98.4% | -1.1336 | -1,939.5R | 39.8% | 96.9% | 96.3% |
-| base | prev_stop_other_zone | 27,718 | 56.13% | 59.9% | -0.1002 | -2,776.8R | 56.9% | 15.7% | 29.8% |
-| base | prev_tp_same_zone | 9,877 | 20.00% | 54.0% | +0.0354 | +349.2R | -7.2% | 10.8% | 30.8% |
-| base | prev_tp_other_zone | 10,078 | 20.41% | 57.6% | -0.0510 | -514.0R | 10.5% | 5.8% | 23.3% |
-| retap_once | **prev_stop_same_zone** | 0 | 0.00% | 0.0% | +0.0000 | +0.0R | -0.0% | 0.0% | 0.0% |
-| retap_once | prev_stop_other_zone | 25,157 | 58.98% | 58.8% | -0.0729 | -1,833.6R | 52.5% | 12.1% | 28.5% |
-| retap_once | prev_tp_same_zone | 8,674 | 20.34% | 60.4% | -0.1290 | -1,118.8R | 32.0% | 0.0% | 28.3% |
-| retap_once | prev_tp_other_zone | 8,822 | 20.68% | 58.0% | -0.0613 | -540.7R | 15.5% | 4.5% | 23.2% |
-| cancel_bar_open | **prev_stop_same_zone** | 78 | 0.20% | 59.0% | -0.1081 | -8.4R | — | 23.1% | 0.0% |
-| cancel_bar_open | prev_stop_other_zone | 18,534 | 47.73% | 48.7% | +0.1950 | +3,613.3R | — | 6.6% | 0.0% |
-| cancel_bar_open | prev_tp_same_zone | 8,678 | 22.35% | 45.8% | +0.2588 | +2,246.2R | — | 6.8% | 0.0% |
-| cancel_bar_open | prev_tp_other_zone | 11,538 | 29.72% | 48.2% | +0.2030 | +2,342.1R | — | 1.8% | 0.0% |
+| 팔 | 부류 | 건수 | 비중 | 손절률 | 거래당 net R | net R 합 | 순손익 대비 | 같은 1분 | 무효화 봉 체결 | **완전 중복** |
+| -- | -- | --: | --: | --: | --: | --: | --: | --: | --: | --: |
+| base | **prev_stop_same_zone** | 1,711 | 3.46% | 98.4% | -1.1336 | -1,939.5R | 39.8% | 96.9% | 96.3% | **92.3%** |
+| base | prev_stop_other_zone | 27,718 | 56.13% | 59.9% | -0.1002 | -2,776.8R | 56.9% | 15.7% | 29.8% | **0.0%** |
+| base | prev_tp_same_zone | 9,877 | 20.00% | 54.0% | +0.0354 | +349.2R | -7.2% | 10.8% | 30.8% | **10.8%** |
+| base | prev_tp_other_zone | 10,078 | 20.41% | 57.6% | -0.0510 | -514.0R | 10.5% | 5.8% | 23.3% | **0.0%** |
+| no_same_step_reopen | **prev_stop_same_zone** | 56 | 0.13% | 48.2% | +0.1753 | +9.8R | -0.3% | 0.0% | 14.3% | **0.0%** |
+| no_same_step_reopen | prev_stop_other_zone | 25,069 | 58.62% | 58.6% | -0.0661 | -1,657.2R | 51.2% | 0.0% | 24.8% | **0.0%** |
+| no_same_step_reopen | prev_tp_same_zone | 8,503 | 19.88% | 60.6% | -0.1355 | -1,152.5R | 35.6% | 0.0% | 28.2% | **0.0%** |
+| no_same_step_reopen | prev_tp_other_zone | 9,139 | 21.37% | 57.5% | -0.0478 | -437.3R | 13.5% | 0.0% | 20.3% | **0.0%** |
 
 ### is
 
-| 팔 | 부류 | 건수 | 비중 | 손절률 | 거래당 net R | net R 합 | 순손익 대비 | 같은 1분 | 무효화 봉 체결 |
-| -- | -- | --: | --: | --: | --: | --: | --: | --: | --: |
-| base | **prev_stop_same_zone** | 1,326 | 3.84% | 98.6% | -1.1331 | -1,502.5R | 48.7% | 97.2% | 96.8% |
-| base | prev_stop_other_zone | 19,199 | 55.58% | 59.6% | -0.0883 | -1,695.2R | 54.9% | 16.7% | 31.3% |
-| base | prev_tp_same_zone | 7,038 | 20.38% | 53.4% | +0.0575 | +404.7R | -13.1% | 11.8% | 32.6% |
-| base | prev_tp_other_zone | 6,978 | 20.20% | 57.5% | -0.0424 | -296.0R | 9.6% | 6.3% | 25.0% |
+| 팔 | 부류 | 건수 | 비중 | 손절률 | 거래당 net R | net R 합 | 순손익 대비 | 같은 1분 | 무효화 봉 체결 | **완전 중복** |
+| -- | -- | --: | --: | --: | --: | --: | --: | --: | --: | --: |
+| base | **prev_stop_same_zone** | 1,326 | 3.84% | 98.6% | -1.1331 | -1,502.5R | 48.7% | 97.2% | 96.8% | **92.5%** |
+| base | prev_stop_other_zone | 19,199 | 55.58% | 59.6% | -0.0883 | -1,695.2R | 54.9% | 16.7% | 31.3% | **0.0%** |
+| base | prev_tp_same_zone | 7,038 | 20.38% | 53.4% | +0.0575 | +404.7R | -13.1% | 11.8% | 32.6% | **11.8%** |
+| base | prev_tp_other_zone | 6,978 | 20.20% | 57.5% | -0.0424 | -296.0R | 9.6% | 6.3% | 25.0% | **0.0%** |
+| no_same_step_reopen | **prev_stop_same_zone** | 40 | 0.14% | 50.0% | +0.1346 | +5.4R | -0.3% | 0.0% | 20.0% | **0.0%** |
+| no_same_step_reopen | prev_stop_other_zone | 17,304 | 58.49% | 58.4% | -0.0562 | -972.2R | 48.6% | 0.0% | 26.2% | **0.0%** |
+| no_same_step_reopen | prev_tp_same_zone | 5,971 | 20.18% | 60.5% | -0.1273 | -759.8R | 38.0% | 0.0% | 29.9% | **0.0%** |
+| no_same_step_reopen | prev_tp_other_zone | 6,268 | 21.19% | 57.5% | -0.0431 | -270.0R | 13.5% | 0.0% | 22.1% | **0.0%** |
 
 ### oos_warm
 
-| 팔 | 부류 | 건수 | 비중 | 손절률 | 거래당 net R | net R 합 | 순손익 대비 | 같은 1분 | 무효화 봉 체결 |
-| -- | -- | --: | --: | --: | --: | --: | --: | --: | --: |
-| base | **prev_stop_same_zone** | 385 | 2.60% | 97.7% | -1.1352 | -437.0R | 24.4% | 95.8% | 94.5% |
-| base | prev_stop_other_zone | 8,489 | 57.38% | 60.5% | -0.1280 | -1,087.0R | 60.7% | 13.6% | 26.5% |
-| base | prev_tp_same_zone | 2,838 | 19.18% | 55.5% | -0.0192 | -54.4R | 3.0% | 8.2% | 26.2% |
-| base | prev_tp_other_zone | 3,083 | 20.84% | 57.8% | -0.0704 | -216.9R | 12.1% | 4.7% | 19.6% |
-| retap_once | **prev_stop_same_zone** | 0 | 0.00% | 0.0% | +0.0000 | +0.0R | -0.0% | 0.0% | 0.0% |
-| retap_once | prev_stop_other_zone | 7,663 | 59.45% | 59.6% | -0.1029 | -788.1R | 57.4% | 10.7% | 25.4% |
-| retap_once | prev_tp_same_zone | 2,539 | 19.70% | 61.0% | -0.1601 | -406.5R | 29.6% | 0.0% | 24.3% |
-| retap_once | prev_tp_other_zone | 2,687 | 20.85% | 57.7% | -0.0673 | -180.9R | 13.2% | 3.5% | 19.8% |
-| cancel_bar_open | **prev_stop_same_zone** | 22 | 0.19% | 54.5% | -0.0196 | -0.4R | — | 22.7% | 0.0% |
-| cancel_bar_open | prev_stop_other_zone | 5,776 | 49.68% | 50.3% | +0.1432 | +827.2R | — | 5.6% | 0.0% |
-| cancel_bar_open | prev_tp_same_zone | 2,444 | 21.02% | 48.2% | +0.1822 | +445.4R | — | 5.8% | 0.0% |
-| cancel_bar_open | prev_tp_other_zone | 3,384 | 29.11% | 50.3% | +0.1356 | +458.9R | — | 1.4% | 0.0% |
+| 팔 | 부류 | 건수 | 비중 | 손절률 | 거래당 net R | net R 합 | 순손익 대비 | 같은 1분 | 무효화 봉 체결 | **완전 중복** |
+| -- | -- | --: | --: | --: | --: | --: | --: | --: | --: | --: |
+| base | **prev_stop_same_zone** | 385 | 2.60% | 97.7% | -1.1352 | -437.0R | 24.4% | 95.8% | 94.5% | **91.7%** |
+| base | prev_stop_other_zone | 8,489 | 57.38% | 60.5% | -0.1280 | -1,087.0R | 60.7% | 13.6% | 26.5% | **0.0%** |
+| base | prev_tp_same_zone | 2,838 | 19.18% | 55.5% | -0.0192 | -54.4R | 3.0% | 8.2% | 26.2% | **8.2%** |
+| base | prev_tp_other_zone | 3,083 | 20.84% | 57.8% | -0.0704 | -216.9R | 12.1% | 4.7% | 19.6% | **0.0%** |
+| no_same_step_reopen | **prev_stop_same_zone** | 16 | 0.12% | 43.8% | +0.2770 | +4.4R | -0.4% | 0.0% | 0.0% | **0.0%** |
+| no_same_step_reopen | prev_stop_other_zone | 7,735 | 58.88% | 59.0% | -0.0889 | -687.7R | 55.4% | 0.0% | 21.8% | **0.0%** |
+| no_same_step_reopen | prev_tp_same_zone | 2,531 | 19.27% | 60.7% | -0.1547 | -391.6R | 31.6% | 0.0% | 24.3% | **0.0%** |
+| no_same_step_reopen | prev_tp_other_zone | 2,854 | 21.73% | 57.4% | -0.0582 | -166.2R | 13.4% | 0.0% | 16.4% | **0.0%** |
 
 ### oos
 
-| 팔 | 부류 | 건수 | 비중 | 손절률 | 거래당 net R | net R 합 | 순손익 대비 | 같은 1분 | 무효화 봉 체결 |
-| -- | -- | --: | --: | --: | --: | --: | --: | --: | --: |
-| base | **prev_stop_same_zone** | 374 | 2.58% | 97.6% | -1.1345 | -424.3R | 23.4% | 95.7% | 94.4% |
-| base | prev_stop_other_zone | 8,333 | 57.52% | 60.6% | -0.1305 | -1,087.5R | 60.0% | 13.5% | 26.1% |
-| base | prev_tp_same_zone | 2,769 | 19.12% | 56.1% | -0.0339 | -93.9R | 5.2% | 7.5% | 26.0% |
-| base | prev_tp_other_zone | 3,010 | 20.78% | 57.6% | -0.0667 | -200.9R | 11.1% | 4.4% | 19.5% |
+| 팔 | 부류 | 건수 | 비중 | 손절률 | 거래당 net R | net R 합 | 순손익 대비 | 같은 1분 | 무효화 봉 체결 | **완전 중복** |
+| -- | -- | --: | --: | --: | --: | --: | --: | --: | --: | --: |
+| base | **prev_stop_same_zone** | 374 | 2.58% | 97.6% | -1.1345 | -424.3R | 23.4% | 95.7% | 94.4% | **91.4%** |
+| base | prev_stop_other_zone | 8,333 | 57.52% | 60.6% | -0.1305 | -1,087.5R | 60.0% | 13.5% | 26.1% | **0.0%** |
+| base | prev_tp_same_zone | 2,769 | 19.12% | 56.1% | -0.0339 | -93.9R | 5.2% | 7.5% | 26.0% | **7.5%** |
+| base | prev_tp_other_zone | 3,010 | 20.78% | 57.6% | -0.0667 | -200.9R | 11.1% | 4.4% | 19.5% | **0.0%** |
+| no_same_step_reopen | **prev_stop_same_zone** | 16 | 0.12% | 43.8% | +0.2770 | +4.4R | -0.4% | 0.0% | 0.0% | **0.0%** |
+| no_same_step_reopen | prev_stop_other_zone | 7,599 | 58.90% | 59.0% | -0.0899 | -683.5R | 55.1% | 0.0% | 21.4% | **0.0%** |
+| no_same_step_reopen | prev_tp_same_zone | 2,486 | 19.27% | 61.1% | -0.1635 | -406.5R | 32.8% | 0.0% | 24.1% | **0.0%** |
+| no_same_step_reopen | prev_tp_other_zone | 2,801 | 21.71% | 57.2% | -0.0534 | -149.7R | 12.1% | 0.0% | 16.4% | **0.0%** |
 
 ## §1 존 식별자 교체 — 진짜 대 대리변수(`손절가`)
 
@@ -76,10 +73,10 @@
 | base | is | 34,541 | 1,326 | 0 | **23** | 33,192 |
 | base | oos_warm | 14,795 | 385 | 0 | **6** | 14,404 |
 | base | oos | 14,486 | 374 | 0 | **6** | 14,106 |
-| retap_once | full | 42,653 | 0 | 0 | **17** | 42,636 |
-| retap_once | oos_warm | 12,889 | 0 | 0 | **1** | 12,888 |
-| cancel_bar_open | full | 38,828 | 78 | 0 | **18** | 38,732 |
-| cancel_bar_open | oos_warm | 11,626 | 22 | 0 | **3** | 11,601 |
+| no_same_step_reopen | full | 42,767 | 56 | 0 | **25** | 42,686 |
+| no_same_step_reopen | is | 29,583 | 40 | 0 | **18** | 29,525 |
+| no_same_step_reopen | oos_warm | 13,136 | 16 | 0 | **7** | 13,113 |
+| no_same_step_reopen | oos | 12,902 | 16 | 0 | **7** | 12,879 |
 
 🚨 「대리변수만」 칸이 곧 **우연히 손절가가 같은 다른 존**이다 — 원 관측의 391에 그만큼이 섞여 있었다.
 
@@ -109,10 +106,10 @@
 | base | oos | 4 | 12 | 48 |
 | base | oos | 5 | 5 | 25 |
 | base | oos | 6 | 1 | 6 |
-| cancel_bar_open | full | 2 | 70 | 140 |
-| cancel_bar_open | full | 3 | 1 | 3 |
-| cancel_bar_open | full | 4 | 2 | 8 |
-| cancel_bar_open | oos_warm | 2 | 22 | 44 |
+| no_same_step_reopen | full | 2 | 56 | 112 |
+| no_same_step_reopen | is | 2 | 40 | 80 |
+| no_same_step_reopen | oos_warm | 2 | 16 | 32 |
+| no_same_step_reopen | oos | 2 | 16 | 32 |
 
 ## §1 TF 분포 (진짜 식별자 · 무더기)
 
@@ -134,22 +131,22 @@
 | base | oos | 1h | 69 | 2,555 | 2.70% |
 | base | oos | 2h | 38 | 1,287 | 2.95% |
 | base | oos | 4h | 10 | 613 | 1.63% |
-| retap_once | full | 15m | 0 | 29,355 | 0.00% |
-| retap_once | full | 1h | 0 | 7,696 | 0.00% |
-| retap_once | full | 2h | 0 | 3,780 | 0.00% |
-| retap_once | full | 4h | 0 | 1,822 | 0.00% |
-| retap_once | oos_warm | 15m | 0 | 8,848 | 0.00% |
-| retap_once | oos_warm | 1h | 0 | 2,287 | 0.00% |
-| retap_once | oos_warm | 2h | 0 | 1,186 | 0.00% |
-| retap_once | oos_warm | 4h | 0 | 568 | 0.00% |
-| cancel_bar_open | full | 15m | 66 | 26,531 | 0.25% |
-| cancel_bar_open | full | 1h | 6 | 7,061 | 0.08% |
-| cancel_bar_open | full | 2h | 4 | 3,529 | 0.11% |
-| cancel_bar_open | full | 4h | 2 | 1,707 | 0.12% |
-| cancel_bar_open | oos_warm | 15m | 20 | 8,101 | 0.25% |
-| cancel_bar_open | oos_warm | 1h | 2 | 2,036 | 0.10% |
-| cancel_bar_open | oos_warm | 2h | 0 | 1,004 | 0.00% |
-| cancel_bar_open | oos_warm | 4h | 0 | 485 | 0.00% |
+| no_same_step_reopen | full | 15m | 45 | 29,249 | 0.15% |
+| no_same_step_reopen | full | 1h | 6 | 7,817 | 0.08% |
+| no_same_step_reopen | full | 2h | 4 | 3,802 | 0.11% |
+| no_same_step_reopen | full | 4h | 1 | 1,899 | 0.05% |
+| no_same_step_reopen | is | 15m | 30 | 20,250 | 0.15% |
+| no_same_step_reopen | is | 1h | 5 | 5,439 | 0.09% |
+| no_same_step_reopen | is | 2h | 4 | 2,615 | 0.15% |
+| no_same_step_reopen | is | 4h | 1 | 1,279 | 0.08% |
+| no_same_step_reopen | oos_warm | 15m | 15 | 8,987 | 0.17% |
+| no_same_step_reopen | oos_warm | 1h | 1 | 2,366 | 0.04% |
+| no_same_step_reopen | oos_warm | 2h | 0 | 1,175 | 0.00% |
+| no_same_step_reopen | oos_warm | 4h | 0 | 608 | 0.00% |
+| no_same_step_reopen | oos | 15m | 15 | 8,885 | 0.17% |
+| no_same_step_reopen | oos | 1h | 1 | 2,308 | 0.04% |
+| no_same_step_reopen | oos | 2h | 0 | 1,134 | 0.00% |
+| no_same_step_reopen | oos | 4h | 0 | 575 | 0.00% |
 
 ## 검산
 
@@ -184,16 +181,14 @@
 | (b) 존 식별자 누락 0건 | all | trades_without_zone_key | 0.000000 | 0.000000 | 0.00e+00 |
 | (a) 기준 팔 ≡ 채택 북 인자 | — | skipped_not_base_arm | 0.000000 | 0.000000 | 0.00e+00 |
 | (b) 존 식별자 누락 0건 | all | trades_without_zone_key | 0.000000 | 0.000000 | 0.00e+00 |
-| (a) 기준 팔 ≡ 채택 북 인자 | — | skipped_not_base_arm | 0.000000 | 0.000000 | 0.00e+00 |
-| (b) 존 식별자 누락 0건 | all | trades_without_zone_key | 0.000000 | 0.000000 | 0.00e+00 |
 
 ## 판정
 
 📌 **§1 — 진짜 존 식별자로 세면 주 구간(`oos_warm`) 무더기는 385건(2.60%)이고 손절률 97.7% · 거래당 net R -1.1352다.**
 📌 대리변수(`손절가`)로 세면 391건이다 — 차이는 「대리변수만」 6건 · 「진짜만」 0건이다.
 📌 **§2 코드 경로 — 그 무더기의 94.5%가 체결 시각이 존 `break_time` 이후다**(= 무효화 봉 안에서 체결 · WAN-364 관측 필드). 인과 취소(WAN-365)가 그 봉의 대기 지정가를 살려 두는 **설계대로의 결과**인지, 그 위에 재탭이 후보를 여러 개 만든 몫인지는 아래 반사실 팔이 가른다.
-📌 반사실 `retap_mode="once"`: 무더기 0건(0.00%) · 거래당 net R +0.0000.
-📌 반사실 `invalidation_cancel="bar_open"`: 무더기 22건(0.19%) · 거래당 net R -0.0196.
+⚠️ 반사실 팔 `retap_mode="once"`은 **안 쟀다** — 지어내지 않는다.
+⚠️ 반사실 팔 `invalidation_cancel="bar_open"`은 **안 쟀다** — 지어내지 않는다.
 
 🚨 **이 표는 「필터를 켜라」로 읽지 않는다** — 무더기를 지우면 공유 자본·슬롯이 재배치돼 다른 숫자가 나오고(WAN-316), 팔 사이의 차이에는 「그 거래를 안 해서」와 「다른 거래를 대신 해서」가 섞여 있다. **판정(가/나/다)은 라이브 파리티(§3)가 낸다.**
 
@@ -204,5 +199,3 @@
 * 전부 `baseline`(낙관) 렌즈 위 값이고 **체결 보수화(`pen_5bp`) 미측정** · 총수익 %는 이 좌표에서 복리 착시(WAN-169/213).
 * **라이브 파리티는 서버 몫**(`alphablock cascade` · `scripts/wan409-server-cascade-census.sh`) — 로컬은 러너 장부가 비어 판정할 수 없다.
 * 실거래 보류 유지(`ALPHABLOCK_LIVE_TRADING=false`).
-
-⏱️ 실측 5,340초 · 48칸 — ⚠️ 다른 모듈의 셀 비용과 섞지 말 것(WAN-316).
