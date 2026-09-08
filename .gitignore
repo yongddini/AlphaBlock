@@ -59,3 +59,7 @@ logs/
 # macOS
 .DS_Store
 .auto-dev.log
+
+# WAN-410 연기 시험 산출물 — 좁혀 돈 판이라 채택 좌표가 아니다(공개 표와 섞지 않는다).
+backtest/reports/*_smoke.csv
+backtest/reports/*_smoke.md
