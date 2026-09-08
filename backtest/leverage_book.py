@@ -272,7 +272,12 @@ class BookStats:
     *「거의 매일 반나절 쉰다」*에 가깝고 그건 개선폭과 별개의 정보다(이슈 §판정 규칙 5)."""
     circuit_breaker_first_trip: dict[str, int] = field(default_factory=dict)
     """발동한 KST 하루 → **처음 막은 시각**(ms). 매칭 대조군(§2겹)이 이 `(날짜, 시각)`
-    쌍을 다른 날로 재배정해 「같은 만큼 쉬되 손실과 무관하게」 쉬는 팔을 만든다."""
+    쌍을 다른 날로 재배정해 「같은 만큼 쉬되 손실과 무관하게」 쉬는 팔을 만든다.
+
+    ⚠️ **「문턱을 넘은 시각」이 아니라 「처음 막은 시각」이다** — 문턱을 넘은 뒤 후보가 한참
+    없으면 그 사이는 안 세어진다. 대조군이 맞춰야 하는 것이 *「하루 중 언제부터 매매가
+    끊겼나」*라 이쪽이 맞는 자다(발동해도 막을 것이 없으면 그 하루엔 아무 일도 안 일어난다).
+    래치라 이 값 **이후의 그 하루 진입은 정의상 전부 막힌다**(검산 (b))."""
     liquidations: list[LiquidationEvent] = field(default_factory=list)
     skip_records: list[SkippedSetup] = field(default_factory=list)
     """스킵된 후보 하나하나의 기록(WAN-180) — 카운터의 원자료라 합이 항상 카운터와 같다."""
@@ -397,9 +402,9 @@ def _reductions_for(
 
 @dataclass
 class _DailyLedger:
-    """그날 **이미 청산된** 거래의 실현 R·손절 건수 (WAN-410 서킷브레이커의 유일한 자).
+    """그날 **이미 청산된** 거래의 실현 R·손절 건수와, 그것이 문턱을 넘었는지의 **래치**.
 
-    ## 정의를 여기 한 곳에 못 박는다 (§1-0)
+    ## 정의를 여기 한 곳에 못 박는다 (WAN-410 §1-0)
 
     * **하루 = KST 날짜**(`common.timefmt.kst_day_key`) — 사람이 읽는 하루와 같다(WAN-172).
       자정(KST)에 리셋되고, 그 리셋이 곧 「하루 한도」의 뜻이다.
@@ -414,16 +419,31 @@ class _DailyLedger:
     * **부분 청산은 최종 청산에 몰아 센다** — 축소 시점에 현금은 움직이지만(WAN-323) R은
       거래 하나가 끝나야 정의된다. 래더를 안 켜면 축소 자체가 없어 이 선택은 무동작이다.
 
+    ## 🚨 래치는 **청산되는 그 순간** 내려간다 — 다음 주문 시도 때가 아니다
+
+    `credit()`이 손익을 기록하면서 **곧바로** 문턱을 확인하고, 넘었으면 그 KST 하루를 잠근다.
+    그 하루는 **자정까지 안 열린다**(늦은 익절로 누계가 회복돼도 그대로).
+
+    두 가지를 동시에 바로잡는다: (1) 「차단기」라는 이름의 뜻 그대로다 — 내려간 차단기는
+    스스로 올라오지 않는다. (2) **후보가 언제 오는지에 판정이 의존하지 않는다** — 문턱을 넘은
+    구간에 마침 후보가 없으면 영영 안 잠기는 판정은 *「손실이 문턱을 넘으면 멈춘다」*가
+    아니라 *「문턱을 넘은 채로 주문을 내려 하면 멈춘다」*다(4h 연기 시험에서 이 차이가 실제로
+    드러났다: 발동 뒤 진입이 12건 샜다).
+
     ⚠️ **이 원장은 라이브 배선의 계약이기도 하다** — 페이퍼 지갑이 gross를 쌓던 시절
     (WAN-392)의 값을 읽으면 **틀린 때에 발동한다**. 백테와 라이브가 같은 자를 읽어야
     한다(WAN-305).
     """
 
+    loss_limit_r: float | None = None
+    stop_limit: int | None = None
     realized_r: dict[str, float] = field(default_factory=dict)
     stops: dict[str, int] = field(default_factory=dict)
+    latched: dict[str, int] = field(default_factory=dict)
+    """발동한 KST 하루 → **그 하루가 잠긴 시각**(= 그 손익을 실현한 청산 시각)."""
 
     def credit(self, position: _OpenBookPosition) -> None:
-        """최종 청산 하나를 그 **청산 시각의 KST 하루**에 기록한다."""
+        """최종 청산 하나를 그 **청산 시각의 KST 하루**에 기록하고, 넘었으면 **잠근다**."""
         day = kst_day_key(position.exit_time)
         risk = position.entry_risk_amount
         self.realized_r[day] = self.realized_r.get(day, 0.0) + (
@@ -431,12 +451,18 @@ class _DailyLedger:
         )
         if position.trade.exits and position.trade.exits[-1].reason is ExitReason.STOP_LOSS:
             self.stops[day] = self.stops.get(day, 0) + 1
+        if day in self.latched:
+            return
+        # 🚨 경계는 **`<=`·`>=`** — 문턱에 **닿으면** 발동한다.
+        hit = (self.loss_limit_r is not None and self.realized_r[day] <= self.loss_limit_r) or (
+            self.stop_limit is not None and self.stops.get(day, 0) >= self.stop_limit
+        )
+        if hit:
+            self.latched[day] = position.exit_time
 
-    def tripped(self, day: str, *, loss_limit_r: float | None, stop_limit: int | None) -> bool:
-        """이 하루가 이미 문턱을 넘었나. 🚨 경계는 **`<=`·`>=`**(문턱에 **닿으면** 발동)."""
-        if loss_limit_r is not None and self.realized_r.get(day, 0.0) <= loss_limit_r:
-            return True
-        return stop_limit is not None and self.stops.get(day, 0) >= stop_limit
+    def tripped(self, day: str) -> bool:
+        """이 KST 하루가 이미 잠겼나."""
+        return day in self.latched
 
 
 def _validate_cells(cells: Sequence[BookCell]) -> None:
@@ -566,6 +592,9 @@ def run_leverage_book(
     * **인과적이다** — 그 시각까지 **이미 청산된** 거래의 실현 R만 본다(`_DailyLedger`가
       그 자를 한 곳에 못 박는다). 🚨 **그날의 첫 손실들은 못 막는다 — 그게 맞는 설계다**
       (막을 수 있다면 그건 미래를 아는 것이다).
+    * **래치다** — 한 번 발동하면 **그 KST 하루가 끝날 때까지** 안 풀린다(늦은 익절로 누계가
+      회복돼도 그날은 다시 안 연다). 「차단기」라는 이름이 그 뜻이고, 그래야 *「발동 뒤 진입
+      0건」*이 검산으로 성립한다.
     * **이미 열린 포지션은 건드리지 않는다** — 청산 규칙은 그대로다. 막는 것은 **그 뒤에
       진입할 후보**뿐이고, 그래서 이 축은 「언제 매매를 멈추나」이지 「언제 던지나」가 아니다.
     * `circuit_breaker_scope`는 무엇을 막을지 고른다(`"entry"` = 신규 진입만 ·
@@ -632,7 +661,7 @@ def run_leverage_book(
     trades: list[Trade] = []
     stats = BookStats()
     last_event: int | None = None
-    ledger = _DailyLedger()
+    ledger = _DailyLedger(loss_limit_r=daily_loss_limit_r, stop_limit=daily_stop_limit)
     breaker_on = daily_loss_limit_r is not None or daily_stop_limit is not None
     schedule: Mapping[str, int] = blocked_from_by_day or {}
 
@@ -702,7 +731,7 @@ def run_leverage_book(
             )
             day = kst_day_key(cand.entry_time)
             blocked = scoped and (
-                ledger.tripped(day, loss_limit_r=daily_loss_limit_r, stop_limit=daily_stop_limit)
+                ledger.tripped(day)
                 if breaker_on
                 else cand.entry_time >= schedule.get(day, _MAX_TIME)
             )

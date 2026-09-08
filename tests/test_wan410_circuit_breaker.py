@@ -112,7 +112,10 @@ def _run(cells: list[BookCell], **kwargs: object) -> tuple[list[int], object]:
 def test_breaker_off_is_bit_identical() -> None:
     """인자를 안 주면 예전 경로와 **거래·손익이 같다** — 옵트인 계약의 본문이다."""
     cells = _cells(
-        ("BTCUSDT", [_loser(DAY1, DAY1 + _MINUTE), _winner(DAY1 + 2 * _MINUTE, DAY1 + 3 * _MINUTE)]),
+        (
+            "BTCUSDT",
+            [_loser(DAY1, DAY1 + _MINUTE), _winner(DAY1 + 2 * _MINUTE, DAY1 + 3 * _MINUTE)],
+        ),
         ("ETHUSDT", [_loser(DAY1 + _MINUTE, DAY1 + 2 * _MINUTE)]),
     )
     plain, out_plain = _run(cells)
@@ -121,7 +124,8 @@ def test_breaker_off_is_bit_identical() -> None:
     )
     assert plain == explicit
     assert [t.realized_pnl for t in out_plain.trades] == [  # type: ignore[attr-defined]
-        t.realized_pnl for t in out_explicit.trades  # type: ignore[attr-defined]
+        t.realized_pnl
+        for t in out_explicit.trades  # type: ignore[attr-defined]
     ]
     assert out_plain.stats.skipped_circuit_breaker == 0  # type: ignore[attr-defined]
     assert out_plain.stats.circuit_breaker_days == {}  # type: ignore[attr-defined]
@@ -228,6 +232,25 @@ def test_scope_selects_what_is_blocked(scope: str, expect_new: bool, expect_reen
     entries, _ = _run(cells, daily_loss_limit_r=-1.0, circuit_breaker_scope=scope)
     assert (new_entry in entries) is expect_new
     assert (rearm in entries) is expect_reentry
+
+
+def test_breaker_is_a_latch_within_the_day() -> None:
+    """🚨 **한 번 발동하면 그 KST 하루는 안 열린다** — 늦은 익절로 누계가 회복돼도 그대로.
+
+    래치가 아니면 「누계」가 오르내리며 매매가 다시 열리고, 그러면 *「발동 뒤 진입 0건」*이
+    **정의상 성립하지 않는다**(4h 연기 시험에서 실제로 12건이 샜다).
+    """
+    cells = _cells(
+        # 00:00 진입 → 00:01 손절(−1R) = 발동.
+        ("BTCUSDT", [_loser(DAY1, DAY1 + _MINUTE)]),
+        # 발동 전에 이미 열려 있던 큰 익절이 00:05에 청산돼 누계를 **플러스로 되돌린다**.
+        ("ETHUSDT", [_winner(DAY1, DAY1 + 5 * _MINUTE)]),
+        # 그 뒤 진입 — 누계는 회복됐지만 래치는 그대로 내려가 있다.
+        ("SOLUSDT", [_winner(DAY1 + 6 * _MINUTE, DAY1 + 7 * _MINUTE)]),
+    )
+    entries, out = _run(cells, daily_loss_limit_r=-1.0)
+    assert DAY1 + 6 * _MINUTE not in entries, "누계가 회복되자 래치가 풀렸다"
+    assert out.stats.circuit_breaker_days == {"2024-03-05": 1}  # type: ignore[attr-defined]
 
 
 def test_stop_count_axis_counts_stops_not_losses() -> None:

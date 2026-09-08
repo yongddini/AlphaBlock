@@ -111,10 +111,10 @@ from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypedDict
+from typing import TypedDict, get_args
 
 import pandas as pd
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from backtest import harness
 from backtest.book_cli import BookSegment, iter_book_segments, net_r
@@ -200,6 +200,9 @@ NOISE_R = 0.005
 
 #: 종목당 유효 거래 하한(WAN-84 이래 같은 자).
 MIN_TRADES_PER_SYMBOL = 20
+
+#: §1-0 버킷 하한 — 이보다 얇은 버킷은 「가장 나쁜 버킷」 후보에서 뺀다(같은 20건 자).
+MIN_BUCKET_TRADES = 20
 
 #: 검산 (a)가 대조하는 열.
 _CHECK_METRICS = ("num_trades", "win_rate", "total_return", "max_drawdown", "peak_concurrency")
@@ -369,6 +372,18 @@ def place(
     )
 
 
+def on_adopted_coordinates(symbols: Sequence[str], timeframes: Sequence[str]) -> bool:
+    """이 실행이 **채택 좌표**를 도는가 — 아니면 공개값 대조 검산은 성립하지 않는다.
+
+    🚨 좁혀 돈 판을 공개 채택 북과 대조하면 **좌표 차이가 배선 오류처럼 보인다**(WAN-381이
+    파일럿에서 `5.63e+04`를 보고 못 박은 자리). 성립 안 하는 검산은 **실패로 찍지 않고
+    「건너뜀」으로** 찍는다 — 「안 걸었다」와 「걸었는데 틀렸다」는 다른 말이다.
+    """
+    return list(symbols) == list(harness.DEFAULT_SYMBOLS) and list(timeframes) == list(
+        harness.DEFAULT_TIMEFRAMES
+    )
+
+
 # --------------------------------------------------------------------------- #
 # §1-0 정의를 못 박는다 — 두 규약을 **나란히** 낸다
 # --------------------------------------------------------------------------- #
@@ -451,7 +466,38 @@ def realized_r_before(facts: Sequence[TradeFact], *, convention: str = "settled"
     return out
 
 
-class DefinitionRow(BaseModel):
+class _CsvRow(BaseModel):
+    """CSV 왕복에서 **`None`이 `NaN`으로 되살아나는 것**을 모델에서 한 번 되돌린다.
+
+    🚨 pandas는 빈 칸을 `NaN`으로 읽는다 — `float | None` 필드는 그것을 **유효한 float으로
+    받아** 표에 `nan`이 찍히고(WAN-395 §부수 수리가 겪은 그 함정) `int | None` 필드는 아예
+    죽는다. 되돌리는 자리는 **모델 하나**여야 한다: 읽는 경로마다 고치면 한 곳을 빠뜨린다.
+
+    ⚠️ **`None`을 허용하는 필드만** 되돌린다 — `share_of_total_net_r`처럼 **`NaN`이 뜻을
+    갖는**(총합이 음수가 아니라 비율이 정의되지 않는다) 필드는 그대로 둔다.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _restore_none(cls, data: object) -> object:
+        if not isinstance(data, dict):
+            return data
+        out = dict(data)
+        for name, field in cls.model_fields.items():
+            value = out.get(name)
+            if isinstance(value, float) and value != value and _allows_none(field.annotation):
+                out[name] = None
+        return out
+
+
+def _allows_none(annotation: object) -> bool:
+    """그 필드가 `None`을 받는가 — `X | None`의 유니온 인자에 `NoneType`이 있으면 참."""
+    return type(None) in get_args(annotation)
+
+
+class DefinitionRow(_CsvRow):
     """§1-0 한 줄 — (구간, 지표, 규약, 버킷)의 사후 성적.
 
     🚨 **관측이지 반사실이 아니다** — 「그 문턱에서 막았다면」의 손익은 막힌 거래가 비운
@@ -544,9 +590,25 @@ def definition_rows(facts: Sequence[TradeFact], *, segment: str) -> list[Definit
     return rows
 
 
-def worst_bucket(rows: Sequence[DefinitionRow], *, indicator: str, convention: str) -> str | None:
-    """그 (지표, 규약)에서 **거래당 net R이 가장 나쁜** 버킷 — §1-0이 가르는 그 부호."""
-    scoped = [r for r in rows if r.indicator == indicator and r.convention == convention]
+def worst_bucket(
+    rows: Sequence[DefinitionRow],
+    *,
+    indicator: str,
+    convention: str,
+    min_trades: int = MIN_BUCKET_TRADES,
+) -> str | None:
+    """그 (지표, 규약)에서 **거래당 net R이 가장 나쁜** 버킷 — §1-0이 가르는 그 부호.
+
+    🚨 **얇은 버킷은 후보에서 뺀다**(기본 `min_trades`) — 안 그러면 **거래 한 건**이
+    「가장 나쁜 버킷」을 정한다(4h만 좁혀 돌린 연기 시험에서 실제로 n=1 버킷이 argmin으로
+    올라왔다). 이 저장소가 표본 미달 셀을 판정에서 빼 온 그 자와 같은 20건이다(WAN-84 이래).
+    전부 얇으면 **판정하지 않는다**(`None` — 지어내지 않는다).
+    """
+    scoped = [
+        r
+        for r in rows
+        if r.indicator == indicator and r.convention == convention and r.num_trades >= min_trades
+    ]
     return min(scoped, key=lambda r: r.mean_net_r).bucket if scoped else None
 
 
@@ -555,7 +617,7 @@ def worst_bucket(rows: Sequence[DefinitionRow], *, indicator: str, convention: s
 # --------------------------------------------------------------------------- #
 
 
-class GridRow(BaseModel):
+class GridRow(_CsvRow):
     """한 (팔, 구간)의 북 집계. 북은 한 지갑이라 심볼 열이 없다(WAN-341)."""
 
     model_config = ConfigDict(frozen=True)
@@ -623,7 +685,7 @@ class LooRow(GridRow):
     exclude: str
 
 
-class NullRow(BaseModel):
+class NullRow(_CsvRow):
     """§2겹 매칭 대조군 한 줄 — 「같은 만큼 쉬되 손실과 무관하게」 쉬는 팔."""
 
     model_config = ConfigDict(frozen=True)
@@ -643,7 +705,7 @@ class NullRow(BaseModel):
     trip_days: int
 
 
-class ChecksumRow(BaseModel):
+class ChecksumRow(_CsvRow):
     model_config = ConfigDict(frozen=True)
 
     check: str
@@ -1142,12 +1204,14 @@ def check_open_positions_untouched(
                 continue
             matched += 1
             mismatched += 1 if other != trade.exits[-1].time else 0
+        # 🚨 짝 수는 **열**로 싣는다 — 검산 **이름**에 넣으면 팔마다 다른 이름이 되어
+        # 요약이 33줄로 불어나고 「같은 검산인가」가 안 읽힌다.
         out.append(
             ChecksumRow(
-                check=f"c 먼저 열린 포지션 청산 불변(짝 {matched})",
+                check="c 먼저 열린 포지션 청산 불변",
                 arm=arm.name,
                 segment=segment,
-                metric="exit_time_mismatch",
+                metric=f"exit_time_mismatch(짝 {matched})",
                 left=float(mismatched),
                 right=0.0,
                 abs_diff=float(mismatched),
@@ -1317,19 +1381,25 @@ def _defs_section(defs: Sequence[DefinitionRow]) -> list[str]:
         for row in primary:
             if row.indicator != indicator:
                 continue
+            thin = " ⚠️표본" if row.num_trades < MIN_BUCKET_TRADES else ""
             out.append(
-                f"| `{row.convention}` | {row.bucket} | {row.num_trades:,} | "
+                f"| `{row.convention}` | {row.bucket}{thin} | {row.num_trades:,} | "
                 f"{_pct(row.share_of_trades)} | {_pct(row.win_rate)} | "
                 f"{_fmt(row.mean_net_r)} | {_fmt(row.sum_net_r, 1)} |"
             )
         out.append("")
         conventions = OPEN_CONVENTIONS if indicator == "open_cells_before" else REALIZED_CONVENTIONS
         worst = {c: worst_bucket(primary, indicator=indicator, convention=c) for c in conventions}
-        agree = len(set(worst.values())) == 1
-        verdict = (
-            "**두 규약이 같은 버킷을 가장 나쁘다고 본다**" if agree else "🚨 **규약에 갈린다**"
+        if any(b is None for b in worst.values()):
+            verdict = "🚨 **판정 불가**(유효 버킷이 없다 — 표본 미달)"
+        elif len(set(worst.values())) == 1:
+            verdict = "**두 규약이 같은 버킷을 가장 나쁘다고 본다**"
+        else:
+            verdict = "🚨 **규약에 갈린다**"
+        out.append(
+            f"가장 나쁜 버킷(**{MIN_BUCKET_TRADES}건 미만 버킷은 후보에서 뺀다**): "
+            + " · ".join(f"`{c}` → {b or '—'}" for c, b in worst.items())
         )
-        out.append("가장 나쁜 버킷: " + " · ".join(f"`{c}` → {b}" for c, b in worst.items()))
         out.append("")
         out.append(f"{verdict}.")
         out.append("")
@@ -1621,6 +1691,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     narrowed = symbols != list(harness.DEFAULT_SYMBOLS) or timeframes != list(
         harness.DEFAULT_TIMEFRAMES
     )
+    adopted = on_adopted_coordinates(symbols, timeframes)
     if narrowed:
         # 🚨 좁혀 돈 판은 **채택 좌표가 아니다** — 공개 CSV를 덮으면 그 표가 조용히 거짓이
         # 된다(WAN-335가 「좁히기가 한쪽에만 걸려 정상 좁히기를 고장으로 읽은」 자리).
@@ -1663,7 +1734,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         for seg in segs:
             facts = trade_facts(seg)
             rows.extend(definition_rows(facts, segment=seg.segment))
-            if seg.segment != PRIMARY_SEGMENT:
+            if seg.segment != PRIMARY_SEGMENT or not adopted:
                 continue
             mean = _mean([f.net_r for f in facts])
             checks_defs.append(
@@ -1689,7 +1760,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             )
         _append(rows, DEFS_CSV, ("segment", "indicator", "convention", "bucket"))
-        _append(checks_defs, CHECKSUM_CSV, ("check", "arm", "segment", "metric"))
+        if checks_defs:
+            _append(checks_defs, CHECKSUM_CSV, ("check", "arm", "segment", "metric"))
+        else:
+            print("[wan410] 검산 (a′)는 **건너뜁니다** — 채택 좌표가 아닙니다(좁혀 돈 판).")
         print(f"§1-0 {len(rows)}행 → {DEFS_CSV}")
     elif args.part == "grid":
         rows_grid, _placed = grid_rows(
@@ -1749,8 +1823,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             log=False,
         )
         checks = (
-            check_adopted_identity(
-                payloads, start_ms=start_ms, end_ms=end_ms, segments=list(SEGMENT_ORDER)
+            (
+                check_adopted_identity(
+                    payloads, start_ms=start_ms, end_ms=end_ms, segments=list(SEGMENT_ORDER)
+                )
+                if adopted
+                else []
             )
             + check_breaker_bound(placed, grid_arms)
             + check_open_positions_untouched(placed, grid_arms, segment=PRIMARY_SEGMENT)

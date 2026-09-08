@@ -1,0 +1,66 @@
+check,arm,segment,metric,left,right,abs_diff
+b 문턱 뒤 진입이 실제로 0건,loss-10R_both,oos_warm,leaked_entries,0.0,0.0,0.0
+b 문턱 뒤 진입이 실제로 0건,loss-10R_entry,oos_warm,leaked_entries,1.0,0.0,1.0
+b 문턱 뒤 진입이 실제로 0건,loss-10R_reentry,oos_warm,leaked_entries,4.0,0.0,4.0
+b 문턱 뒤 진입이 실제로 0건,loss-15R_both,oos_warm,leaked_entries,0.0,0.0,0.0
+b 문턱 뒤 진입이 실제로 0건,loss-15R_entry,oos_warm,leaked_entries,3.0,0.0,3.0
+b 문턱 뒤 진입이 실제로 0건,loss-15R_reentry,oos_warm,leaked_entries,3.0,0.0,3.0
+b 문턱 뒤 진입이 실제로 0건,loss-1R_both,oos_warm,leaked_entries,7.0,0.0,7.0
+b 문턱 뒤 진입이 실제로 0건,loss-1R_entry,oos_warm,leaked_entries,12.0,0.0,12.0
+b 문턱 뒤 진입이 실제로 0건,loss-1R_reentry,oos_warm,leaked_entries,3.0,0.0,3.0
+b 문턱 뒤 진입이 실제로 0건,loss-20R_both,oos_warm,leaked_entries,8.0,0.0,8.0
+b 문턱 뒤 진입이 실제로 0건,loss-20R_entry,oos_warm,leaked_entries,6.0,0.0,6.0
+b 문턱 뒤 진입이 실제로 0건,loss-20R_reentry,oos_warm,leaked_entries,3.0,0.0,3.0
+b 문턱 뒤 진입이 실제로 0건,loss-2R_both,oos_warm,leaked_entries,4.0,0.0,4.0
+b 문턱 뒤 진입이 실제로 0건,loss-2R_entry,oos_warm,leaked_entries,6.0,0.0,6.0
+b 문턱 뒤 진입이 실제로 0건,loss-2R_reentry,oos_warm,leaked_entries,3.0,0.0,3.0
+b 문턱 뒤 진입이 실제로 0건,loss-30R_both,oos_warm,leaked_entries,3.0,0.0,3.0
+b 문턱 뒤 진입이 실제로 0건,loss-30R_entry,oos_warm,leaked_entries,2.0,0.0,2.0
+b 문턱 뒤 진입이 실제로 0건,loss-30R_reentry,oos_warm,leaked_entries,1.0,0.0,1.0
+b 문턱 뒤 진입이 실제로 0건,loss-3R_both,oos_warm,leaked_entries,8.0,0.0,8.0
+b 문턱 뒤 진입이 실제로 0건,loss-3R_entry,oos_warm,leaked_entries,6.0,0.0,6.0
+b 문턱 뒤 진입이 실제로 0건,loss-3R_reentry,oos_warm,leaked_entries,0.0,0.0,0.0
+b 문턱 뒤 진입이 실제로 0건,loss-5R_both,oos_warm,leaked_entries,0.0,0.0,0.0
+b 문턱 뒤 진입이 실제로 0건,loss-5R_entry,oos_warm,leaked_entries,1.0,0.0,1.0
+b 문턱 뒤 진입이 실제로 0건,loss-5R_reentry,oos_warm,leaked_entries,0.0,0.0,0.0
+b 문턱 뒤 진입이 실제로 0건,loss-8R_both,oos_warm,leaked_entries,0.0,0.0,0.0
+b 문턱 뒤 진입이 실제로 0건,loss-8R_entry,oos_warm,leaked_entries,3.0,0.0,3.0
+b 문턱 뒤 진입이 실제로 0건,loss-8R_reentry,oos_warm,leaked_entries,0.0,0.0,0.0
+b 문턱 뒤 진입이 실제로 0건,stops1_both,oos_warm,leaked_entries,2.0,0.0,2.0
+b 문턱 뒤 진입이 실제로 0건,stops2_both,oos_warm,leaked_entries,4.0,0.0,4.0
+b 문턱 뒤 진입이 실제로 0건,stops3_both,oos_warm,leaked_entries,3.0,0.0,3.0
+b 문턱 뒤 진입이 실제로 0건,stops5_both,oos_warm,leaked_entries,0.0,0.0,0.0
+b 문턱 뒤 진입이 실제로 0건,stops8_both,oos_warm,leaked_entries,3.0,0.0,3.0
+c 먼저 열린 포지션 청산 불변(짝 364),loss-1R_entry,oos_warm,exit_time_mismatch,0.0,0.0,0.0
+c 먼저 열린 포지션 청산 불변(짝 503),loss-2R_entry,oos_warm,exit_time_mismatch,0.0,0.0,0.0
+c 먼저 열린 포지션 청산 불변(짝 589),loss-3R_entry,oos_warm,exit_time_mismatch,0.0,0.0,0.0
+c 먼저 열린 포지션 청산 불변(짝 684),loss-5R_entry,oos_warm,exit_time_mismatch,0.0,0.0,0.0
+c 먼저 열린 포지션 청산 불변(짝 740),loss-8R_entry,oos_warm,exit_time_mismatch,0.0,0.0,0.0
+c 먼저 열린 포지션 청산 불변(짝 759),loss-10R_entry,oos_warm,exit_time_mismatch,0.0,0.0,0.0
+c 먼저 열린 포지션 청산 불변(짝 786),loss-15R_entry,oos_warm,exit_time_mismatch,0.0,0.0,0.0
+c 먼저 열린 포지션 청산 불변(짝 838),loss-20R_entry,oos_warm,exit_time_mismatch,0.0,0.0,0.0
+c 먼저 열린 포지션 청산 불변(짝 857),loss-30R_entry,oos_warm,exit_time_mismatch,0.0,0.0,0.0
+c 먼저 열린 포지션 청산 불변(짝 521),loss-1R_reentry,oos_warm,exit_time_mismatch,0.0,0.0,0.0
+c 먼저 열린 포지션 청산 불변(짝 584),loss-2R_reentry,oos_warm,exit_time_mismatch,0.0,0.0,0.0
+c 먼저 열린 포지션 청산 불변(짝 642),loss-3R_reentry,oos_warm,exit_time_mismatch,0.0,0.0,0.0
+c 먼저 열린 포지션 청산 불변(짝 706),loss-5R_reentry,oos_warm,exit_time_mismatch,0.0,0.0,0.0
+c 먼저 열린 포지션 청산 불변(짝 754),loss-8R_reentry,oos_warm,exit_time_mismatch,0.0,0.0,0.0
+c 먼저 열린 포지션 청산 불변(짝 765),loss-10R_reentry,oos_warm,exit_time_mismatch,0.0,0.0,0.0
+c 먼저 열린 포지션 청산 불변(짝 828),loss-15R_reentry,oos_warm,exit_time_mismatch,0.0,0.0,0.0
+c 먼저 열린 포지션 청산 불변(짝 838),loss-20R_reentry,oos_warm,exit_time_mismatch,0.0,0.0,0.0
+c 먼저 열린 포지션 청산 불변(짝 857),loss-30R_reentry,oos_warm,exit_time_mismatch,0.0,0.0,0.0
+c 먼저 열린 포지션 청산 불변(짝 380),loss-1R_both,oos_warm,exit_time_mismatch,0.0,0.0,0.0
+c 먼저 열린 포지션 청산 불변(짝 509),loss-2R_both,oos_warm,exit_time_mismatch,0.0,0.0,0.0
+c 먼저 열린 포지션 청산 불변(짝 591),loss-3R_both,oos_warm,exit_time_mismatch,0.0,0.0,0.0
+c 먼저 열린 포지션 청산 불변(짝 684),loss-5R_both,oos_warm,exit_time_mismatch,0.0,0.0,0.0
+c 먼저 열린 포지션 청산 불변(짝 740),loss-8R_both,oos_warm,exit_time_mismatch,0.0,0.0,0.0
+c 먼저 열린 포지션 청산 불변(짝 759),loss-10R_both,oos_warm,exit_time_mismatch,0.0,0.0,0.0
+c 먼저 열린 포지션 청산 불변(짝 786),loss-15R_both,oos_warm,exit_time_mismatch,0.0,0.0,0.0
+c 먼저 열린 포지션 청산 불변(짝 838),loss-20R_both,oos_warm,exit_time_mismatch,0.0,0.0,0.0
+c 먼저 열린 포지션 청산 불변(짝 857),loss-30R_both,oos_warm,exit_time_mismatch,0.0,0.0,0.0
+c 먼저 열린 포지션 청산 불변(짝 359),stops1_both,oos_warm,exit_time_mismatch,0.0,0.0,0.0
+c 먼저 열린 포지션 청산 불변(짝 483),stops2_both,oos_warm,exit_time_mismatch,0.0,0.0,0.0
+c 먼저 열린 포지션 청산 불변(짝 571),stops3_both,oos_warm,exit_time_mismatch,0.0,0.0,0.0
+c 먼저 열린 포지션 청산 불변(짝 666),stops5_both,oos_warm,exit_time_mismatch,0.0,0.0,0.0
+c 먼저 열린 포지션 청산 불변(짝 730),stops8_both,oos_warm,exit_time_mismatch,0.0,0.0,0.0
+d 후보 층은 팔에 무관(배치 축),33팔,full,base+reentry_candidates,5174.0,5174.0,0.0
