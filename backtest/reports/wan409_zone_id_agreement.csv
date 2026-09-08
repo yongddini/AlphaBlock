@@ -1,0 +1,9 @@
+arm,segment,num_classified,both,real_only,proxy_only,neither
+base,full,49384,1711,0,29,47644
+base,is,34541,1326,0,23,33192
+base,oos_warm,14795,385,0,6,14404
+base,oos,14486,374,0,6,14106
+no_same_step_reopen,full,42767,56,0,25,42686
+no_same_step_reopen,is,29583,40,0,18,29525
+no_same_step_reopen,oos_warm,13136,16,0,7,13113
+no_same_step_reopen,oos,12902,16,0,7,12879

@@ -884,6 +884,64 @@ def cmd_same_minute(args: argparse.Namespace, settings: Settings) -> int:
     return 0
 
 
+def cmd_cascade(args: argparse.Namespace, settings: Settings) -> int:
+    """`alphablock cascade [--days N]` — 라이브 「같은 존 연속 체결」 인구조사(WAN-409 §3).
+
+    백테스트 채택 북에서 **직전 거래가 손절이고 같은 존인** 거래가 손절률 97.4%로 무더기를
+    이룬다(WAN-409 §1). 이 명령은 그 무더기가 **라이브(페이퍼)에도 나는가**를 센다 — 라이브는
+    무효화를 한 봉 늦게 알므로(WAN-353) 같은 무더기가 나야 하고, 안 난다면 백테만의 현상이라
+    고칠 대상은 필터가 아니라 파리티다.
+
+    🚨 **세기가 먼저다.** 페이퍼 장부는 2026-09-01에 리셋됐고(WAN-392) `live_limit_orders`도
+    그때 함께 비워졌으므로(`paper-reset.sh`의 보호 대상은 시세뿐) 표본이 문턱 미만이면
+    **판정하지 않고** 「표본 부족 · 관측 계속」으로 적는다. 순수 조회라 종료 코드는 항상
+    0이다(DB에 아무것도 안 쓴다).
+    """
+    from live.cascade_census import render, window_label
+    from live.fill_report import resolve_day_window
+    from live.order_journal import OrderJournal
+    from paper.store import PaperTradeStore
+
+    db_path = args.db if args.db is not None else settings.db_path
+    if args.days is None:
+        start_ms, end_ms = 0, 2**63 - 1
+        label = "장부 전수"
+    else:
+        _, end_ms, day_key = resolve_day_window(args.day)
+        start_ms = end_ms - max(1, args.days) * 86_400_000
+        label = f"{max(1, args.days)}일 창(끝 {day_key}) · {window_label(start_ms, end_ms)}"
+    journal = OrderJournal(db_path)
+    store = PaperTradeStore(db_path)
+    try:
+        orders = journal.orders_placed_between(start_ms=start_ms, end_ms=end_ms)
+        records = store.list_records()
+        symbols = _split_csv(args.symbol)
+        timeframes = _split_csv(args.tf)
+        if symbols is not None or timeframes is not None:
+            # 좁히기는 **탐색용 옵트인**이고 **양쪽에 똑같이** 건다 — 한쪽만 좁히면 정상
+            # 좁히기가 「짝이 없다」로 읽힌다(WAN-335 §2가 실제로 겪은 자리).
+            wanted_syms = set(symbols) if symbols is not None else None
+            wanted_tfs = set(timeframes) if timeframes is not None else None
+            orders = [
+                o
+                for o in orders
+                if (wanted_syms is None or o.symbol in wanted_syms)
+                and (wanted_tfs is None or o.timeframe in wanted_tfs)
+            ]
+            records = [
+                r
+                for r in records
+                if (wanted_syms is None or r.symbol in wanted_syms)
+                and (wanted_tfs is None or r.timeframe in wanted_tfs)
+            ]
+            label += " · 좌표 " + _coordinate_label(symbols, timeframes)
+        print(render(orders, records, label=label))
+    finally:
+        store.close()
+        journal.close()
+    return 0
+
+
 def cmd_fills(args: argparse.Namespace, settings: Settings) -> int:
     """`alphablock fills [--day YYYY-MM-DD]` — 당일(KST) 주문별 체결 여부 조회(WAN-232).
 
@@ -1949,6 +2007,27 @@ def build_parser() -> argparse.ArgumentParser:
     p_same_minute.add_argument("--symbol", default=None, help="종목 좁히기(콤마 구분, 탐색용)")
     p_same_minute.add_argument("--tf", default=None, help="TF 좁히기(콤마 구분, 탐색용)")
     p_same_minute.set_defaults(func=cmd_same_minute)
+
+    p_cascade = sub.add_parser(
+        "cascade",
+        help="라이브 「같은 존 연속 체결」 인구조사 — 백테 무더기가 라이브에도 나는가(WAN-409)",
+    )
+    p_cascade.add_argument("--db", default=None, help="장부 DB 경로(기본: 설정의 db_path)")
+    p_cascade.add_argument(
+        "--days",
+        type=int,
+        default=None,
+        help="최근 N일 창만 본다(기본: 장부 전수). --day로 창의 끝 날짜를 옮긴다",
+    )
+    p_cascade.add_argument(
+        "--day",
+        default="today",
+        metavar="YYYY-MM-DD",
+        help="--days 창의 끝 KST 날짜(기본: 오늘)",
+    )
+    p_cascade.add_argument("--symbol", default=None, help="종목 좁히기(콤마 구분, 탐색용)")
+    p_cascade.add_argument("--tf", default=None, help="TF 좁히기(콤마 구분, 탐색용)")
+    p_cascade.set_defaults(func=cmd_cascade)
 
     p_stop_width = sub.add_parser(
         "stop-width",

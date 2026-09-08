@@ -408,6 +408,13 @@ def _iter_reentries(
             # 비트 재현된다(손절 슬리피지를 안 얹으면 exit_price가 그대로다).
             order_block=ob,
             trigger_time=outcome.entry_time,
+            # WAN-409: 존 식별자도 base 후보와 **같은 값**을 싣는다 — 재진입은 정의상 부모와
+            # 같은 존에 다시 거는 것이라(WAN-273) `cand.zone_key`가 그대로 맞다. 빠져 있으면
+            # 북 거래를 존 단위로 묶는 인구조사가 재진입 거래를 통째로 「모르는 존」으로
+            # 흘린다(채택 북 `oos_warm` 거래의 약 10.7%). ⚠️ `tap_index`는 **안 싣는다** —
+            # 재진입에는 탭이 없어 그 값이 뜻하는 것이 없고, 지어내면 「몇 번째 탭인가」를
+            # 세는 표(WAN-388)가 조용히 틀린다. 순수 관측이라 손익·시퀀싱은 그대로다.
+            zone_key=cand.zone_key,
             exit_extreme=outcome.exit_extreme,
             exit_at_breakeven=outcome.exit_at_breakeven,
             # WAN-323: 래더를 켰으면 재진입 거래의 부분 청산도 북 회계로 넘긴다(안 켜면 빈 튜플).
