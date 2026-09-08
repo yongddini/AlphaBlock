@@ -1131,6 +1131,55 @@ def check_adopted_identity(
     return out
 
 
+#: 지표별로 **WAN-408 §0이 실제로 쓴 규약** — 검산 (a″)가 그 행만 공개 표와 맞댄다.
+#: (b)는 `#(진입 < t) − #(청산 ≤ t)`, (c)는 `bisect_left`(= 엄격히 앞선 청산만)였다.
+PUBLISHED_CONVENTION: dict[str, str] = {
+    "open_cells_before": "wan408",
+    "realized_net_r_today_before": "strict",
+}
+
+
+def check_published_leading(rows: Sequence[DefinitionRow]) -> list[ChecksumRow]:
+    """검산 (a″) — `wan408` 규약 행이 **공개 `wan408_leading.csv`를 그대로 재현**한다.
+
+    🚨 이것이 §1-0을 성립시키는 등식이다 — 같은 지표를 **다른 모듈이 다른 날 다시 만든
+    후보로** 계산해 공개 표와 같은 수가 나와야, 「규약을 바꿨더니 달라졌다」가 *규약의 몫*이지
+    *실행이 달라진 탓*이 아님이 선다. 공개 CSV가 없으면 **지어내지 않고 빈 목록**을 낸다.
+    """
+    published = REPORTS_DIR / "wan408_leading.csv"
+    if not published.exists():
+        return []
+    frame = pd.read_csv(published)
+    ref = {
+        (str(r["segment"]), str(r["indicator"]), str(r["bucket"])): r
+        for r in frame.to_dict("records")
+    }
+    out: list[ChecksumRow] = []
+    for row in rows:
+        if row.convention != PUBLISHED_CONVENTION.get(row.indicator):
+            continue
+        other = ref.get((row.segment, row.indicator, row.bucket))
+        if other is None:
+            continue
+        for metric, mine in (
+            ("num_trades", float(row.num_trades)),
+            ("mean_net_r", row.mean_net_r),
+        ):
+            theirs = float(other[metric])
+            out.append(
+                ChecksumRow(
+                    check="a″ `wan408` 규약 ≡ 공개 wan408_leading.csv",
+                    arm=BASE_ARM.name,
+                    segment=row.segment,
+                    metric=f"{metric}[{row.bucket}]",
+                    left=mine,
+                    right=theirs,
+                    abs_diff=abs(mine - theirs),
+                )
+            )
+    return out
+
+
 def check_breaker_bound(
     placed: Mapping[tuple[str, str], BookSegment], grid: Sequence[Arm]
 ) -> list[ChecksumRow]:
@@ -1391,8 +1440,10 @@ def _defs_section(defs: Sequence[DefinitionRow]) -> list[str]:
     total = primary[0].total_trades if primary else 0
     out.append(
         f"주 구간(`{PRIMARY_SEGMENT}`) 거래 **{total:,}건** 중 `진입 == 청산`인 거래가 "
-        f"**{zero:,}건**({zero / total:.2%} — 「같은 분 익절」 부류, WAN-336)이다. "
-        "🚨 **그 수가 곧 (b) 두 규약의 차다**(§1-0 대수 항등)."
+        f"**{zero:,}건**({zero / total:.2%})이다 — 「같은 1분에 열고 닫은」 부류이고 "
+        "**익절만이 아니라 손절·만료도 포함**한다. 🚨 **그 수가 곧 (b) 두 규약의 차다**"
+        "(§1-0 대수 항등). ⚠️ **WAN-336의 「같은 분 익절 7.37%」와 같은 수가 아니다** — "
+        "그쪽은 익절만 세고 **옛 좌표**(소급 취소 · 존폭 필터 켬 · 거래 6,336건)의 값이다."
     )
     out.append("")
     for indicator, title in (
@@ -1787,6 +1838,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     abs_diff=abs(mean - PUBLISHED_OOS_WARM_MEAN_NET_R),
                 )
             )
+        checks_defs.extend(check_published_leading(rows) if adopted else [])
         _append(rows, DEFS_CSV, ("segment", "indicator", "convention", "bucket"))
         if checks_defs:
             _append(checks_defs, CHECKSUM_CSV, ("check", "arm", "segment", "metric"))

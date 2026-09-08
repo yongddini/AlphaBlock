@@ -1,0 +1,91 @@
+check,arm,segment,metric,left,right,abs_diff
+a′ §1-0 발판 ≡ 공개 채택 북,base,oos_warm,num_trades,14843.0,14843.0,0.0
+a′ §1-0 발판 ≡ 공개 채택 북,base,oos_warm,mean_net_r,-0.12073851686076328,-0.12073851686076308,2.0816681711721685e-16
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,full,num_trades[0–1],15224.0,15224.0,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,full,mean_net_r[0–1],-0.17634604936367176,-0.1763460493636717,5.551115123125783e-17
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,full,num_trades[2–3],9015.0,9015.0,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,full,mean_net_r[2–3],-0.06592412507787318,-0.0659241250778731,8.326672684688674e-17
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,full,num_trades[4–6],14167.0,14167.0,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,full,mean_net_r[4–6],-0.05295088536224358,-0.0529508853622435,7.632783294297951e-17
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,full,num_trades[7–10],9216.0,9216.0,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,full,mean_net_r[7–10],-0.07527575323754415,-0.0752757532375441,5.551115123125783e-17
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,full,num_trades[11+],1810.0,1810.0,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,full,mean_net_r[11+],-0.08568070894552253,-0.0856807089455225,2.7755575615628914e-17
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,full,num_trades[≥ 0R],19903.0,19903.0,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,full,mean_net_r[≥ 0R],-0.07691120987048308,-0.076911209870483,8.326672684688674e-17
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,full,num_trades[[-3R ~ 0R)],7076.0,7076.0,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,full,mean_net_r[[-3R ~ 0R)],-0.08886258290381924,-0.0888625829038192,4.163336342344337e-17
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,full,num_trades[[-5R ~ -3R)],3318.0,3318.0,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,full,mean_net_r[[-5R ~ -3R)],-0.06310759438110183,-0.0631075943811018,2.7755575615628914e-17
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,full,num_trades[[-10R ~ -5R)],5866.0,5866.0,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,full,mean_net_r[[-10R ~ -5R)],-0.1007849748333247,-0.1007849748333247,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,full,num_trades[[-20R ~ -10R)],5936.0,5936.0,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,full,mean_net_r[[-20R ~ -10R)],-0.10736471178172283,-0.1073647117817228,2.7755575615628914e-17
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,full,num_trades[< -20R],7333.0,7333.0,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,full,mean_net_r[< -20R],-0.17462277713082763,-0.1746227771308276,2.7755575615628914e-17
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,is,num_trades[0–1],10781.0,10781.0,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,is,mean_net_r[0–1],-0.1716444183134582,-0.1716444183134582,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,is,num_trades[2–3],5787.0,5787.0,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,is,mean_net_r[2–3],-0.05928034219577187,-0.0592803421957718,6.938893903907228e-17
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,is,num_trades[4–6],9659.0,9659.0,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,is,mean_net_r[4–6],-0.04223348675376821,-0.0422334867537682,6.938893903907228e-18
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,is,num_trades[7–10],6826.0,6826.0,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,is,mean_net_r[7–10],-0.054802488606962095,-0.054802488606962,9.71445146547012e-17
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,is,num_trades[11+],1536.0,1536.0,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,is,mean_net_r[11+],-0.0718009149548733,-0.0718009149548733,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,is,num_trades[≥ 0R],14348.0,14348.0,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,is,mean_net_r[≥ 0R],-0.07957314173552633,-0.0795731417355263,2.7755575615628914e-17
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,is,num_trades[[-3R ~ 0R)],4781.0,4781.0,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,is,mean_net_r[[-3R ~ 0R)],-0.0717534186359668,-0.0717534186359668,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,is,num_trades[[-5R ~ -3R)],2134.0,2134.0,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,is,mean_net_r[[-5R ~ -3R)],-0.046272717973246384,-0.0462727179732463,8.326672684688674e-17
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,is,num_trades[[-10R ~ -5R)],3838.0,3838.0,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,is,mean_net_r[[-10R ~ -5R)],-0.11710862278148855,-0.1171086227814885,5.551115123125783e-17
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,is,num_trades[[-20R ~ -10R)],4204.0,4204.0,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,is,mean_net_r[[-20R ~ -10R)],-0.08711086390403393,-0.0871108639040339,2.7755575615628914e-17
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,is,num_trades[< -20R],5284.0,5284.0,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,is,mean_net_r[< -20R],-0.1299514717861604,-0.1299514717861604,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,oos_warm,num_trades[0–1],4443.0,4443.0,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,oos_warm,mean_net_r[0–1],-0.18775462112877808,-0.187754621128778,8.326672684688674e-17
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,oos_warm,num_trades[2–3],3228.0,3228.0,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,oos_warm,mean_net_r[2–3],-0.0778347730142794,-0.0778347730142794,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,oos_warm,num_trades[4–6],4508.0,4508.0,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,oos_warm,mean_net_r[4–6],-0.07591436210564739,-0.0759143621056473,9.71445146547012e-17
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,oos_warm,num_trades[7–10],2390.0,2390.0,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,oos_warm,mean_net_r[7–10],-0.13374876761760776,-0.1337487676176077,5.551115123125783e-17
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,oos_warm,num_trades[11+],274.0,274.0,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,oos_warm,mean_net_r[11+],-0.16348860518507388,-0.1634886051850738,8.326672684688674e-17
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,oos_warm,num_trades[≥ 0R],5555.0,5555.0,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,oos_warm,mean_net_r[≥ 0R],-0.07003571060862003,-0.07003571060862,2.7755575615628914e-17
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,oos_warm,num_trades[[-3R ~ 0R)],2295.0,2295.0,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,oos_warm,mean_net_r[[-3R ~ 0R)],-0.12450481138512733,-0.1245048113851273,2.7755575615628914e-17
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,oos_warm,num_trades[[-5R ~ -3R)],1184.0,1184.0,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,oos_warm,mean_net_r[[-5R ~ -3R)],-0.09345018412296305,-0.093450184122963,4.163336342344337e-17
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,oos_warm,num_trades[[-10R ~ -5R)],2028.0,2028.0,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,oos_warm,mean_net_r[[-10R ~ -5R)],-0.06989239060006387,-0.0698923906000638,6.938893903907228e-17
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,oos_warm,num_trades[[-20R ~ -10R)],1732.0,1732.0,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,oos_warm,mean_net_r[[-20R ~ -10R)],-0.15652589912456644,-0.1565258991245664,2.7755575615628914e-17
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,oos_warm,num_trades[< -20R],2049.0,2049.0,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,oos_warm,mean_net_r[< -20R],-0.28982198525245906,-0.289821985252459,5.551115123125783e-17
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,oos,num_trades[0–1],4459.0,4459.0,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,oos,mean_net_r[0–1],-0.20460663737134552,-0.2046066373713455,2.7755575615628914e-17
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,oos,num_trades[2–3],3271.0,3271.0,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,oos,mean_net_r[2–3],-0.0725066980130366,-0.0725066980130366,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,oos,num_trades[4–6],4406.0,4406.0,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,oos,mean_net_r[4–6],-0.06959160319079012,-0.0695916031907901,2.7755575615628914e-17
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,oos,num_trades[7–10],2196.0,2196.0,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,oos,mean_net_r[7–10],-0.13749770601987762,-0.1374977060198776,2.7755575615628914e-17
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,oos,num_trades[11+],202.0,202.0,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,oos,mean_net_r[11+],-0.2645449326803221,-0.2645449326803221,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,oos,num_trades[≥ 0R],5479.0,5479.0,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,oos,mean_net_r[≥ 0R],-0.07271608214183918,-0.0727160821418391,8.326672684688674e-17
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,oos,num_trades[[-3R ~ 0R)],2247.0,2247.0,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,oos,mean_net_r[[-3R ~ 0R)],-0.1406079735044239,-0.1406079735044239,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,oos,num_trades[[-5R ~ -3R)],1163.0,1163.0,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,oos,mean_net_r[[-5R ~ -3R)],-0.09641679709734799,-0.0964167970973479,8.326672684688674e-17
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,oos,num_trades[[-10R ~ -5R)],2032.0,2032.0,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,oos,mean_net_r[[-10R ~ -5R)],-0.05799462060255671,-0.0579946206025567,6.938893903907228e-18
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,oos,num_trades[[-20R ~ -10R)],1679.0,1679.0,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,oos,mean_net_r[[-20R ~ -10R)],-0.15100899682607363,-0.1510089968260736,2.7755575615628914e-17
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,oos,num_trades[< -20R],1934.0,1934.0,0.0
+a″ `wan408` 규약 ≡ 공개 wan408_leading.csv,base,oos,mean_net_r[< -20R],-0.317287801158224,-0.317287801158224,0.0
