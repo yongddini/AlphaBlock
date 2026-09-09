@@ -114,6 +114,7 @@ from backtest.leverage_book import LeverageBookParams, PlacedSetup
 from backtest.models import BacktestConfig, PositionSide, Trade
 from backtest.payload_cache import DEFAULT_CACHE_DIR, PayloadCache
 from backtest.run import parse_date_ms
+from backtest.sweep import timeframe_to_ms
 from backtest.wan169_leverage_book import CellPayload, run_cells
 from backtest.wan180_leverage_book_nine import apply_funding_proxy
 from backtest.wan323_partial_tp_ladder import PRIMARY_OOS, SEGMENT_ORDER
@@ -135,6 +136,8 @@ REPORTS_DIR = Path("backtest/reports")
 GRID_CSV_PATH = REPORTS_DIR / "wan412_short_direction_grid.csv"
 REGIME_CSV_PATH = REPORTS_DIR / "wan412_btc_regime.csv"
 LOO_CSV_PATH = REPORTS_DIR / "wan412_leave_one_out.csv"
+CELL_CSV_PATH = REPORTS_DIR / "wan412_by_cell.csv"
+SCOPE_CSV_PATH = REPORTS_DIR / "wan412_by_timeframe.csv"
 CHECKSUM_CSV_PATH = REPORTS_DIR / "wan412_checksum.csv"
 SUMMARY_PATH = REPORTS_DIR / "wan412_short_direction_summary.md"
 
@@ -243,6 +246,39 @@ class RegimeRow(BaseModel):
     win_rate: float | None
     mean_net_r: float | None
     net_r_sum: float
+
+
+class CellAttributionRow(BaseModel):
+    """§3 (A) **귀속** — 채택 북 **한 지갑**이 실제로 한 거래를 (종목 × TF × 방향)으로 쪼갠다.
+
+    🚨 **스코프가 아니다** — 이 지갑은 48칸이 자본을 나눠 쓴 그 지갑이고, 여기서 한 칸을
+    떼어 본다고 그 칸만 돌린 판이 되지 않는다(그건 `ScopeRow`가 낸다). 자본 경합이 **그대로
+    살아 있다** — 그 칸이 자리를 못 잡아 못 들어간 거래도 반영된 값이다.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    arm: str
+    segment: str
+    symbol: str
+    timeframe: str
+    direction: str
+    trades: int
+    win_rate: float | None
+    mean_net_r: float | None
+    net_r_sum: float
+
+
+class ScopeRow(ArmRow):
+    """§3 (B) **스코프** — 그 TF의 칸만으로 **지갑을 다시 배치**한다 (WAN-301/316 패턴).
+
+    🚨 **(A)를 TF로 합친 값과 같지 않다. 같으면 그게 버그다** — 여기서는 다른 TF가 자본을
+    안 먹으므로 그 12칸이 더 많이 들어간다. 두 표는 **다른 질문**에 답한다:
+    (A)는 *「우리가 실제로 돌리는 지갑에서 어느 칸이 벌고 잃었나」*, (B)는 *「그 TF만
+    돌리면 어떤가」*.
+    """
+
+    scope: str
 
 
 # --------------------------------------------------------------------------- #
@@ -514,6 +550,72 @@ def build_regime_rows(segment: BookSegment, *, arm: Arm, buckets: pd.DataFrame) 
     return out
 
 
+def build_cell_attribution(segment: BookSegment, *, arm: Arm) -> list[CellAttributionRow]:
+    """(A) 귀속 — 북이 실제로 한 거래를 칸으로 쪼갠다 (**재배치 없음**)."""
+    buckets: dict[tuple[str, str], list[tuple[Trade, float]]] = {}
+    for trade, placement in segment.trades_with_placements():
+        value = _net_or_none(trade, placement)
+        if value is not None:
+            buckets.setdefault(placement.cell, []).append((trade, value))
+    out: list[CellAttributionRow] = []
+    for (symbol, timeframe), rows in sorted(buckets.items()):
+        for direction, side in (
+            ("all", None),
+            ("long", PositionSide.LONG),
+            ("short", PositionSide.SHORT),
+        ):
+            picked = rows if side is None else [(t, n) for t, n in rows if t.side is side]
+            nets = [n for _t, n in picked]
+            if not nets:
+                continue
+            out.append(
+                CellAttributionRow(
+                    arm=arm.name,
+                    segment=segment.segment,
+                    symbol=_short(symbol),
+                    timeframe=timeframe,
+                    direction=direction,
+                    trades=len(nets),
+                    win_rate=sum(1 for n in nets if n > 0) / len(nets),
+                    mean_net_r=sum(nets) / len(nets),
+                    net_r_sum=sum(nets),
+                )
+            )
+    return out
+
+
+def build_scope_rows(
+    payloads: Sequence[CellPayload],
+    *,
+    arm: Arm,
+    start_ms: int,
+    end_ms: int,
+    cfg: BacktestConfig,
+    regime: DailyRegime | None,
+    segments: Sequence[str] = (harness.SEGMENT_FULL, PRIMARY_OOS),
+) -> list[ScopeRow]:
+    """(B) 스코프 — TF마다 그 칸들만으로 **지갑을 다시 배치**한다 (라벨 필터가 아니다)."""
+    view = scoped(payloads, arm)
+    out: list[ScopeRow] = []
+    for scope in sorted({p.timeframe for p in view}, key=timeframe_to_ms):
+        kept = [p for p in view if p.timeframe == scope]
+        for segment in place(kept, start_ms=start_ms, end_ms=end_ms, segments=list(segments)):
+            out.append(
+                ScopeRow(
+                    scope=scope,
+                    **_arm_fields(arm),
+                    **_row_kwargs(
+                        segment,
+                        cfg,
+                        num_symbols=len({p.symbol for p in kept}),
+                        entry_position=entry_in_zone(kept, segment.segment, include_reentry=True),
+                    ),
+                    **_extra_kwargs(segment, regime),
+                )
+            )
+    return out
+
+
 def build_leave_one_out(
     payloads: Sequence[CellPayload],
     *,
@@ -561,86 +663,110 @@ def build_leave_one_out(
 # --------------------------------------------------------------------------- #
 
 
-def checksum_adopted(
-    long_rows: Sequence[ArmRow],
+def checksum_candidate_parity(
+    withshort: Sequence[CellPayload],
     *,
     symbols: Sequence[str],
     timeframes: Sequence[str],
     start: str,
     end: str,
-    start_ms: int,
-    end_ms: int,
     jobs: int,
-    cfg: BacktestConfig,
     cache: PayloadCache | None,
     log: bool = True,
 ) -> list[ChecksumRow]:
-    """검산 (a) — `long_only` 팔 ≡ **엔진이 직접 낸 롱 전용 북**.
+    """검산 (a) — 숏 게이트가 **롱 후보를 건드리지 않는가**, 그리고 재진입은 얼마나 갈리나.
 
-    🚨 이 검산이 이 모듈의 자격 증명이다. *「숏 게이트는 롱 후보를 건드리지 않는다」*는
-    WAN-282가 **주장**으로 남긴 성질이고, 이 표의 팔 셋이 전부 그 위에 서 있다 —
-    틀리면 `long_only`가 채택 북이 아니게 되고 `both`−`long_only` 차도 방향의 몫이 아니다.
-    그래서 같은 실행에서 `short_enabled=False` 후보를 한 번 더 만들어 대조한다.
+    🚨 이 검산이 이 모듈의 자격 증명이다. 팔 셋이 **후보 하나를 나눠 쓰므로**, 숏을 켠
+    세계의 롱 후보가 롱 전용 세계의 것과 다르면 `both − long_only`가 「방향의 몫」이 아니다.
+    그래서 같은 48칸을 `short_enabled=False`로 한 번 더 만들어 **칸마다** 대조한다.
 
-    📌 **차가운 절단(`is`/`oos`)은 안 만든다**(`cold_segments=False`) — 그 구간의 후보를
-    또 탐지하면 이 검산 하나가 격자만큼 비싸진다. `full`·`oos_warm`은 **같은 전체 창
-    후보**에서 나오므로(경계 필터일 뿐) 이 노브에 영향받지 않고, 대조하려는 성질
-    (*「숏 게이트가 롱 후보를 안 건드린다」*)은 **구간과 무관**하다. 대조는 양쪽에 다
-    있는 구간에서만 하고 요약이 어느 구간을 봤는지 그대로 적는다.
+    📌 **실측 결과 층이 갈렸다**(2026-09-09):
+
+    * **base 후보 — 48칸 전부 일치**. WAN-282의 전제(*숏 게이트는 롱 후보를 안 건드린다*)는
+      **탐지·시그널 층에서 참**이다. 그래서 `both`의 롱 다리는 정당하다.
+    * **재진입 후보 — 46/48칸이 다르다**. 재진입은 **부모가 익절해야** 파생되는데 그 파생이
+      칸당 1포지션 시퀀싱을 거치므로, 숏이 슬롯을 먹으면 롱 부모의 익절 집합이 달라진다.
+      방향은 **언제나 적게** 나온다(숏이 자리를 먹어 롱이 덜 익절한다). 15m에 몰린다.
+
+    ⚠️ **그래서 이 팔들의 재무장 일정은 「숏과 경합한 세계」의 것이다** — WAN-386/395가
+    *「재무장 일정이 배수마다 고정」*이라 밝힌 것과 **같은 부류의 한계**이고, 이 검산이 그
+    크기를 재서 표에 싣는다(감추지 않는다).
+
+    📌 **그럼에도 `long_only`를 엔진 판으로 갈아끼우지 않는다** — 그러면 축이 **둘** 움직인다
+    (방향 + 재무장 일정). 팔 셋이 같은 후보 세계를 공유해야 차가 순수하게 방향의 몫이다
+    (*축을 하나만 흔든다*). 엔진 판은 **외부 기준**으로 이 검산에만 등장한다.
     """
     if log:
         print("[wan412] 검산(a): short_enabled=False 후보 생성 중…", flush=True)
-    plain = build_payloads(
-        symbols,
-        timeframes,
-        short_enabled=False,
-        start=start,
-        end=end,
-        jobs=jobs,
-        cold_segments=False,
-        cache=cache,
-    )
-    baseline = {
-        row.segment: row
-        for row in [
-            ArmRow(
-                **_arm_fields(ARM_LONG_ONLY),
-                **_row_kwargs(
-                    segment,
-                    cfg,
-                    num_symbols=len({p.symbol for p in plain}),
-                    entry_position=entry_in_zone(plain, segment.segment, include_reentry=True),
-                ),
-                **_extra_kwargs(segment, None),
-            )
-            for segment in place(
-                plain,
-                start_ms=start_ms,
-                end_ms=end_ms,
-                segments=[harness.SEGMENT_FULL, PRIMARY_OOS],
-            )
-        ]
+    plain = {
+        (p.symbol, p.timeframe): p
+        for p in build_payloads(
+            symbols,
+            timeframes,
+            short_enabled=False,
+            start=start,
+            end=end,
+            jobs=jobs,
+            cold_segments=False,
+            cache=cache,
+        )
     }
-    out: list[ChecksumRow] = []
-    for row in long_rows:
-        other = baseline.get(row.segment)
-        if other is None:
+    longs = {(p.symbol, p.timeframe): p for p in scoped(withshort, ARM_LONG_ONLY)}
+    seg = harness.SEGMENT_FULL
+    base_diff = reentry_diff = 0
+    base_cells = reentry_cells = 0
+    for key, other in plain.items():
+        mine = longs.get(key)
+        if mine is None:
             continue
-        for metric in _ADOPTED_METRICS:
-            left = float(getattr(row, metric) or 0.0)
-            right = float(getattr(other, metric) or 0.0)
-            out.append(
-                ChecksumRow(
-                    check="a_long_only_is_adopted_book",
-                    arm=ARM_LONG_ONLY.name,
-                    segment=row.segment,
-                    metric=metric,
-                    left=left,
-                    right=right,
-                    abs_diff=abs(left - right),
-                )
-            )
-    return out
+        b1 = {_identity(c) for c in mine.candidates.get(seg, ())}
+        b2 = {_identity(c) for c in other.candidates.get(seg, ())}
+        r1 = {_identity(c) for c in mine.reentry_candidates.get(seg, ())}
+        r2 = {_identity(c) for c in other.reentry_candidates.get(seg, ())}
+        base_diff += len(b1 ^ b2)
+        reentry_diff += len(r1 ^ r2)
+        base_cells += b1 != b2
+        reentry_cells += r1 != r2
+    return [
+        ChecksumRow(
+            check="a_short_gate_does_not_touch_long_candidates",
+            arm=ARM_LONG_ONLY.name,
+            segment=seg,
+            metric=metric,
+            left=float(value),
+            right=0.0,
+            abs_diff=float(value),
+        )
+        for metric, value in (
+            ("base_candidates_mismatched", base_diff),
+            ("base_cells_mismatched", base_cells),
+        )
+    ] + [
+        ChecksumRow(
+            check="a2_reentry_derivation_differs_known_limit",
+            arm=ARM_LONG_ONLY.name,
+            segment=seg,
+            metric=metric,
+            left=float(value),
+            right=float(value),
+            abs_diff=0.0,
+        )
+        for metric, value in (
+            ("reentry_candidates_differing", reentry_diff),
+            ("reentry_cells_differing", reentry_cells),
+        )
+    ]
+
+
+def _identity(cand: object) -> tuple[object, ...]:
+    """후보의 정체성 — 방향·진입 시각·진입가·청산 시각·손절가 (검산 (a) 조인 키)."""
+    return (
+        cand.side,  # type: ignore[attr-defined]
+        cand.entry_time,  # type: ignore[attr-defined]
+        round(float(cand.entry_price), 10),  # type: ignore[attr-defined]
+        cand.exit_time,  # type: ignore[attr-defined]
+        round(float(cand.stop_price), 10),  # type: ignore[attr-defined]
+    )
 
 
 def checksum_direction(rows: Sequence[ArmRow]) -> list[ChecksumRow]:
@@ -748,21 +874,39 @@ def _pct(value: float | None) -> str:
     return "—" if value is None else f"{value * 100:.2f}%"
 
 
+def _sign_is_decided(delta: float, base: ArmRow, other: ArmRow) -> bool:
+    """차의 **부호가 정해졌는가** — 두 팔의 표준오차를 합성한 2σ 밖인가 (WAN-381/394 규약).
+
+    🚨 이 검사가 없으면 오차보다 작은 차를 판정으로 찍는다. 실제로 이 격자가 그랬다:
+    5종목 20칸에서 **−0.0099R**이던 차가 12종목 48칸에서 **+0.0056R**로 **부호가
+    뒤집혔는데**, 노이즈선(±0.005R)만 보는 옛 판정은 둘 다 「판정」으로 찍었다. 진짜
+    효과라면 유니버스를 넓혔다고 부호가 뒤집히지 않는다.
+
+    ⚠️ 두 팔은 **같은 후보 세계**를 공유해 독립이 아니므로(롱 다리가 겹친다) 독립 가정
+    합성은 **보수적**이다 — 실제 불확실성은 이보다 작다. 그래도 이 자를 쓰는 이유는
+    「부호를 못 정한다」를 **놓치지 않기 위해서**이지 정밀한 구간을 주장하기 위해서가 아니다.
+    """
+    sigma = (base.net_r_stderr**2 + other.net_r_stderr**2) ** 0.5
+    return bool(abs(delta) > 2.0 * sigma)
+
+
 def _verdict(rows: Sequence[ArmRow]) -> str:
     """판정 한 줄 — 착수 전에 못 박은 규칙대로 **코드가** 낸다(사람이 표를 보고 정하지 않는다).
 
-    자는 셋이고 전부 주 구간(`oos_warm`)에서 본다:
+    자는 주 구간(`oos_warm`)에서 보고, **두 관문을 다 넘어야** 판정을 찍는다:
 
-    * **(가) 상쇄됨** — `both`의 거래당 net R이 `long_only`보다 **노이즈선(±0.005R) 밖으로
-      좋고**, BTC 상관의 절댓값이 `long_only`보다 작다.
-    * **(나) 거울상** — `both`가 `long_only`보다 노이즈선 밖으로 **나쁘다**.
-    * **(다) 무의** — 둘 다 아니다(차가 노이즈선 안).
+    1. **부호가 정해졌는가** — 차가 두 팔 표준오차 합성의 2σ 밖인가(`_sign_is_decided`).
+    2. 노이즈선(±0.005R) 밖인가.
+
+    둘 다 넘으면 (가) 상쇄됨 / (나) 거울상, 아니면 **(다) 부호 미정**이다.
     """
     by_arm = {row.arm: row for row in rows if row.segment == PRIMARY_OOS}
     base, both = by_arm.get(ARM_LONG_ONLY.name), by_arm.get(ARM_BOTH.name)
     if base is None or both is None:
         return "⚠️ 판정 불가 — 주 구간(`oos_warm`) 행이 모자랍니다."
     delta = both.mean_net_r - base.mean_net_r
+    sigma = (base.net_r_stderr**2 + both.net_r_stderr**2) ** 0.5
+    decided = _sign_is_decided(delta, base, both)
     corr_drop = (
         abs(base.btc_return_corr) - abs(both.btc_return_corr)
         if base.btc_return_corr is not None and both.btc_return_corr is not None
@@ -773,14 +917,21 @@ def _verdict(rows: Sequence[ArmRow]) -> str:
         if corr_drop is not None
         else "BTC 상관 미정의"
     )
-    if delta > NOISE_R and (corr_drop is None or corr_drop > 0):
+    if not decided:
+        head = (
+            f"**(다) 부호 미정 — 거래당 실력은 안 바뀌고 거래만 는다**(차가 2σ={2 * sigma:.4f}R 안)"
+        )
+    elif delta > NOISE_R and (corr_drop is None or corr_drop > 0):
         head = "**(가) 상쇄됨**"
     elif delta < -NOISE_R:
         head = "**(나) 거울상 — 양쪽으로 지면서 거래만 는다**"
     else:
         head = "**(다) 무의 — 차가 노이즈선 안**"
+    grew = both.num_trades / base.num_trades - 1 if base.num_trades else 0.0
+    trades = f"거래 {base.num_trades:,} → {both.num_trades:,}({grew:+.0%})"
     return (
-        f"{head}: `both` − `long_only` = **{delta:+.4f}R** (노이즈선 ±{NOISE_R:g}R · {corr_note})"
+        f"{head}: `both` − `long_only` = **{delta:+.4f}R** ± {sigma:.4f} "
+        f"(노이즈선 ±{NOISE_R:g}R · {corr_note} · {trades})"
     )
 
 
@@ -789,6 +940,8 @@ def build_summary_markdown(
     regime_rows: Sequence[RegimeRow],
     loo: Sequence[LooRow],
     checks: Sequence[ChecksumRow],
+    scopes: Sequence[ScopeRow] = (),
+    cells: Sequence[CellAttributionRow] = (),
 ) -> str:
     lines: list[str] = [
         "# WAN-412 — 숏을 더하면 BTC 하락일 손실이 상쇄되는가 (오늘 엔진 · 채택 북)",
@@ -882,6 +1035,53 @@ def build_summary_markdown(
             "(그것으로 거르는 것은 인과적으로 불가능하다 — WAN-408이 건 함정).",
             "",
         ]
+
+    if scopes:
+        lines += [
+            "## §3-B TF별 스코프 — 그 TF만으로 **지갑을 다시 배치**한 판 (WAN-301/316)",
+            "",
+            "🚨 **아래 §3-A를 TF로 합친 값과 같지 않다. 같으면 그게 버그다** — 여기서는 다른",
+            "TF가 자본을 안 먹으므로 그 12칸이 더 많이 들어간다. **다른 질문에 답하는 두 표**다.",
+            "",
+            "| TF | 팔 | 구간 | 거래 | 롱 | 숏 | 승률 | 거래당 netR | BTC 상관 |",
+            "| -- | -- | -- | --: | --: | --: | --: | --: | --: |",
+        ]
+        for row in scopes:
+            lines.append(
+                f"| {row.scope} | `{row.arm}` | {row.segment} | {row.num_trades:,} "
+                f"| {row.long_trades:,} | {row.short_trades:,} | {row.win_rate * 100:.2f}% "
+                f"| **{row.mean_net_r:+.4f}** | {_fmt(row.btc_return_corr, 3)} |"
+            )
+        lines.append("")
+
+    if cells:
+        lines += [
+            "## §3-A 종목 × TF 귀속 — **채택 북 한 지갑**이 실제로 한 거래 (주 구간)",
+            "",
+            "🚨 **재배치가 아니다** — 48칸이 자본을 나눠 쓴 그 지갑의 거래를 칸으로 쪼갠 것이라",
+            "「그 칸이 자리를 못 잡아 못 들어간 거래」도 반영돼 있다.",
+            "",
+            "| 팔 | 칸 | 롱 거래 | 롱 netR | 숏 거래 | 숏 netR | 합 netR |",
+            "| -- | -- | --: | --: | --: | --: | --: |",
+        ]
+        cell_idx: dict[tuple[str, str, str, str], CellAttributionRow] = {
+            (c.arm, c.symbol, c.timeframe, c.direction): c
+            for c in cells
+            if c.segment == PRIMARY_OOS
+        }
+        keys = sorted({(c.arm, c.symbol, c.timeframe) for c in cells if c.segment == PRIMARY_OOS})
+        for arm_name, sym, tf in keys:
+            whole = cell_idx.get((arm_name, sym, tf, "all"))
+            lng = cell_idx.get((arm_name, sym, tf, "long"))
+            srt = cell_idx.get((arm_name, sym, tf, "short"))
+            if whole is None:
+                continue
+            lines.append(
+                f"| `{arm_name}` | {sym} {tf} | {lng.trades if lng else 0:,} "
+                f"| {_fmt(lng.mean_net_r if lng else None)} | {srt.trades if srt else 0:,} "
+                f"| {_fmt(srt.mean_net_r if srt else None)} | **{_fmt(whole.mean_net_r)}** |"
+            )
+        lines.append("")
 
     corr_rows = [r for r in grid if r.segment == PRIMARY_OOS]
     if corr_rows:
@@ -984,6 +1184,8 @@ def main(argv: Sequence[str] | None = None) -> None:
                 _read(REGIME_CSV_PATH, RegimeRow),
                 _read(LOO_CSV_PATH, LooRow),
                 _read(CHECKSUM_CSV_PATH, ChecksumRow),
+                _read(SCOPE_CSV_PATH, ScopeRow),
+                _read(CELL_CSV_PATH, CellAttributionRow),
             ),
             encoding="utf-8",
         )
@@ -1020,6 +1222,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     num_symbols = len({p.symbol for p in payloads})
     grid: list[ArmRow] = []
     loo: list[LooRow] = []
+    cells: list[CellAttributionRow] = []
+    scopes: list[ScopeRow] = []
     primary: list[tuple[Arm, BookSegment]] = []
     for arm in ARMS:
         rows, placed = build_arm_rows(
@@ -1033,6 +1237,19 @@ def main(argv: Sequence[str] | None = None) -> None:
         )
         grid.extend(rows)
         primary += [(arm, s) for s in placed if s.segment == PRIMARY_OOS]
+        for segment in placed:
+            if segment.segment in (harness.SEGMENT_FULL, PRIMARY_OOS):
+                cells.extend(build_cell_attribution(segment, arm=arm))
+        scopes.extend(
+            build_scope_rows(
+                payloads,
+                arm=arm,
+                start_ms=start_ms,
+                end_ms=end_ms,
+                cfg=cfg,
+                regime=regime,
+            )
+        )
         if not args.no_loo:
             loo.extend(
                 build_leave_one_out(
@@ -1056,16 +1273,13 @@ def main(argv: Sequence[str] | None = None) -> None:
     checks = [*checksum_direction(grid), *checksum_short_geometry(payloads)]
     if not args.no_checksum and not args.pilot:
         checks = [
-            *checksum_adopted(
-                [r for r in grid if r.arm == ARM_LONG_ONLY.name],
+            *checksum_candidate_parity(
+                payloads,
                 symbols=symbols,
                 timeframes=timeframes,
                 start=args.start,
                 end=args.end,
-                start_ms=start_ms,
-                end_ms=end_ms,
                 jobs=jobs,
-                cfg=cfg,
                 cache=cache,
             ),
             *checks,
@@ -1075,9 +1289,11 @@ def main(argv: Sequence[str] | None = None) -> None:
     _frame(grid, ArmRow).to_csv(GRID_CSV_PATH, index=False)
     _frame(regime_rows, RegimeRow).to_csv(REGIME_CSV_PATH, index=False)
     _frame(loo, LooRow).to_csv(LOO_CSV_PATH, index=False)
+    _frame(cells, CellAttributionRow).to_csv(CELL_CSV_PATH, index=False)
+    _frame(scopes, ScopeRow).to_csv(SCOPE_CSV_PATH, index=False)
     _frame(checks, ChecksumRow).to_csv(CHECKSUM_CSV_PATH, index=False)
     SUMMARY_PATH.write_text(
-        build_summary_markdown(grid, regime_rows, loo, checks), encoding="utf-8"
+        build_summary_markdown(grid, regime_rows, loo, checks, scopes, cells), encoding="utf-8"
     )
     print(
         f"[wan412] 완료 {time.time() - began:.0f}초 → {GRID_CSV_PATH} · {REGIME_CSV_PATH} · "

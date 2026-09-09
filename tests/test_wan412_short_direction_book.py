@@ -261,11 +261,30 @@ def test_short_geometry_checksum_is_mirrored_and_catches_a_flipped_candidate() -
 # --------------------------------------------------------------------------- #
 
 
-def _verdict(base_net: float, both_net: float, *, base_corr: float, both_corr: float) -> str:
+def _verdict(
+    base_net: float,
+    both_net: float,
+    *,
+    base_corr: float,
+    both_corr: float,
+    stderr: float = 0.0005,
+) -> str:
+    """판정 줄. 🚨 `stderr` 기본값이 **작다** — 부호 결정 관문을 통과시켜 놓고 **노이즈선**을
+    따로 시험하기 위해서다(두 관문을 한 픽스처에서 재면 어느 쪽이 걸렀는지 못 가른다)."""
     return wan412._verdict(
         [
-            _row(wan412.ARM_LONG_ONLY, mean_net_r=base_net, btc_return_corr=base_corr),
-            _row(wan412.ARM_BOTH, mean_net_r=both_net, btc_return_corr=both_corr),
+            _row(
+                wan412.ARM_LONG_ONLY,
+                mean_net_r=base_net,
+                btc_return_corr=base_corr,
+                net_r_stderr=stderr,
+            ),
+            _row(
+                wan412.ARM_BOTH,
+                mean_net_r=both_net,
+                btc_return_corr=both_corr,
+                net_r_stderr=stderr,
+            ),
         ]
     )
 
@@ -285,6 +304,32 @@ def test_verdict_uses_the_inherited_noise_line_not_a_new_one() -> None:
     assert NOISE_R == 0.005
     assert "(다) 무의" in _verdict(-0.12, -0.1160, base_corr=0.54, both_corr=0.20)
     assert "(가) 상쇄됨" in _verdict(-0.12, -0.1140, base_corr=0.54, both_corr=0.20)
+
+
+def test_verdict_refuses_to_call_a_sign_it_cannot_decide() -> None:
+    """🚨 **이 격자가 실제로 데인 자리다.** 노이즈선만 보면 오차보다 작은 차를 판정으로 찍는다.
+
+    실측(2026-09-09): 5종목 20칸에서 **−0.0099R**이던 차가 12종목 48칸에서 **+0.0056R**로
+    **부호가 뒤집혔는데**, 옛 판정은 둘 다 「판정」으로 찍었다(각각 (나)·(가)). 진짜 효과라면
+    유니버스를 넓혔다고 부호가 뒤집히지 않는다. 아래 픽스처가 그 48칸 실측 그대로다.
+    """
+    line = _verdict(-0.1204, -0.1148, base_corr=0.444, both_corr=0.056, stderr=0.0105)
+    assert "(다) 부호 미정" in line
+    assert "(가) 상쇄됨" not in line
+    # 같은 차라도 오차가 작으면 판정이 선다 — 관문이 **크기가 아니라 비(比)**를 본다.
+    assert "(가) 상쇄됨" in _verdict(
+        -0.1204, -0.1148, base_corr=0.444, both_corr=0.056, stderr=0.0005
+    )
+
+
+def test_sign_gate_combines_both_arms_uncertainty() -> None:
+    """두 팔의 표준오차를 **합성**한다 — 한쪽만 보면 관문이 헐거워진다."""
+    base = _row(wan412.ARM_LONG_ONLY, mean_net_r=-0.12, net_r_stderr=0.004)
+    both = _row(wan412.ARM_BOTH, mean_net_r=-0.11, net_r_stderr=0.004)
+    # 합성 σ = √(0.004² + 0.004²) ≈ 0.00566 → 2σ ≈ 0.0113 > 0.01이라 **부호 미정**이다.
+    assert not wan412._sign_is_decided(0.01, base, both)
+    # 한쪽 σ(0.004)만 봤다면 2σ = 0.008 < 0.01이라 통과했을 값이다.
+    assert wan412._sign_is_decided(0.02, base, both)
 
 
 # --------------------------------------------------------------------------- #
