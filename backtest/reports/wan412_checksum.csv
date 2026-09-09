@@ -1,0 +1,16 @@
+check,arm,segment,metric,left,right,abs_diff
+a_short_gate_does_not_touch_long_candidates,long_only,full,base_candidates_mismatched,0.0,0.0,0.0
+a_short_gate_does_not_touch_long_candidates,long_only,full,base_cells_mismatched,0.0,0.0,0.0
+a2_reentry_derivation_differs_known_limit,long_only,full,reentry_candidates_differing,896.0,896.0,0.0
+a2_reentry_derivation_differs_known_limit,long_only,full,reentry_cells_differing,46.0,46.0,0.0
+b_long_only_has_no_short,long_only,full,short_trades,0.0,0.0,0.0
+b_long_only_has_no_short,long_only,is,short_trades,0.0,0.0,0.0
+b_long_only_has_no_short,long_only,oos_warm,short_trades,0.0,0.0,0.0
+b_long_only_has_no_short,long_only,oos,short_trades,0.0,0.0,0.0
+b_short_only_has_no_long,short_only,full,long_trades,0.0,0.0,0.0
+b_short_only_has_no_long,short_only,is,long_trades,0.0,0.0,0.0
+b_short_only_has_no_long,short_only,oos_warm,long_trades,0.0,0.0,0.0
+b_short_only_has_no_long,short_only,oos,long_trades,0.0,0.0,0.0
+c_short_geometry_is_mirrored,short_only,candidates,short_candidates,217225.0,217225.0,0.0
+c_short_geometry_is_mirrored,short_only,candidates,stop_not_above_entry,0.0,0.0,0.0
+c_short_geometry_is_mirrored,short_only,candidates,take_profit_not_below_entry,0.0,0.0,0.0

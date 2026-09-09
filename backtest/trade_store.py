@@ -175,6 +175,12 @@ _ENGINE_NON_SOURCE: frozenset[str] = frozenset(
         # `payload_cache.CACHE_SCHEMA_VERSION`이 그 무효화를 담당한다(`timeline_cache`와 같은
         # 규약). 반대로 그 캐시가 **읽는** 러너 소스는 `payload_cache.RUNNER_SOURCE_FILES`가 건다.
         "backtest/payload_cache.py",
+        # BTC의 KST 일간 등락 축(WAN-412) — 저장 1h 봉을 접어 「그날 얼마 움직였나」를 낼 뿐
+        # 후보·체결·손익 어디에도 안 실린다(성적을 **가르는** 설명 변수이지 엔진 입력이
+        # 아니다). 🚨 그래서 엔진 목록에 넣지 않는다: 넣으면 이 축을 손볼 때마다 payload
+        # 캐시와 야간 타임라인 캐시가 통째로 무효화되는데, 이 파일은 백테 수치를 **하나도**
+        # 안 움직인다.
+        "backtest/btc_day_regime.py",
         "backtest/report.py",
         "backtest/synthetic.py",
         # 운영 표시 전용(WAN-309 드리프트 경고) — 설정값을 읽어 경고만 찍고 백테 수치에
