@@ -190,3 +190,59 @@ class RealtimeBand:
         if math.isnan(anchor_val) or math.isnan(width_val):
             return None
         return anchor_val - direction_sign * width_val
+
+    def safe_price_interval(
+        self, threshold: float, direction_sign: int, *, rel_margin: float = 1e-7
+    ) -> tuple[float, float] | None:
+        """현재가 `p`가 이 구간 **안**이면 `value(p)`가 `threshold`의 유리한 쪽임이 보장된다.
+
+        (WAN-375 성능 전용 · 판정 규칙이 아니다.) 롱(`direction_sign=+1`)은
+        `value(p) >= threshold`, 숏은 `value(p) <= threshold`를 보장하는 현재가 구간을 낸다 —
+        보유 중 「밴드가 존 원단 너머로 무너졌나」(진입 규칙 3)를 매 1분 스텝마다
+        `value()`로 다시 계산하지 않으려는 **걸러내기**다. 호출부는 구간 **밖**에서만 정확한
+        `value()`를 부르므로 판정은 매번 `value()`를 부른 것과 **같다** — 이 함수가 틀려도
+        「무너졌다」를 지어낼 수는 없고(구간 밖은 정확히 판정), 구간을 **너무 넓게** 잡을 때만
+        틀린다. 그래서 두 겹으로 보수적으로 잡는다: 닫힌 해를 창 평균 기준으로 **중심화**해
+        상쇄 오차를 없애고(`_population_stdev`가 제곱합 누적을 안 쓰는 이유와 같다), 끝점을
+        가격의 `rel_margin`만큼 안쪽으로 줄인다.
+
+        SMA 기준선 + σ 폭(채택 기본값)에서만 닫힌 해가 있고, 그 밖의 설정·워밍업·빈 구간이면
+        `None`(= 걸러내지 말고 매번 정확히 판정하라)이다.
+
+        유도(롱, n=`sma_length`, k=`width_value`, 창 평균 c, 편차 제곱합 V0, x=p−c, B=c−b):
+        `m−kσ ≥ b` ⇔ `nB+x ≥ 0` 이고 `(nB+x)² ≥ k²(n·V0 + (n−1)x²)`. x에 대한 이차식
+        `(1−k²(n−1))x² + 2nBx + n²B² − k²nV0 ≥ 0`의 두 근 사이다(최고차 계수가 음수일 때).
+        숏은 x′=−x, B=t−c로 같은 식이다.
+        """
+        params = self.filter_params
+        if params.anchor != "sma" or params.width_kind != "stdev" or not self.ready:
+            return None
+        window = list(self._window)
+        n = len(window) + 1
+        k = float(params.width_value)
+        if n < 2 or k <= 0.0:
+            return None
+        c = sum(window) / len(window)
+        v0 = sum((w - c) ** 2 for w in window)
+        a = 1.0 - k * k * (n - 1)
+        if a >= 0.0:
+            return None  # 폭이 좁아 구간이 한쪽으로 열린다 — 닫힌 해를 쓰지 않는다.
+        big_b = (c - threshold) if direction_sign > 0 else (threshold - c)
+        bq = 2.0 * n * big_b
+        cq = (n * big_b) ** 2 - k * k * n * v0
+        disc = bq * bq - 4.0 * a * cq
+        if disc <= 0.0:
+            return None
+        root = math.sqrt(disc)
+        x1 = (-bq + root) / (2.0 * a)
+        x2 = (-bq - root) / (2.0 * a)
+        lo_x, hi_x = min(x1, x2), max(x1, x2)
+        lo_x = max(lo_x, -n * big_b)  # nB + x ≥ 0 (기준선이 문턱의 유리한 쪽).
+        margin = rel_margin * max(abs(c), 1.0)
+        lo_x += margin
+        hi_x -= margin
+        if lo_x >= hi_x:
+            return None
+        if direction_sign > 0:
+            return c + lo_x, c + hi_x
+        return c - hi_x, c - lo_x

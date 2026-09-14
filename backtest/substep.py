@@ -140,6 +140,20 @@ class PathProbeProvider(Protocol):
         ...
 
 
+@runtime_checkable
+class HoldBreakScreenProvider(Protocol):
+    """보유 중 밴드 무너짐 판정을 **걸러낼 수 있는** 공급자 (WAN-375, 성능 전용 · 선택적).
+
+    `PathProbeProvider`의 또 다른 선택적 확장이다. 없으면 시뮬레이터가 매 스텝
+    `probe_limit`을 정확히 부르고, 있으면 상위TF 봉마다 한 번 받은 구간 **밖**에서만 부른다 —
+    구간 안에서는 `probe_limit`이 `None`이 아님이 보장되므로 판정은 같다.
+    """
+
+    def hold_break_screen(self) -> tuple[float, float] | None:
+        """현재가가 이 열린 구간 안이면 밴드가 무너지지 않았음이 보장된다(`None` = 보장 없음)."""
+        ...
+
+
 @dataclass(frozen=True)
 class PartialExit:
     """부분 청산 체결 하나 (WAN-323 반익절 래더).
@@ -152,6 +166,38 @@ class PartialExit:
     price: float
     fraction: float
     reason: SignalExitReason
+
+
+@dataclass(frozen=True)
+class HoldPathProbe:
+    """보유 구간 경로 관측 (WAN-375 Phase 1, `observe_hold_path` 옵트인 · 순수 관측).
+
+    세 질문에 답하려고 **청산 스텝을 빼고** 잰다 — 같은 스텝에서 손절과 목표가 함께 닿으면
+    엔진은 손절을 이기게 하므로(`stop_before_tp`), 청산 스텝의 고가까지 넣으면 「그 가격에
+    지정가 익절을 걸었으면 체결됐다」가 과대평가된다.
+
+    * `mfe_r_pre_exit` — 청산 스텝 **이전** 스텝들만의 최대유리이탈(R 단위). 이 값이 `X`
+      이상이면 「목표를 `X`R에 걸었다면 손절보다 먼저 익절됐다」와 **같은 뜻**이다(1분봉
+      안의 순서 가정은 엔진과 같다 — 진입 스텝 익절 낙관 WAN-336 포함). 청산 이전 스텝이
+      하나도 없으면(진입 스텝에서 곧바로 청산) `None` = 어느 목표에도 못 닿았다.
+    * `target_reach_time` — 위 조건으로 `hold_path_target_r` 배수 목표에 **처음** 닿은 스텝.
+      익절을 끈 실행에서 이 값이 있으면 「채택 익절을 켰다면 그 시각에 익절로 나갔다」이다
+      (진입·체결은 익절과 무관해 두 실행이 같은 셋업이다, WAN-137).
+    * `band_break_time`·`band_break_r` — 진입 **다음** 스텝부터 청산 이전 스텝까지, 그 스텝
+      종가를 표본으로 한 봉내 라이브 밴드가 **진입 판정 규칙 3**(WAN-75 — 밴드가 존 전체보다
+      불리 = 롱이면 밴드 하단이 존 바닥 아래)에 처음 걸린 시각과 그 순간 종가의 R. 진입을
+      막는 바로 그 규칙을 보유 중에 한 번 더 묻는 것이다(새 규칙이 아니라 시간 확장).
+      `band_break_mfe_r`은 그 시각까지의 MFE다(무너지기 전에 얼마나 갔었나).
+
+    **체결·청산·손익 어디에도 쓰이지 않는다** — `mfe_r`(WAN-90) · `exit_extreme`(WAN-276) ·
+    `path_fill_price`(WAN-328)와 같은 부류이고, 켜도 끄도 결과는 이 필드 외에 비트 동일하다.
+    """
+
+    mfe_r_pre_exit: float | None = None
+    target_reach_time: int | None = None
+    band_break_time: int | None = None
+    band_break_r: float | None = None
+    band_break_mfe_r: float | None = None
 
 
 @dataclass(frozen=True)
@@ -260,6 +306,10 @@ class ZoneLimitOutcome:
     색은 이 둘에서만 파생된다(`strategy.realtime_macd.macd_color`) — 색 문자열을 여기 싣지
     않는 이유는 판정 규칙이 **한 곳**에만 있어야 하기 때문이다(부등호를 한 칸 옮기면 같은
     봉이 다른 색이 된다)."""
+    hold_path: HoldPathProbe | None = None
+    """보유 구간 경로 관측 (WAN-375, `observe_hold_path` 옵트인 · 순수 관측).
+
+    체결됐을 때만 값이 있고, 안 켜면 항상 `None`이다(`HoldPathProbe` 독스트링)."""
     order_rested: bool = True
     """이 셋업에 주문이 **한 번이라도 주문판에 걸렸는지** (WAN-119).
 
@@ -393,6 +443,8 @@ def simulate_zone_limit_trade(
     no_same_step_tp: bool = False,
     no_same_step_tp_minutes: frozenset[int] | None = None,
     macd_state: RealtimeMacd | None = None,
+    observe_hold_path: bool = False,
+    hold_path_target_r: float | None = None,
 ) -> ZoneLimitOutcome:
     """한 오더블록 셋업의 존-지정가 진입·청산을 1분 서브스텝으로 시뮬레이션한다.
 
@@ -518,6 +570,18 @@ def simulate_zone_limit_trade(
       그래서 **체결 순간의 값**을 그 거래의 값으로 확정하고 그 봉이 어떻게 끝나든 바꾸지
       않는다(사용자 확인 2026-08-27).
     * ⚠️ `rsi_state`처럼 이 상태도 호출 중 **갱신된다** — 재사용하려면 `copy()`로 떠서 넘긴다.
+
+    ## 보유 구간 경로 관측 (WAN-375, 옵트인 · 순수 관측)
+
+    `observe_hold_path`를 켜면 체결된 셋업에 `HoldPathProbe`를 싣는다 — 청산 이전 스텝만의
+    MFE, `hold_path_target_r` 배수 목표에 처음 닿은 시각, 보유 중 밴드가 진입 규칙 3에 처음
+    걸린 시각. 밴드 판정은 `probe_limit`(상태를 굴리지 않는 조회, WAN-328)으로 하므로 봉내
+    라이브 밴드 공급자에서만 뜻이 있고, 그 밖에서 켜면 **거부한다**.
+
+    * **룩어헤드 없음** — 모든 판정이 그 스텝까지의 값(고가·저가·종가)만 쓰고, 밴드도 상위TF
+      봉 마감마다 커밋된 상태에 그 스텝 종가를 얹은 값이다(진입가 정본과 같은 자, WAN-132).
+    * 밴드가 한 번 무너지면 더는 조회하지 않는다(첫 시각만 필요하다 — 비용도 그만큼 준다).
+    * 끄면(기본) 이 가지를 아예 타지 않아 **예전과 비트 단위로 같다**.
     """
     if not substeps:
         # 서브스텝이 없으면 live 밴드는 값을 낼 기회조차 없었다 = 주문이 걸린 적 없다.
@@ -568,6 +632,19 @@ def simulate_zone_limit_trade(
         raise ValueError(
             "live_limit을 쓰면 익절 목표는 체결 순간에 산출되므로 "
             "take_profit_price를 함께 줄 수 없습니다."
+        )
+    if observe_hold_path and not isinstance(live_limit, PathProbeProvider):
+        # 밴드 무너짐은 「그 스텝 종가를 표본으로 한 지정가가 없는가」로 판정한다 — 상수
+        # 지정가에는 그 질문이 없고 `probe_limit`이 없으면 물을 방법이 없다. 켜 봐야 밴드
+        # 열이 언제나 비어 「무너진 적 없음」으로 읽힌다(WAN-367: 0은 불가능과 구분 안 된다).
+        raise ValueError(
+            "observe_hold_path는 probe_limit을 내는 live_limit(봉내 라이브 밴드)에서만 "
+            "뜻이 있습니다(WAN-375)."
+        )
+    if hold_path_target_r is not None and (not observe_hold_path or hold_path_target_r <= 0.0):
+        raise ValueError(
+            "hold_path_target_r은 observe_hold_path와 함께, 양수로만 줍니다"
+            f"(WAN-375): {hold_path_target_r}"
         )
 
     is_long = direction is OrderBlockDirection.BULLISH
@@ -642,6 +719,43 @@ def simulate_zone_limit_trade(
     partial_price: float | None = None
     partials: list[PartialExit] = []
     pending_breakeven = False
+    # WAN-375 관측 상태(옵트인). 안 켜면 아래 관측 가지를 아예 타지 않아 비트 동일하다.
+    pre_exit_extreme: float | None = None
+    target_price: float | None = None
+    target_reach_time: int | None = None
+    band_break_time: int | None = None
+    band_break_r: float | None = None
+    band_break_mfe_r: float | None = None
+    # 걸러내기 구간(성능 전용): 상위TF 봉이 바뀔 때마다(= 밴드가 커밋될 때마다) 다시 받는다.
+    break_screen: tuple[float, float] | None = None
+    break_screen_htf: int | None = None
+    # 공급자 확인은 **한 번만** 한다 — `runtime_checkable` isinstance는 매 스텝 부르기엔 비싸다.
+    hold_probe_provider: PathProbeProvider | None = (
+        live_limit if observe_hold_path and isinstance(live_limit, PathProbeProvider) else None
+    )
+    hold_screen_provider: HoldBreakScreenProvider | None = (
+        live_limit
+        if hold_probe_provider is not None and isinstance(live_limit, HoldBreakScreenProvider)
+        else None
+    )
+
+    def _signed_r(price: float) -> float | None:
+        """진입가에서 `price`까지의 유리 방향 거리(R). 1R을 못 재면 None."""
+        if entry_price is None or entry_risk is None or entry_risk <= 0.0:
+            return None
+        move = price - entry_price if is_long else entry_price - price
+        return move / entry_risk
+
+    def _hold_probe() -> HoldPathProbe | None:
+        if not observe_hold_path:
+            return None
+        return HoldPathProbe(
+            mfe_r_pre_exit=None if pre_exit_extreme is None else _signed_r(pre_exit_extreme),
+            target_reach_time=target_reach_time,
+            band_break_time=band_break_time,
+            band_break_r=band_break_r,
+            band_break_mfe_r=band_break_mfe_r,
+        )
 
     def _entry_stop() -> float:
         """호출부에 돌려줄 손절 참조가(진입 시점 값). 체결 전이면 현재 손절선."""
@@ -746,6 +860,10 @@ def simulate_zone_limit_trade(
                     if partial_take_profit_r is not None and entry_risk > 0.0:
                         offset = partial_take_profit_r * entry_risk
                         partial_price = entry_price + offset if is_long else entry_price - offset
+                    if hold_path_target_r is not None and entry_risk > 0.0:
+                        # WAN-375 관측: 목표도 체결 순간의 1R로 못 박는다(룩어헤드 없음).
+                        reach = hold_path_target_r * entry_risk
+                        target_price = entry_price + reach if is_long else entry_price - reach
                     # 관통 방지: 같은 스텝에서 손절/익절을 곧바로 재판정한다(아래로 진행).
                 elif cancel_on_condition_fail:
                     return ZoneLimitOutcome(
@@ -814,6 +932,40 @@ def simulate_zone_limit_trade(
                 if stop_fill:
                     stop_extreme = step.low if is_long else step.high
                     stop_exit_price = _stop_fill_price(stop_extreme)
+            if observe_hold_path and not ((stop_fill and (not tp_hit or stop_before_tp)) or tp_hit):
+                # WAN-375 순수 관측 — **이 스텝에서 나가지 않을 때만** 반영한다(청산 스텝의
+                # 고가를 넣으면 「그 가격에 익절을 걸었다면 체결됐다」가 과대평가된다).
+                favorable = step.high if is_long else step.low
+                if pre_exit_extreme is None:
+                    pre_exit_extreme = favorable
+                elif is_long:
+                    pre_exit_extreme = max(pre_exit_extreme, favorable)
+                else:
+                    pre_exit_extreme = min(pre_exit_extreme, favorable)
+                if (
+                    target_reach_time is None
+                    and target_price is not None
+                    and (step.high >= target_price if is_long else step.low <= target_price)
+                ):
+                    target_reach_time = step.time
+                if band_break_time is None and not just_entered:
+                    # 진입 규칙 3을 그대로 다시 묻는다 — 이 종가를 표본으로 한 지정가가 없으면
+                    # 밴드가 존 전체보다 불리하다(워밍업은 체결 뒤라 불가능하다).
+                    assert hold_probe_provider is not None  # 위 가드가 보장.
+                    if break_screen_htf != current_htf:
+                        break_screen_htf = current_htf
+                        break_screen = (
+                            None
+                            if hold_screen_provider is None
+                            else hold_screen_provider.hold_break_screen()
+                        )
+                    safe = (
+                        break_screen is not None and break_screen[0] < step.close < break_screen[1]
+                    )
+                    if not safe and hold_probe_provider.probe_limit(step.close) is None:
+                        band_break_time = step.time
+                        band_break_r = _signed_r(step.close)
+                        band_break_mfe_r = _signed_r(pre_exit_extreme)
             if stop_fill and (not tp_hit or stop_before_tp):
                 # WAN-323: 같은 스텝에서 분할 지점도 닿았을 수 있으나 **손절이 이긴다**
                 # (보수적 — `stop_before_tp`와 같은 관행). 그래서 여기서 부분 청산을
@@ -834,6 +986,7 @@ def simulate_zone_limit_trade(
                     path_fill_price=path_fill_price,
                     macd_hist=macd_hist,
                     macd_hist_prev=macd_hist_prev,
+                    hold_path=_hold_probe(),
                     exit_extreme=stop_extreme,
                     exit_at_breakeven=entry_stop is not None and active_stop != entry_stop,
                     partial_exits=tuple(partials),
@@ -873,6 +1026,7 @@ def simulate_zone_limit_trade(
                     path_fill_price=path_fill_price,
                     macd_hist=macd_hist,
                     macd_hist_prev=macd_hist_prev,
+                    hold_path=_hold_probe(),
                     partial_exits=tuple(partials),
                     order_rested=order_rested,
                 )
@@ -891,6 +1045,7 @@ def simulate_zone_limit_trade(
             path_fill_price=path_fill_price,
             macd_hist=macd_hist,
             macd_hist_prev=macd_hist_prev,
+            hold_path=_hold_probe(),
             partial_exits=tuple(partials),
             order_rested=order_rested,
         )
