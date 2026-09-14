@@ -63,6 +63,7 @@ from backtest.multi_tf_overlap import (
 )
 from backtest.portfolio import PortfolioParams, PortfolioStats, sequence_portfolio
 from backtest.substep import (
+    HoldPathProbe,
     PartialExit,
     SubStep,
     ZoneLimitStatus,
@@ -229,6 +230,13 @@ class _Candidate:
     체결·청산 로직에는 쓰이지 않는다."""
     mfe_r: float | None = None
     """보유 구간의 최대유리이탈(MFE), R 단위(WAN-90). 시뮬레이터가 낸 값 그대로 싣는다."""
+    hold_path: HoldPathProbe | None = None
+    """보유 구간 경로 관측 (WAN-375, `observe_hold_path` 옵트인 · 순수 관측).
+
+    `ZoneLimitOutcome.hold_path` 그대로다 — 안 켜면 항상 `None`이라 예전 CSV가 비트 재현되고,
+    켜도 후보·체결·손익이 하나도 안 움직인다(`mfe_r` WAN-90 · `zone_width_atr` WAN-376과 같은
+    부류). ⚠️ 재진입 후보 경로(`wan228_reentry_census`)에는 배선하지 않았다 — 이 관측을 쓰는
+    측정(WAN-375)은 **익절을 끈** 실행이라 재진입(익절 후 재무장)이 정의상 생기지 않는다."""
     mae_r: float | None = None
     """보유 구간의 최대불리이탈(MAE), R 단위(WAN-90). 시뮬레이터가 낸 값 그대로 싣는다."""
     exit_at_breakeven: bool = False
@@ -293,6 +301,19 @@ class ZoneLimitStats:
     def fill_rate(self) -> float | None:
         """지정가 체결률 = filled / eligible. 대상 셋업이 없으면 None."""
         return self.filled / self.eligible if self.eligible else None
+
+
+@dataclass(frozen=True)
+class UnrestedTap:
+    """주문이 **한 번도 주문판에 안 걸린** 탭 (WAN-375, `unrested_sink` 옵트인 · 순수 관측).
+
+    봉내 라이브 밴드가 탭부터 만료·무효화까지 줄곧 워밍업이거나 존 전체보다 불리(WAN-75 규칙 3)
+    했던 셋업이다. `SetupDiagnostic`은 이 부류를 **일부러 안 담는다**(체결률 분모를 모드 간에
+    맞추려고, WAN-119) — 그래서 따로 모은다."""
+
+    trigger_time: int
+    tap_index: int
+    zone_key: frozenset[int] | None
 
 
 @dataclass(frozen=True)
@@ -532,6 +553,19 @@ class _IntrabarLiveLimit:
                 "서브스텝 종가라 「이 틱이 p였다면」이 성립하지 않는다, WAN-328)."
             )
         return self._limit_from_sample(live_price)
+
+    def hold_break_screen(self) -> tuple[float, float] | None:
+        """보유 중 밴드 무너짐 판정의 **걸러내기 구간** (WAN-375 성능 전용 · 판정 불변).
+
+        현재가가 이 구간 안이면 `probe_limit`이 `None`이 아님(= 밴드가 존 원단의 유리한 쪽)이
+        보장된다 — 시뮬레이터는 구간 **밖**에서만 `probe_limit`을 정확히 부르므로 판정은 매
+        스텝 부른 것과 같다(`RealtimeBand.safe_price_interval`). 인과 모드는 표본이 직전
+        스텝 종가라 이 질문이 없어 `None`(= 매번 정확히)이다.
+        """
+        if self.causal:
+            return None
+        distal = self.order_block.bottom if self.is_long else self.order_block.top
+        return self.band.safe_price_interval(float(distal), self._direction_sign)
 
     def resolve_exits(self, limit_price: float) -> tuple[float, float | None] | None:
         """체결 순간의 (손절 참조가, 익절 목표가). None이면 이 셋업은 진입하지 않는다.
@@ -939,6 +973,9 @@ def build_zone_limit_candidates(
     no_same_step_tp: bool = False,
     no_same_step_tp_minutes: frozenset[int] | None = None,
     invalidation_cancel: InvalidationCancel | None = None,
+    observe_hold_path: bool = False,
+    hold_path_target_r: float | None = None,
+    unrested_sink: list[UnrestedTap] | None = None,
 ) -> tuple[list[_Candidate], ZoneLimitStats]:
     """B안 셋업 순회 → 1분 서브스텝 시뮬레이션까지(비용 반영 전 원가 후보 목록).
 
@@ -1027,7 +1064,23 @@ def build_zone_limit_candidates(
     바뀔 수 있다**: 익절이 미뤄지면 그 셋업이 다음 스텝부터 다른 청산(손절·만료·홀드)을 탈
     수 있고, 단일 포지션·북 시퀀싱에서는 슬롯 점유 시간이 달라져 **뒤따르는 후보까지**
     갈린다. 그래서 이건 「청산만 바꾸는 오버라이드」가 아니라 **팔**이다. 끄면(기본) 엔진이
-    예전과 비트 단위로 같다."""
+    예전과 비트 단위로 같다.
+
+    `observe_hold_path`·`hold_path_target_r`(WAN-375, 옵트인)를 켜면 체결된 후보마다 **청산
+    이전 스텝만의 MFE · 목표 배수 도달 시각 · 보유 중 밴드가 진입 규칙 3에 처음 걸린 시각**을
+    실어 준다(`HoldPathProbe`). 밴드 판정이 봉내 라이브 밴드의 조회를 쓰므로 그 밴드 모드에서만
+    받고 그 밖에서는 거부한다. **순수 관측이라 켜도 후보·체결·손익이 하나도 안 움직이고**,
+    끄면(기본) 필드가 `None`이라 예전과 비트 단위로 같다.
+
+    `unrested_sink`(WAN-375, 옵트인)를 주면 **주문이 끝까지 한 번도 안 걸린 탭**(봉내 밴드가
+    워밍업이거나 줄곧 존보다 불리 = 규칙 3)을 `UnrestedTap`으로 모은다. 그 탭은 `setup_sink`에도
+    안 들어가므로(체결률 분모에서 빠진다, WAN-119) 이것 없이는 「첫 탭이 볼린저에 막혔다」를 셀
+    수 없다. 순수 관측이라 후보·통계는 그대로다."""
+    if hold_path_target_r is not None and not observe_hold_path:
+        raise ValueError(
+            "hold_path_target_r은 observe_hold_path와 함께만 뜻이 있습니다(WAN-375) — "
+            "라벨만 붙고 아무것도 안 재는 실행을 막습니다."
+        )
     if overlap is not None and overlap.arm != "A" and zone_provider is None:
         raise ValueError(
             "overlap.arm이 'B'/'C'면 zone_provider가 필요합니다 — 하위TF 겹침 존을 "
@@ -1070,6 +1123,12 @@ def build_zone_limit_candidates(
     live_band_mode = deviation is not None and (
         deviation.band_bar == "intrabar_live" or causal_band_mode
     )
+    if observe_hold_path and not (live_band_mode and not causal_band_mode):
+        # 밴드 무너짐 판정은 `probe_limit`(부작용 없는 조회)으로 하는데, 그건 봉내 라이브
+        # 밴드에서만 정의된다(인과 모드는 표본이 직전 스텝 종가라 거부 — WAN-328).
+        raise ValueError(
+            "observe_hold_path는 band_bar='intrabar_live'(채택 진입가)에서만 씁니다(WAN-375)."
+        )
     if live_band_mode:
         assert deviation is not None
         mode = deviation.band_bar
@@ -1337,6 +1396,8 @@ def build_zone_limit_candidates(
             no_same_step_tp=no_same_step_tp,
             no_same_step_tp_minutes=no_same_step_tp_minutes,
             macd_state=macd_state,
+            observe_hold_path=observe_hold_path,
+            hold_path_target_r=hold_path_target_r,
         )
 
         confirmation: ConfirmationProbe | None = None
@@ -1358,6 +1419,16 @@ def build_zone_limit_candidates(
             )
 
         if not outcome.order_rested:
+            if unrested_sink is not None:
+                # WAN-375 순수 관측: 체결률 분모에서 빠지는 탭도 「그 탭에서 진입이 없었다」의
+                # 한 갈래라 따로 센다(분모 규약은 그대로 둔다).
+                unrested_sink.append(
+                    UnrestedTap(
+                        trigger_time=signal.trigger_time,
+                        tap_index=signal.tap_index,
+                        zone_key=signal.zone_key,
+                    )
+                )
             # WAN-119: live 밴드가 이 셋업에 **끝까지 주문을 걸지 못했다**(워밍업이거나
             # 밴드가 줄곧 존보다 불리 = WAN-75 규칙 3). 정적 모드는 같은 셋업을 탭 봉에서
             # `continue`로 걸러내 분모(eligible)에 넣지 않으므로, 여기서도 세지 않아야
@@ -1465,6 +1536,8 @@ def build_zone_limit_candidates(
                 trigger_time=signal.trigger_time,
                 mfe_r=outcome.mfe_r,
                 mae_r=outcome.mae_r,
+                # WAN-375 순수 관측 — 안 켜면 `None`이라 예전과 비트 단위로 같다.
+                hold_path=outcome.hold_path,
                 partial_exits=outcome.partial_exits,
                 exit_at_breakeven=outcome.exit_at_breakeven,
                 exit_extreme=outcome.exit_extreme,
