@@ -279,3 +279,33 @@ def test_zero_open_interest_is_a_publishing_defect_not_a_value() -> None:
     assert rows.oi_usdt.tolist() == [50.0, 70.0, 80.0]
     series = build_series("BTCUSDT", [rows])
     assert series.census["zero_rows"] == 2 and series.census["gaps_longer"] == 1
+
+
+def test_create_time_becomes_window_start_label_from_2024_03_04() -> None:
+    """🚨 실측(12종목 같은 날): 2024-03-04부터 라벨은 5분 구간 시작, 값은 라벨 + 5분에 잰 것이다.
+
+    보정을 안 하면 「진입 이하 마지막 스냅샷」이 체결 뒤 최대 5분의 가격을 담는다(룩어헤드).
+    """
+    from data.oi_metrics_archive import MEASURED_SHIFT_FROM_DAY, measured_shift_ms
+
+    assert MEASURED_SHIFT_FROM_DAY == "2024-03-04"
+    before = read_day_text(
+        _day_text([_row("2024-03-03 23:50:00", 1, 1), _row("2024-03-03 23:55:00", 2, 2)]),
+        symbol="BTCUSDT",
+        day="2024-03-03",
+    )
+    after = read_day_text(
+        _day_text([_row("2024-03-04 00:00:00", 3, 3), _row("2024-03-04 00:05:00", 4, 4)]),
+        symbol="BTCUSDT",
+        day="2024-03-04",
+    )
+    assert measured_shift_ms("2024-03-03") == 0 and before.measured_shift_ms == 0
+    assert before.times_ms[0] == parse_create_time("2024-03-03 23:50:00")
+    assert after.measured_shift_ms == SNAPSHOT_INTERVAL_MS
+    assert after.times_ms.tolist() == [
+        parse_create_time("2024-03-04 00:05:00"),
+        parse_create_time("2024-03-04 00:10:00"),
+    ]
+    # 전환을 가로질러 이어 붙여도 시각이 되돌아가지 않는다(전환 순간 00:00 한 칸이 구멍으로 남는다).
+    series = build_series("BTCUSDT", [before, after])
+    assert np.all(np.diff(series.times_ms) > 0) and series.census["files_shifted"] == 1

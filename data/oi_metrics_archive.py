@@ -16,9 +16,14 @@ sum_toptrader_long_short_ratio · count_long_short_ratio · sum_taker_long_short
   + 헤더 1 = 577). 「5분이면 288행」과 「577행」이 **둘 다 맞았다**. 최근 파일(2025-10-11)은
   중복이 없다(289행). 이 모듈은 `create_time`으로 **중복을 접되 값이 다르면 셈한다**(조용히
   하나를 고르지 않는다 — 몇 건인지 인구조사에 실린다).
-* `create_time`은 **스냅샷 시각**이다(구간의 시작·끝이 아니라 그 순간의 미결제약정) — 파일은
-  UTC 하루 단위이고 그 하루의 `00:00:00 ~ 23:55:00`이 담긴다. 시각은 **UTC**로 읽는다
-  (`day_of`가 UTC인 이유와 같다 — 시간대를 섞으면 파일과 행이 어긋난다).
+* 🚨 **`create_time`의 뜻이 2024-03-04에 바뀐다** — 그 전에는 **값을 잰 시각**이고, 그날부터는
+  **5분 구간의 시작 라벨이고 값은 구간 끝(라벨 + 5분)에 잰다.** 파일의 함의 가격(명목 ÷ 수량)을
+  저장 1분봉 시가와 시차별로 맞추면 2024-03-03까지는 시차 **0분**, 2024-03-04부터는 **+5분**에서만
+  맞는다(12종목 전부 같은 날 · 오차 0.02~0.6bp — WAN-417 `--part audit`). 같은 날 소수 자릿수도
+  8 → 16으로 바뀐다. 이 모듈은 **값을 잰 시각**(`times_ms`)으로 되돌려 낸다
+  (`MEASURED_SHIFT_FROM_DAY`). 🚨 이걸 안 하면 「진입 이하 마지막 스냅샷」이 **체결 뒤 최대 5분의
+  가격**을 담는다 — 실제로 그 룩어헤드가 「직전 가격 급락 = 나쁨」이라는 가짜 효과를 2024년 이후에만
+  만들었다. 시각은 **UTC**로 읽는다.
 * 파일 안의 `symbol` 열이 파일 이름과 다르면 **거부**한다(엉뚱한 파일을 펼치면 판정 전체가
   무효다 — WAN-348 (c) 규약).
 
@@ -59,6 +64,16 @@ DEFAULT_CACHE_DIR = Path("data/cache/wan417-metrics")
 #: 파일마다 이 값을 다시 확인해 어긋나면 거부한다(「5분이라고 들었다」가 아니라 값으로).
 SNAPSHOT_INTERVAL_MS = 300_000
 SNAPSHOTS_PER_DAY = 86_400_000 // SNAPSHOT_INTERVAL_MS  # 288
+MEASURED_SHIFT_FROM_DAY = "2024-03-04"
+"""이 날(UTC) 파일부터 `create_time`은 구간 시작 라벨이고 값은 **라벨 + 5분**에 잰 것이다(실측 ·
+12종목 같은 날). 🚨 날짜를 바꾸면 룩어헤드가 되살아난다 — `--part audit`이 매 실행 다시 잰다."""
+
+
+def measured_shift_ms(day: str) -> int:
+    """그 날 파일의 라벨 → 값을 잰 시각 보정(ms)."""
+    return SNAPSHOT_INTERVAL_MS if day >= MEASURED_SHIFT_FROM_DAY else 0
+
+
 #: S3 목록 — 존재하는 날짜를 하나하나 HEAD로 찌르지 않고 한 번에 얻는다(500키씩 페이지).
 LISTING_BASE = "https://s3-ap-northeast-1.amazonaws.com/data.binance.vision"
 
@@ -209,7 +224,7 @@ class DayRows:
     symbol: str
     day: str
     times_ms: np.ndarray
-    """정렬된 스냅샷 시각(UTC epoch ms) — 중복을 접은 뒤."""
+    """정렬된 **값을 잰 시각**(UTC epoch ms) — 중복을 접고 `measured_shift_ms`를 더한 뒤."""
     oi_coin: np.ndarray
     oi_usdt: np.ndarray
     raw_rows: int
@@ -221,6 +236,8 @@ class DayRows:
     offgrid_rows: int
     """5분 격자에서 벗어난 스냅샷 수(실측: 전 아카이브 17개 · 몇 초 흔들림). **격자로 끌어오지
     않고 뺀다** — 끌어오면 그 순간에 없던 값을 지어낸다. 빠진 자리는 구멍으로 남는다."""
+    measured_shift_ms: int
+    """라벨 → 값을 잰 시각 보정(2024-03-04부터 +5분). `times_ms`에는 이미 더해져 있다."""
     zero_rows: int
     """미결제약정이 **0 이하**로 적힌 행(실측: 전 아카이브 2,703행 · 12종목이 **같은 달**에 함께
     — 2022-03에 종목마다 정확히 117행). 대형 선물의 OI는 0일 수 없으니 거래소 쪽 게시 결함이다
@@ -291,7 +308,8 @@ def read_day_text(text: str, *, symbol: str, day: str) -> DayRows:
             conflicts += 1
     on_grid = sorted(t for t in seen if t % SNAPSHOT_INTERVAL_MS == 0)
     offgrid = len(seen) - len(on_grid)
-    times = np.array(on_grid, dtype=np.int64)
+    shift = measured_shift_ms(day)
+    times = np.array(on_grid, dtype=np.int64) + shift
     coin = np.array([seen[t][0] for t in on_grid], dtype=np.float64)
     usdt = np.array([seen[t][1] for t in on_grid], dtype=np.float64)
     min_gap = int(np.diff(times).min()) if len(times) >= 2 else None
@@ -310,6 +328,7 @@ def read_day_text(text: str, *, symbol: str, day: str) -> DayRows:
         duplicate_rows=duplicates,
         conflicting_rows=conflicts,
         offgrid_rows=offgrid,
+        measured_shift_ms=shift,
         zero_rows=zeros,
         spill_rows=spill,
         min_gap_ms=min_gap,
@@ -374,6 +393,7 @@ def build_series(symbol: str, day_rows: Sequence[DayRows]) -> MetricsSeries:
         "offgrid_rows": int(sum(d.offgrid_rows for d in ordered)),
         "spill_rows": int(sum(d.spill_rows for d in ordered)),
         "zero_rows": int(sum(d.zero_rows for d in ordered)),
+        "files_shifted": int(sum(1 for d in ordered if d.measured_shift_ms)),
         "missing_snapshots_in_files": int(
             sum(max(SNAPSHOTS_PER_DAY - d.snapshots, 0) for d in ordered)
         ),

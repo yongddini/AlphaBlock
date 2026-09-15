@@ -41,7 +41,9 @@
 
 ## 데이터 규약 (0단계 실측 · `docs/decisions/wan417.md` §1)
 
-간격 **300초**(격자 위 최소 차) · `create_time`은 **스냅샷 시각** · 옛 파일은 행이 **두 번씩**
+간격 **300초**(격자 위 최소 차) · 🚨 `create_time`은 **2024-03-03까지 값을 잰 시각 · 2024-03-04부터
+5분 구간 시작 라벨(값은 +5분)** — 파서가 잰 시각으로 되돌리고 `--part audit`이 1분봉과 대조해 매번
+검산한다 · 옛 파일은 행이 **두 번씩**
 적혀 「577행」이 났다 · 두 단위 열 다 있음 · 첫 날짜 **BTC 2020-09-01 · 나머지 11종목 2021-12-01**
 · OI=0 게시 결함 2,703행(12종목이 같은 달에) · 날 넘김 행 5 · 격자 밖 17.
 
@@ -110,6 +112,7 @@ BINS_CSV = REPORTS_DIR / "wan417_oi_bins.csv"
 LOO_CSV = REPORTS_DIR / "wan417_oi_loo.csv"
 CHECKSUM_CSV = REPORTS_DIR / "wan417_oi_checksum.csv"
 HOLD_CSV = REPORTS_DIR / "wan417_oi_holding.csv"
+AUDIT_CSV = REPORTS_DIR / "wan417_oi_timestamp_audit.csv"
 DECOMP_CSV = REPORTS_DIR / "wan417_oi_price_decomposition.csv"
 FIGURE_SVG = REPORTS_DIR / "wan417_oi_paths.svg"
 SUMMARY_PATH = REPORTS_DIR / "wan417_oi_event_study_summary.md"
@@ -241,6 +244,8 @@ class CensusRow:
     """다음 날 첫 1분 시각이 적혀 **뺀** 행(다음 날 파일의 몫)."""
     zero_rows: int
     """OI가 0 이하로 적혀 **뺀** 행(거래소 게시 결함 · 구멍이 된다)."""
+    files_shifted: int
+    """라벨 → 값을 잰 시각을 +5분 보정한 파일 수(2024-03-04부터)."""
     files_short: int
     """스냅샷이 288개 미만인 파일(하루 안의 구멍)."""
     missing_snapshots_in_files: int
@@ -313,6 +318,7 @@ def census_rows(
                 offgrid_rows=series.census.get("offgrid_rows", 0),
                 spill_rows=series.census.get("spill_rows", 0),
                 zero_rows=series.census.get("zero_rows", 0),
+                files_shifted=series.census.get("files_shifted", 0),
                 files_short=series.census.get("files_short", 0),
                 missing_snapshots_in_files=series.census.get("missing_snapshots_in_files", 0),
             )
@@ -336,6 +342,83 @@ def load_all_series(
             flush=True,
         )
     return out
+
+
+# --------------------------------------------------------------------------- #
+# 시각 검산 — 파일의 함의 가격이 「값을 잰 시각」의 1분봉 가격과 맞는가
+# --------------------------------------------------------------------------- #
+
+AUDIT_DAYS: tuple[str, ...] = ("2022-06-01", "2023-06-01", "2024-03-01", "2024-03-06", "2025-06-01")
+"""전환일(2024-03-04) 양옆과 앞뒤 해에서 고른 날 — 착수 후 고정(결과를 보고 고르지 않았다)."""
+AUDIT_LAGS_MIN: tuple[int, ...] = tuple(range(-10, 11))
+
+
+@dataclass(frozen=True)
+class AuditRow:
+    symbol: str
+    day: str
+    snapshots: int
+    best_lag_min: int
+    err_bp_at_0: float
+    err_bp_at_best: float
+    err_bp_at_plus5: float
+
+
+def timestamp_audit_rows(
+    symbols: Sequence[str], series_by: dict[str, MetricsSeries]
+) -> list[AuditRow]:
+    """보정 뒤 시계열의 함의 가격(명목 ÷ 수량)을 1분봉 **시가**(= 그 분의 시작 순간 가격)와 시차별로
+    대조한다. 보정이 맞으면 모든 (종목, 날)에서 **시차 0분**이 가장 잘 맞아야 한다(검산 (j))."""
+    rows: list[AuditRow] = []
+    for symbol in symbols:
+        bare = archive_symbol(symbol)
+        series = series_by[bare]
+        for day in AUDIT_DAYS:
+            lo = parse_day_ms(day)
+            hi = lo + 86_400_000
+            sel = (series.times_ms >= lo) & (series.times_ms < hi)
+            if not sel.any():
+                continue
+            market = harness.load_market_data(
+                harness.normalize_symbol(bare),
+                "1h",
+                start_ms=lo - 86_400_000,
+                end_ms=hi + 86_400_000,
+                need_1m=True,
+                funding=False,
+            )
+            opens = pd.Series(
+                market.df_1m["open"].to_numpy(dtype=np.float64),
+                index=market.df_1m["open_time"].to_numpy(dtype=np.int64),
+            )
+            times = series.times_ms[sel]
+            implied = series.oi_usdt[sel] / series.oi_coin[sel]
+            errors: dict[int, float] = {}
+            for lag in AUDIT_LAGS_MIN:
+                ref = opens.reindex(times + lag * 60_000).to_numpy()
+                ok = ~np.isnan(ref)
+                if ok.sum() < 100:
+                    continue
+                errors[lag] = float(np.median(np.abs(implied[ok] / ref[ok] - 1.0)) * 1e4)
+            if 0 not in errors:
+                continue
+            best = min(errors, key=lambda k: errors[k])
+            rows.append(
+                AuditRow(
+                    symbol=bare,
+                    day=day,
+                    snapshots=int(sel.sum()),
+                    best_lag_min=best,
+                    err_bp_at_0=errors[0],
+                    err_bp_at_best=errors[best],
+                    err_bp_at_plus5=errors.get(5, float("nan")),
+                )
+            )
+    return rows
+
+
+def parse_day_ms(day: str) -> int:
+    return int(pd.Timestamp(day, tz="UTC").value // 1_000_000)
 
 
 # --------------------------------------------------------------------------- #
@@ -1297,6 +1380,18 @@ def checksum_rows(
             float(late),
         )
     )
+    # (j) 시각 검산 — (i)는 **파일 라벨이 맞다는 전제** 위의 값이라, 라벨 자체를 1분봉으로 확인한다.
+    audit = pd.read_csv(AUDIT_CSV) if AUDIT_CSV.exists() else pd.DataFrame()
+    audited = len(audit)
+    off = int((audit["best_lag_min"] != 0).sum()) if audited else 0
+    rows.append(
+        ChecksumRow(
+            f"(j) 시각 검산 — 보정 뒤 최적 시차 ≠ 0분인 (종목, 날) · 대조 {audited}칸",
+            float(off),
+            0.0,
+            float(off) if audited else float("nan"),
+        )
+    )
     return rows
 
 
@@ -1617,6 +1712,25 @@ def render_summary(
             f"{rec['missing_snapshots_in_files']:,} |"
         )
     lines.append("")
+    lines.append("### 🚨 시각 검산 — `create_time`의 뜻이 2024-03-04에 바뀐다")
+    lines.append("")
+    lines.append(
+        "파일의 함의 가격(명목 ÷ 수량)을 저장 1분봉 시가와 시차별로 맞췄다. "
+        "라벨 그대로면 2024-03-03까지는 0분, 2024-03-04부터는 **+5분**에서만 맞는다"
+        "(값을 구간 끝에 쟀다). 파서가 그날부터 +5분을 더해 **값을 잰 시각**으로 되돌렸고, "
+        "아래는 **보정 뒤** 표다 — 전부 0분이어야 한다(검산 (j))."
+    )
+    lines.append("")
+    lines.append("| 종목 | 날 | 스냅샷 | 가장 잘 맞는 시차(분) | 오차 bp @0 | @+5분 |")
+    lines.append("| -- | -- | --: | --: | --: | --: |")
+    if AUDIT_CSV.exists():
+        for rec in pd.read_csv(AUDIT_CSV).to_dict("records"):
+            lines.append(
+                f"| {rec['symbol']} | {rec['day']} | {int(rec['snapshots'])} | "
+                f"{int(rec['best_lag_min']):+d} | {rec['err_bp_at_0']:.2f} | "
+                f"{rec['err_bp_at_plus5']:.2f} |"
+            )
+    lines.append("")
     lines.append("### 제외 인구조사 (정렬마다 · 보간 없음)")
     lines.append("")
     if not exclusions.empty:
@@ -1704,6 +1818,8 @@ def _run_census(
     census = census_rows(symbols, listed, series_by)
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     pd.DataFrame.from_records([asdict(r) for r in census]).to_csv(CENSUS_CSV, index=False)
+    audit = timestamp_audit_rows(symbols, series_by)
+    _records(audit).to_csv(AUDIT_CSV, index=False)
     return census, series_by
 
 
