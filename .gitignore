@@ -33,6 +33,8 @@ data/*.db.*
 # FUSE가 「열려 있는데 삭제된」 파일에 붙이는 이름. 여기 있는 것들은 SQLite `-shm`
 # 이고 손상 시점의 마운트 상태를 증언한다(WAN-195 §1) — 커밋 대상은 아니다.
 data/.fuse_hidden*
+# 페이퍼 리셋이 지우기 전에 떨구는 장부 CSV (WAN-399) — 서버 운영 기록이지 코드가 아니다.
+data/paper-reset-exports/
 
 # 1분봉 등 전체 로드 parquet 캐시 (WAN-78) — data/*.parquet는 하위 디렉터리를 잡지 못함
 data/cache/
