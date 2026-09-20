@@ -30,6 +30,11 @@ _TIMEFRAME_MS: dict[str, int] = {
 }
 
 
+#: 지원하는 타임프레임(짧은 것부터). 이 표가 정본이고, 밖에서 TF 목록이 필요하면 여기서
+#: 파생한다 — 손으로 다시 적으면 새 TF가 조용히 빠진다(WAN-423).
+SUPPORTED_TIMEFRAMES: tuple[str, ...] = tuple(_TIMEFRAME_MS)
+
+
 def timeframe_to_ms(timeframe: str) -> int:
     """타임프레임 문자열을 밀리초로 변환한다.
 

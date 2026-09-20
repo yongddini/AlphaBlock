@@ -85,6 +85,7 @@ from data.agg_trade_archive import (
     fetch_day,
     minute_ticks,
 )
+from data.models import SUPPORTED_TIMEFRAMES, timeframe_to_ms
 from data.storage import OhlcvStore
 from strategy.models import (
     ConfluenceParams,
@@ -113,9 +114,14 @@ DEFAULT_STRATUM_FLOOR = 10
 #: 시드 고정(§2 완료기준 2: 재현 가능). 이슈 번호를 쓴다.
 DEFAULT_SEED = 348
 
-TF_MS: dict[str, int] = {"15m": 900_000, "1h": 3_600_000, "2h": 7_200_000, "4h": 14_400_000}
-#: 표·요약의 TF 순서(짧은 것부터). 층 배분·출력이 이 순서를 공유한다.
-TF_ORDER: tuple[str, ...] = ("15m", "1h", "2h", "4h")
+#: 상위TF → ms. **정본 표(`data.models`)에서 파생한다**(WAN-423) — 여기에 손으로 적어 두면
+#: 새 TF를 쓰는 규칙을 판정할 때 `TF_MS.get()`이 `None`을 내고 재구성이 통째로 실패한다
+#: (그 실패는 「데이터가 없다」와 구분되지 않는다). 2026-09-20 실측에서 6h·1d 규칙을 재려다
+#: 스크래치 패치로 우회해야 했던 자리다.
+TF_MS: dict[str, int] = {tf: timeframe_to_ms(tf) for tf in SUPPORTED_TIMEFRAMES}
+#: 표·요약의 TF 순서(짧은 것부터). 층 배분·출력이 이 순서를 공유한다. 빈 층은 출력에서
+#: 저절로 빠지므로 **지원하는 TF 전부**를 담아도 옛 표의 행·순서는 그대로다(WAN-423).
+TF_ORDER: tuple[str, ...] = tuple(sorted(TF_MS, key=TF_MS.__getitem__))
 
 ARM_STATIC = "static"
 ARM_BAND = "band"

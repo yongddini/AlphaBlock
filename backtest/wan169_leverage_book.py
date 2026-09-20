@@ -879,6 +879,10 @@ def run_cell_variants(
                         substeps=reentry_ctx.substeps,
                         substep_times=reentry_ctx.substep_times,
                         offset=task.confirmation_offset,
+                        # WAN-423: base 후보와 **같은 규칙**을 배수별 팔에도 건다. 이 두 줄이
+                        # 없던 동안 `no_same_step_tp`는 라벨만 붙고 동작하지 않았다.
+                        no_same_step_tp=task.no_same_step_tp,
+                        no_same_step_tp_minutes=task.no_same_step_tp_minutes or None,
                     )
                     for multiple, arm_cands in derived.items():
                         arms[label].setdefault(arm_key(arm, multiple), {})[segment_name] = tuple(
