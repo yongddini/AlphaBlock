@@ -116,6 +116,8 @@ def derive_arm_candidates(
     substeps: Sequence[SubStep],
     substep_times: Sequence[int],
     offset: float = ARM_C_OFFSET,
+    no_same_step_tp: bool = False,
+    no_same_step_tp_minutes: frozenset[int] | None = None,
 ) -> dict[float, list[_Candidate]]:
     """한 팔의 「익절 배수 → 후보」. 후보 **집합**은 안 만들고 진입·청산만 갈아끼운다.
 
@@ -128,6 +130,11 @@ def derive_arm_candidates(
 
     반환은 `multiples` 각 값 → 후보 목록이고, **같은 팔의 배수들은 진입 집합이 비트 일치**
     한다(익절은 청산만 바꾼다 — WAN-137/143 훅과 같은 성질. 회귀 테스트가 고정한다).
+
+    🚨 `no_same_step_tp`·`no_same_step_tp_minutes`(WAN-423)는 **진입 스텝 익절 금지**를
+    이 경로에도 건다. 이 배선이 없던 동안 `run_cells(no_same_step_tp=True)`는 base 후보에만
+    걸리고 **배수별 팔에서는 무동작**이었다 — 익절 배수를 축으로 쓴 표가 전부 낙관 위에 있었다.
+    안 주면 예전과 **비트 단위로 같다**.
     """
     out: dict[float, list[_Candidate]] = {m: [] for m in multiples}
     if len(out) != len(multiples):
@@ -163,6 +170,8 @@ def derive_arm_candidates(
             stop_price=cand.stop_price,
             take_profit_prices=targets,
             substeps=substeps,
+            no_same_step_tp=no_same_step_tp,
+            no_same_step_tp_minutes=no_same_step_tp_minutes,
         )
         for multiple, target, done in zip(multiples, targets, exits, strict=True):
             out[multiple].append(

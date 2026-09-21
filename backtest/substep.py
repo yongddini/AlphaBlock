@@ -1091,6 +1091,8 @@ def simulate_fixed_entry_exits(
     take_profit_prices: Sequence[float | None],
     substeps: Sequence[SubStep],
     stop_before_tp: bool = True,
+    no_same_step_tp: bool = False,
+    no_same_step_tp_minutes: frozenset[int] | None = None,
 ) -> list[FixedEntryExit]:
     """확정 진입 하나를 **여러 익절 목표로 동시에** 청산 판정한다 (WAN-386 §0, 순수 함수).
 
@@ -1104,9 +1106,20 @@ def simulate_fixed_entry_exits(
 
     ⚠️ MFE/MAE는 **목표마다 다르다**(보유 구간이 다르므로) — 청산 스텝까지만 보고 그 이후는
     보지 않는다는 WAN-90 규약을 목표별로 지킨다.
+
+    🚨 `no_same_step_tp`·`no_same_step_tp_minutes`(WAN-423): **진입한 그 1분 스텝에서는
+    익절을 판정하지 않는다** — `simulate_zone_limit_trade`의 같은 이름 인자와 **같은 뜻·같은
+    상호 배타 규칙**이다. 이 경로(배수별 팔)가 그 인자를 **받지도 않아** `run_cells(
+    no_same_step_tp=True)`를 줘도 배수 축 표에서는 조용히 무동작이었다(라벨은 붙고 동작은
+    안 하는 WAN-91/95/112/123/159/194 부류). 안 주면 예전과 **비트 단위로 같다**.
     """
     if entry_index < 0 or entry_index >= len(substeps):
         raise ValueError(f"entry_index가 서브스텝 범위 밖입니다: {entry_index}")
+    if no_same_step_tp and no_same_step_tp_minutes is not None:
+        raise ValueError(
+            "no_same_step_tp(전부)와 no_same_step_tp_minutes(표적)는 같은 축의 두 값이라 "
+            "함께 줄 수 없습니다 — 하나만 고르세요."
+        )
     is_long = direction is OrderBlockDirection.BULLISH
     risk = abs(entry_price - stop_price)
     count = len(take_profit_prices)
@@ -1138,8 +1151,17 @@ def simulate_fixed_entry_exits(
             else:
                 hold_high[idx] = max(hold_high[idx], step.high)
                 hold_low[idx] = min(hold_low[idx], step.low)
-            tp_hit = tp_price is not None and (
-                step.high >= tp_price if is_long else step.low <= tp_price
+            # WAN-423: 진입 스텝의 익절을 막는 조건은 본 시뮬레이터(`simulate_zone_limit_trade`)
+            # 와 **같은 술어**다 — 「방금 체결된 그 1분」이고, 손절은 그대로 판정하므로 켠 팔은
+            # 「손절만 같은 분에 인정」이 되어 `stop_before_tp`와 방향이 대칭이 된다.
+            same_step_tp_blocked = step.time == entry_time and (
+                no_same_step_tp
+                or (no_same_step_tp_minutes is not None and step.time in no_same_step_tp_minutes)
+            )
+            tp_hit = (
+                not same_step_tp_blocked
+                and tp_price is not None
+                and (step.high >= tp_price if is_long else step.low <= tp_price)
             )
             if stop_hit and (not tp_hit or stop_before_tp):
                 mfe_r, mae_r = _excursions(idx)
