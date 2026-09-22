@@ -1,0 +1,20 @@
+import pickle, collections
+D="/private/tmp/claude-501/-Users-joyongjin-AlphaBlock/e589d145-2734-4f76-9e37-1c84bb6f4fda/scratchpad/"
+R=pickle.load(open(D+"delayed.pkl","rb"))
+def path(tr):
+    eq=peak=1.0; mdd=0.0; rs=[]
+    for _,p in sorted(tr): eq+=eq*p; peak=max(peak,eq); mdd=max(mdd,1-eq/peak)
+    return eq-1,mdd
+for floor in (0.03,0.04,0.05):
+  for kthr in (15.0,25.0):
+    print(f"\n=== 하한 {floor:.0%} · %K<{kthr:.0f} · ts4 · 거래당 1% (단순 복리 경로) ===")
+    for seg in ("앞","뒤"):
+        sel=[t for t in R if t[5]>=floor and t[6] is not None and t[6]<kthr and ((t[2]<t[7])==(seg=="앞"))]
+        base=[(t[3],0.01*t[4]) for t in sel]
+        A=[(t[8][0],0.01*t[8][1]) for t in sel if t[8]]
+        B=[(t[3],0.005*t[4]) for t in sel]+[(t[8][0],0.005*t[8][1]) for t in sel if t[8]]
+        skipped=[t for t in sel if not t[8]]
+        rb=sum(t[4] for t in sel)/len(sel); ra=sum(t[8][1] for t in sel if t[8])/max(1,len(A))
+        wA=[t[8][2]/t[5] for t in sel if t[8]]; wA.sort()
+        f=lambda x:f"{x[0]:+.0%}/MDD {x[1]:.0%}"
+        print(f"  {seg}: 지금 {len(sel)}거래 R {rb:+.3f} {f(path(base))} | A 한봉대기 {len(A)}거래 R {ra:+.3f} {f(path(A))} (손절폭 배수 중앙 {wA[len(wA)//2]:.2f}) | B 반반 {f(path(B))} | A가 거른 {len(skipped)}건 원래 R 평균 {sum(t[4] for t in skipped)/max(1,len(skipped)):+.2f}")

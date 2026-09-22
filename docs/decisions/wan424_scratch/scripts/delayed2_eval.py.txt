@@ -1,0 +1,63 @@
+import gzip, pickle, __main__, dataclasses, time
+from pathlib import Path
+from backtest import wan424_stoch_isolation as iso, wan424_stoch_ob_arm as arm, harness
+from backtest.book_cli import iter_book_segments, net_r
+from backtest.leverage_book import LeverageBookParams
+from backtest.run import parse_date_ms
+__main__.IsoCell = iso.IsoCell
+with gzip.open("backtest/cache/wan424_iso_work.pkl.gz") as fh: cl=pickle.load(fh)["cells"]
+cells={(c.symbol,c.timeframe):c for c in cl}
+A=pickle.load(open("/private/tmp/claude-501/-Users-joyongjin-AlphaBlock/e589d145-2734-4f76-9e37-1c84bb6f4fda/scratchpad/delayed2.pkl","rb"))
+arm.register_3h()
+base=arm.build_base_payloads(jobs=4,payload_dir=Path("backtest/cache/wan424_payloads"))
+def sel_idx(c,seg,floor,kthr):
+    return [i for i,x in enumerate(c.pool[4][seg]) if arm.stop_width(x)>=floor and c.k_value[seg][i] is not None and c.k_value[seg][i]<kthr]
+W={}
+def build(mode,floor,kthr):
+    out=[]
+    for p in base:
+        c=cells[(p.symbol,p.timeframe)]; a=A.get((p.symbol,p.timeframe),{}); k1={}; k2={}
+        for seg in c.pool[4]:
+            idx=sel_idx(c,seg,floor,kthr); ad=a.get(seg,{})
+            for i in idx:
+                if i in ad: W[(p.symbol,p.timeframe,int(ad[i].entry_time))]=(arm.stop_width(c.pool[4][seg][i]),arm.stop_width(ad[i]))
+            legA=tuple(ad[i] for i in idx if i in ad); legB=tuple(c.pool[4][seg][i] for i in idx)
+            k1[seg]=legA if mode=="A" else legB
+            k2[seg]=legA
+        out.append(dataclasses.replace(p,candidates=k1,reentry_candidates={},arm_candidates={}))
+        if mode=="B": out.append(dataclasses.replace(p,timeframe=p.timeframe+"·B",candidates=k2,reentry_candidates={},arm_candidates={}))
+    return out
+def trades(ps):
+    res={}
+    for s in iter_book_segments(ps,book=LeverageBookParams(),segments=("is","oos_warm"),start_ms=parse_date_ms(harness.DEFAULT_START),end_ms=parse_date_ms(harness.DEFAULT_END),include_reentry=False,compound_sizing=False,min_stop_distance_fraction=0.0,take_profit_liquidity=harness.ADOPTED_TAKE_PROFIT_LIQUIDITY):
+        rows=[]
+        for t,p in s.trades_with_placements():
+            sym,tf=p.cell; leg2=tf.endswith("·B")
+            ratio=1.0
+            if leg2:
+                w1,w2=W[(sym,tf[:-2],int(t.entry_time))]; ratio=w2/w1
+            rows.append((t.exit_time,net_r(t,p),leg2,ratio))
+        res[s.segment]=rows
+    return res
+def path(rows,wfn):
+    eq=peak=1.0; mdd=0.0; rs=[]
+    for x,r,l2,ra in sorted(rows):
+        eq+=wfn(l2,ra)*eq*r; peak=max(peak,eq); mdd=max(mdd,1-eq/peak)
+    return eq-1,mdd
+for floor in (0.03,0.04,0.05):
+    print(f"\n=== 하한 {floor:.0%} · ts4 · 실제 북 · 원래 방식 복리 경로 ===",flush=True)
+    for kthr in (15.0,25.0):
+        T0=trades(build(None,floor,kthr)); TA=trades(build("A",floor,kthr)); TB=trades(build("B",floor,kthr))
+        # 수량 반반의 세트당 평균 위험 (앞구간에서만) → 1%로 맞추는 배율
+        leg1=sum(1 for r in TB["is"] if not r[2]); tot=sum(0.005*(r[3] if r[2] else 1.0) for r in TB["is"])
+        k=0.01*leg1/tot if tot else 1.0
+        modes=[("지금",T0,lambda l,ra:0.01),("A 한봉대기",TA,lambda l,ra:0.01),("B R맞춤(각 0.5%)",TB,lambda l,ra:0.005),
+               ("B 수량반반",TB,lambda l,ra:0.005*(ra if l else 1.0)),(f"B 수량반반·위험맞춤(×{k:.2f})",TB,lambda l,ra,k=k:k*0.005*(ra if l else 1.0))]
+        for lab,Tm,wf in modes:
+            out=[]
+            for seg in ("is","oos_warm"):
+                rows=Tm[seg]; n1=sum(1 for r in rows if not r[2]); n2=len(rows)-n1
+                m=sum(r[1] for r in rows)/len(rows) if rows else float("nan"); ret,mdd=path(rows,wf)
+                cnt=f"{n1}+{n2}" if n2 and lab.startswith("B") else f"{len(rows)}"
+                out.append(f"{cnt:>9}거래 R {m:+.3f} 복리 {ret:+6.0%} MDD {mdd:3.0%}")
+            print(f"  %K<{kthr:.0f} {lab:>24}: 앞 {out[0]} | 뒤 {out[1]}",flush=True)

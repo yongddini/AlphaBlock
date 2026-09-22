@@ -1,0 +1,44 @@
+import gzip, pickle, __main__, collections, datetime as dt, statistics as st
+from pathlib import Path
+from backtest import wan424_stoch_isolation as iso, wan424_stoch_ob_arm as arm, harness
+from backtest.book_cli import iter_book_segments, net_r
+from backtest.leverage_book import LeverageBookParams
+from backtest.run import parse_date_ms
+__main__.IsoCell = iso.IsoCell
+D="/private/tmp/claude-501/-Users-joyongjin-AlphaBlock/e589d145-2734-4f76-9e37-1c84bb6f4fda/scratchpad/"
+T=pickle.load(open(D+"cap_trades.pkl","rb"))
+with gzip.open("backtest/cache/wan424_iso_work.pkl.gz") as fh: cl=pickle.load(fh)["cells"]
+cells={(c.symbol,c.timeframe):c for c in cl}
+arm.register_3h()
+base=arm.build_base_payloads(jobs=4,payload_dir=Path("backtest/cache/wan424_payloads"))
+orig=harness.build_config; UPD={}
+harness.build_config=lambda *a,**k:(lambda c:c.model_copy(update={"risk_sizing":c.risk_sizing.model_copy(update=UPD)}))(orig(*a,**k))
+KST=dt.timezone(dt.timedelta(hours=9)); day=lambda ms:dt.datetime.fromtimestamp(ms/1000,KST).date()
+EV={"2021-05-19","2021-12-04","2022-01-22","2022-05-10","2022-05-12","2022-06-13","2024-08-05","2025-02-03"}
+for a,lv in [((0.04,4,15.0),0.0075)]:
+    med=st.median(w for *_,w in T[a+("is",)])
+    UPD.update({"sizing_mode":"fixed_notional","notional_fraction":lv/med})
+    sel=iso._select(base,cells,hold=a[1],floor=a[0],thr=a[2],mode="real")
+    seg=iter_book_segments(sel,book=LeverageBookParams(),segments=("full",),start_ms=parse_date_ms(harness.DEFAULT_START),end_ms=parse_date_ms(harness.DEFAULT_END),include_reentry=False,compound_sizing=True,min_stop_distance_fraction=0.0,take_profit_liquidity=harness.ADOPTED_TAKE_PROFIT_LIQUIDITY)[0]
+    tp=sorted(seg.trades_with_placements(),key=lambda x:x[0].exit_time)
+    eq0=tp[0][1].equity  # 첫 진입 시 자본
+    print(f"full: 수익 {seg.row.total_return:+.0%} · MDD {seg.row.max_drawdown:.0%} · 거래 {seg.row.num_trades}")
+    pnl=collections.Counter(); ent=collections.Counter(); stops=collections.Counter(); rs=collections.defaultdict(float)
+    for t,p in tp:
+        ent[day(t.entry_time)]+=1
+        pnl[day(t.exit_time)]+=p.realized_pnl
+        rs[day(t.exit_time)]+=net_r(t,p)
+        if t.exits[-1].reason.name=="STOP_LOSS": stops[day(t.exit_time)]+=1
+    eq=eq0; start={}
+    for d in sorted(set(pnl)|set(ent)):
+        start[d]=eq; eq+=pnl.get(d,0.0)
+    rows=[(d,pnl[d]/start[d]) for d in pnl]
+    def show(d):
+        print(f"{d}: 진입 {ent.get(d,0):3d} · 청산 손절 {stops.get(d,0):3d} · net R {rs.get(d,0):+6.1f} · 계좌 {pnl.get(d,0)/start[d] if d in start else 0:+6.1%}")
+    print("\n[앞서 말한 폭락일]")
+    for d in sorted(start):
+        if str(d) in EV: show(d)
+    print("\n[계좌가 가장 많이 빠진 날 10]")
+    for d,_ in sorted(rows,key=lambda x:x[1])[:10]: show(d)
+    print("\n[가장 많이 오른 날 5]")
+    for d,_ in sorted(rows,key=lambda x:-x[1])[:5]: show(d)

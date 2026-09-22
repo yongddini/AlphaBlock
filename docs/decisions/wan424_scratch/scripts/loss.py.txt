@@ -1,0 +1,27 @@
+import gzip, pickle, __main__, numpy as np
+from collections import defaultdict
+from datetime import datetime, timezone, timedelta
+from backtest import wan424_matched_null as mn
+from backtest import wan424_stoch_ob_arm as arm
+__main__.NullCell = mn.NullCell
+with gzip.open("backtest/cache/wan424_null_work.pkl.gz") as fh:
+    cells = pickle.load(fh)["cells"]
+base = arm.build_base_payloads(jobs=1, payload_dir=arm.DEFAULT_PAYLOAD_DIR)
+pay = mn.build_payloads(base, cells, hold=4, threshold=25.0, null=None)
+facts = mn.place_facts(pay, segments=("full",))["full"]
+rs=[f.net_r for f in facts]
+losses=[r for r in rs if r<0]; wins=[r for r in rs if r>0]
+print(f"전체 {len(rs)}거래 · 승 {len(wins)} 패 {len(losses)}")
+print(f"이긴 거래 평균 net R: {np.mean(wins):+.3f} · 최대 {max(wins):+.2f}")
+print(f"진 거래 평균 net R: {np.mean(losses):+.3f} · 최악 한 방 {min(losses):+.2f}")
+print(f"손실 분위: p50 {np.percentile(losses,50):+.2f} · p90 {np.percentile(losses,10):+.2f} · p99 {np.percentile(losses,1):+.2f}")
+print(f"−1R보다 나쁜 손절 비율: {sum(1 for r in losses if r<-1.0)/len(losses):.0%}")
+# 하루(KST)에 몇 개나 동시에 손절나나
+day=defaultdict(int)
+for f in facts:
+    if f.net_r<0:
+        d=datetime.fromtimestamp(f.entry_time/1000,tz=timezone(timedelta(hours=9))).strftime("%Y-%m-%d")
+        day[d]+=1
+top=sorted(day.values(),reverse=True)[:5]
+print(f"하루 최대 동시 손절(상위5일): {top}")
+print(f"하루 평균 손절 수(손절난 날): {np.mean(list(day.values())):.1f}")

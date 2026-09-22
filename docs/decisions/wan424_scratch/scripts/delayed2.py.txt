@@ -1,0 +1,42 @@
+import gzip, pickle, __main__, dataclasses, bisect, time
+from concurrent.futures import ProcessPoolExecutor
+from backtest import wan424_stoch_isolation as iso, wan424_stoch_ob_arm as arm, harness
+from backtest.harness import SEGMENT_FULL, SEGMENT_IS, SEGMENT_OOS
+from backtest.run import parse_date_ms
+from backtest.substep import build_substeps
+from backtest.wan169_leverage_book import IS_SEGMENT, OOS_SEGMENT
+from data.models import timeframe_to_ms
+__main__.IsoCell = iso.IsoCell
+def work(c):
+    arm.register_3h()
+    tf=timeframe_to_ms(c.timeframe)
+    if not any(arm.stop_width(x)>=0.03 for seg in c.pool[4] for x in c.pool[4][seg]): return (c.symbol,c.timeframe),{}
+    m=harness.load_market_data(c.symbol,c.timeframe,start_ms=parse_date_ms(harness.DEFAULT_START),end_ms=parse_date_ms(harness.DEFAULT_END),need_1m=True)
+    win={SEGMENT_FULL:m,SEGMENT_IS:harness.slice_market(m,IS_SEGMENT),SEGMENT_OOS:harness.slice_market(m,OOS_SEGMENT)}
+    out={}
+    for seg,pool in c.pool[4].items():
+        ss=build_substeps(win[seg].df_1m,tf); times=[s.time for s in ss]; d={}
+        for i,x in enumerate(pool):
+            if arm.stop_width(x)<0.03: continue
+            st=float(x.stop_price); j=bisect.bisect_left(times,int(x.entry_time))
+            if j>=len(times) or times[j]!=int(x.entry_time): continue
+            b0=ss[j].htf_bar_time; k=j; broke=False
+            while k<len(ss) and ss[k].htf_bar_time==b0:
+                if ss[k].low<=st: broke=True; break
+                k+=1
+            if broke or k>=len(ss): continue
+            ea=ss[k-1].close
+            if ea<=st: continue
+            ca=arm.time_exit(dataclasses.replace(x,entry_price=ea),index=k,bars=4,substeps=ss)
+            d[i]=dataclasses.replace(ca,entry_liquidity=arm.Liquidity.TAKER)
+        out[seg]=d
+    return (c.symbol,c.timeframe),out
+if __name__=="__main__":
+    t0=time.monotonic()
+    with gzip.open("backtest/cache/wan424_iso_work.pkl.gz") as fh: cl=pickle.load(fh)["cells"]
+    res={}
+    with ProcessPoolExecutor(4) as ex:
+        for n,(k,v) in enumerate(ex.map(work,cl),1):
+            res[k]=v
+            if n%20==0: print(f"{n}/{len(cl)} {time.monotonic()-t0:.0f}s",flush=True)
+    pickle.dump(res,open("/private/tmp/claude-501/-Users-joyongjin-AlphaBlock/e589d145-2734-4f76-9e37-1c84bb6f4fda/scratchpad/delayed2.pkl","wb")); print("DONE",time.monotonic()-t0,flush=True)

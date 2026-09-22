@@ -1,0 +1,222 @@
+"""측정 전용 패치 — 같은 체결 집합 위에 **진단 팔**을 얹는다(WAN-423 §6 후속 탐색).
+
+오늘 확정된 두 사실에서 곧장 나온 설계다:
+  · 거래당 gross가 −0.08R인데 **같은 회계로 무작위 팔을 돌린 적이 없다** → 「우리 규칙이
+    나쁜가」와 「이 청산 구조가 나쁜가」가 안 갈린다.
+  · 비용이 손절폭에 반비례해 좁은 손절 구간이 −0.52R이다 → **자(1R)를 존 바닥에 묶은 것**이
+    원인일 수 있는데 그 자를 바꿔 본 적이 없다.
+
+팔 목록(`arm` 이름으로 분기):
+  · `기준`     — 원래 동작(원 함수에 위임).
+  · `널`       — **같은 칸·같은 기하·무작위 시각**. 진입 시각만 무작위로 옮기고 손절폭 비율·
+                 익절 배수는 그 거래의 것을 그대로 쓴다. 이 팔이 0 언저리면 우리 진입은
+                 중립이고 손해는 **회계·기하**에서 오는 것이다.
+  · `pct1/2/3` — 손절을 존 바닥이 아니라 **진입가의 고정 비율**(1·2·3%)로. 좁은 존이 만드는
+                 「1R이 얇아 비용이 R의 30%」 구간이 사라진다.
+  · `time1/2/4/8` — **시간 청산**: 상위TF 봉 N개 뒤 종가에 시장가로 나간다. 손절·익절선이
+                 아예 없으므로 「한 봉 안에서 둘 다 닿으면 손절 우선」이라는 구조적 불리함이
+                 사라진다 — 진입 뒤 **순수 방향성**만 남는다.
+
+🚨 이 패치를 켜면 팔 라벨의 뜻이 바뀐다 — **반드시 별도 캐시 디렉터리**를 쓴다.
+"""
+from __future__ import annotations
+
+import bisect
+import dataclasses
+import random
+from collections.abc import Sequence
+
+from backtest import confirmation_arm as _ca
+from backtest import wan169_leverage_book as _w169
+from backtest.models import ExitReason
+from backtest.substep import simulate_fixed_entry_exits
+from backtest.zone_limit_backtest import _Candidate
+from common.costs import Liquidity
+from strategy.models import OrderBlockDirection
+
+ARM_BASE = _ca.ARM_BASE
+NULL = "널"
+PCT = {"pct1": 0.01, "pct2": 0.02, "pct3": 0.03}
+TIME = {"time1": 1, "time2": 2, "time4": 4, "time8": 8}
+#: 🚨 시간 청산의 **대조군** — 같은 칸·같은 보유 봉 수·**무작위 시각**. 롱 온리라 상승장에서는
+#: 아무 때나 사서 N봉 들고 있어도 오른다(WAN-393 「buy&hold 병기」의 이 축 판). 이 팔과의
+#: 차이만이 「진입에 방향성이 있는가」이고, 이 대조군 없이 시간 청산 수치를 인용하면 안 된다.
+NULL_TIME = {"nt1": 1, "nt2": 2, "nt4": 4, "nt8": 8}
+#: 🚨 손절선은 **두고** 익절선만 없앤 팔 — 「한 봉에 둘 다 닿으면 손절 우선」 불리함은
+#: 사라지지만 손실은 1R로 막힌다. 손절 없는 `time*`는 R의 분모(존 깊이)가 얇을 때 값이
+#: 폭발해(실측 최악 −156R) 평균 R이 뜻을 잃으므로, **판정은 이 팔에서 낸다**.
+STOP_TIME = {"ts1": 1, "ts2": 2, "ts4": 4, "ts8": 8}
+NULL_STOP_TIME = {"nts1": 1, "nts2": 2, "nts4": 4, "nts8": 8}
+ALL_ARMS = (ARM_BASE, NULL, *PCT, *TIME, *NULL_TIME, *STOP_TIME, *NULL_STOP_TIME)
+#: 보유 봉수 연장(§6 후속) — ts8이 격자 끝에서 안 꺾여 12·16·24봉을 더 잰다.
+#: 🚨 ALL_ARMS에 넣지 않는다(기존 진단 캐시의 키가 바뀌면 전 칸 미스).
+LONG_STOP_TIME = {"ts12": 12, "ts16": 16, "ts24": 24}
+
+_ORIGINAL = _ca.derive_arm_candidates
+
+
+def _rebuild(cand, *, entry_time, entry_price, stop_price, take_profit, done, substeps, liquidity):
+    out = _ca._rebuilt(
+        cand,
+        entry_time=entry_time,
+        entry_price=entry_price,
+        take_profit=take_profit,
+        liquidity=liquidity,
+        done=done,
+        substeps=substeps,
+    )
+    return dataclasses.replace(out, stop_price=stop_price)
+
+
+def _time_exit(
+    cand,
+    *,
+    index: int,
+    bars: int,
+    substeps,
+    entry_price: float | None = None,
+    stop_price: float | None = None,
+) -> _Candidate | None:
+    """상위TF 봉 `bars`개 뒤 종가 청산(시장가). `stop_price`를 주면 그전에 손절을 먼저 본다."""
+    seen = {substeps[index].htf_bar_time}
+    last = substeps[index]
+    hit_stop = False
+    for step in substeps[index:]:
+        if step.htf_bar_time not in seen:
+            if len(seen) >= bars:
+                break
+            seen.add(step.htf_bar_time)
+        last = step
+        if stop_price is not None and (
+            step.low <= stop_price if cand.side.sign > 0 else step.high >= stop_price
+        ):
+            hit_stop = True
+            break
+    entry = cand.entry_price if entry_price is None else entry_price
+    return dataclasses.replace(
+        cand,
+        entry_time=substeps[index].time,
+        entry_price=entry,
+        stop_price=cand.stop_price if stop_price is None else stop_price,
+        exit_time=last.time,
+        exit_price=stop_price if hit_stop else last.close,
+        reason=ExitReason.STOP_LOSS if hit_stop else ExitReason.END_OF_DATA,
+        take_profit_price=None,
+        entry_liquidity=Liquidity.MAKER,
+        mfe_r=None,
+        mae_r=None,
+    )
+
+
+def _derive(
+    candidates: Sequence[_Candidate],
+    *,
+    arm: str,
+    multiples: Sequence[float],
+    substeps,
+    substep_times,
+    offset: float = _ca.ARM_C_OFFSET,
+    no_same_step_tp: bool = False,
+    no_same_step_tp_minutes: frozenset[int] | None = None,
+) -> dict[float, list[_Candidate]]:
+    if arm == ARM_BASE:
+        return _ORIGINAL(
+            candidates,
+            arm=arm,
+            multiples=multiples,
+            substeps=substeps,
+            substep_times=substep_times,
+            offset=offset,
+            no_same_step_tp=no_same_step_tp,
+            no_same_step_tp_minutes=no_same_step_tp_minutes,
+        )
+
+    out: dict[float, list[_Candidate]] = {m: [] for m in multiples}
+    timed = {**TIME, **NULL_TIME, **STOP_TIME, **NULL_STOP_TIME, **LONG_STOP_TIME}
+    if arm in timed:
+        bars = timed[arm]
+        random_entry = arm in NULL_TIME or arm in NULL_STOP_TIME
+        with_stop = arm in STOP_TIME or arm in NULL_STOP_TIME or arm in LONG_STOP_TIME
+        rng = random.Random(f"wan423:{arm}:{substep_times[0] if substep_times else 0}")
+        for cand in candidates:
+            base_entry = float(cand.entry_price)
+            is_long = cand.side.sign > 0
+            raw = (base_entry - float(cand.stop_price)) if is_long else (float(cand.stop_price) - base_entry)
+            width = raw / base_entry if base_entry > 0 else 0.0
+            if with_stop and width <= 0:
+                continue
+            if random_entry:
+                limit = max(1, int(len(substeps) * 0.9))
+                index = rng.randrange(limit)
+                entry_price: float | None = float(substeps[index].close)
+            else:
+                index = bisect.bisect_left(substep_times, cand.entry_time)
+                if index >= len(substep_times) or substep_times[index] != cand.entry_time:
+                    continue
+                entry_price = None
+            stop = None
+            if with_stop:
+                ref = entry_price if entry_price is not None else base_entry
+                stop = ref * (1.0 - width) if is_long else ref * (1.0 + width)
+            built = _time_exit(
+                cand, index=index, bars=bars, substeps=substeps, entry_price=entry_price,
+                stop_price=stop,
+            )
+            if built is None:
+                continue
+            for m in multiples:  # 시간 청산은 배수를 안 읽는다 — 같은 행을 키마다 담는다
+                out[m].append(built)
+        return out
+
+    rng = random.Random(f"wan423:{arm}:{substep_times[0] if substep_times else 0}")
+    for cand in candidates:
+        entry_price = float(cand.entry_price)
+        if entry_price <= 0:
+            continue
+        width = (entry_price - float(cand.stop_price)) / entry_price
+        if width <= 0:
+            continue
+
+        if arm == NULL:
+            # 같은 기하 · 무작위 시각 — 창 끝 10%는 피한다(청산 여유).
+            limit = max(1, int(len(substeps) * 0.9))
+            index = rng.randrange(limit)
+            entry = float(substeps[index].close)
+            w = width
+        else:
+            index = bisect.bisect_left(substep_times, cand.entry_time)
+            if index >= len(substep_times) or substep_times[index] != cand.entry_time:
+                continue
+            entry = entry_price
+            w = PCT[arm]
+
+        stop = entry * (1.0 - w)
+        targets = [entry * (1.0 + w * m) for m in multiples]
+        exits = simulate_fixed_entry_exits(
+            direction=OrderBlockDirection.BULLISH,
+            entry_index=index,
+            entry_price=entry,
+            stop_price=stop,
+            take_profit_prices=targets,
+            substeps=substeps,
+            no_same_step_tp=no_same_step_tp,
+            no_same_step_tp_minutes=no_same_step_tp_minutes,
+        )
+        for m, target, done in zip(multiples, targets, exits, strict=True):
+            out[m].append(
+                _rebuild(
+                    cand,
+                    entry_time=substeps[index].time,
+                    entry_price=entry,
+                    stop_price=stop,
+                    take_profit=target,
+                    done=done,
+                    substeps=substeps,
+                    liquidity=Liquidity.MAKER,
+                )
+            )
+    return out
+
+
+_ca.derive_arm_candidates = _derive
+_w169.derive_arm_candidates = _derive

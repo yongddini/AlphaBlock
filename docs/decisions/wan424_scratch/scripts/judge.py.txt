@@ -1,0 +1,24 @@
+import gzip, pickle, __main__, numpy as np
+from backtest import wan424_stoch_isolation as iso
+from backtest import wan424_matched_null as mn
+from backtest import wan424_stoch_ob_arm as arm
+__main__.IsoCell = iso.IsoCell
+with gzip.open("backtest/cache/wan424_iso_work.pkl.gz") as fh:
+    cells = {(c.symbol,c.timeframe):c for c in pickle.load(fh)["cells"]}
+base = arm.build_base_payloads(jobs=1, payload_dir=arm.DEFAULT_PAYLOAD_DIR)
+hold, thr = 4, 25.0
+print(f"{'하한':>4} | {'구간':>8} | {'팔':>9} {'하한만':>9} {'%K기여':>9} | {'A널':>9} {'p':>6} 유의", flush=True)
+for floor in (0.0,0.02,0.03,0.04):
+    armp = iso._select(base,cells,hold=hold,floor=floor,thr=thr,mode="real")
+    flp  = iso._select(base,cells,hold=hold,floor=floor,thr=thr,mode="floor")
+    af = mn.place_facts(armp,segments=("full","is","oos_warm"))
+    ff = mn.place_facts(flp,segments=("full","is","oos_warm"))
+    nulls={s:[] for s in ("full","is","oos_warm")}
+    for d in range(200):
+        nf=mn.place_facts(iso._select(base,cells,hold=hold,floor=floor,thr=thr,mode="null",draw=d),segments=("full","is","oos_warm"))
+        for s in nulls: nulls[s].append(mn.mean_r(nf[s]))
+    for s in ("full","is","oos_warm"):
+        a=mn.mean_r(af[s]); f=mn.mean_r(ff[s]); nm=float(np.nanmean(nulls[s])); p=mn.p_value(a,nulls[s])
+        sig="✅" if mn.significant(a,nulls[s],len(af[s])) else "—"
+        print(f"{floor:>4.0%} | {s:>8} | {a:+.4f}({len(af[s])}) {f:+.4f} {a-f:+.4f} | {nm:+.4f} {p:.3f} {sig}", flush=True)
+    print(flush=True)

@@ -1,0 +1,31 @@
+import gzip, pickle, __main__, sys, numpy as np
+from backtest import harness
+from backtest import wan424_stoch_isolation as iso
+from backtest import wan424_stoch_ob_arm as arm
+from backtest.book_cli import iter_book_segments
+from backtest.leverage_book import LeverageBookParams
+from backtest.run import parse_date_ms
+__main__.IsoCell = iso.IsoCell
+floor=float(sys.argv[1]); thr=float(sys.argv[2]); hold=4; DRAWS=200
+with gzip.open("backtest/cache/wan424_iso_work.pkl.gz") as fh:
+    cells = {(c.symbol,c.timeframe):c for c in pickle.load(fh)["cells"]}
+base = arm.build_base_payloads(jobs=1, payload_dir=arm.DEFAULT_PAYLOAD_DIR)
+SEGS=("is","oos_warm")
+def book(pay):
+    out={}
+    for seg in iter_book_segments(pay, book=LeverageBookParams(), segments=SEGS,
+            start_ms=parse_date_ms(harness.DEFAULT_START), end_ms=parse_date_ms(harness.DEFAULT_END),
+            include_reentry=False, compound_sizing=True, min_stop_distance_fraction=0.0,
+            take_profit_liquidity=harness.ADOPTED_TAKE_PROFIT_LIQUIDITY):
+        out[seg.segment]=(seg.row.num_trades, seg.row.total_return, seg.row.max_drawdown)
+    return out
+real=book(iso._select(base,cells,hold=hold,floor=floor,thr=thr,mode="real"))
+nulls={s:[] for s in SEGS}
+for d in range(DRAWS):
+    b=book(iso._select(base,cells,hold=hold,floor=floor,thr=thr,mode="null",draw=d))
+    for s in SEGS: nulls[s].append(b[s])
+print(f"=== 하한 {floor:.0%} · ts{hold} · %K<{thr:.0f} ===")
+for s in SEGS:
+    n,r,m=real[s]; rets=np.array([x[1] for x in nulls[s]]); mdds=np.array([x[2] for x in nulls[s]])
+    p_ret=(rets>=r).mean(); p_mdd=(mdds<=m).mean()
+    print(f"{s:>8}: %K {n}거래 복리 {r*100:+.0f}% MDD {m*100:.0f}% | 무작위 평균 복리 {np.mean(rets)*100:+.0f}% (중앙 {np.median(rets)*100:+.0f}%) MDD {np.mean(mdds)*100:.0f}% | p(수익) {p_ret:.3f} · p(MDD) {p_mdd:.3f}")

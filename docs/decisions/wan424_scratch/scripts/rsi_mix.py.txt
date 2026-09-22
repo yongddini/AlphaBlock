@@ -1,0 +1,58 @@
+import gzip, pickle, __main__, dataclasses, statistics as st, math, sys
+from pathlib import Path
+from backtest import wan424_stoch_isolation as iso, wan424_stoch_ob_arm as arm, harness
+from backtest.book_cli import iter_book_segments, net_r
+from backtest.leverage_book import LeverageBookParams
+from backtest.run import parse_date_ms
+from data.storage import OhlcvStore
+from data.models import timeframe_to_ms
+__main__.IsoCell = iso.IsoCell
+D="/private/tmp/claude-501/-Users-joyongjin-AlphaBlock/e589d145-2734-4f76-9e37-1c84bb6f4fda/scratchpad/"
+T=pickle.load(open(D+"cap_trades.pkl","rb"))
+with gzip.open("backtest/cache/wan424_iso_work.pkl.gz") as fh: cl=pickle.load(fh)["cells"]
+cells={(c.symbol,c.timeframe):c for c in cl}
+arm.register_3h()
+base=arm.build_base_payloads(jobs=4,payload_dir=Path("backtest/cache/wan424_payloads"))
+store=OhlcvStore(harness.DB_PATH)
+def rsi_line(close,n=14):
+    out=[None]*len(close)
+    if len(close)<=n: return out
+    g=[max(close[i]-close[i-1],0) for i in range(1,len(close))]; l=[max(close[i-1]-close[i],0) for i in range(1,len(close))]
+    ag=sum(g[:n])/n; al=sum(l[:n])/n
+    out[n]=100 if al==0 else 100-100/(1+ag/al)
+    for i in range(n+1,len(close)):
+        ag=(ag*(n-1)+g[i-1])/n; al=(al*(n-1)+l[i-1])/n
+        out[i]=100 if al==0 else 100-100/(1+ag/al)
+    return out
+RSI={}
+for c in cl:
+    fr=store.load(c.symbol,c.timeframe,start_ms=0,end_ms=10**14)
+    times=[int(v) for v in fr["open_time"]]; r=rsi_line([float(v) for v in fr["close"]])
+    tf=timeframe_to_ms(c.timeframe)
+    RSI[(c.symbol,c.timeframe)]={seg:tuple(arm.k_before(times,r,int(x.entry_time),tf) for x in c.pool[4][seg]) for seg in c.pool[4]}
+print("RSI 부착 완료",file=sys.stderr)
+orig=harness.build_config; UPD={}
+harness.build_config=lambda *a,**k:(lambda c:c.model_copy(update={"risk_sizing":c.risk_sizing.model_copy(update=UPD)}))(orig(*a,**k))
+def run(kthr, rthr, lv=0.0075):
+    med=st.median(w for *_,w in T[(0.04,4,15.0,"is")])
+    UPD.clear(); UPD.update({"sizing_mode":"fixed_notional","notional_fraction":lv/med})
+    out=[]
+    for p in base:
+        c=cells[(p.symbol,p.timeframe)]; rv=RSI[(p.symbol,p.timeframe)]; kept={}
+        for seg in c.pool[4]:
+            idx=[i for i,x in enumerate(c.pool[4][seg]) if arm.stop_width(x)>=0.04
+                 and (kthr is None or (c.k_value[seg][i] is not None and c.k_value[seg][i]<kthr))
+                 and (rthr is None or (rv[seg][i] is not None and rv[seg][i]<rthr))]
+            kept[seg]=tuple(c.pool[4][seg][i] for i in idx)
+        out.append(dataclasses.replace(p,candidates=kept,reentry_candidates={},arm_candidates={}))
+    res={}
+    for s in iter_book_segments(out,book=LeverageBookParams(),segments=("is","oos_warm"),start_ms=parse_date_ms(harness.DEFAULT_START),end_ms=parse_date_ms(harness.DEFAULT_END),include_reentry=False,compound_sizing=True,min_stop_distance_fraction=0.0,take_profit_liquidity=harness.ADOPTED_TAKE_PROFIT_LIQUIDITY):
+        rs=[net_r(t,p) for t,p in s.trades_with_placements()]
+        res[s.segment]=(s.row.total_return,s.row.max_drawdown,len(rs),(sum(rs)/len(rs) if rs else math.nan))
+    return res
+print("하한 4% · ts4 · 폭비례 0.75% · 실제 북(복리)")
+for kthr in (15.0,25.0,None):
+    for rthr in (None,40.0,35.0,30.0,25.0):
+        r=run(kthr,rthr); i,o=r["is"],r["oos_warm"]
+        kl="%K 없음" if kthr is None else f"%K<{kthr:.0f}"; rl="RSI 없음" if rthr is None else f"RSI<{rthr:.0f}"
+        print(f"{kl:>7} {rl:>8}: 앞 {i[2]:4d}거래 R {i[3]:+.3f} 수익 {i[0]:+5.0%} MDD {i[1]:3.0%} | 뒤 {o[2]:4d}거래 R {o[3]:+.3f} 수익 {o[0]:+5.0%} MDD {o[1]:3.0%}",flush=True)

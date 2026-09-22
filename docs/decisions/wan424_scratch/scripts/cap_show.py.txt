@@ -1,0 +1,8 @@
+import pickle
+D="/private/tmp/claude-501/-Users-joyongjin-AlphaBlock/e589d145-2734-4f76-9e37-1c84bb6f4fda/scratchpad/"
+R=pickle.load(open(D+"cap_res.pkl","rb")); inf=float("inf")
+for a in [(0.04,4,15.0),(0.04,4,25.0),(0.03,4,15.0),(0.04,8,25.0)]:
+    print(f"\n== 하한{a[0]:.0%} ts{a[1]} %K<{a[2]:.0f} ==")
+    for lab,cfg in [("지금(1R·한도없음)",("1R","block",inf)),("1R·한도20%",("1R","block",0.20)),("1R·한도10%",("1R","block",0.10)),("1R·한도5%",("1R","block",0.05)),("폭비례·한도없음",("폭비례","block",inf))]:
+        s=" | ".join(f"{sg[:3]}: {R[(a,)+cfg+(sg,)][2]}거래 수익 {R[(a,)+cfg+(sg,)][0]:+.0%} MDD {R[(a,)+cfg+(sg,)][1]:.0%}" for sg in ("is","oos_warm"))
+        print(f"{lab:>16} {s}")

@@ -1,0 +1,41 @@
+import sys as _s
+_s.path.insert(0, "/private/tmp/claude-501/-Users-joyongjin-AlphaBlock/92ebc647-da74-4930-817c-6dae264955e8/scratchpad")
+import tf3h_patch, diag_patch  # noqa
+import dataclasses, pickle, time
+from concurrent.futures import ProcessPoolExecutor
+from backtest import harness, wan424_stoch_ob_arm as arm
+from backtest.confirmation_arm import ARM_C_OFFSET
+from backtest.harness import SEGMENT_FULL, SEGMENT_IS, SEGMENT_OOS
+from backtest.payload_cache import PayloadCache
+from backtest.run import parse_date_ms
+from backtest.substep import build_substeps
+from backtest.wan169_leverage_book import IS_SEGMENT, OOS_SEGMENT, run_cells
+from backtest.wan180_leverage_book_nine import apply_funding_proxy
+from data.models import timeframe_to_ms
+from diag_cross import ALL31, CACHE
+TFS=("1h","2h","3h","4h","6h","8h","12h","1d","1w"); HOLDS=(1,2,3,4)
+def work(p):
+    import tf3h_patch  # noqa
+    shorts={seg:[c for c in v if c.side.sign<0 and not c.is_reentry and c.tap_index==0 and c.entry_price>0 and arm.stop_width(c)>=0.03] for seg,v in p.candidates.items()}
+    if not any(shorts.values()): return (p.symbol,p.timeframe),{}
+    m=harness.load_market_data(p.symbol,p.timeframe,start_ms=parse_date_ms(harness.DEFAULT_START),end_ms=parse_date_ms(harness.DEFAULT_END),need_1m=True)
+    win={SEGMENT_FULL:m,SEGMENT_IS:harness.slice_market(m,IS_SEGMENT),SEGMENT_OOS:harness.slice_market(m,OOS_SEGMENT)}
+    tf=timeframe_to_ms(p.timeframe); out={}
+    for seg,cs in shorts.items():
+        if not cs: out[seg]={h:() for h in HOLDS}; continue
+        d=arm.derive_hold_arms(cs,substeps=build_substeps(win[seg].df_1m,tf),holds=HOLDS)
+        out[seg]={h:tuple(d[h]) for h in HOLDS}
+    return (p.symbol,p.timeframe),out
+if __name__=="__main__":
+    t0=time.monotonic()
+    payloads=apply_funding_proxy(run_cells(ALL31,TFS,start=harness.DEFAULT_START,end=harness.DEFAULT_END,jobs=4,
+        take_profit_liquidity=harness.ADOPTED_TAKE_PROFIT_LIQUIDITY,retap_mode="once",reentry=False,engine_check=False,
+        confirmation_arms=("ts4","ts8","ts12","ts16","ts24"),confirmation_multiples=(0.6,),confirmation_offset=ARM_C_OFFSET,
+        payload_cache=PayloadCache(CACHE.with_name("hold_ls_payloads")),fill=harness.fill_preset("pen_5bp"),
+        short_enabled=True,no_same_step_tp=True))[0]
+    res={}
+    with ProcessPoolExecutor(4) as ex:
+        for n,(k,v) in enumerate(ex.map(work,payloads),1):
+            res[k]=v
+            if n%20==0: print(f"{n}/{len(payloads)} {time.monotonic()-t0:.0f}s",flush=True)
+    pickle.dump(res,open("/private/tmp/claude-501/-Users-joyongjin-AlphaBlock/e589d145-2734-4f76-9e37-1c84bb6f4fda/scratchpad/short_hold.pkl","wb")); print("DONE",time.monotonic()-t0)

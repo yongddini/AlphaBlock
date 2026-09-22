@@ -1,0 +1,47 @@
+import gzip, pickle, __main__, time, statistics as st, sys
+from pathlib import Path
+from backtest import wan424_stoch_isolation as iso, wan424_stoch_ob_arm as arm, harness, book_cli
+from backtest.book_cli import iter_book_segments
+from backtest.leverage_book import LeverageBookParams
+from backtest.run import parse_date_ms
+__main__.IsoCell = iso.IsoCell
+D="/private/tmp/claude-501/-Users-joyongjin-AlphaBlock/e589d145-2734-4f76-9e37-1c84bb6f4fda/scratchpad/"
+T=pickle.load(open(D+"cap_trades.pkl","rb"))
+with gzip.open("backtest/cache/wan424_iso_work.pkl.gz") as fh:
+    cl = pickle.load(fh)["cells"]
+cells = {(c.symbol, c.timeframe): c for c in cl}
+arm.register_3h()
+base = arm.build_base_payloads(jobs=4, payload_dir=Path("backtest/cache/wan424_payloads"))
+orig = harness.build_config
+UPD = {}
+def patched(*a, **k):
+    cfg = orig(*a, **k)
+    return cfg.model_copy(update={"risk_sizing": cfg.risk_sizing.model_copy(update=UPD)})
+harness.build_config = patched
+LEVELS=[0.0025,0.005,0.0075,0.01,0.0125,0.015,0.02]
+ARMS=[(0.04,4,15.0),(0.04,4,25.0),(0.03,4,15.0),(0.04,8,25.0),(0.03,8,15.0),(0.04,8,15.0)]
+out={}
+t0=time.time()
+for a in ARMS:
+    sel = iso._select(base, cells, hold=a[1], floor=a[0], thr=a[2], mode="real")
+    med = st.median(w for *_,w in T[a+("is",)])
+    for sname in ("1R","폭비례"):
+        for lv in LEVELS:
+            UPD.clear()
+            UPD.update({"risk_per_trade":lv} if sname=="1R" else {"sizing_mode":"fixed_notional","notional_fraction":lv/med})
+            for seg in iter_book_segments(sel, book=LeverageBookParams(), segments=("is","oos_warm"),
+                    start_ms=parse_date_ms(harness.DEFAULT_START), end_ms=parse_date_ms(harness.DEFAULT_END),
+                    include_reentry=False, compound_sizing=True, min_stop_distance_fraction=0.0,
+                    take_profit_liquidity=harness.ADOPTED_TAKE_PROFIT_LIQUIDITY):
+                r=seg.row
+                out[(a,sname,lv,seg.segment)]=(r.total_return, r.max_drawdown, r.num_trades)
+    print(f"{a} 완료 {time.time()-t0:.0f}s", flush=True, file=sys.stderr)
+pickle.dump(out,open(D+"mdd30.pkl","wb"))
+for a in ARMS:
+    print(f"\n== 하한{a[0]:.0%} ts{a[1]} %K<{a[2]:.0f} ==")
+    for sname in ("1R","폭비례"):
+        ok=[lv for lv in LEVELS if out[(a,sname,lv,"is")][1]<=0.30]
+        for lv in LEVELS:
+            i=out[(a,sname,lv,"is")]; o=out[(a,sname,lv,"oos_warm")]
+            mark=" ◀ IS MDD≤30% 중 최대" if ok and lv==max(ok) else ""
+            print(f"  {sname:>4} {lv:.2%}: 앞 {i[2]}거래 {i[0]:+.0%} MDD {i[1]:.0%} | 뒤 {o[2]}거래 {o[0]:+.0%} MDD {o[1]:.0%}{mark}")

@@ -219,6 +219,8 @@ _NO_PIN_NEEDED: frozenset[str] = frozenset(
         "wan424_stoch_ob_arm",
         # §2 매칭 대조군도 같다 — §1 팔(필터 꺼진 판) 위에서 대조군을 건다.
         "wan424_matched_null",
+        # §3 격리도 같다 — §1 팔 위에서 손절폭 하한만 흔든다.
+        "wan424_stoch_isolation",
         # 존 병합 × 재탭 2×2(WAN-388)도 같다 — 필터를 켠 채 낸 표가 아니라 **필터 꺼진 채택
         # 북** 위에서 존 정의와 재탭 정책만 갈아끼운 표다(핀 없음이 설계, WAN-305). 검산
         # (a-1)/(a-2)가 `split_every` 팔 ≡ 인자 없는 채택 북을 못 박는다.

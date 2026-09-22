@@ -1,0 +1,25 @@
+import gzip, pickle, __main__, time
+from pathlib import Path
+from backtest import wan424_stoch_isolation as iso, wan424_stoch_ob_arm as arm, harness
+from backtest.book_cli import iter_book_segments, net_r
+from backtest.leverage_book import LeverageBookParams
+from backtest.run import parse_date_ms
+__main__.IsoCell = iso.IsoCell
+with gzip.open("backtest/cache/wan424_iso_work.pkl.gz") as fh:
+    cl = pickle.load(fh)["cells"]
+cells = {(c.symbol, c.timeframe): c for c in cl}
+arm.register_3h()
+base = arm.build_base_payloads(jobs=4, payload_dir=Path("backtest/cache/wan424_payloads"))
+out = {}
+t0 = time.time()
+arms = [(f,h,k) for f in (0.0,0.02,0.03,0.04) for h in (4,8) for k in (15.0,20.0,25.0)]
+for n,(f,h,k) in enumerate(arms,1):
+    sel = iso._select(base, cells, hold=h, floor=f, thr=k, mode="real")
+    for seg in iter_book_segments(sel, book=LeverageBookParams(), segments=("is","oos_warm"),
+            start_ms=parse_date_ms(harness.DEFAULT_START), end_ms=parse_date_ms(harness.DEFAULT_END),
+            include_reentry=False, compound_sizing=False, min_stop_distance_fraction=0.0,
+            take_profit_liquidity=harness.ADOPTED_TAKE_PROFIT_LIQUIDITY):
+        out[(f,h,k,seg.segment)] = [(t.entry_time, t.exit_time, net_r(t,p), abs(t.entry_price-p.stop_price)/t.entry_price) for t,p in seg.trades_with_placements()]
+    print(f"[{n}/24] {f:.0%} ts{h} K<{k:.0f} {time.time()-t0:.0f}s", flush=True)
+pickle.dump(out, open("/private/tmp/claude-501/-Users-joyongjin-AlphaBlock/e589d145-2734-4f76-9e37-1c84bb6f4fda/scratchpad/cap_trades.pkl","wb"))
+print("DONE")

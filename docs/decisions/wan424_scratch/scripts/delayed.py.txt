@@ -1,0 +1,46 @@
+import gzip, pickle, __main__, dataclasses, bisect, time, sys
+from concurrent.futures import ProcessPoolExecutor
+from backtest import wan424_stoch_isolation as iso, wan424_stoch_ob_arm as arm, harness
+from backtest.run import parse_date_ms
+from backtest.substep import build_substeps
+from data.models import timeframe_to_ms
+__main__.IsoCell = iso.IsoCell
+FEE_T=0.0004; FEE_M=0.0002; SLIP=0.0005
+def cost_r(w, maker_entry):
+    ent = FEE_M if maker_entry else FEE_T+SLIP
+    return (ent + FEE_T + SLIP) / w
+def work(c):
+    arm.register_3h()
+    tf=timeframe_to_ms(c.timeframe)
+    pool=c.pool[4]["full"]; kv=c.k_value["full"]
+    idxs=[i for i,x in enumerate(pool) if arm.stop_width(x)>=0.03]
+    if not idxs: return []
+    m=harness.load_market_data(c.symbol,c.timeframe,start_ms=parse_date_ms(harness.DEFAULT_START),end_ms=parse_date_ms(harness.DEFAULT_END),need_1m=True)
+    ss=build_substeps(m.df_1m,tf); times=[s.time for s in ss]; out=[]
+    for i in idxs:
+        x=pool[i]; w=arm.stop_width(x); st=float(x.stop_price)
+        r0=(float(x.exit_price)-float(x.entry_price))/(float(x.entry_price)-st)-cost_r(w,True)
+        j=bisect.bisect_left(times,int(x.entry_time)); a=None
+        if j<len(times) and times[j]==int(x.entry_time):
+            b0=ss[j].htf_bar_time; k=j; broke=False
+            while k<len(ss) and ss[k].htf_bar_time==b0:
+                if ss[k].low<=st: broke=True; break
+                k+=1
+            if not broke and k<len(ss):
+                ea=ss[k-1].close
+                if ea>st:
+                    ca=arm.time_exit(dataclasses.replace(x,entry_price=ea),index=k,bars=4,substeps=ss)
+                    wa=(ea-st)/ea
+                    ra=(float(ca.exit_price)-ea)/(ea-st)-cost_r(wa,False)
+                    a=(int(ca.exit_time),ra,wa)
+        out.append((c.symbol,c.timeframe,int(x.entry_time),int(x.exit_time),r0,w,kv[i],c.boundary_ms,a))
+    return out
+if __name__=="__main__":
+    t0=time.monotonic()
+    with gzip.open("backtest/cache/wan424_iso_work.pkl.gz") as fh: cl=pickle.load(fh)["cells"]
+    res=[]
+    with ProcessPoolExecutor(4) as ex:
+        for n,o in enumerate(ex.map(work,cl),1):
+            res.extend(o)
+            if n%20==0: print(f"{n}/{len(cl)} {time.monotonic()-t0:.0f}s",flush=True)
+    pickle.dump(res,open("/private/tmp/claude-501/-Users-joyongjin-AlphaBlock/e589d145-2734-4f76-9e37-1c84bb6f4fda/scratchpad/delayed.pkl","wb")); print("DONE",time.monotonic()-t0,flush=True)

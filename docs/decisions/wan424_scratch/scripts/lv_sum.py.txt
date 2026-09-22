@@ -1,0 +1,38 @@
+import csv, glob, sys, math
+rows=[]
+for f in glob.glob(sys.argv[1]+"/lvall_*.csv"):
+    for r in csv.reader(open(f)): rows.append(r)
+d={}
+for fl,h,t,lv,seg,n,ret,mdd,pk in rows:
+    ret=float(ret); mdd=float(mdd)
+    d[(float(fl),int(h),float(t),lv,seg)]=(int(n),ret,mdd,ret/mdd if mdd>0 else float('nan'))
+arms=sorted({k[:3] for k in d})
+LV=["A0","A1","A2","A3","A4","A5"]
+print(f"완료 팔 {len(arms)}/24\n")
+print("비율 = 복리수익 ÷ MDD (앞 is / 뒤 oos)")
+print(f"{'팔':<14}"+"".join(f"{l:>14}" for l in LV))
+for a in arms:
+    line=f"{a[0]:.0%} ts{a[1]} K<{a[2]:.0f}".ljust(14)
+    for l in LV:
+        i=d.get(a+(l,"is")); o=d.get(a+(l,"oos_warm"))
+        line+= f"{i[3]:+6.2f}/{o[3]:+5.2f}".rjust(14) if i and o else "—".rjust(14)
+    print(line)
+print("\n레버별: A0 대비 비율이 좋아진 팔 수 (앞 / 뒤 / 둘 다)")
+for l in LV[1:]:
+    ci=co=cb=0; n=0
+    for a in arms:
+        b_i=d[a+("A0","is")][3]; b_o=d[a+("A0","oos_warm")][3]
+        x_i=d[a+(l,"is")][3]; x_o=d[a+(l,"oos_warm")][3]
+        n+=1; up_i=x_i>b_i; up_o=x_o>b_o
+        ci+=up_i; co+=up_o; cb+=up_i and up_o
+    print(f"  {l}: 앞 {ci}/{n} · 뒤 {co}/{n} · 둘 다 {cb}/{n}")
+
+print("\n[정정 집계] 레버별 A0 대비 — 수익↑ / MDD↓ 를 따로 (팔 수), 그리고 A0가 앞·뒤 모두 플러스인 팔에서만 비율 비교")
+pos=[a for a in arms if d[a+("A0","is")][1]>0 and d[a+("A0","oos_warm")][1]>0]
+print(f"  (A0 앞·뒤 모두 수익 플러스인 팔: {len(pos)}개)")
+for l in LV[1:]:
+    s={}
+    for seg in ("is","oos_warm"):
+        s[seg]=(sum(d[a+(l,seg)][1]>d[a+("A0",seg)][1] for a in arms), sum(d[a+(l,seg)][2]<d[a+("A0",seg)][2] for a in arms))
+    rb=sum((d[a+(l,"is")][3]>d[a+("A0","is")][3]) and (d[a+(l,"oos_warm")][3]>d[a+("A0","oos_warm")][3]) for a in pos)
+    print(f"  {l}: 앞 수익↑{s['is'][0]} MDD↓{s['is'][1]} · 뒤 수익↑{s['oos_warm'][0]} MDD↓{s['oos_warm'][1]} (/{len(arms)}) · 플러스 팔에서 비율 앞·뒤 모두↑ {rb}/{len(pos)}")

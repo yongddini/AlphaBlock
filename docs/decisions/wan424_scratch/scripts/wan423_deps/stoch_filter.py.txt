@@ -1,0 +1,160 @@
+"""OB × 스토캐스틱(20,10,10) %K < 20 필터 — 후보를 다시 만들지 않고 걸러 재배치한다.
+
+정의(트레이딩뷰 규약): raw %K = 100·(종가 − 최근20봉 최저) / (최근20봉 최고 − 최저) ·
+**%K 선 = SMA(raw, 10)** · %D = SMA(%K, 10). 사용자가 말한 「%K 선」은 평활된 쪽이다.
+
+🚨 **인과적으로만 읽는다** — 진입 시각이 속한 상위TF 봉은 **아직 형성 중**이므로 그 봉의
+%K는 미래 정보다. **직전 확정봉**의 %K를 쓴다(WAN-119/132가 밴드에서 세운 규약과 같은 자리).
+"""
+from __future__ import annotations
+
+import sys as _s
+_s.path.insert(0, "/private/tmp/claude-501/-Users-joyongjin-AlphaBlock/92ebc647-da74-4930-817c-6dae264955e8/scratchpad")
+import tf3h_patch  # noqa: F401
+import diag_patch  # noqa: F401
+
+import bisect
+import dataclasses
+import time
+
+from backtest import harness
+from backtest.book_cli import iter_book_segments, net_r
+from backtest.confirmation_arm import ARM_C_OFFSET
+from backtest.leverage_book import LeverageBookParams
+from backtest.payload_cache import PayloadCache
+from backtest.run import parse_date_ms
+from backtest.wan169_leverage_book import arm_key, run_cells
+from backtest.wan180_leverage_book_nine import apply_funding_proxy
+from data.models import timeframe_to_ms
+from data.storage import OhlcvStore
+
+from diag_patch import ALL_ARMS
+from diag_cross import ALL31, CACHE, MULTS
+
+TFS = ("1h", "2h", "3h", "4h", "6h", "8h", "12h", "1d")
+SEGMENTS = ("full", "is", "oos_warm")
+K_LEN, K_SMOOTH = 20, 10
+THRESHOLD = 20.0
+ARMS = ("기준", "ts4")
+FLOORS = (0.0, 0.06)
+
+
+def stoch_k(store: OhlcvStore, symbol: str, timeframe: str):
+    """(봉 open_time 리스트, 그 봉 **종가 기준** %K 선) — 봉 i의 값은 봉 i가 닫혀야 안다."""
+    frame = store.load(symbol, timeframe, start_ms=0, end_ms=10 ** 14)
+    if frame.empty:
+        return [], []
+    times = [int(v) for v in frame["open_time"]]
+    high = [float(v) for v in frame["high"]]
+    low = [float(v) for v in frame["low"]]
+    close = [float(v) for v in frame["close"]]
+    raw: list[float | None] = []
+    for i in range(len(times)):
+        if i + 1 < K_LEN:
+            raw.append(None)
+            continue
+        hi = max(high[i + 1 - K_LEN: i + 1])
+        lo = min(low[i + 1 - K_LEN: i + 1])
+        raw.append(50.0 if hi <= lo else 100.0 * (close[i] - lo) / (hi - lo))
+    k: list[float | None] = []
+    for i in range(len(times)):
+        window = raw[i + 1 - K_SMOOTH: i + 1] if i + 1 >= K_SMOOTH else []
+        k.append(sum(window) / K_SMOOTH if window and all(v is not None for v in window) else None)
+    return times, k
+
+
+def main() -> None:
+    started = time.monotonic()
+    payloads = apply_funding_proxy(run_cells(
+        ALL31, TFS, start=harness.DEFAULT_START, end=harness.DEFAULT_END, jobs=4,
+        take_profit_liquidity=harness.ADOPTED_TAKE_PROFIT_LIQUIDITY, retap_mode="once",
+        reentry=False, engine_check=False, confirmation_arms=ALL_ARMS,
+        confirmation_multiples=MULTS, confirmation_offset=ARM_C_OFFSET,
+        payload_cache=PayloadCache(CACHE), fill=harness.fill_preset("pen_5bp"),
+        no_same_step_tp=True,
+    ))[0]
+    print(f"후보 적재 {time.monotonic() - started:.0f}s · 칸 {len(payloads)}", flush=True)
+
+    store = OhlcvStore(harness.DB_PATH)
+    kmap: dict[tuple[str, str], tuple[list[int], list[float | None]]] = {}
+    for p in payloads:
+        key = (p.symbol, p.timeframe)
+        if key not in kmap:
+            kmap[key] = stoch_k(store, p.symbol, p.timeframe)
+    print(f"스토캐스틱 준비 {time.monotonic() - started:.0f}s", flush=True)
+
+    def k_at(symbol: str, timeframe: str, entry_ms: int) -> float | None:
+        """진입 시각 **직전 확정봉**의 %K."""
+        times, k = kmap[(symbol, timeframe)]
+        if not times:
+            return None
+        tf = timeframe_to_ms(timeframe)
+        bar_open = (entry_ms // tf) * tf
+        idx = bisect.bisect_left(times, bar_open)
+        if idx >= len(times) or times[idx] != bar_open:
+            idx = bisect.bisect_right(times, bar_open) - 1
+            if idx < 0:
+                return None
+        prev = idx - 1  # 직전 확정봉
+        return k[prev] if 0 <= prev < len(k) else None
+
+    def pick(arm, floor, tfs, *, stoch: bool):
+        key = arm_key(arm, 0.6)
+        out = []
+        for p in payloads:
+            if p.timeframe not in tfs:
+                continue
+            cands = {}
+            for seg, v in p.arm_candidates[key].items():
+                kept = []
+                for c in v:
+                    if c.is_reentry or c.tap_index != 0:
+                        continue
+                    e, s = float(c.entry_price), float(c.stop_price)
+                    if e <= 0 or (e - s) / e < floor:
+                        continue
+                    if stoch:
+                        kv = k_at(p.symbol, p.timeframe, int(c.entry_time))
+                        if kv is None or kv >= THRESHOLD:
+                            continue
+                    kept.append(c)
+                cands[seg] = tuple(kept)
+            out.append(dataclasses.replace(p, candidates=cands, reentry_candidates={}))
+        return out
+
+    def run(ps):
+        res = {}
+        for seg in iter_book_segments(
+            ps, book=LeverageBookParams(), segments=SEGMENTS,
+            start_ms=parse_date_ms(harness.DEFAULT_START), end_ms=parse_date_ms(harness.DEFAULT_END),
+            include_reentry=False, compound_sizing=False, min_stop_distance_fraction=0.0,
+            take_profit_liquidity=harness.ADOPTED_TAKE_PROFIT_LIQUIDITY,
+        ):
+            rs = [net_r(t, p) for t, p in seg.trades_with_placements()]
+            n = len(rs)
+            mean = sum(rs) / n if n else float("nan")
+            se = ((sum((r - mean) ** 2 for r in rs) / (n - 1)) / n) ** 0.5 if n > 1 else float("nan")
+            res[seg.segment] = (mean, n, se)
+        return res
+
+    print(f"\n=== ① 스토캐스틱 %K<{THRESHOLD:.0f} 필터 (8TF 한 지갑) ===", flush=True)
+    for arm in ARMS:
+        for floor in FLOORS:
+            for stoch in (False, True):
+                r = run(pick(arm, floor, set(TFS), stoch=stoch))
+                tag = "%K<20" if stoch else "필터없음"
+                print(f"  {arm:4} 하한{floor*100:>3.0f}% {tag:7} | " + " · ".join(
+                    f"{s} {r[s][0]:+.4f}±{r[s][2]:.4f}({r[s][1]})" for s in SEGMENTS), flush=True)
+
+    print("\n=== ② TF 분해 (기준 팔 · 하한 0% · 필터 유무) ===", flush=True)
+    for tf in TFS:
+        a = run(pick("기준", 0.0, {tf}, stoch=False))
+        b = run(pick("기준", 0.0, {tf}, stoch=True))
+        print(f"  {tf:3} | 없음 " + " · ".join(f"{s} {a[s][0]:+.4f}({a[s][1]})" for s in SEGMENTS)
+              + "  ||  %K<20 " + " · ".join(f"{s} {b[s][0]:+.4f}({b[s][1]})" for s in SEGMENTS),
+              flush=True)
+    print(f"\n총 {time.monotonic() - started:.0f}s", flush=True)
+
+
+if __name__ == "__main__":
+    main()
