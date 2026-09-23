@@ -86,12 +86,14 @@ import pandas as pd
 from pydantic import BaseModel, ConfigDict
 
 from backtest import harness
-from backtest.book_cli import BookSegment
+from backtest.book_cli import BookSegment, iter_book_segments
+from backtest.leverage_book import LeverageBookParams
 from backtest.models import ExitReason
 from backtest.payload_cache import PayloadCache
 from backtest.run import parse_date_ms
 from backtest.sweep import timeframe_to_ms
 from backtest.wan169_leverage_book import CellPayload
+from backtest.wan180_leverage_book_nine import apply_funding_proxy
 from backtest.wan408_loss_clustering import build_payloads, place
 from backtest.wan409_invalidation_cascade import (
     PUBLISHED_OOS_WARM_MEAN_NET_R,
@@ -110,7 +112,11 @@ __all__ = [
     "ChecksumRow",
     "RankRow",
     "TradeRank",
+    "ARMS",
+    "ARM_ADOPTED",
+    "ARM_NO_REENTRY",
     "build_archives",
+    "place_arm",
     # 🚨 빌려 온 배선을 **일부러 다시 내보낸다** — 이 모듈이 후보 생성·배치를 자기 손으로
     # 짜지 않고 `wan408`의 그 함수를 쓴다는 사실이 공개 표면에 드러나야 하고, 스파이 테스트가
     # **이 이름들로** 호출 인자를 확인한다(자기 사본을 만들면 두 경로가 갈라진다).
@@ -326,6 +332,52 @@ def build_archives(
 
 
 # --------------------------------------------------------------------------- #
+# 팔 — 채택(재진입 ON) + 반사실(재진입 끔)
+# --------------------------------------------------------------------------- #
+
+#: 채택 팔 = 인자 없는 채택 북(재진입 ON · WAN-273). 검산 (a)가 이 팔에만 걸린다.
+ARM_ADOPTED = "adopted"
+
+#: 🚨 **반사실 팔**(사용자 결정 2026-09-23 「일단은 (가)만」) — 재진입을 **끄고 지갑을 다시
+#: 배치한다**. ❌ 「재진입을 끄자」는 제안이 **아니다**: `reentry=True`는 WAN-273 사용자 결정이고
+#: 그 전환은 이 이슈 범위 밖의 재-베이스라인이다(페이퍼 러너도 같은 규칙으로 재진입한다,
+#: WAN-274 · WAN-305).
+#:
+#: 이 팔이 있어야만 답할 수 있는 것: 「4위 이하 37%」 중 **재진입이 만든 몫**. 🚨 `scope=base`
+#: 행으로는 못 답한다 — 그건 **라벨 필터**라 재진입이 쓰던 자본·슬롯을 다른 칸이 가져가는
+#: **재배치가 빠져 있다**(WAN-316 · WAN-389가 같은 자리에서 못 박은 구분).
+ARM_NO_REENTRY = "no_reentry"
+
+ARMS: tuple[str, ...] = (ARM_ADOPTED, ARM_NO_REENTRY)
+
+
+def place_arm(
+    payloads: Sequence[CellPayload],
+    *,
+    start_ms: int,
+    end_ms: int,
+    segments: Sequence[str],
+    include_reentry: bool,
+) -> list[BookSegment]:
+    """한 팔의 북 배치 — `include_reentry` **하나만** 축이고 나머지는 채택 인자 그대로다.
+
+    🚨 `include_reentry=True`면 `wan408.place`와 **같은 호출**이어야 한다(그쪽이 채택 북 인자의
+    단일 소스다). 두 벌이 조용히 갈라지면 검산 (a)가 도는 팔과 반사실 팔의 **비교 자체가
+    무효**가 되므로, 스파이 테스트가 두 경로의 **호출 인자 전체**를 대조해 고정한다.
+    """
+    proxied, _note = apply_funding_proxy(payloads)
+    return iter_book_segments(
+        proxied,
+        book=LeverageBookParams(),
+        segments=list(segments),
+        start_ms=start_ms,
+        end_ms=end_ms,
+        include_reentry=include_reentry,
+        take_profit_liquidity=INHERITED_TAKE_PROFIT_LIQUIDITY,
+    )
+
+
+# --------------------------------------------------------------------------- #
 # 거래 하나 · 라벨
 # --------------------------------------------------------------------------- #
 
@@ -334,6 +386,8 @@ def build_archives(
 class TradeRank:
     """북이 체결한 거래 하나 + 그 시점 존 순위."""
 
+    arm: str
+    """`adopted`(채택 북) 또는 `no_reentry`(반사실) — 팔마다 **다른 지갑**이다."""
     segment: str
     symbol: str
     timeframe: str
@@ -377,6 +431,7 @@ def rank_trades(
     segment: BookSegment,
     archives: dict[tuple[str, str], CellArchive],
     *,
+    arm: str = ARM_ADOPTED,
     ranked_cache: dict[tuple[str, str], _Ranked] | None = None,
 ) -> list[TradeRank]:
     """북 한 구간의 거래마다 그 시점 존 순위를 붙인다.
@@ -412,6 +467,7 @@ def rank_trades(
             )
         out.append(
             TradeRank(
+                arm=arm,
                 segment=segment.segment,
                 symbol=symbol,
                 timeframe=timeframe,
@@ -452,6 +508,7 @@ class RankRow(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
+    arm: str
     segment: str
     scope: str
     """`all`(전체) 또는 TF 이름 · `reentry`/`base`(부류) — 스코프는 **라벨 필터**다."""
@@ -482,7 +539,9 @@ def _bucket_order(label: str) -> int:
     return len(RANK_BUCKETS)  # 「?」는 맨 뒤
 
 
-def _rows_for_scope(trades: Sequence[TradeRank], *, segment: str, scope: str) -> list[RankRow]:
+def _rows_for_scope(
+    trades: Sequence[TradeRank], *, arm: str, segment: str, scope: str
+) -> list[RankRow]:
     if not trades:
         return []
     total_trades = len(trades)
@@ -498,6 +557,7 @@ def _rows_for_scope(trades: Sequence[TradeRank], *, segment: str, scope: str) ->
         bucket_sum = sums[label]
         rows.append(
             RankRow(
+                arm=arm,
                 segment=segment,
                 scope=scope,
                 rank_bucket=label,
@@ -514,23 +574,30 @@ def _rows_for_scope(trades: Sequence[TradeRank], *, segment: str, scope: str) ->
     return rows
 
 
-def census_rows(trades_by_segment: dict[str, list[TradeRank]]) -> list[RankRow]:
-    """전체 · TF별 · base/재진입별 스코프의 순위 분포."""
+def census_rows(trades_by_arm: dict[str, dict[str, list[TradeRank]]]) -> list[RankRow]:
+    """팔 × 구간 × (전체 · TF별 · base/재진입별) 스코프의 순위 분포.
+
+    🚨 **팔은 서로 다른 지갑이다**(재진입을 끄면 자본·슬롯이 재배치된다 — WAN-316). 팔을 가로질러
+    행을 더하거나 빼지 말 것 — 그래서 `arm`이 **행의 열**이지 필터가 아니다.
+    """
     rows: list[RankRow] = []
-    for segment in SEGMENTS:
-        trades = trades_by_segment.get(segment, [])
-        if not trades:
-            continue
-        rows.extend(_rows_for_scope(trades, segment=segment, scope="all"))
-        for timeframe in sorted({t.timeframe for t in trades}, key=timeframe_to_ms):
-            subset = [t for t in trades if t.timeframe == timeframe]
-            rows.extend(_rows_for_scope(subset, segment=segment, scope=timeframe))
-        for label, predicate in (
-            ("base", lambda t: not t.is_reentry),
-            ("reentry", lambda t: t.is_reentry),
-        ):
-            subset = [t for t in trades if predicate(t)]
-            rows.extend(_rows_for_scope(subset, segment=segment, scope=label))
+    for arm in ARMS:
+        by_segment = trades_by_arm.get(arm, {})
+        for segment in SEGMENTS:
+            trades = by_segment.get(segment, [])
+            if not trades:
+                continue
+            rows.extend(_rows_for_scope(trades, arm=arm, segment=segment, scope="all"))
+            for timeframe in sorted({t.timeframe for t in trades}, key=timeframe_to_ms):
+                subset = [t for t in trades if t.timeframe == timeframe]
+                rows.extend(_rows_for_scope(subset, arm=arm, segment=segment, scope=timeframe))
+            for label, predicate in (
+                ("base", lambda t: not t.is_reentry),
+                ("reentry", lambda t: t.is_reentry),
+            ):
+                subset = [t for t in trades if predicate(t)]
+                if subset:
+                    rows.extend(_rows_for_scope(subset, arm=arm, segment=segment, scope=label))
     return rows
 
 
@@ -602,13 +669,19 @@ def on_adopted_coordinates(
 
 
 def checksum_rows(
-    trades_by_segment: dict[str, list[TradeRank]],
+    trades_by_arm: dict[str, dict[str, list[TradeRank]]],
     archives: dict[tuple[str, str], CellArchive],
     *,
     adopted_coordinates: bool,
 ) -> list[ChecksumRow]:
-    """(a) 공개 채택 북 집계 · (b) 존을 못 찾은 거래 0 · (c) base 탭 시각 ∈ `tapped_times`."""
+    """(a) 공개 채택 북 집계 · (b) 존을 못 찾은 거래 0 · (c) base 탭 시각 ∈ `tapped_times`.
+
+    🚨 (a)는 **채택 팔에만** 건다 — 반사실 팔은 정의상 다른 지갑이라 그 등식이 성립하지 않고,
+    거기에 걸면 「검산 실패」가 정상 동작이 된다(WAN-367: 실패가 성공과 같은 모양의 거울상).
+    (d)는 그 반사실이 **실제로 동작했는지**를 본다 — 재진입 거래가 0건이어야 한다.
+    """
     checks: list[ChecksumRow] = []
+    trades_by_segment = trades_by_arm.get(ARM_ADOPTED, {})
     primary = trades_by_segment.get(PRIMARY_SEGMENT, [])
     if adopted_coordinates and primary:
         mean_net = _mean([t.net_r for t in primary])
@@ -644,15 +717,30 @@ def checksum_rows(
             )
         )
 
-    for segment in SEGMENTS:
-        trades = trades_by_segment.get(segment, [])
-        if not trades:
-            continue
+    for arm in ARMS:
+        for segment in SEGMENTS:
+            trades = trades_by_arm.get(arm, {}).get(segment, [])
+            if not trades:
+                continue
+            checks.extend(_integrity_checks(trades, archives, arm=arm, segment=segment))
+    return checks
+
+
+def _integrity_checks(
+    trades: Sequence[TradeRank],
+    archives: dict[tuple[str, str], CellArchive],
+    *,
+    arm: str,
+    segment: str,
+) -> list[ChecksumRow]:
+    checks: list[ChecksumRow] = []
+    label = f"{arm}/{segment}"
+    if trades:
         unresolved = sum(1 for t in trades if t.rank is None)
         checks.append(
             ChecksumRow(
                 check="(b) 순위를 못 잰 거래 0건",
-                segment=segment,
+                segment=label,
                 metric="num_unranked",
                 left=float(unresolved),
                 right=0.0,
@@ -673,13 +761,26 @@ def checksum_rows(
         checks.append(
             ChecksumRow(
                 check="(c) base 거래의 탭 시각 ∈ 그 존의 tapped_times",
-                segment=segment,
+                segment=label,
                 metric="num_mismatched",
                 left=float(mismatched),
                 right=0.0,
                 abs_diff=float(mismatched),
             )
         )
+        if arm == ARM_NO_REENTRY:
+            # (d) 반사실이 **라벨이 아니라 동작**이었는지 — 재진입 거래가 하나도 없어야 한다.
+            leaked = sum(1 for t in trades if t.is_reentry)
+            checks.append(
+                ChecksumRow(
+                    check="(d) 반사실 팔에 재진입 거래 0건",
+                    segment=label,
+                    metric="num_reentry_trades",
+                    left=float(leaked),
+                    right=0.0,
+                    abs_diff=float(leaked),
+                )
+            )
     return checks
 
 
@@ -697,8 +798,12 @@ def run_measure(
     jobs: int = 1,
     cache: PayloadCache | None = None,
     log: bool = True,
-) -> tuple[list[RankRow], list[ChecksumRow], dict[str, list[TradeRank]]]:
-    """후보 → 배치 → 존 대장 → 라벨링. 흔드는 축은 **하나도 없다**(관측 전용)."""
+) -> tuple[list[RankRow], list[ChecksumRow], dict[str, dict[str, list[TradeRank]]]]:
+    """후보 → **팔마다 배치** → 존 대장 → 라벨링. 흔드는 축은 **재진입 하나**뿐이다(관측 전용).
+
+    📌 **재진입은 배치 축이라 후보를 다시 안 만든다**(WAN-389/394 §0) — 무거운 패스는 위에서
+    한 번이고 두 팔은 그 payload를 나눠 쓴다. 실측으로 팔 하나 추가 비용이 **초 단위**다.
+    """
     start_ms, end_ms = parse_date_ms(start), parse_date_ms(end)
     t0 = time.monotonic()
     payloads: list[CellPayload] = build_payloads(
@@ -714,30 +819,46 @@ def run_measure(
     if log:
         print(f"[wan428] 후보 {len(payloads)}칸: {t_cand - t0:.0f}s", flush=True)
 
-    book = place(payloads, start_ms=start_ms, end_ms=end_ms, segments=SEGMENTS)
+    books: dict[str, list[BookSegment]] = {}
+    for arm in ARMS:
+        books[arm] = place_arm(
+            payloads,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            segments=SEGMENTS,
+            include_reentry=(arm == ARM_ADOPTED),
+        )
     t_book = time.monotonic()
     if log:
-        print(f"[wan428] 배치 {len(book)}구간: {t_book - t_cand:.0f}s", flush=True)
+        print(
+            f"[wan428] 배치 {len(ARMS)}팔 × {len(SEGMENTS)}구간: {t_book - t_cand:.0f}s", flush=True
+        )
 
     archives = build_archives(symbols, timeframes, start=start, end=end, jobs=jobs)
     t_arch = time.monotonic()
     if log:
         print(f"[wan428] 존 대장 {len(archives)}칸: {t_arch - t_book:.0f}s", flush=True)
 
+    # 🚨 순위 뷰(`_Ranked`)는 **아카이브만의 함수**라 팔 사이에서 공유해도 된다(팔은 어떤
+    # 거래를 하느냐만 바꾸지 존 대장을 안 바꾼다) — 그래서 캐시를 팔 밖에 둔다.
     ranked_cache: dict[tuple[str, str], _Ranked] = {}
-    trades_by_segment = {
-        seg.segment: rank_trades(seg, archives, ranked_cache=ranked_cache) for seg in book
+    trades_by_arm = {
+        arm: {
+            seg.segment: rank_trades(seg, archives, arm=arm, ranked_cache=ranked_cache)
+            for seg in books[arm]
+        }
+        for arm in ARMS
     }
     if log:
         print(f"[wan428] 라벨링: {time.monotonic() - t_arch:.0f}s", flush=True)
 
-    rows = census_rows(trades_by_segment)
+    rows = census_rows(trades_by_arm)
     checks = checksum_rows(
-        trades_by_segment,
+        trades_by_arm,
         archives,
         adopted_coordinates=on_adopted_coordinates(symbols, timeframes, start, end),
     )
-    return rows, checks, trades_by_segment
+    return rows, checks, trades_by_arm
 
 
 def _write(frame: pd.DataFrame, path: Path) -> None:
@@ -777,11 +898,11 @@ def _scope_share(scope_rows: pd.DataFrame, bucket_sum: float) -> str:
 
 
 def verdict_lines(
-    census: pd.DataFrame, trades_by_segment: dict[str, list[TradeRank]] | None
+    census: pd.DataFrame, trades_by_arm: dict[str, dict[str, list[TradeRank]]] | None
 ) -> list[str]:
     """★판정 — 「4위 이하가 손익의 몇 %인가」. 코드가 찍는다(사람이 표를 보고 정하지 않는다)."""
     lines: list[str] = []
-    primary = (trades_by_segment or {}).get(PRIMARY_SEGMENT)
+    primary = (trades_by_arm or {}).get(ARM_ADOPTED, {}).get(PRIMARY_SEGMENT)
     if primary:
         stats = below_render_limit(primary)
         share = _pct(stats["net_r_share"]) if stats["share_ok"] else "— (분모가 상쇄돼 뜻 없음)"
@@ -815,7 +936,11 @@ def verdict_lines(
     else:
         lines.append("- ★ 판정: `oos_warm` 거래가 없습니다 — 좌표를 확인하십시오.")
     if not census.empty:
-        row = census[(census.segment == PRIMARY_SEGMENT) & (census.scope == "all")]
+        row = census[
+            (census.arm == ARM_ADOPTED)
+            & (census.segment == PRIMARY_SEGMENT)
+            & (census.scope == "all")
+        ]
         top = row[row.rank_bucket == "1"]
         if not top.empty:
             lines.append(
@@ -831,7 +956,7 @@ def render_summary(
     census: pd.DataFrame,
     checks: pd.DataFrame,
     *,
-    trades_by_segment: dict[str, list[TradeRank]] | None = None,
+    trades_by_arm: dict[str, dict[str, list[TradeRank]]] | None = None,
     cost_note: str | None = None,
 ) -> str:
     lines: list[str] = [
@@ -854,7 +979,7 @@ def render_summary(
         "## 판정",
         "",
     ]
-    lines.extend(verdict_lines(census, trades_by_segment))
+    lines.extend(verdict_lines(census, trades_by_arm))
     lines.extend(
         [
             "",
@@ -865,7 +990,11 @@ def render_summary(
         ]
     )
     primary_rows = (
-        census[(census.segment == PRIMARY_SEGMENT) & (census.scope == "all")]
+        census[
+            (census.arm == ARM_ADOPTED)
+            & (census.segment == PRIMARY_SEGMENT)
+            & (census.scope == "all")
+        ]
         if not census.empty
         else census
     )
@@ -895,7 +1024,9 @@ def render_summary(
     )
     if not census.empty:
         tf_rows = census[
-            (census.segment == PRIMARY_SEGMENT) & (~census.scope.isin(["all", "base", "reentry"]))
+            (census.arm == ARM_ADOPTED)
+            & (census.segment == PRIMARY_SEGMENT)
+            & (~census.scope.isin(["all", "base", "reentry"]))
         ]
         for _, row in tf_rows.iterrows():
             scope_rows = tf_rows[tf_rows.scope == row.scope]
@@ -907,6 +1038,40 @@ def render_summary(
             )
     lines.extend(
         [
+            "",
+            "## 반사실 — 재진입을 끄면 순위가 어떻게 움직이나",
+            "",
+            "🚨 **「재진입을 끄자」는 제안이 아니다** — `reentry=True`는 WAN-273 **사용자"
+            " 결정**이고 페이퍼 러너도 같은 규칙으로 재진입한다(WAN-274 · WAN-305). 이 팔은"
+            " **귀속용**이다: 「4위 이하」 중 **재진입이 만든 몫**을 가른다"
+            "(사용자 결정 2026-09-23 「일단은 (가)만」).",
+            "",
+            "🚨 **`scope=base` 행으로는 이 질문에 답할 수 없다** — 그건 **라벨 필터**라 재진입이"
+            " 쓰던 자본·슬롯을 다른 칸이 가져가는 **재배치가 빠져 있다**(WAN-316 · WAN-389).",
+            "",
+            "| 팔 | 거래 | 거래당 net R | 1위 | 4위 이하 | 11위+ |",
+            "| -- | --: | --: | --: | --: | --: |",
+        ]
+    )
+    for arm in ARMS:
+        trades = (trades_by_arm or {}).get(arm, {}).get(PRIMARY_SEGMENT)
+        if not trades:
+            lines.append(f"| `{arm}` | — | — | — | — | — |")
+            continue
+        stats = below_render_limit(trades)
+        ten = below_render_limit(trades, limit=10)
+        first = sum(1 for t in trades if t.rank == 1)
+        lines.append(
+            f"| `{arm}` | {len(trades):,} | {_fmt(_mean([t.net_r for t in trades]))} | "
+            f"{_pct(first / len(trades))} | {_pct(stats['trade_share'])} "
+            f"({stats['net_r_sum']:+,.1f}R) | {_pct(ten['trade_share'])} |"
+        )
+    lines.extend(
+        [
+            "",
+            "⚠️ **두 팔은 서로 다른 지갑이다** — 거래 수 차이를 「재진입 거래 수」로 읽지"
+            " 말 것(재진입을 끄면 남은 후보가 그 슬롯을 가져가 base 거래도 늘어난다,"
+            " WAN-389 §슬롯 경합).",
             "",
             "## WAN-405 §부수답과의 관계",
             "",
@@ -980,14 +1145,19 @@ def _load_frames() -> tuple[pd.DataFrame, pd.DataFrame]:
     return pd.read_csv(CENSUS_CSV), pd.read_csv(CHECKSUM_CSV)
 
 
-def trades_frame(trades_by_segment: dict[str, list[TradeRank]]) -> pd.DataFrame:
+def trades_frame(trades_by_arm: dict[str, dict[str, list[TradeRank]]]) -> pd.DataFrame:
     """거래 단위 원자료 — `--from-csv`가 판정 줄을 복원하는 데 필요하다."""
     return pd.DataFrame.from_records(
-        [asdict(t) for segment in SEGMENTS for t in trades_by_segment.get(segment, [])]
+        [
+            asdict(t)
+            for arm in ARMS
+            for segment in SEGMENTS
+            for t in trades_by_arm.get(arm, {}).get(segment, [])
+        ]
     )
 
 
-def trades_from_frame(frame: pd.DataFrame) -> dict[str, list[TradeRank]]:
+def trades_from_frame(frame: pd.DataFrame) -> dict[str, dict[str, list[TradeRank]]]:
     """CSV 왕복 — 🚨 빈 칸(`NaN`)을 `None`으로 되돌린다.
 
     pandas가 `rank`의 빈 칸을 `NaN`으로 되살리면 「순위를 못 잰 거래」가 유효한 float으로
@@ -999,10 +1169,11 @@ def trades_from_frame(frame: pd.DataFrame) -> dict[str, list[TradeRank]]:
             return None
         return int(str(value).split(".")[0])
 
-    out: dict[str, list[TradeRank]] = {}
+    out: dict[str, dict[str, list[TradeRank]]] = {}
     for rec in frame.to_dict("records"):
-        out.setdefault(str(rec["segment"]), []).append(
+        out.setdefault(str(rec["arm"]), {}).setdefault(str(rec["segment"]), []).append(
             TradeRank(
+                arm=str(rec["arm"]),
                 segment=str(rec["segment"]),
                 symbol=str(rec["symbol"]),
                 timeframe=str(rec["timeframe"]),
@@ -1041,7 +1212,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if trades is None:
             print(f"[wan428] ⚠️ {TRADES_CSV}가 없어 판정 줄을 복원하지 못합니다.", flush=True)
         SUMMARY_MD.write_text(
-            render_summary(census, checks, trades_by_segment=trades), encoding="utf-8"
+            render_summary(census, checks, trades_by_arm=trades), encoding="utf-8"
         )
         print(f"[wan428] 요약 재생성: {SUMMARY_MD}")
         return 0
@@ -1097,7 +1268,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"({len(symbols) * len(timeframes)}칸 · `--jobs {jobs}` · M1)"
     )
     SUMMARY_MD.write_text(
-        render_summary(census_frame, checks_frame, trades_by_segment=trades, cost_note=note),
+        render_summary(census_frame, checks_frame, trades_by_arm=trades, cost_note=note),
         encoding="utf-8",
     )
     print(f"[wan428] 적재: {CENSUS_CSV} · {CHECKSUM_CSV} · {SUMMARY_MD} ({note})")

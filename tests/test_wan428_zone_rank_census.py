@@ -24,6 +24,8 @@ from backtest import harness
 from backtest import wan428_zone_rank_census as wan428
 from backtest.run import parse_date_ms
 from backtest.wan428_zone_rank_census import (
+    ARM_ADOPTED,
+    ARM_NO_REENTRY,
     INHERITED_TAKE_PROFIT_LIQUIDITY,
     PINE_MAX_ORDER_BLOCKS,
     RANK_BUCKETS,
@@ -184,8 +186,16 @@ def test_buckets_cover_every_rank_and_mark_the_unmeasured() -> None:
     assert bucket_label(11) == "11+"
 
 
-def _trade(rank: int | None, net_r: float, *, tf: str = "1h", reentry: bool = False) -> TradeRank:
+def _trade(
+    rank: int | None,
+    net_r: float,
+    *,
+    tf: str = "1h",
+    reentry: bool = False,
+    arm: str = ARM_ADOPTED,
+) -> TradeRank:
     return TradeRank(
+        arm=arm,
         segment="oos_warm",
         symbol="BTCUSDT",
         timeframe=tf,
@@ -204,7 +214,7 @@ def _trade(rank: int | None, net_r: float, *, tf: str = "1h", reentry: bool = Fa
 
 def test_census_rows_shares_and_sums_close() -> None:
     trades = [_trade(1, -1.0), _trade(2, 1.5), _trade(4, -1.0), _trade(12, 1.5)]
-    rows = [r for r in census_rows({"oos_warm": trades}) if r.scope == "all"]
+    rows = [r for r in census_rows({ARM_ADOPTED: {"oos_warm": trades}}) if r.scope == "all"]
     assert {r.rank_bucket for r in rows} == {"1", "2", "4-5", "11+"}
     assert sum(r.num_trades for r in rows) == len(trades)
     assert sum(r.trade_share for r in rows) == pytest.approx(1.0)
@@ -214,7 +224,7 @@ def test_census_rows_shares_and_sums_close() -> None:
 
 def test_census_rows_split_base_and_reentry() -> None:
     trades = [_trade(1, 1.0), _trade(5, -1.0, reentry=True)]
-    rows = census_rows({"oos_warm": trades})
+    rows = census_rows({ARM_ADOPTED: {"oos_warm": trades}})
     base = [r for r in rows if r.scope == "base"]
     reentry = [r for r in rows if r.scope == "reentry"]
     assert [r.rank_bucket for r in base] == ["1"]
@@ -253,6 +263,7 @@ def test_share_guard_rejects_a_cancelling_denominator() -> None:
 
 def _row(bucket: str, net_r_sum: float) -> RankRow:
     return RankRow(
+        arm=ARM_ADOPTED,
         segment="oos_warm",
         scope="all",
         rank_bucket=bucket,
@@ -320,7 +331,7 @@ def _archives(tapped: tuple[int, ...]) -> dict[tuple[str, str], CellArchive]:
 
 
 def test_checksum_c_passes_when_the_tap_time_is_in_the_zone() -> None:
-    trades = {"oos_warm": [_trade(1, 1.0)]}  # trigger_time = 1h
+    trades = {ARM_ADOPTED: {"oos_warm": [_trade(1, 1.0)]}}  # trigger_time = 1h
     rows = checksum_rows(trades, _archives((1 * _H,)), adopted_coordinates=False)
     mismatch = next(r for r in rows if r.metric == "num_mismatched")
     assert mismatch.abs_diff == 0.0
@@ -328,7 +339,7 @@ def test_checksum_c_passes_when_the_tap_time_is_in_the_zone() -> None:
 
 def test_checksum_c_fires_when_the_archive_index_is_wrong() -> None:
     """🚨 인덱스가 어긋나면 이 검산이 **실제로** 걸린다 — 안 걸리면 검산이 아니다."""
-    trades = {"oos_warm": [_trade(1, 1.0)]}  # trigger_time = 1h
+    trades = {ARM_ADOPTED: {"oos_warm": [_trade(1, 1.0)]}}  # trigger_time = 1h
     rows = checksum_rows(trades, _archives((7 * _H,)), adopted_coordinates=False)
     mismatch = next(r for r in rows if r.metric == "num_mismatched")
     assert mismatch.abs_diff == 1.0
@@ -336,14 +347,14 @@ def test_checksum_c_fires_when_the_archive_index_is_wrong() -> None:
 
 def test_checksum_c_skips_reentry_trades() -> None:
     """재진입의 `trigger_time`은 탭이 아니라 재무장 체결 시각이라 이 술어가 성립하지 않는다."""
-    trades = {"oos_warm": [_trade(1, 1.0, reentry=True)]}
+    trades = {ARM_ADOPTED: {"oos_warm": [_trade(1, 1.0, reentry=True)]}}
     rows = checksum_rows(trades, _archives((7 * _H,)), adopted_coordinates=False)
     mismatch = next(r for r in rows if r.metric == "num_mismatched")
     assert mismatch.abs_diff == 0.0
 
 
 def test_checksum_b_counts_unranked_trades() -> None:
-    trades = {"oos_warm": [_trade(1, 1.0), _trade(None, -1.0)]}
+    trades = {ARM_ADOPTED: {"oos_warm": [_trade(1, 1.0), _trade(None, -1.0)]}}
     rows = checksum_rows(trades, _archives((1 * _H,)), adopted_coordinates=False)
     unranked = next(r for r in rows if r.metric == "num_unranked")
     assert unranked.abs_diff == 1.0
@@ -352,7 +363,9 @@ def test_checksum_b_counts_unranked_trades() -> None:
 def test_checksum_a_is_skipped_off_adopted_coordinates() -> None:
     """좁혀 돈 판을 공개 CSV와 대조하면 배선 오류처럼 보인다 — 조용히 통과시키지 않고 건너뛴다."""
     rows = checksum_rows(
-        {"oos_warm": [_trade(1, 1.0)]}, _archives((1 * _H,)), adopted_coordinates=False
+        {ARM_ADOPTED: {"oos_warm": [_trade(1, 1.0)]}},
+        _archives((1 * _H,)),
+        adopted_coordinates=False,
     )
     assert any(r.metric == "skipped_not_adopted_coordinates" for r in rows)
 
@@ -421,21 +434,21 @@ def test_real_archive_ranks_are_dense_from_one() -> None:
 def test_trades_csv_round_trip_preserves_unmeasured_ranks() -> None:
     """🚨 `NaN`을 `None`으로 되돌린다 — 안 그러면 「못 잰 거래」가 유효한 값으로 둔갑한다."""
     trades = [_trade(4, -1.0), _trade(None, 2.0, tf="4h", reentry=True)]
-    frame = trades_frame({"oos_warm": trades})
-    assert trades_from_frame(frame)["oos_warm"] == trades
+    frame = trades_frame({ARM_ADOPTED: {"oos_warm": trades}})
+    assert trades_from_frame(frame)[ARM_ADOPTED]["oos_warm"] == trades
 
 
 def test_from_csv_verdict_needs_the_trades_file() -> None:
     """거래 원자료가 없으면 판정 줄을 **지어내지 않는다**(WAN-194/367)."""
     checks = pd.DataFrame(columns=["check", "segment", "metric", "left", "right", "abs_diff"])
-    body = render_summary(pd.DataFrame(), checks, trades_by_segment=None)
+    body = render_summary(pd.DataFrame(), checks, trades_by_arm=None)
     assert "좌표를 확인하십시오" in body
 
 
 def test_verdict_reports_the_pine_memory_cap() -> None:
     """원본이 기억조차 안 하는 구간(31위+)을 판정 줄이 따로 낸다."""
     trades = [_trade(1, 1.0), _trade(PINE_MAX_ORDER_BLOCKS + 1, -4.0)]
-    lines = verdict_lines(pd.DataFrame(), {"oos_warm": trades})
+    lines = verdict_lines(pd.DataFrame(), {ARM_ADOPTED: {"oos_warm": trades}})
     body = "\n".join(lines)
     assert f"{PINE_MAX_ORDER_BLOCKS}개" in body
     assert "-4.0R" in body
@@ -532,3 +545,96 @@ def test_summary_names_the_cost_accounting() -> None:
     body = render_summary(pd.DataFrame(), checks)
     assert "ADOPTED_TAKE_PROFIT_LIQUIDITY" in body
     assert INHERITED_TAKE_PROFIT_LIQUIDITY.value in body
+
+
+# --------------------------------------------------------------------------- #
+# 반사실 팔(재진입 끔) — 라벨이 아니라 동작으로
+# --------------------------------------------------------------------------- #
+
+
+def test_place_arm_with_reentry_on_matches_wan408_place(monkeypatch: pytest.MonkeyPatch) -> None:
+    """🚨 `place_arm(include_reentry=True)` ≡ `wan408.place` — **호출 인자 전체**로 고정한다.
+
+    두 벌이 조용히 갈라지면 검산 (a)가 도는 채택 팔과 반사실 팔의 **비교 자체가 무효**다.
+    """
+    import backtest.wan408_loss_clustering as wan408
+
+    calls: list[dict[str, object]] = []
+
+    def _spy(*_args: object, **kwargs: object) -> list[object]:
+        calls.append(dict(kwargs))
+        return []
+
+    monkeypatch.setattr(wan408, "iter_book_segments", _spy)
+    monkeypatch.setattr(wan428, "iter_book_segments", _spy)
+
+    wan428.place([], start_ms=0, end_ms=1, segments=list(wan428.SEGMENTS))
+    wan428.place_arm([], start_ms=0, end_ms=1, segments=list(wan428.SEGMENTS), include_reentry=True)
+
+    assert len(calls) == 2
+    assert calls[0] == calls[1], f"채택 팔 인자가 갈렸습니다: {calls[0]} != {calls[1]}"
+
+
+def test_place_arm_flips_only_the_reentry_axis(monkeypatch: pytest.MonkeyPatch) -> None:
+    """반사실 팔은 `include_reentry` **하나만** 다르다 — 다른 축이 같이 움직이면 귀속이 깨진다."""
+    calls: list[dict[str, object]] = []
+
+    def _spy(*_args: object, **kwargs: object) -> list[object]:
+        calls.append(dict(kwargs))
+        return []
+
+    monkeypatch.setattr(wan428, "iter_book_segments", _spy)
+    for flag in (True, False):
+        wan428.place_arm(
+            [], start_ms=0, end_ms=1, segments=list(wan428.SEGMENTS), include_reentry=flag
+        )
+
+    on, off = calls
+    assert on["include_reentry"] is True and off["include_reentry"] is False
+    assert {k: v for k, v in on.items() if k != "include_reentry"} == {
+        k: v for k, v in off.items() if k != "include_reentry"
+    }
+
+
+def test_checksum_d_fires_when_a_reentry_trade_leaks_into_the_counterfactual() -> None:
+    """🚨 반사실이 **라벨이 아니라 동작**이었는지 — 재진입이 새면 검산이 걸린다(돌연변이 확인)."""
+    clean = {ARM_NO_REENTRY: {"oos_warm": [_trade(1, 1.0, arm=ARM_NO_REENTRY)]}}
+    rows = checksum_rows(clean, _archives((1 * _H,)), adopted_coordinates=False)
+    assert next(r for r in rows if r.metric == "num_reentry_trades").abs_diff == 0.0
+
+    leaked = {ARM_NO_REENTRY: {"oos_warm": [_trade(1, 1.0, reentry=True, arm=ARM_NO_REENTRY)]}}
+    rows = checksum_rows(leaked, _archives((1 * _H,)), adopted_coordinates=False)
+    assert next(r for r in rows if r.metric == "num_reentry_trades").abs_diff == 1.0
+
+
+def test_checksum_a_only_applies_to_the_adopted_arm() -> None:
+    """반사실 팔은 정의상 다른 지갑이라 공개 집계와 맞을 수 없다 — 거기 걸면 실패가 정상이 된다."""
+    rows = checksum_rows(
+        {ARM_NO_REENTRY: {"oos_warm": [_trade(1, 1.0, arm=ARM_NO_REENTRY)]}},
+        _archives((1 * _H,)),
+        adopted_coordinates=True,
+    )
+    published = [r for r in rows if "공개 book_trades" in r.check]
+    assert [r.metric for r in published] == ["skipped_not_adopted_coordinates"]
+
+
+def test_census_rows_keep_the_arms_apart() -> None:
+    """팔은 **행의 열**이지 필터가 아니다 — 서로 다른 지갑이라 더하거나 빼면 안 된다."""
+    rows = census_rows(
+        {
+            ARM_ADOPTED: {"oos_warm": [_trade(1, 1.0)]},
+            ARM_NO_REENTRY: {"oos_warm": [_trade(7, -1.0, arm=ARM_NO_REENTRY)]},
+        }
+    )
+    adopted = [r for r in rows if r.arm == ARM_ADOPTED and r.scope == "all"]
+    counter = [r for r in rows if r.arm == ARM_NO_REENTRY and r.scope == "all"]
+    assert [r.rank_bucket for r in adopted] == ["1"]
+    assert [r.rank_bucket for r in counter] == ["6-10"]
+
+
+def test_trades_round_trip_keeps_the_arm() -> None:
+    trades = {
+        ARM_ADOPTED: {"oos_warm": [_trade(1, 1.0)]},
+        ARM_NO_REENTRY: {"oos_warm": [_trade(4, -1.0, arm=ARM_NO_REENTRY)]},
+    }
+    assert trades_from_frame(trades_frame(trades)) == trades
