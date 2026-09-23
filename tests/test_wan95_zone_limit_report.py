@@ -11,6 +11,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
+from backtest.models import BacktestConfig, ExitReason
 from backtest.sweep import timeframe_to_ms
 from backtest.synthetic import make_synthetic_ohlcv
 from backtest.wan95_zone_limit_report import (
@@ -20,6 +21,7 @@ from backtest.wan95_zone_limit_report import (
     rows_to_frame,
     run_symbol_timeframe,
 )
+from common.costs import Liquidity
 from data.models import FundingRate
 from strategy.models import ConfluenceParams
 from strategy.order_blocks import OrderBlockDetector
@@ -94,8 +96,8 @@ def test_funding_coverage_present_on_zone_limit_row() -> None:
         assert 0.0 <= row.funding_coverage <= 1.0
 
 
-def test_frames_and_markdown_render() -> None:
-    """B안 단독 CSV/마크다운 생성이 렌더된다(델타표 없음, WAN-200 §A)."""
+def _rendered_frame() -> pd.DataFrame:
+    """합성 데이터로 만든 렌더용 프레임 — 마크다운 렌더 테스트들이 공유한다."""
     htf, one_min = _synthetic_pair()
     ob_result = OrderBlockDetector().run(htf)
     rows = run_symbol_timeframe(
@@ -106,7 +108,12 @@ def test_frames_and_markdown_render() -> None:
         funding_rates=_funding_rates(htf),
         order_block_result=ob_result,
     )
-    frame = rows_to_frame(rows)
+    return rows_to_frame(rows)
+
+
+def test_frames_and_markdown_render() -> None:
+    """B안 단독 CSV/마크다운 생성이 렌더된다(델타표 없음, WAN-200 §A)."""
+    frame = _rendered_frame()
     for col in ("symbol", "timeframe", "entry_mode", "total_return", "fill_rate"):
         assert col in frame.columns
     assert set(frame["entry_mode"]) == {"zone_limit"}
@@ -120,6 +127,33 @@ def test_frames_and_markdown_render() -> None:
     assert "한계" in md
     # A안(종가) 비교팔은 WAN-200 §A로 제거됐다 — 델타표 섹션이 없어야 한다.
     assert "## 종가 → 지정가 델타" not in md
+
+
+def test_markdown_cost_prose_matches_the_engine_single_source() -> None:
+    """비용 **서술**이 엔진의 단일 소스(`BacktestConfig.exit_liquidity`)와 일치한다 — WAN-429.
+
+    WAN-370이 익절을 메이커로 옮긴 뒤에도 이 리포트의 문장은 「청산은 테이커(익절 포함) ·
+    왕복 0.11%」로 남아 있었다. 숫자는 WAN-384가 재산출해 맞았고 **문장만** 낡았던,
+    「라벨과 동작이 어긋남」(WAN-91/95/112/123/159/194)의 서술 축 변종이다.
+
+    🚨 이 테스트는 문자열을 못 박지 않고 **엔진에 물어본다** — 누군가 익절 유동성 기본값을
+    되돌리면 그때는 이 서술도 함께 고쳐야 한다는 사실이 여기서 드러난다.
+    """
+    md = build_markdown(_rendered_frame())
+
+    cfg = BacktestConfig()
+    take_profit_is_maker = cfg.exit_liquidity(ExitReason.TAKE_PROFIT) is Liquidity.MAKER
+    stop_is_taker = cfg.exit_liquidity(ExitReason.STOP_LOSS) is Liquidity.TAKER
+    assert take_profit_is_maker, "WAN-370 채택 기본값이 바뀌었다면 아래 서술도 함께 고칠 것"
+    assert stop_is_taker
+
+    # 사유별로 갈린다는 사실이 본문에 있다(옛 「청산은 테이커」 한 덩어리 서술이 되살아나면
+    # 이 두 줄이 먼저 깨진다).
+    assert "익절(부분 익절 포함)도 메이커" in md
+    assert "손절·만료·데이터 종료만 테이커" in md
+    # 요율 값을 서술에 베끼지 않고 단일 소스를 가리킨다.
+    assert "BacktestConfig.exit_liquidity" in md
+    assert "0.11%(메이커 2bp" not in md
 
 
 def test_tf_verdict_frame_counts_positive_symbols() -> None:
