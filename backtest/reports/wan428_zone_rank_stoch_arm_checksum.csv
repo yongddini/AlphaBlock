@@ -1,0 +1,21 @@
+check,combo,segment,metric,left,right,abs_diff
+(a′) WAN-424 §1 기준값 재현,ts4·하한4%·%K<15,full,num_trades,861.0,861.0,0.0
+(a′) WAN-424 §1 기준값 재현,ts4·하한4%·%K<15,full,mean_net_r(소수 3자리),0.154,0.154,0.0
+(a′) WAN-424 §1 기준값 재현,ts4·하한4%·%K<15,is,num_trades,627.0,627.0,0.0
+(a′) WAN-424 §1 기준값 재현,ts4·하한4%·%K<15,is,mean_net_r(소수 3자리),0.135,0.135,0.0
+(a′) WAN-424 §1 기준값 재현,ts4·하한4%·%K<15,oos_warm,num_trades,234.0,234.0,0.0
+(a′) WAN-424 §1 기준값 재현,ts4·하한4%·%K<15,oos_warm,mean_net_r(소수 3자리),0.203,0.203,0.0
+(a′) WAN-424 §1 기준값 재현,ts4·하한4%·%K<25,full,num_trades,2710.0,2710.0,0.0
+(a′) WAN-424 §1 기준값 재현,ts4·하한4%·%K<25,full,mean_net_r(소수 3자리),0.12,0.12,0.0
+(a′) WAN-424 §1 기준값 재현,ts4·하한4%·%K<25,is,num_trades,2031.0,2031.0,0.0
+(a′) WAN-424 §1 기준값 재현,ts4·하한4%·%K<25,is,mean_net_r(소수 3자리),0.106,0.106,0.0
+(a′) WAN-424 §1 기준값 재현,ts4·하한4%·%K<25,oos_warm,num_trades,679.0,679.0,0.0
+(a′) WAN-424 §1 기준값 재현,ts4·하한4%·%K<25,oos_warm,mean_net_r(소수 3자리),0.165,0.165,0.0
+(b) 순위를 못 잰 거래 0건,ts4·하한4%·%K<15,full,num_unranked,0.0,0.0,0.0
+(c) 탭 시각 ∈ 그 존의 tapped_times,ts4·하한4%·%K<15,full,num_mismatched,0.0,0.0,0.0
+(b) 순위를 못 잰 거래 0건,ts4·하한4%·%K<15,oos_warm,num_unranked,0.0,0.0,0.0
+(c) 탭 시각 ∈ 그 존의 tapped_times,ts4·하한4%·%K<15,oos_warm,num_mismatched,0.0,0.0,0.0
+(b) 순위를 못 잰 거래 0건,ts4·하한4%·%K<25,full,num_unranked,0.0,0.0,0.0
+(c) 탭 시각 ∈ 그 존의 tapped_times,ts4·하한4%·%K<25,full,num_mismatched,0.0,0.0,0.0
+(b) 순위를 못 잰 거래 0건,ts4·하한4%·%K<25,oos_warm,num_unranked,0.0,0.0,0.0
+(c) 탭 시각 ∈ 그 존의 tapped_times,ts4·하한4%·%K<25,oos_warm,num_mismatched,0.0,0.0,0.0
