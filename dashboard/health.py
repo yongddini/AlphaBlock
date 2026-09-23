@@ -8,8 +8,10 @@ DB·상태파일에서 읽은 **원시 값**(최신 봉 시각, 펀딩 시각, �
 ---------
 * **데이터 신선도**: `lag = now - 최신봉 open_time`. TF 주기 대비 `stale_multiplier`
   배를 넘으면 stale(빨강). 최신 봉이 없으면 UNKNOWN.
-* **펀딩 신선도**: 예측 현재값의 `funding_time`은 다음 정산(미래)이라 lag가 음수면
-  정상. 정산 주기(기본 8h) 대비 배수를 넘으면 stale.
+* **펀딩 신선도**: `lag = now - 마지막 **확정** 정산 시각`(WAN-422 §2). 정산 주기(기본
+  8h) 대비 배수를 넘으면 stale. 🚨 예측 행은 **표시만** 한다 — 예측 행의 `funding_time`은
+  다음 정산(미래)이라 그걸로 재면 지연이 늘 음수/0이 되어, 확정이 12일 멈췄는데도
+  12종목 전부 OK였다(2026-09-07~18 실사고).
 * **러너 생존**: `lag = now - 마지막 폴링`. 폴링 간격 대비 배수를 넘으면 멈춤.
   한 번도 돌지 않았으면 UNKNOWN(미실행).
 """
@@ -65,6 +67,11 @@ class FundingFreshness(BaseModel):
     is_predicted: bool
     lag_ms: int | None
     level: HealthLevel
+    confirmed_funding_time: int | None = None
+    """마지막 **확정** 정산 시각 — 판정(`lag_ms`·`level`)의 기준(WAN-422 §2).
+
+    위 `funding_time`/`is_predicted`는 **표시용** 최신 행(예측일 수 있음)이다.
+    """
 
 
 class RunnerStatus(BaseModel):
@@ -166,17 +173,37 @@ def compute_freshness(
     return out
 
 
+FundingRow = tuple[str, float | None, int | None, int | None, bool, int | None]
+"""`(symbol, rate, funding_time, next_funding_time, is_predicted, confirmed_funding_time)`.
+
+앞 다섯은 **표시용** 최신 행(예측 포함), 마지막은 **판정용** 마지막 확정 정산 시각이다.
+"""
+
+
 def compute_funding_status(
-    rows: list[tuple[str, float | None, int | None, int | None, bool]],
+    rows: Sequence[FundingRow],
     *,
     now_ms: int,
     stale_multiplier: float,
     interval_ms: int = FUNDING_INTERVAL_MS,
 ) -> list[FundingFreshness]:
-    """심볼별 `(symbol, rate, funding_time, next_funding_time, is_predicted)`을 신선도로 변환."""
+    """심볼별 `FundingRow`를 신선도로 변환한다 — 판정은 **확정 행만** 본다(WAN-422 §2).
+
+    * 행이 하나도 없으면 UNKNOWN(예전과 같다).
+    * 예측 행은 있는데 **확정 행이 하나도 없으면 STALE** — 확정 이력이 한 번도 안 들어온
+      것이고, 확정만 읽는 소비자(백테스트·페이퍼 장부)에게는 펀딩이 없는 것과 같다.
+    * 그 외에는 `now - 마지막 확정 정산`으로 `classify_lag`.
+
+    ⚠️ **점검 항목을 줄인 게 아니라 판정으로 옮기는 법을 고친 것이다**(WAN-318 §3 ·
+    WAN-321 · WAN-327 §3과 같은 문장) — 표시는 그대로 최신 행(`(예측)` 포함)을 보여준다.
+    """
     out: list[FundingFreshness] = []
-    for symbol, rate, funding_time, next_funding_time, is_predicted in rows:
-        lag, level = classify_lag(funding_time, now_ms, interval_ms, stale_multiplier)
+    for symbol, rate, funding_time, next_funding_time, is_predicted, confirmed_time in rows:
+        lag: int | None
+        if funding_time is not None and confirmed_time is None:
+            lag, level = None, HealthLevel.STALE
+        else:
+            lag, level = classify_lag(confirmed_time, now_ms, interval_ms, stale_multiplier)
         out.append(
             FundingFreshness(
                 symbol=symbol,
@@ -186,6 +213,7 @@ def compute_funding_status(
                 is_predicted=is_predicted,
                 lag_ms=lag,
                 level=level,
+                confirmed_funding_time=confirmed_time,
             )
         )
     return out

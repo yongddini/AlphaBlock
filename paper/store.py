@@ -65,7 +65,12 @@ from pydantic import BaseModel, ConfigDict
 
 from backtest.models import BacktestConfig, ExitReason
 from common.costs import CostModel, Liquidity
-from data.funding import Direction, FundingRateStore, cumulative_funding_cost
+from data.funding import (
+    Direction,
+    FundingRateStore,
+    cumulative_funding_cost,
+    settled_funding_rates,
+)
 from data.models import FundingRate
 from data.sqlite_util import configure_connection
 from execution.models import Position
@@ -893,13 +898,35 @@ class PaperTradeRecorder:
         """
         try:
             funding_rates: list[FundingRate] | None = None
+            include_predicted = self._include_predicted
             if self._funding_store is not None:
-                funding_rates = self._funding_store.get_rates(
-                    trade.position.symbol,
-                    start_ms=trade.position.entry_time,
-                    end_ms=trade.exit_time,
-                    include_predicted=self._include_predicted,
-                )
+                if self._include_predicted:
+                    funding_rates = self._funding_store.get_rates(
+                        trade.position.symbol,
+                        start_ms=trade.position.entry_time,
+                        end_ms=trade.exit_time,
+                        include_predicted=True,
+                    )
+                else:
+                    # 정산 단위로 고른다(WAN-422 §1) — 확정 우선, 확정이 아직 안 들어온
+                    # 정산은 그 정산의 마지막 예측값. 확정만 읽으면 청산 순간 방금 지난
+                    # 정산이 조용히 0이 됐다(옛 장부 186거래 전부 0). 이미 정산마다 한
+                    # 행으로 골랐으므로 비용 계산은 예측 행을 다시 거르지 않는다.
+                    funding_rates = settled_funding_rates(
+                        self._funding_store,
+                        trade.position.symbol,
+                        start_ms=trade.position.entry_time,
+                        end_ms=trade.exit_time,
+                    )
+                    include_predicted = True
+                    substituted = sum(1 for r in funding_rates if r.is_predicted)
+                    if substituted:
+                        _logger.info(
+                            "펀딩 확정 이력 미도착 정산 %d건을 예측값으로 반영: %s %s",
+                            substituted,
+                            trade.position.symbol,
+                            trade.position.timeframe,
+                        )
             return build_record(
                 trade,
                 fee_rate=self._fee_rate,
@@ -908,7 +935,7 @@ class PaperTradeRecorder:
                 # 사유별로 갈린다(WAN-370/371) — 거래마다 다시 묻는다.
                 exit_liquidity=self.exit_liquidity_for(trade.reason),
                 funding_rates=funding_rates,
-                include_predicted=self._include_predicted,
+                include_predicted=include_predicted,
                 dollars=dollars,
             )
         except Exception:  # noqa: BLE001 — 기록 실패가 러너 루프를 멈추지 않도록.

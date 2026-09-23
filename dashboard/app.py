@@ -1643,6 +1643,8 @@ def _funding_frame(rows: list[FundingFreshness]) -> pd.DataFrame:
             "펀딩비": "—" if r.rate is None else f"{r.rate * 100:.4f}%",
             "다음 정산(KST)": _fmt_time(r.next_funding_time),
             "구분": "예측" if r.is_predicted else "확정",
+            # 판정(지연·상태)은 마지막 확정 정산 기준이다(WAN-422 §2).
+            "마지막 확정(KST)": _fmt_time(r.confirmed_funding_time),
             "지연": _fmt_lag(r.lag_ms),
             "상태": _LEVEL_BADGE[r.level],
         }

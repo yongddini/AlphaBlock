@@ -500,9 +500,80 @@ def backfill_funding_all(
     return results
 
 
+def catch_up_confirmed(
+    exchange: FundingRateSource,
+    store: FundingRateStore,
+    symbols: Sequence[str],
+    *,
+    settings: Settings | None = None,
+    now_ms: Callable[[], int] = lambda: int(time.time() * 1000),
+) -> dict[str, int]:
+    """확정 펀딩 이력을 심볼마다 **마지막 확정 다음부터** 이어받는다(WAN-422 §3-b).
+
+    🚨 **왜 필요한가** — 현재값 최신화(`refresh_funding`)는 거래소의 「현재 펀딩비」 =
+    **다음 정산의 예측값**만 저장한다. 확정 이력은 `backfill_funding_all`에서만 들어오는데
+    그게 **수집기 기동 때 한 번**이었다. 그래서 「마지막 확정 시각 ≈ 마지막 기동 시각」이
+    됐고(2026-09-07 · 09-18 두 번), 그 뒤 정산은 **예측 행으로만** 남았다 — 확정만 읽는
+    페이퍼 장부는 그 구간 펀딩을 0으로 냈다(WAN-422 §1).
+
+    수집 루프가 매 주기 이걸 부른다. 대개 새 행이 없어 심볼당 이력 조회 1회로 끝난다.
+    ⚠️ **한 심볼의 실패가 루프를 죽이지 않게** 심볼 단위로 격리한다 — 재시도를 다 쓴
+    예외는 `ERROR`로 남기고 다음 주기에 다시 시도한다(조용히 삼키지 않는다).
+    """
+    results: dict[str, int] = {}
+    for symbol in symbols:
+        try:
+            results.update(
+                backfill_funding_all(exchange, store, [symbol], settings=settings, now_ms=now_ms)
+            )
+        except Exception:  # noqa: BLE001 — 한 심볼 실패가 수집 루프를 멈추지 않도록.
+            logger.exception("펀딩 확정 이력 이어받기 실패 %s (다음 주기에 재시도)", symbol)
+    return results
+
+
 # --------------------------------------------------------------------------- #
 # 비용 헬퍼
 # --------------------------------------------------------------------------- #
+
+#: 같은 정산의 예측 행과 확정 행을 같은 것으로 묶는 해상도(ms). 거래소 이력 API는 정산
+#: 시각보다 **1~5ms 늦은** 타임스탬프를 주고(WAN-422 PM 진단) 예측 행은 정각이라, 기본키
+#: `(symbol, funding_time)`로는 둘이 다른 행이 된다. 1분 버킷이면 둘이 같은 정산으로
+#: 묶이고, 정산 간격(4h/8h)보다 훨씬 작아 서로 다른 정산이 섞일 일은 없다.
+SETTLEMENT_MATCH_MS = 60_000
+
+
+def settled_funding_rates(
+    store: FundingRateStore,
+    symbol: str,
+    *,
+    start_ms: int,
+    end_ms: int,
+) -> list[FundingRate]:
+    """`[start_ms, end_ms)`에 **정산된** 펀딩 — 정산마다 한 행, 확정 우선(WAN-422 §1).
+
+    확정 행이 있는 정산은 확정값을 쓰고, **확정 행이 아직 없는 정산**(이력 수집이 그
+    정산을 아직 못 가져온 경우)은 그 정산 시각의 **마지막 예측값**으로 채운다. 예측 행의
+    `funding_time`은 곧 그 정산 시각이고 수집기가 정산 직전까지 5분마다 덮어쓰므로, 정산이
+    지난 예측 행 = **정산 직전 마지막으로 관측한 적용 요율**이다.
+
+    🚨 **왜 확정만 읽으면 안 되는가** — 장부는 **청산 순간** 비용을 확정한다(지갑이 그 행으로
+    정산된다, WAN-392). 그 순간에 방금 지난 정산은 확정 이력이 아직 안 들어와 있을 수 있고
+    (최소 한 수집 주기 · 옛 수집기는 다음 기동까지), 확정만 읽으면 그 정산을 **조용히 0**으로
+    낸다 — 롱 온리라 성과가 좋게 나오는 방향이다. 옛 장부 186거래가 전부 0이었던 이유다.
+
+    ⚠️ 같은 정산의 확정·예측 행은 `SETTLEMENT_MATCH_MS` 버킷으로 짝짓는다(한 번만 센다 —
+    이중 계상 금지). 반환 행의 `is_predicted`는 **그대로 둔다**(대체 사실을 숨기지 않는다) —
+    그래서 비용 계산에는 `include_predicted=True`로 넘겨야 한다(여기서 이미 정산 단위로
+    골랐다).
+    """
+    rows = store.get_rates(symbol, start_ms=start_ms, end_ms=end_ms, include_predicted=True)
+    confirmed_buckets = {r.funding_time // SETTLEMENT_MATCH_MS for r in rows if not r.is_predicted}
+    picked = [
+        r
+        for r in rows
+        if not r.is_predicted or r.funding_time // SETTLEMENT_MATCH_MS not in confirmed_buckets
+    ]
+    return sorted(picked, key=lambda r: r.funding_time)
 
 
 def cumulative_funding_cost(
@@ -625,10 +696,15 @@ async def run_funding_refresh(
     exchange: FundingRateSource | None = None,
     store: FundingRateStore | None = None,
     backfill: bool = True,
+    confirmed_catchup: bool = True,
     max_cycles: int | None = None,
     sleeper: Callable[[float], Awaitable[None]] = _default_async_sleep,
 ) -> None:
     """펀딩비를 백필한 뒤 설정 간격으로 현재 펀딩비를 지속 최신화한다.
+
+    `backfill`은 **기동 때 1회** 전 구간 이어받기이고, `confirmed_catchup`(기본 켬,
+    WAN-422 §3-b)은 **매 주기** 마지막 확정 다음부터 확정 이력을 이어받는다. 끄면 옛
+    동작(확정은 기동 때만)이다 — 그 동작이 페이퍼 장부 펀딩 0의 원인이었다.
 
     `funding_enabled=False`이면 즉시 반환한다. `max_cycles`를 주면 그만큼만 갱신하고
     종료한다(테스트/일회성). 동기 ccxt 호출은 스레드로 오프로딩해 루프를 막지 않는다.
@@ -653,6 +729,12 @@ async def run_funding_refresh(
         cycles = 0
         while True:
             await asyncio.to_thread(refresh_funding, exchange, store, settings.symbols)
+            if confirmed_catchup:
+                # 확정 이력도 매 주기 이어받는다(WAN-422 §3-b) — 기동 백필만으로는 「마지막
+                # 확정 = 마지막 기동」이 되어 그 뒤 정산이 예측 행으로만 남는다.
+                await asyncio.to_thread(
+                    catch_up_confirmed, exchange, store, settings.symbols, settings=settings
+                )
             cycles += 1
             if max_cycles is not None and cycles >= max_cycles:
                 break

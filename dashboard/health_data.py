@@ -14,6 +14,7 @@ from common.heartbeat import HeartbeatStore
 from dashboard.health import (
     CollectorStatus,
     FundingFreshness,
+    FundingRow,
     OverallBadge,
     RunnerStatus,
     SeriesFreshness,
@@ -98,15 +99,14 @@ def series_freshness_rows(
     return rows
 
 
-def funding_rows(
-    store: FundingRateStore, symbols: list[str]
-) -> list[tuple[str, float | None, int | None, int | None, bool]]:
-    """심볼별 최신 펀딩비 `(symbol, rate, funding_time, next_funding_time, is_predicted)`."""
-    rows: list[tuple[str, float | None, int | None, int | None, bool]] = []
+def funding_rows(store: FundingRateStore, symbols: list[str]) -> list[FundingRow]:
+    """심볼별 `FundingRow` — 표시용 최신 행(예측 포함) + 판정용 마지막 확정 시각(WAN-422 §2)."""
+    rows: list[FundingRow] = []
     for symbol in symbols:
         latest = store.latest(symbol)
+        confirmed = store.last_funding_time(symbol, confirmed_only=True)
         if latest is None:
-            rows.append((symbol, None, None, None, False))
+            rows.append((symbol, None, None, None, False, confirmed))
         else:
             rows.append(
                 (
@@ -115,6 +115,7 @@ def funding_rows(
                     latest.funding_time,
                     latest.next_funding_time,
                     latest.is_predicted,
+                    confirmed,
                 )
             )
     return rows

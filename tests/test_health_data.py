@@ -29,6 +29,7 @@ def _seed(db_path: str, *, last_open_time: int) -> None:
     with FundingRateStore(db_path) as funding:
         funding.upsert_rates(
             [
+                # 화면에 뜨는 최신 행 = 다음 정산의 예측값(수집기가 5분마다 갱신).
                 FundingRate(
                     symbol="BTC/USDT:USDT",
                     funding_time=_NOW + 4 * _HOUR,
@@ -36,7 +37,17 @@ def _seed(db_path: str, *, last_open_time: int) -> None:
                     mark_price=100.0,
                     next_funding_time=_NOW + 4 * _HOUR,
                     is_predicted=True,
-                )
+                ),
+                # 판정은 마지막 **확정** 정산으로 낸다(WAN-422 §2) — 예측 행만 있으면
+                # 확정 수집이 멈춘 것과 구분되지 않아 STALE이다.
+                FundingRate(
+                    symbol="BTC/USDT:USDT",
+                    funding_time=_NOW - 4 * _HOUR,
+                    rate=0.0001,
+                    mark_price=100.0,
+                    next_funding_time=_NOW + 4 * _HOUR,
+                    is_predicted=False,
+                ),
             ]
         )
 

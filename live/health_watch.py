@@ -116,14 +116,20 @@ def evaluate_alerts(view: HealthView) -> list[Alert]:
     for fund in view.funding:
         if fund.level is HealthLevel.STALE:
             lag = _fmt_lag(fund.lag_ms)
+            # 판정 기준 = 마지막 **확정** 정산(WAN-422 §2). 예측 행은 매 주기 갱신돼
+            # 수집이 멈춰도 늘 「방금」으로 보이므로 경고문도 확정 시각을 말한다.
+            if fund.confirmed_funding_time is not None:
+                since = f"마지막 확정 정산 {_fmt_at(fund.confirmed_funding_time)} (*{lag}* 전)."
+            else:
+                since = (
+                    "확정 펀딩 이력이 저장돼 있지 않습니다"
+                    f" (최신 표시 행 {_fmt_at(fund.funding_time)})."
+                )
             alerts.append(
                 Alert(
                     key=f"funding:{fund.symbol}",
                     title=f"펀딩비 갱신 지연: {fund.symbol}",
-                    detail=(
-                        f"⚠️ *펀딩비 갱신 지연* — `{fund.symbol}`\n"
-                        f"마지막 펀딩 갱신 {_fmt_at(fund.funding_time)} (*{lag}* 전)."
-                    ),
+                    detail=f"⚠️ *펀딩비 갱신 지연* — `{fund.symbol}`\n{since}",
                 )
             )
 
