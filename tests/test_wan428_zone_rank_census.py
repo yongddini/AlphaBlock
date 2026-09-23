@@ -21,8 +21,10 @@ import pandas as pd
 import pytest
 
 from backtest import harness
+from backtest import wan428_zone_rank_census as wan428
 from backtest.run import parse_date_ms
 from backtest.wan428_zone_rank_census import (
+    INHERITED_TAKE_PROFIT_LIQUIDITY,
     PINE_MAX_ORDER_BLOCKS,
     RANK_BUCKETS,
     RENDER_LIMIT_LOW,
@@ -480,3 +482,53 @@ def test_summary_carries_the_pine_comparison_note() -> None:
     checks = pd.DataFrame(columns=["check", "segment", "metric", "left", "right", "abs_diff"])
     body = render_summary(pd.DataFrame(), checks)
     assert "죽은 코드" in body and "maxOrderBlocks" in body
+
+
+# --------------------------------------------------------------------------- #
+# 빌려 쓴 배선 — 라벨이 아니라 **호출 인자**로 확인한다 (WAN-330/373 관행)
+# --------------------------------------------------------------------------- #
+
+
+def test_borrowed_wiring_passes_the_adopted_take_profit_liquidity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """🚨 이 모듈은 익절 회계를 **인용만** 한다 — 실제로 그 값이 넘어가는지는 스파이가 본다.
+
+    `INHERITED_TAKE_PROFIT_LIQUIDITY`가 주석뿐이면 「라벨은 익절 메이커인데 실제는 테이커」가
+    조용히 성립한다(WAN-370/373이 못 박은 자리).
+    """
+    import backtest.wan408_loss_clustering as wan408
+
+    seen: dict[str, object] = {}
+
+    def _spy_run_cells(*_args: object, **kwargs: object) -> list[object]:
+        seen["candidates"] = kwargs.get("take_profit_liquidity")
+        seen["cold_segments"] = kwargs.get("cold_segments")
+        return []
+
+    def _spy_iter(*_args: object, **kwargs: object) -> list[object]:
+        seen["placement"] = kwargs.get("take_profit_liquidity")
+        seen["include_reentry"] = kwargs.get("include_reentry")
+        return []
+
+    monkeypatch.setattr(wan408, "run_cells", _spy_run_cells)
+    monkeypatch.setattr(wan408, "iter_book_segments", _spy_iter)
+
+    wan428.build_payloads(
+        ["BTCUSDT"], ["4h"], start="2024-01-01", end="2024-02-01", jobs=1, cold_segments=False
+    )
+    wan428.place([], start_ms=0, end_ms=1, segments=list(wan428.SEGMENTS))
+
+    assert seen["candidates"] is INHERITED_TAKE_PROFIT_LIQUIDITY
+    assert seen["placement"] is INHERITED_TAKE_PROFIT_LIQUIDITY
+    # 그리고 이 모듈이 요청하는 나머지 두 축도 여기서 고정된다.
+    assert seen["cold_segments"] is False  # 차가운 절단은 안 쟀다(모듈 독스트링)
+    assert seen["include_reentry"] is True  # 재진입은 채택 규칙(WAN-273/305)
+
+
+def test_summary_names_the_cost_accounting() -> None:
+    """net R이 어느 비용 회계 위의 값인지 표가 스스로 밝힌다."""
+    checks = pd.DataFrame(columns=["check", "segment", "metric", "left", "right", "abs_diff"])
+    body = render_summary(pd.DataFrame(), checks)
+    assert "ADOPTED_TAKE_PROFIT_LIQUIDITY" in body
+    assert INHERITED_TAKE_PROFIT_LIQUIDITY.value in body

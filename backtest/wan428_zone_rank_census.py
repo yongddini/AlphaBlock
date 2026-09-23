@@ -111,6 +111,11 @@ __all__ = [
     "RankRow",
     "TradeRank",
     "build_archives",
+    # 🚨 빌려 온 배선을 **일부러 다시 내보낸다** — 이 모듈이 후보 생성·배치를 자기 손으로
+    # 짜지 않고 `wan408`의 그 함수를 쓴다는 사실이 공개 표면에 드러나야 하고, 스파이 테스트가
+    # **이 이름들로** 호출 인자를 확인한다(자기 사본을 만들면 두 경로가 갈라진다).
+    "build_payloads",
+    "place",
     "bucket_label",
     "census_rows",
     "checksum_rows",
@@ -156,6 +161,16 @@ SUMMARY_MD = Path("backtest/reports/wan428_zone_rank_summary.md")
 #: 거래 단위 원자료 — 커밋하지 않는다(`backtest/cache/`는 gitignore). `--from-csv`가 이것을
 #: 읽어 **판정 줄까지** 다시 낸다(집계 CSV만으로는 `rank_bar_close` 민감도를 복원할 수 없다).
 TRADES_CSV = Path("backtest/cache/wan428/trades.csv.gz")
+
+#: 익절 청산 유동성(WAN-370) — 이 모듈은 후보 생성·배치를 `wan408.build_payloads`/`place`에서
+#: **그대로 빌려 쓰므로** 그쪽이 명시한 `harness.ADOPTED_TAKE_PROFIT_LIQUIDITY`(익절 메이커
+#: 2bp)를 물려받는다. net R이 어느 비용 회계 위의 값인지는 표를 읽는 데 필수라 **여기서 이름을
+#: 밝히고 요약에도 찍는다**.
+#:
+#: 🚨 **값을 다시 정하지 않는다** — 두 벌로 갈라지면 「라벨은 익절 메이커인데 실제는 테이커」가
+#: 된다(WAN-370/373이 못 박은 자리). 그래서 이것은 **인용이지 정의가 아니고**, 빌려 쓴 두 함수가
+#: 실제로 그 값을 넘기는지는 **호출부를 가로채는 스파이 테스트**가 확인한다.
+INHERITED_TAKE_PROFIT_LIQUIDITY = harness.ADOPTED_TAKE_PROFIT_LIQUIDITY
 
 
 # --------------------------------------------------------------------------- #
@@ -828,7 +843,9 @@ def render_summary(
         " §1만 쟀고, `zone_limit`을 **시그널 경로에 걸지 않았다**(관측 전용).",
         "",
         f"좌표: 12종목 × 4TF × 못 박은 6년 · `{PRIMARY_SEGMENT}` 주 수치 · 핀 없음(WAN-305) ·"
-        " 판단은 북에서(WAN-341) · 전부 `baseline`(낙관) 렌즈 위 값.",
+        " 판단은 북에서(WAN-341) · 전부 `baseline`(낙관) 렌즈 위 값 ·"
+        f" 익절 청산 유동성 **{INHERITED_TAKE_PROFIT_LIQUIDITY.value}**"
+        "(`harness.ADOPTED_TAKE_PROFIT_LIQUIDITY`, WAN-370).",
         "",
         "순위 = `select_active`의 규칙 **그대로**(방향별 · 그 시점 생존 · **최신 확정순**) —"
         " 원본 pine의 `unshift` + `for j = 0 to bullishOrderBlocks-1`과 같은 기준이고"
