@@ -1,0 +1,25 @@
+import gzip, pickle, __main__, collections, datetime as dt
+from backtest import wan424_stoch_isolation as iso
+__main__.IsoCell = iso.IsoCell
+with gzip.open("backtest/cache/wan424_iso_work.pkl.gz") as fh: cl=pickle.load(fh)["cells"]
+KST=dt.timezone(dt.timedelta(hours=9)); day=lambda ms:str(dt.datetime.fromtimestamp(ms/1000,KST).date())
+EV=["2021-05-19","2021-12-04","2022-01-22","2022-05-10","2022-05-12","2022-06-13","2024-08-05","2025-02-03"]
+arm_set=set()
+for c in cl:
+    for i in iso._real_idx(c,4,"full",0.04,15.0): arm_set.add((c.symbol,c.timeframe,i))
+for d in EV:
+    allz=collections.defaultdict(lambda:[0,0,set()]); armz=collections.defaultdict(lambda:[0,0])
+    for c in cl:
+        for i,x in enumerate(c.pool[4]["full"]):
+            if day(x.entry_time)!=d: continue
+            s=c.symbol.replace("USDT","").split("/")[0]; brk="STOP" in str(x.reason).upper()
+            allz[s][0]+=1; allz[s][1]+=brk
+            if brk: allz[s][2].add(c.timeframe)
+            if (c.symbol,c.timeframe,i) in arm_set: armz[s][0]+=1; armz[s][1]+=brk
+    tot=sum(v[0] for v in allz.values()); tb=sum(v[1] for v in allz.values())
+    per=sorted(((v[1],s,v[0],len(v[2])) for s,v in allz.items()),reverse=True)
+    counts=[v[1] for v in allz.values()]
+    print(f"\n{d}: 종목 {len(allz)}개 · 탭 {tot} · 깨짐 {tb} ({tb/tot:.0%}) · 종목당 깨짐 평균 {tb/len(allz):.1f} · 최대 {max(counts)}")
+    print("   많이 깨진 종목: "+", ".join(f"{s} {b}/{n}({k}TF)" for b,s,n,k in per[:8]))
+    ab=sum(v[1] for v in armz.values()); an=sum(v[0] for v in armz.values())
+    print(f"   추천팔(4%·%K<15): 진입 {an} · 깨짐 {ab} · 종목 {len(armz)}개 · "+", ".join(f"{s} {v[1]}/{v[0]}" for s,v in sorted(armz.items(),key=lambda kv:-kv[1][1])[:6]))

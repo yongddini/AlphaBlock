@@ -1,0 +1,22 @@
+import gzip, pickle, __main__, collections, datetime as dt
+from backtest import wan424_stoch_isolation as iso
+from data.models import timeframe_to_ms
+__main__.IsoCell = iso.IsoCell
+with gzip.open("backtest/cache/wan424_iso_work.pkl.gz") as fh: cl=pickle.load(fh)["cells"]
+KST=dt.timezone(dt.timedelta(hours=9)); day=lambda ms:str(dt.datetime.fromtimestamp(ms/1000,KST).date())
+EV={"2021-05-19","2021-12-04","2022-01-22","2022-05-10","2022-05-12","2022-06-13","2024-08-05","2025-02-03"}
+for thr in (15.0,25.0):
+    g={"폭락일":collections.Counter(),"평소":collections.Counter()}; mins={"폭락일":[],"평소":[]}; n={"폭락일":0,"평소":0}
+    for c in cl:
+        tf=timeframe_to_ms(c.timeframe)
+        for i in iso._real_idx(c,4,"full",0.04,thr):
+            x=c.pool[4]["full"][i]; k="폭락일" if day(x.entry_time) in EV else "평소"; n[k]+=1
+            if str(x.reason).endswith("stop_loss") or "STOP" in str(x.reason).upper():
+                b=x.exit_time//tf - x.entry_time//tf
+                g[k][min(b,3)]+=1; mins[k].append((x.exit_time-x.entry_time)/60000)
+    print(f"\n=== 하한4% · ts4 · %K<{thr:.0f} (6년 전체) ===")
+    for k in ("폭락일","평소"):
+        s=sum(g[k].values()); mm=sorted(mins[k])
+        lab={0:"진입한 그 봉",1:"다음 봉",2:"2봉 뒤",3:"3봉 뒤"}
+        parts=" · ".join(f"{lab[b]} {g[k][b]/s:.0%}" for b in range(4))
+        print(f"  {k}: 진입 {n[k]} · 손절 {s} ({s/n[k]:.0%}) → {parts} · 진입→손절 중앙 {mm[len(mm)//2]:.0f}분")

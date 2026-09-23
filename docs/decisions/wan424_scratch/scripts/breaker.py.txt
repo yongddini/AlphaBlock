@@ -1,0 +1,36 @@
+import pickle, statistics as st, datetime as dt, collections, heapq
+D="/private/tmp/claude-501/-Users-joyongjin-AlphaBlock/e589d145-2734-4f76-9e37-1c84bb6f4fda/scratchpad/"
+T=pickle.load(open(D+"cap_trades.pkl","rb")); A=(0.04,4,15.0)
+KST=dt.timezone(dt.timedelta(hours=9)); day=lambda ms:str(dt.datetime.fromtimestamp(ms/1000,KST).date())
+med=st.median(w for *_,w in T[A+("is",)]); H=3600_000
+EV={"2021-05-19","2021-12-04","2022-01-22","2022-05-10","2022-05-12","2022-06-13","2024-08-05","2025-02-03"}
+# ① 폭락일 진입의 결과
+allt=T[A+("is",)]+T[A+("oos_warm",)]
+print("① 폭락일에 진입한 거래")
+for d in sorted(EV):
+    xs=[t for t in allt if day(t[0])==d]; win=[t for t in xs if t[2]>0]
+    hrs=[(t[1]-t[0])/H for t in win]
+    print(f"  {d}: 진입 {len(xs):2d} · 수익 {len(win):2d}건(합 {sum(t[2] for t in win):+5.1f}R) · 손실 {len(xs)-len(win):2d}건(합 {sum(t[2] for t in xs if t[2]<=0):+6.1f}R) · 수익거래 보유 중앙 {st.median(hrs) if hrs else 0:.0f}시간")
+def sim(tr, X, Hh):
+    size=lambda w:0.0075*w/med
+    ev=sorted(tr); done=[]  # (exit, pnl)
+    blocked_until=-1; eq=0.0; peak=0.0; mdd=0.0; kept=[]; blocked=[]
+    pend=[]  # heap of (exit,pnl) for taken trades
+    realized=collections.deque()
+    for e,x,r,w in ev:
+        while pend and pend[0][0]<=e:
+            ex,p=heapq.heappop(pend); realized.append((ex,p))
+        while realized and realized[0][0]<=e-24*H: realized.popleft()
+        if X is not None and sum(p for _,p in realized)<=-X: blocked_until=max(blocked_until, e+Hh*H) if blocked_until<e else blocked_until
+        if X is not None and e<blocked_until: blocked.append(r); continue
+        p=size(w)*r; kept.append((x,p)); heapq.heappush(pend,(x,p))
+    for x,p in sorted(kept): eq+=p; peak=max(peak,eq); mdd=max(mdd,peak-eq)
+    return eq, mdd, len(kept), blocked
+print("\n② 「최근 24시간 실현손실 ≥ X% → H시간 신규 진입 금지」 (단리, 시드 대비)")
+for seg in ("is","oos_warm"):
+    tr=T[A+(seg,)]; b=sim(tr,None,0)
+    print(f"\n[{seg}] 금지 없음: 수익 {b[0]:+.0%} · MDD {b[1]:.0%} · 비 {b[0]/b[1]:.2f} · 거래 {b[2]}")
+    for X in (0.03,0.05,0.08,0.10):
+        for Hh in (4,12,24,48):
+            s=sim(tr,X,Hh); bl=s[3]
+            print(f"  X {X:.0%} · {Hh:2d}시간: 수익 {s[0]:+.0%} · MDD {s[1]:.0%} · 비 {s[0]/s[1] if s[1] else 0:.2f} · 막힌 {len(bl):3d}건(평균 {st.mean(bl) if bl else 0:+.2f}R)")

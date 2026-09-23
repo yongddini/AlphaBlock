@@ -1,0 +1,19 @@
+import gzip, pickle, __main__, collections, datetime as dt
+from backtest import wan424_stoch_isolation as iso
+from data.models import timeframe_to_ms
+__main__.IsoCell = iso.IsoCell
+with gzip.open("backtest/cache/wan424_iso_work.pkl.gz") as fh: cl=pickle.load(fh)["cells"]
+KST=dt.timezone(dt.timedelta(hours=9)); day=lambda ms:str(dt.datetime.fromtimestamp(ms/1000,KST).date())
+EV=["2021-05-19","2021-12-04","2022-01-22","2022-05-10","2022-05-12","2022-06-13","2024-08-05","2025-02-03"]
+g={d:collections.Counter() for d in EV}; ev=collections.Counter(); nm=collections.Counter()
+for c in cl:
+    tf=timeframe_to_ms(c.timeframe)
+    for x in c.pool[4]["full"]:
+        if "STOP" not in str(x.reason).upper(): continue
+        b=min(x.exit_time//tf-x.entry_time//tf,3); d=day(x.entry_time)
+        if d in g: g[d][b]+=1; ev[b]+=1
+        else: nm[b]+=1
+lab=["진입한 그 봉","다음 봉","2봉 뒤","3봉 뒤"]
+f=lambda C:f"{sum(C.values()):4d}건 → "+" · ".join(f"{lab[b]} {C[b]/sum(C.values()):.0%}" for b in range(4))
+for d in EV: print(f"{d}: {f(g[d])}")
+print(f"\n폭락일 합계: {f(ev)}\n평소:        {f(nm)}")

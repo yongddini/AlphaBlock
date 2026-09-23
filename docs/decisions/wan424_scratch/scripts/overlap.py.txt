@@ -1,0 +1,16 @@
+import gzip, pickle, __main__, statistics as st
+from backtest import wan424_stoch_isolation as iso
+from backtest import wan424_stoch_ob_arm as arm
+__main__.IsoCell = iso.IsoCell
+with gzip.open("backtest/cache/wan424_iso_work.pkl.gz") as fh:
+    cells = pickle.load(fh)["cells"]
+for seg in ("is","oos"):
+    widths_k=[]; widths_nok=[]
+    for c in cells:
+        pool=c.pool[4].get(seg,()); kv=c.k_value.get(seg,())
+        for cand,k in zip(pool,kv):
+            if k is None: continue
+            (widths_k if k<25 else widths_nok).append(arm.stop_width(cand))
+    def share(ws,f): return sum(1 for w in ws if w>=f)/len(ws)
+    print(f"[{seg}] %K<25: {len(widths_k)}개 · 손절폭 중앙 {st.median(widths_k)*100:.2f}% · 4%이상 {share(widths_k,0.04):.1%} · 2%이상 {share(widths_k,0.02):.1%}")
+    print(f"[{seg}] %K≥25: {len(widths_nok)}개 · 손절폭 중앙 {st.median(widths_nok)*100:.2f}% · 4%이상 {share(widths_nok,0.04):.1%} · 2%이상 {share(widths_nok,0.02):.1%}")

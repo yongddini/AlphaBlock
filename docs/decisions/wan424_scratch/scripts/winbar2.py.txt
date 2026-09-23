@@ -1,0 +1,33 @@
+import gzip, pickle, __main__, bisect, statistics as st
+from backtest import wan424_stoch_isolation as iso, wan424_stoch_ob_arm as arm, harness
+from data.storage import OhlcvStore
+from data.models import timeframe_to_ms
+__main__.IsoCell = iso.IsoCell
+arm.register_3h()
+with gzip.open("backtest/cache/wan424_iso_work.pkl.gz") as fh: cl=pickle.load(fh)["cells"]
+store=OhlcvStore(harness.DB_PATH)
+rows=[]  # (arm?, 결과R, 진입봉종가R, 진입봉고가R)
+for c in cl:
+    tf=timeframe_to_ms(c.timeframe)
+    fr=store.load(c.symbol,c.timeframe,start_ms=0,end_ms=10**14)
+    if fr.empty: continue
+    t=[int(v) for v in fr["open_time"]]; cc=fr["close"].tolist(); hh=fr["high"].tolist()
+    armset=set(iso._real_idx(c,4,"full",0.04,15.0))
+    for i,x in enumerate(c.pool[4]["full"]):
+        e,s=float(x.entry_price),float(x.stop_price)
+        if e<=s: continue
+        b=(int(x.entry_time)//tf)*tf; j=bisect.bisect_left(t,b)
+        if j>=len(t) or t[j]!=b: continue
+        R=(float(x.exit_price)-e)/(e-s)
+        c2=(cc[j+1]-e)/(e-s) if j+1<len(cc) else None
+        brk0=x.exit_time//tf==x.entry_time//tf and "STOP" in str(x.reason).upper()
+        brk1=x.exit_time//tf<=x.entry_time//tf+1 and "STOP" in str(x.reason).upper()
+        rows.append((i in armset, arm.stop_width(x)>=0.04, R, (cc[j]-e)/(e-s), c2, "STOP" in str(x.reason).upper(), brk0, brk1))
+import statistics as st
+g=[r for r in rows if r[0]]
+print("추천팔(4%·%K<15) 6년")
+for lab,f in [("큰 수익(R≥1)",lambda r:r[2]>=1),("작은 수익",lambda r:0<r[2]<1),("손실(손절 아님)",lambda r:r[2]<=0 and not r[5]),("손절",lambda r:r[5])]:
+    h=[r for r in g if f(r) and r[4] is not None]
+    print(f"  {lab:>12}: {len(h):4d}건 · 1봉 종가 중앙 {st.median(r[3] for r in h):+.2f}R · 2봉 종가 중앙 {st.median(r[4] for r in h):+.2f}R")
+st_=[r for r in g if r[5]]
+print(f"  손절 {len(st_)}건 중 1봉 대기로 피함 {sum(r[6] for r in st_)/len(st_):.0%} · 2봉 대기로 피함 {sum(r[7] for r in st_)/len(st_):.0%}")

@@ -1,0 +1,55 @@
+import pickle, statistics as st, heapq, math
+D="/private/tmp/claude-501/-Users-joyongjin-AlphaBlock/e589d145-2734-4f76-9e37-1c84bb6f4fda/scratchpad/"
+T=pickle.load(open(D+"cap_trades.pkl","rb"))
+ARMS=sorted({k[:3] for k in T})
+def sim(tr, base_fn, cap, mode, compound=False):
+    ev=sorted(tr,key=lambda x:x[0]); open_=[]; eq=1.0; peak=1.0; mdd=0.0; openrisk=0.0; n=0; used=[]
+    def settle(until):
+        nonlocal eq,peak,mdd,openrisk
+        while open_ and open_[0][0]<=until:
+            ex,r,sz=heapq.heappop(open_); openrisk-=sz
+            eq += (eq if compound else 1.0)*sz*r
+            peak=max(peak,eq); mdd=max(mdd,(peak-eq)/peak if peak>0 else 1)
+    for e,x,r,w in ev:
+        settle(e)
+        b=base_fn(w); room=cap-openrisk
+        if room>=b-1e-12: sz=b
+        elif mode=="shrink" and room>=0.001: sz=room
+        else: continue
+        openrisk+=sz; n+=1; used.append(sz); heapq.heappush(open_,(x,r,sz))
+    settle(float("inf"))
+    return eq-1, mdd, n, (st.mean(used) if used else 0)
+CAPS=[0.03,0.05,0.08,0.10,0.15,0.20,float("inf")]
+res={}
+for a in ARMS:
+    med=st.median(w for *_,w in T[a+("is",)])
+    sizings={"1R":lambda w:0.01, "폭비례":lambda w,m=med:0.01*w/m}
+    for sname,fn in sizings.items():
+        for mode in ("block","shrink"):
+            for cap in CAPS:
+                if cap==float("inf") and mode=="shrink": continue
+                for seg in ("is","oos_warm"):
+                    res[(a,sname,mode,cap,seg)]=sim(T[a+(seg,)],fn,cap,mode)
+pickle.dump(res,open(D+"cap_res.pkl","wb"))
+ratio=lambda r: r[0]/r[1] if r[1]>0 else float("nan")
+def score(cfg,seg):
+    vals=[]
+    for a in ARMS:
+        b=res[(a,"1R","block",float("inf"),seg)]
+        if b[0]<=0: continue
+        c=res[(a,)+cfg+(seg,)]
+        vals.append(ratio(c)/ratio(b) if c[0]>0 else 0.0)
+    return st.median(vals), len(vals)
+cfgs=[(s,m,c) for s in ("1R","폭비례") for m in ("block","shrink") for c in CAPS if not (c==float("inf") and m=="shrink")]
+rows=[]
+for cfg in cfgs:
+    si,ni=score(cfg,"is"); so,no=score(cfg,"oos_warm")
+    both=sum(1 for a in ARMS if all(
+        res[(a,"1R","block",float("inf"),sg)][0]>0 and res[(a,)+cfg+(sg,)][0]>0 and ratio(res[(a,)+cfg+(sg,)])>ratio(res[(a,"1R","block",float("inf"),sg)])
+        for sg in ("is","oos_warm")))
+    rows.append((si,cfg,so,both,ni,no))
+print("기준 = 1R·한도없음. 값 = 기준 대비 단리 수익÷MDD 배수의 팔 중앙값 (기준 수익>0 팔만: 앞 %d팔, 뒤 %d팔)"%(rows[0][4],rows[0][5]))
+print(f"{'거래당':>6} {'넘칠때':>6} {'한도':>5} | {'앞(IS)':>7} {'뒤(OOS)':>7} | 앞뒤 모두 개선 팔")
+for si,cfg,so,both,_,_ in sorted(rows,key=lambda r:-r[0]):
+    s,m,c=cfg
+    print(f"{s:>6} {('막기' if m=='block' else '작게'):>6} {('없음' if c==float('inf') else f'{c:.0%}'):>5} | {si:7.2f} {so:7.2f} | {both}")

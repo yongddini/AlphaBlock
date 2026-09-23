@@ -1,0 +1,6 @@
+"""측정 전용 — 3h 주기를 이 프로세스(와 워커)에서만 인식시킨다. 운영 코드는 안 건드린다."""
+import backtest.sweep as _sweep
+import data.models as _models
+
+_models._TIMEFRAME_MS.setdefault("3h", 10_800_000)
+_sweep._TIMEFRAME_MINUTES.setdefault("3h", 180)

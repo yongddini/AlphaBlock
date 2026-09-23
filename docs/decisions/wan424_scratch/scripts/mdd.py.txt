@@ -1,0 +1,23 @@
+import gzip, pickle, __main__
+from backtest import wan424_stoch_isolation as iso
+from backtest import wan424_matched_null as mn
+from backtest import wan424_stoch_ob_arm as arm
+__main__.IsoCell = iso.IsoCell
+with gzip.open("backtest/cache/wan424_iso_work.pkl.gz") as fh:
+    cells = {(c.symbol,c.timeframe):c for c in pickle.load(fh)["cells"]}
+base = arm.build_base_payloads(jobs=1, payload_dir=arm.DEFAULT_PAYLOAD_DIR)
+def fmt(rs):
+    fr, fm, _ = arm._equity_path(rs, compound=False)
+    cr, cm, dead = arm._equity_path(rs, compound=True)
+    c = "파산" if dead else f"{cr*100:+.0f}%"
+    return f"고정 {fr*100:+5.0f}%/MDD{fm*100:3.0f}% · 복리 {c:>7}/MDD{cm*100:3.0f}%"
+print("하한 ts %K  | full: net R · 고정/복리 | oos_warm: net R · 고정/복리", flush=True)
+for floor in iso.FLOORS:
+    for hold in iso.HOLDS:
+        for thr in iso.THRESHOLDS:
+            f = mn.place_facts(iso._select(base,cells,hold=hold,floor=floor,thr=thr,mode="real"), segments=("full","oos_warm"))
+            out=[]
+            for s in ("full","oos_warm"):
+                rs=[x.net_r for x in sorted(f[s], key=lambda x: x.exit_time)]
+                out.append(f"{mn.mean_r(f[s]):+.3f}({len(rs)}) {fmt(rs)}")
+            print(f"{floor:>3.0%} ts{hold} <{thr:.0f} | {out[0]} | {out[1]}", flush=True)

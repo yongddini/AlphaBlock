@@ -1,0 +1,13 @@
+import gzip, pickle, __main__, collections, statistics as st
+from backtest import wan424_stoch_isolation as iso, wan424_stoch_ob_arm as arm
+__main__.IsoCell = iso.IsoCell
+with gzip.open("backtest/cache/wan424_iso_work.pkl.gz") as fh:
+    cl = pickle.load(fh)["cells"]
+tot=collections.Counter(); ok=collections.Counter(); ws=collections.defaultdict(list); sel=collections.Counter()
+for c in cl:
+    for i,cand in enumerate(c.pool[4]["full"]):
+        w=arm.stop_width(cand); tot[c.timeframe]+=1; ws[c.timeframe].append(w)
+        if w>=0.04: ok[c.timeframe]+=1
+    sel[c.timeframe]+=len(iso._real_idx(c,4,"full",0.04,15.0))
+for tf in ("1h","2h","3h","4h","6h","8h","12h","1d","1w"):
+    print(f"{tf:>4}: 탭 {tot[tf]:6d} · 손절폭 중앙 {st.median(ws[tf])*100:.2f}% · 4%이상 {ok[tf]/tot[tf]:6.1%} ({ok[tf]}) · 추천팔(%K<15) 거래 {sel[tf]}")

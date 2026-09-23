@@ -1,0 +1,134 @@
+"""§5 — 오늘 각각 효과가 확인된 둘을 **곱한다**: 「익절선 제거」 × 「넓은 손절」.
+
+§4가 낸 두 사실:
+  · 익절선을 빼면(`ts`) 구조적 손해가 사라진다(gross −0.086 → **0.00**).
+  · 비용은 손절폭에 반비례한다(0~1% −0.52R → 6%+ −0.03R).
+그런데 `ts` 팔은 **존 바닥 손절**이라 대부분 얇고, 넓은 손절은 **익절선이 있는** 팔에서만
+쟀다. 둘이 만나는 칸은 이 저장소에 없다.
+
+후보를 다시 만들지 않는다 — `diag_payloads`의 `ts*`/`nts*` 팔 후보를 **손절폭으로 걸러**
+다시 배치할 뿐이다(공짜 축).
+"""
+from __future__ import annotations
+
+import sys as _s
+_s.path.insert(0, "/private/tmp/claude-501/-Users-joyongjin-AlphaBlock/92ebc647-da74-4930-817c-6dae264955e8/scratchpad")
+import diag_patch  # noqa: F401
+
+import dataclasses
+import time
+from pathlib import Path
+
+from backtest import harness
+from backtest.book_cli import iter_book_segments, net_r
+from backtest.confirmation_arm import ARM_C_OFFSET
+from backtest.leverage_book import LeverageBookParams
+from backtest.models import Liquidity
+from backtest.payload_cache import PayloadCache
+from backtest.run import parse_date_ms
+from backtest.wan169_leverage_book import arm_key, run_cells
+from backtest.wan180_leverage_book_nine import apply_funding_proxy
+
+from diag_patch import ALL_ARMS
+
+NEW7 = ("ALGO/USDT:USDT", "ATOM/USDT:USDT", "ETC/USDT:USDT", "THETA/USDT:USDT",
+        "VET/USDT:USDT", "XLM/USDT:USDT", "XMR/USDT:USDT")
+NEW12 = tuple(f"{c}/USDT:USDT" for c in ("AVAX", "UNI", "SUSHI", "CRV", "SNX", "COMP",
+                                         "YFI", "XTZ", "ZEC", "DASH", "NEO", "EGLD"))
+ALL31 = tuple(harness.DEFAULT_SYMBOLS) + NEW7 + NEW12
+
+CACHE = Path(__file__).with_name("diag_payloads")
+TFS = ("1d", "8h", "6h", "4h", "1h")
+MULTS = (0.6, 1.0, 1.5)
+SEGMENTS = ("full", "is", "oos_warm")
+ARMS = ("기준", "ts1", "ts2", "ts4", "ts8", "nts1", "nts2", "nts4", "nts8")
+FLOORS = (0.0, 0.02, 0.03, 0.04, 0.06)
+CFG = harness.build_config("1h", take_profit_liquidity=harness.ADOPTED_TAKE_PROFIT_LIQUIDITY)
+SLIP = CFG.slippage
+
+
+def gross_r(trade, placed) -> float:
+    pnl = trade.realized_pnl + trade.entry_fee + trade.funding_cost
+    for fill in trade.exits:
+        pnl += fill.fee
+        if CFG.exit_liquidity(fill.reason) is Liquidity.TAKER:
+            pnl += fill.quantity * fill.price * SLIP
+    if trade.entry_liquidity is Liquidity.TAKER:
+        pnl += trade.quantity * trade.entry_price * SLIP
+    return pnl / placed.risk_amount if placed.risk_amount else float("nan")
+
+
+def main() -> None:
+    started = time.monotonic()
+    payloads = apply_funding_proxy(run_cells(
+        ALL31, TFS, start=harness.DEFAULT_START, end=harness.DEFAULT_END, jobs=4,
+        take_profit_liquidity=harness.ADOPTED_TAKE_PROFIT_LIQUIDITY, retap_mode="once",
+        reentry=False, engine_check=False, confirmation_arms=ALL_ARMS,
+        confirmation_multiples=MULTS, confirmation_offset=ARM_C_OFFSET,
+        payload_cache=PayloadCache(CACHE), fill=harness.fill_preset("pen_5bp"),
+        no_same_step_tp=True,
+    ))[0]
+    print(f"후보 적재 {time.monotonic() - started:.0f}s · 칸 {len(payloads)}", flush=True)
+
+    def pick(arm: str, floor: float, tfs):
+        key = arm_key(arm, 0.6)
+        out = []
+        for p in payloads:
+            if p.timeframe not in tfs:
+                continue
+            cands = {}
+            for seg, v in p.arm_candidates[key].items():
+                kept = []
+                for c in v:
+                    if c.is_reentry or c.tap_index != 0:
+                        continue
+                    e, s = float(c.entry_price), float(c.stop_price)
+                    if e > 0 and (e - s) / e >= floor:
+                        kept.append(c)
+                cands[seg] = tuple(kept)
+            out.append(dataclasses.replace(p, candidates=cands, reentry_candidates={}))
+        return out
+
+    def run(ps):
+        res = {}
+        for seg in iter_book_segments(
+            ps, book=LeverageBookParams(), segments=SEGMENTS,
+            start_ms=parse_date_ms(harness.DEFAULT_START), end_ms=parse_date_ms(harness.DEFAULT_END),
+            include_reentry=False, compound_sizing=False, min_stop_distance_fraction=0.0,
+            take_profit_liquidity=harness.ADOPTED_TAKE_PROFIT_LIQUIDITY,
+        ):
+            pairs = seg.trades_with_placements()
+            n = len(pairs)
+            rs = [net_r(t, p) for t, p in pairs]
+            res[seg.segment] = (
+                sum(gross_r(t, p) for t, p in pairs) / n if n else float("nan"),
+                sum(rs) / n if n else float("nan"),
+                n,
+                sum(1 for r in rs if r > 0) / n if n else float("nan"),
+                min(rs) if rs else float("nan"),
+            )
+        return res
+
+    print("\n=== §5 익절선 제거 × 손절폭 하한 (5TF 한 지갑) ===", flush=True)
+    hits = []
+    for arm in ARMS:
+        for floor in FLOORS:
+            res = run(pick(arm, floor, set(TFS)))
+            print(f"  {arm:5} 하한{floor*100:.0f}% | " + " · ".join(
+                f"{s} g{res[s][0]:+.4f}/n{res[s][1]:+.4f}({res[s][2]}·승{res[s][3]*100:.0f}%"
+                f"·최악{res[s][4]:+.1f}R)" for s in SEGMENTS), flush=True)
+            if (not arm.startswith("nts")) and res["is"][1] > 0 and res["oos_warm"][1] > 0 \
+                    and res["is"][2] >= 300:
+                hits.append((min(res["is"][1], res["oos_warm"][1]), arm, floor, res))
+
+    print("\n=== §6 net이 앞뒤 구간 모두 양수 · 앞구간 300거래 이상(무작위 팔 제외) ===", flush=True)
+    if not hits:
+        print("  없음", flush=True)
+    for _, arm, floor, res in sorted(hits, reverse=True)[:15]:
+        print(f"  {arm} 하한{floor*100:.0f}% | " + " · ".join(
+            f"{s} g{res[s][0]:+.4f}/n{res[s][1]:+.4f}({res[s][2]})" for s in SEGMENTS), flush=True)
+    print(f"\n총 {time.monotonic() - started:.0f}s", flush=True)
+
+
+if __name__ == "__main__":
+    main()

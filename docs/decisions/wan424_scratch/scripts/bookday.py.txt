@@ -1,0 +1,25 @@
+import gzip, pickle, __main__, collections, datetime as dt
+from pathlib import Path
+from backtest import wan424_stoch_isolation as iso, wan424_stoch_ob_arm as arm, wan424_matched_null as mn
+__main__.IsoCell = iso.IsoCell
+with gzip.open("backtest/cache/wan424_iso_work.pkl.gz") as fh:
+    cl = pickle.load(fh)["cells"]
+cells = {(c.symbol, c.timeframe): c for c in cl}
+arm.register_3h()
+base = arm.build_base_payloads(jobs=4, payload_dir=Path("backtest/cache/wan424_payloads"))
+KST = dt.timezone(dt.timedelta(hours=9))
+day = lambda ms: dt.datetime.fromtimestamp(ms/1000, KST).date()
+for thr in (15.0, 25.0):
+    sig = collections.Counter()
+    for c in cl:
+        for i in iso._real_idx(c, 4, "full", 0.04, thr):
+            sig[day(c.pool[4]["full"][i].entry_time)] += 1
+    fs = mn.place_facts(iso._select(base, cells, hold=4, floor=0.04, thr=thr, mode="real"), ["full"])["full"]
+    by = collections.defaultdict(list)
+    for f in fs: by[day(f.entry_time)].append(f)
+    ev = sorted([(f.entry_time,1) for f in fs]+[(f.exit_time,-1) for f in fs], key=lambda x:(x[0],x[1]))
+    cur=mx=0
+    for _,d in ev: cur+=d; mx=max(mx,cur)
+    print(f"\n=== 4%·ts4·%K<{thr:.0f}: 신호 {sum(sig.values())} → 북 체결 {len(fs)}건 · 최대 동시 보유 {mx}개 ===")
+    for d, xs in sorted(by.items(), key=lambda kv:-len(kv[1]))[:6]:
+        print(f"{d}: 북 {len(xs)}건 (신호 {sig[d]}) · {len({x.symbol for x in xs})}종목 · 손절 {sum(x.is_stop for x in xs)} · net R 합 {sum(x.net_r for x in xs):+.1f}")

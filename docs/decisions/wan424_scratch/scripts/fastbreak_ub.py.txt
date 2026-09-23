@@ -1,0 +1,22 @@
+import gzip, pickle, __main__
+from backtest import wan424_stoch_isolation as iso
+from data.models import timeframe_to_ms
+__main__.IsoCell = iso.IsoCell
+with gzip.open("backtest/cache/wan424_iso_work.pkl.gz") as fh: cl=pickle.load(fh)["cells"]
+def path(tr):
+    eq=peak=1.0; mdd=0.0
+    for _,r in sorted(tr): eq+=0.01*eq*r; peak=max(peak,eq); mdd=max(mdd,1-eq/peak)
+    return eq-1,mdd
+for thr in (15.0,25.0):
+  for seg in ("is","oos"):
+    base=[];no0=[];no01=[];half=[]
+    for c in cl:
+        tf=timeframe_to_ms(c.timeframe)
+        for i in iso._real_idx(c,4,seg,0.04,thr):
+            x=c.pool[4][seg][i]; r=(x.exit_price-x.entry_price)/(x.entry_price-x.stop_price)-0.12
+            stop="STOP" in str(x.reason).upper(); b=x.exit_time//tf-x.entry_time//tf
+            base.append((x.exit_time,r))
+            if not(stop and b==0): no0.append((x.exit_time,r))
+            if not(stop and b<=1): no01.append((x.exit_time,r))
+            half.append((x.exit_time, r*0.5 if (stop and b==0) else r))
+    print(f"%K<{thr:.0f} {seg:>3}: 지금 {len(base)}거래 {path(base)[0]:+.0%}/MDD {path(base)[1]:.0%} | 진입봉 손절 제거 {len(no0)} {path(no0)[0]:+.0%}/MDD {path(no0)[1]:.0%} | 진입봉+다음봉 손절 제거 {len(no01)} {path(no01)[0]:+.0%}/MDD {path(no01)[1]:.0%} | 진입봉 손절 절반만 {path(half)[0]:+.0%}/MDD {path(half)[1]:.0%}")

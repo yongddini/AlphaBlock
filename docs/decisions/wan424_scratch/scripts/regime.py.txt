@@ -1,0 +1,53 @@
+import gzip, pickle, __main__, sys, bisect, numpy as np
+from collections import defaultdict
+from backtest import harness
+from backtest import wan424_stoch_isolation as iso
+from backtest import wan424_matched_null as mn
+from backtest import wan424_stoch_ob_arm as arm
+from data.storage import OhlcvStore
+__main__.IsoCell = iso.IsoCell
+floor=float(sys.argv[1]); thr=float(sys.argv[2]); hold=4; DRAWS=200; SMA=200; DAY=86_400_000
+with gzip.open("backtest/cache/wan424_iso_work.pkl.gz") as fh:
+    cells = {(c.symbol,c.timeframe):c for c in pickle.load(fh)["cells"]}
+base = arm.build_base_payloads(jobs=1, payload_dir=arm.DEFAULT_PAYLOAD_DIR)
+store = OhlcvStore(harness.DB_PATH)
+def daily(sym):
+    f = store.load(sym, "1d", start_ms=0, end_ms=10**14)
+    close = f["close"].astype(float).to_numpy(); ot = f["open_time"].astype("int64").to_numpy()
+    sma = np.full(len(close), np.nan)
+    if len(close) >= SMA:
+        c = np.cumsum(np.insert(close,0,0.0)); sma[SMA-1:] = (c[SMA:]-c[:-SMA])/SMA
+    return list(ot + DAY), close, sma   # 확정 시각 = 봉 끝
+cache={}
+def label(sym, t):
+    if sym not in cache: cache[sym]=daily(sym)
+    ct, close, sma = cache[sym]
+    i = bisect.bisect_right(ct, t) - 1   # t 이전에 닫힌 마지막 일봉
+    if i < 0 or np.isnan(sma[i]): return None
+    return "상승" if close[i] > sma[i] else "하락"
+BTC="BTC/USDT:USDT"
+def split(facts, mode):
+    out=defaultdict(list)
+    for f in facts:
+        lab = label(BTC if mode=="btc" else f.symbol, f.entry_time)
+        if lab: out[lab].append(f.net_r)
+    return out
+SEGS=("is","oos_warm")
+real = mn.place_facts(iso._select(base,cells,hold=hold,floor=floor,thr=thr,mode="real"), segments=SEGS)
+flo  = mn.place_facts(iso._select(base,cells,hold=hold,floor=floor,thr=thr,mode="floor"), segments=SEGS)
+draws=[mn.place_facts(iso._select(base,cells,hold=hold,floor=floor,thr=thr,mode="null",draw=d), segments=SEGS) for d in range(DRAWS)]
+print(f"=== 하한 {floor:.0%} · ts{hold} · %K<{thr:.0f} ===")
+for mode,name in (("btc","BTC 200일선"),("own","종목 자체 200일선")):
+    print(f"-- 장세 기준: {name}")
+    for s in SEGS:
+        r=split(real[s],mode); fl=split(flo[s],mode)
+        nd=[split(d[s],mode) for d in draws]
+        for lab in ("상승","하락"):
+            rs=r.get(lab,[]); 
+            if not rs: print(f"  {s:>8} {lab}: 거래 없음"); continue
+            rm=np.mean(rs)
+            nm=[np.mean(x[lab]) for x in nd if x.get(lab)]
+            p=np.mean([v>=rm for v in nm]) if nm else float('nan')
+            fm=np.mean(fl[lab]) if fl.get(lab) else float('nan')
+            sig="✅" if (p<=0.05 and rm>np.mean(nm) and len(rs)>=20) else "—"
+            print(f"  {s:>8} {lab}: %K {rm:+.3f}({len(rs)}) · 하한만 {fm:+.3f}({len(fl.get(lab,[]))}) · 무작위 {np.mean(nm):+.3f} · p {p:.3f} {sig}")

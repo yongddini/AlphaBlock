@@ -1,0 +1,40 @@
+import gzip, pickle, __main__, collections, datetime as dt, heapq
+from pathlib import Path
+from backtest import wan424_stoch_isolation as iso, wan424_stoch_ob_arm as arm, harness
+from backtest.book_cli import iter_book_segments, net_r
+from backtest.leverage_book import LeverageBookParams
+from backtest.run import parse_date_ms
+__main__.IsoCell = iso.IsoCell
+with gzip.open("backtest/cache/wan424_iso_work.pkl.gz") as fh:
+    cl = pickle.load(fh)["cells"]
+cells = {(c.symbol, c.timeframe): c for c in cl}
+arm.register_3h()
+base = arm.build_base_payloads(jobs=4, payload_dir=Path("backtest/cache/wan424_payloads"))
+KST = dt.timezone(dt.timedelta(hours=9))
+def path(tr, key):
+    eq=1.0; peak=1.0; mdd=0.0; ceq=1.0; cpk=1.0; cmdd=0.0; days=collections.Counter()
+    for t in sorted(tr, key=lambda x:x["exit"]):
+        p=key(t); eq+=p; peak=max(peak,eq); mdd=max(mdd,(peak-eq)/peak)
+        ceq*=1+p; cpk=max(cpk,ceq); cmdd=max(cmdd,(cpk-ceq)/cpk)
+        days[dt.datetime.fromtimestamp(t["exit"]/1000,KST).date()]+=p
+    return eq-1, mdd, ceq-1, cmdd, min(days.values())
+for thr in (15.0, 25.0):
+    sel = iso._select(base, cells, hold=4, floor=0.04, thr=thr, mode="real")
+    for seg in iter_book_segments(sel, book=LeverageBookParams(), segments=("is","oos_warm"),
+            start_ms=parse_date_ms(harness.DEFAULT_START), end_ms=parse_date_ms(harness.DEFAULT_END),
+            include_reentry=False, compound_sizing=False, min_stop_distance_fraction=0.0,
+            take_profit_liquidity=harness.ADOPTED_TAKE_PROFIT_LIQUIDITY):
+        tr=[dict(entry=t.entry_time, exit=t.exit_time, r=net_r(t,p), w=abs(t.entry_price-p.stop_price)/t.entry_price) for t,p in seg.trades_with_placements()]
+        # 1/5 명목: 동시 25개(=5배/0.2) 상한, 진입 순서대로
+        kept=[]; open_=[]
+        for t in sorted(tr,key=lambda x:x["entry"]):
+            while open_ and open_[0]<=t["entry"]: heapq.heappop(open_)
+            if len(open_)<25: kept.append(t); heapq.heappush(open_,t["exit"])
+        avg_fifth = sum(0.2*t["w"] for t in kept)/len(kept)
+        rows=[("1R(거래당 1%)", tr, lambda t:0.01*t["r"], 0.01),
+              ("1/5 명목", kept, lambda t:0.2*t["w"]*t["r"], avg_fifth),
+              (f"1R을 평균 {avg_fifth:.2%}로 맞춤", tr, lambda t:avg_fifth*t["r"], avg_fifth)]
+        print(f"\n=== 4%·ts4·%K<{thr:.0f} · {seg.segment} ===")
+        for name, xs, k, ar in rows:
+            s, m, c, cm, wd = path(xs, k)
+            print(f"{name:>22}: {len(xs):4d}거래 · 평균리스크 {ar:.2%} · 단리 {s:+.0%} MDD {m:.0%} (비 {s/m:.2f}) · 복리 {c:+.0%} MDD {cm:.0%} · 최악일 {wd:+.1%}")

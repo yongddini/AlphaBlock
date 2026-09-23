@@ -1,0 +1,25 @@
+import gzip, pickle, __main__
+from collections import defaultdict
+from backtest import wan424_matched_null as mn
+from backtest import wan424_stoch_ob_arm as arm
+__main__.NullCell = mn.NullCell
+with gzip.open("backtest/cache/wan424_null_work.pkl.gz") as fh:
+    cells = pickle.load(fh)["cells"]
+base = arm.build_base_payloads(jobs=1, payload_dir=arm.DEFAULT_PAYLOAD_DIR)
+order = ["1h","2h","3h","4h","6h","8h","12h","1d","1w"]
+res={}
+for hold in (4,8):
+    pay = mn.build_payloads(base, cells, hold=hold, threshold=25.0, null=None)
+    facts = mn.place_facts(pay, segments=("full","oos_warm"))
+    for seg in ("full","oos_warm"):
+        by=defaultdict(list)
+        for f in facts[seg]: by[f.timeframe].append(f.net_r)
+        res[(hold,seg)]={tf:(sum(v)/len(v),len(v)) for tf,v in by.items()}
+print(f"{'TF':>4} | {'full ts4':>10} {'full ts8':>10} | {'oos ts4':>10} {'oos ts8':>10} | 더 나은 hold")
+for tf in order:
+    f4=res[(4,'full')].get(tf); f8=res[(8,'full')].get(tf)
+    o4=res[(4,'oos_warm')].get(tf); o8=res[(8,'oos_warm')].get(tf)
+    if not f4: continue
+    better_full = "ts8" if f8[0]>f4[0] else "ts4"
+    better_oos = "ts8" if (o8 and o4 and o8[0]>o4[0]) else "ts4"
+    print(f"{tf:>4} | {f4[0]:+.3f}({f4[1]:>3}) {f8[0]:+.3f}({f8[1]:>3}) | {o4[0]:+.3f}({o4[1]:>3}) {o8[0]:+.3f}({o8[1]:>3}) | full {better_full} · oos {better_oos}")

@@ -1,0 +1,24 @@
+import gzip, pickle, __main__
+from collections import defaultdict
+from backtest import wan424_matched_null as mn
+from backtest import wan424_stoch_ob_arm as arm
+__main__.NullCell = mn.NullCell
+with gzip.open("backtest/cache/wan424_null_work.pkl.gz") as fh:
+    cells = pickle.load(fh)["cells"]
+base = arm.build_base_payloads(jobs=1, payload_dir=arm.DEFAULT_PAYLOAD_DIR)
+pay = mn.build_payloads(base, cells, hold=4, threshold=25.0, null=None)
+facts = mn.place_facts(pay, segments=("full","oos_warm"))
+def sym(s): return s.split("/")[0]
+for seg in ("full","oos_warm"):
+    by=defaultdict(list)
+    for f in facts[seg]: by[sym(f.symbol)].append(f.net_r)
+    rows=[]
+    for s,rs in by.items():
+        wr=sum(1 for r in rs if r>0)/len(rs); m=sum(rs)/len(rs)
+        rows.append((wr,m,len(rs),s))
+    rows.sort()
+    print(f"\n=== {seg} · 판정 칸 ts4·하한4%·%K<25 · 승률 오름차순 ===")
+    for wr,m,n,s in rows:
+        print(f"  {s:>6}: 승률 {wr:.0%} · net R {m:+.4f} · {n:>3}거래")
+    allr=[r for rs in by.values() for r in rs]
+    print(f"  전체: 승률 {sum(1 for r in allr if r>0)/len(allr):.0%} · net R {sum(allr)/len(allr):+.4f} · {len(allr)}거래")

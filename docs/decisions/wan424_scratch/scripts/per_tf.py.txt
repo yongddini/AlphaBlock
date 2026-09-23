@@ -1,0 +1,24 @@
+import gzip, pickle, __main__
+from collections import defaultdict
+from backtest import wan424_matched_null as mn
+from backtest import wan424_stoch_ob_arm as arm
+__main__.NullCell = mn.NullCell  # -m 피클 호환
+with gzip.open("backtest/cache/wan424_null_work.pkl.gz") as fh:
+    cells = pickle.load(fh)["cells"]
+base = arm.build_base_payloads(jobs=1, payload_dir=arm.DEFAULT_PAYLOAD_DIR)
+hold, thr = mn.JUDGE
+pay = mn.build_payloads(base, cells, hold=hold, threshold=thr, null=None)
+facts = mn.place_facts(pay, segments=("full","is","oos_warm"))
+order = ["1h","2h","3h","4h","6h","8h","12h","1d","1w"]
+for seg in ("full","is","oos_warm"):
+    by=defaultdict(list)
+    for f in facts[seg]:
+        by[f.timeframe].append(f.net_r)
+    print(f"\n=== {seg} (판정 칸 ts4·하한4%·%K<25) ===")
+    for tf in order:
+        rs=by.get(tf,[])
+        if rs:
+            m=sum(rs)/len(rs); wr=sum(1 for r in rs if r>0)/len(rs)
+            print(f"  {tf:>3}: net R {m:+.4f} · {len(rs):4d}거래 · 승률 {wr:.0%}")
+        else:
+            print(f"  {tf:>3}: 거래 없음")
