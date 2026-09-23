@@ -122,6 +122,30 @@ class TailCatchup:
             logger.exception("꼬리 따라잡기 백필 실패 — 다음 (재)접속에서 다시 시도합니다")
 
 
+def report_funding_task_exit(task: asyncio.Task[None]) -> None:
+    """펀딩 최신화 태스크가 끝났을 때 **조용히 끝나지 않게** 한다(WAN-422 §3).
+
+    「펀딩 루프가 죽어도 스트림은 유지된다」는 설계(펀딩 때문에 봉 수집이 멈추면 더
+    나쁘다)는 그대로 지킨다 — 여기서 바꾸는 것은 *조용히* 뿐이다. 무한 루프라 정상
+    종료는 없으므로, 취소가 아닌 모든 종료(예외 포함)를 `ERROR`로 남긴다. 감시 쪽은
+    `alphablock watch`가 **마지막 확정 정산 지연**으로 잡는다(`dashboard.health`) — 태스크가
+    죽으면 확정이 더 이상 안 쌓여 그 지연이 문턱을 넘는다.
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error(
+            "펀딩 최신화 태스크가 예외로 죽었습니다 — 봉 수집은 계속됩니다: %r",
+            exc,
+            exc_info=exc,
+        )
+    else:
+        logger.error(
+            "펀딩 최신화 태스크가 종료됐습니다(정상 종료가 없는 루프) — 봉 수집은 계속됩니다"
+        )
+
+
 async def _backfill_funding(settings: Settings, exchange: FundingRateSource) -> None:
     """OHLCV 백필 직후 펀딩 이력을 백필한다(WAN-63).
 
@@ -253,6 +277,7 @@ async def run_collector(
                 funding_task = asyncio.create_task(
                     run_funding_refresh(settings, exchange=exchange, backfill=False)
                 )
+                funding_task.add_done_callback(report_funding_task_exit)
 
             # 프로세스 레벨 워치독 스레드(WAN-173 (2)). in-process 재접속(아래 유휴
             # 워치독)조차 못 돌 만큼 이벤트 루프가 멎으면 hang→exit로 바꿔 서비스

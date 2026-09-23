@@ -89,13 +89,13 @@ def _funding_lines(view: HealthView) -> list[str]:
     (`paper/store.py`), 수집이 멈추면 성과가 **항상 실제보다 좋게** 나온다.
 
     📌 **예측 행 주의** — 거래소는 다음 정산을 미리 준다. 그 행의 `funding_time`은 **미래**라
-    지연이 음수로 나오므로 `(예측)`을 함께 찍는다(확정 이력이 아니라는 뜻).
+    `(예측)`을 함께 찍는다(확정 이력이 아니라는 뜻).
 
-    ⚠️ **그래서 이 자는 최대 ~8시간 낙관이다**: 판정에 쓰는 행이 예측일 수 있어(대시보드
-    Health와 같은 규약 — `dashboard.health_data.funding_rows`가 `store.latest`를 쓴다) 수집이
-    막 멈춘 직후에는 아직 OK로 보인다. 문턱이 `stale_multiplier × 8시간`(기본 20시간)이라
-    **탐지가 그만큼 늦을 뿐 놓치지는 않고**, 화면에는 `(예측)`으로 그 사실이 드러난다.
-    「언제부터 멈췄나」를 정확히 세는 자리(포렌식 스크립트 §1)는 **확정 행만** 센다.
+    🚨 **판정(지연·상태)은 마지막 확정 정산으로 낸다(WAN-422 §2).** 옛 문장은 *「판정에 쓰는
+    행이 예측일 수 있어 최대 ~8시간 낙관 — 늦을 뿐 놓치지는 않는다」*였는데 **틀렸다**:
+    예측 행은 수집기가 5분마다 다음 정산으로 갱신하므로 **확정이 영원히 멈춰도 늘 미래**였고,
+    2026-09-07~18 확정 정지를 12일간 12종목 전부 `[OK]`로 찍었다. 이제 확정 시각을 함께
+    찍고 그 지연으로 판정한다(예측 행은 **표시만**).
     """
     lines = ["펀딩 신선도:"]
     if not view.funding:
@@ -109,9 +109,15 @@ def _funding_lines(view: HealthView) -> list[str]:
             )
             continue
         predicted = " (예측)" if f.is_predicted else ""
+        confirmed = (
+            "확정 이력 없음"
+            if f.confirmed_funding_time is None
+            else f"마지막 확정 {_fmt_time(f.confirmed_funding_time)}"
+        )
         lines.append(
             f"  {_LEVEL_TEXT[f.level]} {f.symbol}"
-            f"  최신 {_fmt_time(f.funding_time)}{predicted} (지연 {_fmt_lag(f.lag_ms)})"
+            f"  최신 {_fmt_time(f.funding_time)}{predicted}"
+            f" · {confirmed} (지연 {_fmt_lag(f.lag_ms)})"
         )
     if any(f.level is HealthLevel.STALE for f in view.funding):
         lines.append(

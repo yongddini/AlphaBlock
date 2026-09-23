@@ -56,12 +56,26 @@ def test_compute_freshness_flags_stale_series() -> None:
 def test_compute_funding_status_predicted_future_is_ok() -> None:
     now = 100 * FUNDING_INTERVAL_MS
     rows = [
-        # 예측 현재값: 다음 정산이 미래(=지연 음수) → 정상
-        ("BTC/USDT:USDT", 0.0001, now + FUNDING_INTERVAL_MS, now + FUNDING_INTERVAL_MS, True),
+        # 표시 행은 예측(미래)이고 마지막 확정이 최근 → 정상. 판정은 확정 기준(WAN-422 §2).
+        (
+            "BTC/USDT:USDT",
+            0.0001,
+            now + FUNDING_INTERVAL_MS,
+            now + FUNDING_INTERVAL_MS,
+            True,
+            now - FUNDING_INTERVAL_MS // 2,
+        ),
         # 확정값이 한참 과거 → stale
-        ("ETH/USDT:USDT", 0.0002, now - 30 * FUNDING_INTERVAL_MS, None, False),
+        (
+            "ETH/USDT:USDT",
+            0.0002,
+            now - 30 * FUNDING_INTERVAL_MS,
+            None,
+            False,
+            now - 30 * FUNDING_INTERVAL_MS,
+        ),
         # 데이터 없음 → unknown
-        ("SOL/USDT:USDT", None, None, None, False),
+        ("SOL/USDT:USDT", None, None, None, False, None),
     ]
     result = compute_funding_status(rows, now_ms=now, stale_multiplier=2.5)
     by_symbol = {r.symbol: r for r in result}
