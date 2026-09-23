@@ -193,6 +193,7 @@ def _trade(
     tf: str = "1h",
     reentry: bool = False,
     arm: str = ARM_ADOPTED,
+    age_days: float = 1.0,
 ) -> TradeRank:
     return TradeRank(
         arm=arm,
@@ -209,6 +210,7 @@ def _trade(
         rank=rank,
         rank_bar_close=rank,
         alive_zones=10,
+        zone_age_ms=int(age_days * 86_400_000),
     )
 
 
@@ -275,6 +277,7 @@ def _row(bucket: str, net_r_sum: float) -> RankRow:
         abs_net_r_share=abs(net_r_sum) / 20.0,
         stop_rate=0.5,
         mean_alive_zones=20.0,
+        median_zone_age_days=3.0,
     )
 
 
@@ -638,3 +641,45 @@ def test_trades_round_trip_keeps_the_arm() -> None:
         ARM_NO_REENTRY: {"oos_warm": [_trade(4, -1.0, arm=ARM_NO_REENTRY)]},
     }
     assert trades_from_frame(trades_frame(trades)) == trades
+
+
+# --------------------------------------------------------------------------- #
+# 존 나이 — 순위가 나이의 다른 이름인지 이 열이 보여 준다
+# --------------------------------------------------------------------------- #
+
+
+def test_age_is_observed_not_recomputed_outside() -> None:
+    """나이는 **라벨러가 싣는다** — 밖에서 다시 계산하면 갈라진다(WAN-77 사본 사고)."""
+    trades = [_trade(1, 1.0, age_days=0.5), _trade(1, -1.0, age_days=1.5)]
+    rows = [r for r in census_rows({ARM_ADOPTED: {"oos_warm": trades}}) if r.scope == "all"]
+    assert rows[0].median_zone_age_days == pytest.approx(1.0)
+
+
+def test_age_uses_median_not_mean() -> None:
+    """🚨 중앙값이다 — 나이 분포가 극단으로 치우쳐(최대 2,007일) 평균은 소수 고참이 끌어올린다."""
+    trades = [
+        _trade(11, -1.0, age_days=1.0),
+        _trade(11, -1.0, age_days=2.0),
+        _trade(11, -1.0, age_days=2000.0),
+    ]
+    rows = [r for r in census_rows({ARM_ADOPTED: {"oos_warm": trades}}) if r.scope == "all"]
+    assert rows[0].median_zone_age_days == pytest.approx(2.0)  # 평균이면 ~667일
+
+
+def test_trades_frame_does_not_hardcode_the_arm_keys() -> None:
+    """🚨 실제 버그의 회귀 — `ARMS`로 돌면 부록 모듈의 조합 라벨이 통째로 빠져 **빈 파일**이 된다.
+
+    실제로 48바이트 gzip이 조용히 나왔고 `--from-csv`가 터졌다. 키는 **담긴 것**을 돈다.
+    """
+    frame = trades_frame({"ts4·하한4%·%K<25": {"oos_warm": [_trade(1, 1.0, arm="ts4")]}})
+    assert len(frame) == 1
+    assert frame.iloc[0]["arm"] == "ts4"
+
+
+def test_trades_frame_is_deterministic_across_key_order() -> None:
+    """키 순서가 달라도 같은 CSV가 나온다 — 정렬해서 담기 때문이다."""
+    a = _trade(1, 1.0, arm="A")
+    b = _trade(2, -1.0, arm="B")
+    one = trades_frame({"A": {"oos_warm": [a]}, "B": {"oos_warm": [b]}})
+    two = trades_frame({"B": {"oos_warm": [b]}, "A": {"oos_warm": [a]}})
+    assert one.to_csv(index=False) == two.to_csv(index=False)

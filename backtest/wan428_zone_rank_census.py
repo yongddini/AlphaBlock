@@ -408,6 +408,13 @@ class TradeRank:
     """그 시점 같은 방향으로 살아 있던 존 수 — 순위의 분모.
 
     「3위 중 3위」와 「200위 중 3위」는 다른 이야기다."""
+    zone_age_ms: int
+    """**존 나이** = `trigger_time − confirmed_time`(ms).
+
+    🚨 **순위는 나이의 다른 이름이다**(실측 Spearman 0.753 · 1위 중앙 0.55일 → 11위+ 224.7일).
+    그런데 **절대 나이가 아니라 상대 순서**라 같은 「11위+」가 15m 162일 · 1h 398일이다 —
+    순위로 자르는 것과 나이로 자르는 것은 **다른 필터**이고, 그 구분이 후속의 흔들 축을 정한다.
+    그래서 이 열이 관측으로 실려 있어야 한다(밖에서 다시 계산하면 갈라진다 — WAN-77)."""
 
 
 def _zone_index(zone_key: frozenset[int] | None) -> int | None:
@@ -450,6 +457,7 @@ def rank_trades(
         index = _zone_index(placement.zone_key)
         rank = rank_bar_close = None
         alive = 0
+        age_ms = 0
         if item is not None and index is not None and 0 <= index < len(item.archive):
             if cell not in cache:
                 cache[cell] = _Ranked.build(item.archive)
@@ -465,6 +473,7 @@ def rank_trades(
                 for _, ob in ranked.by_direction[target.direction]
                 if ob.alive_at(placement.trigger_time)
             )
+            age_ms = placement.trigger_time - target.confirmed_time
         out.append(
             TradeRank(
                 arm=arm,
@@ -481,6 +490,7 @@ def rank_trades(
                 rank=rank,
                 rank_bar_close=rank_bar_close,
                 alive_zones=alive,
+                zone_age_ms=age_ms,
             )
         )
     return out
@@ -526,10 +536,17 @@ class RankRow(BaseModel):
     stop_rate: float
     mean_alive_zones: float
     """그 버킷 거래들의 「그 시점 살아 있던 같은 방향 존 수」 평균 — 순위의 분모."""
+    median_zone_age_days: float
+    """그 버킷 거래들의 **존 나이 중앙값**(일). 🚨 평균이 아니라 중앙값이다 — 나이 분포가
+    극단적으로 치우쳐(최대 2,007일) 평균은 소수 고참이 끌어올린다(WAN-90 `E[러너]` 함정)."""
 
 
 def _mean(values: Sequence[float]) -> float:
     return statistics.fmean(values) if values else float("nan")
+
+
+def _median(values: Sequence[float]) -> float:
+    return statistics.median(values) if values else float("nan")
 
 
 def _bucket_order(label: str) -> int:
@@ -569,6 +586,7 @@ def _rows_for_scope(
                 abs_net_r_share=(bucket_sum and abs(bucket_sum) / abs_total) if abs_total else 0.0,
                 stop_rate=sum(1 for t in items if t.is_stop) / len(items),
                 mean_alive_zones=_mean([float(t.alive_zones) for t in items]),
+                median_zone_age_days=_median([t.zone_age_ms / 86_400_000 for t in items]),
             )
         )
     return rows
@@ -985,8 +1003,9 @@ def render_summary(
             "",
             "## 순위 분포 — `oos_warm` 전체",
             "",
-            "| 순위 | 거래 | 거래 몫 | 거래당 net R | net R 합 | net R 몫 | 손절률 | 생존 존 수 |",
-            "| -- | --: | --: | --: | --: | --: | --: | --: |",
+            "| 순위 | 거래 | 거래 몫 | 거래당 net R | net R 합 | net R 몫 | 손절률 |"
+            " **존 나이(중앙)** | 생존 존 수 |",
+            "| -- | --: | --: | --: | --: | --: | --: | --: | --: |",
         ]
     )
     primary_rows = (
@@ -1003,7 +1022,9 @@ def render_summary(
             f"| {row.rank_bucket} | {int(row.num_trades):,} | {_pct(float(row.trade_share))} | "
             f"{_fmt(float(row.mean_net_r))} | {float(row.net_r_sum):+,.1f}R | "
             f"{_scope_share(primary_rows, float(row.net_r_sum))} | "
-            f"{_pct(float(row.stop_rate), 1)} | {_fmt(float(row.mean_alive_zones), 1)} |"
+            f"{_pct(float(row.stop_rate), 1)} | "
+            f"**{_fmt(float(row.median_zone_age_days), 1)}일** | "
+            f"{_fmt(float(row.mean_alive_zones), 1)} |"
         )
     lines.extend(
         [
@@ -1072,6 +1093,22 @@ def render_summary(
             "⚠️ **두 팔은 서로 다른 지갑이다** — 거래 수 차이를 「재진입 거래 수」로 읽지"
             " 말 것(재진입을 끄면 남은 후보가 그 슬롯을 가져가 base 거래도 늘어난다,"
             " WAN-389 §슬롯 경합).",
+            "",
+            "## 🚨 순위는 **존 나이**의 다른 이름이다",
+            "",
+            "위 표의 `존 나이(중앙)` 열을 보면 순위가 밀릴수록 나이가 **단조로** 늘어난다"
+            "(실측 Spearman **0.753**). 그래서 이 표의 이야기가 바뀐다 — 문제는 「화면에 안 보이는"
+            " 존」이 아니라 **「반년 묵은 존」**이다.",
+            "",
+            "🚨 **그래서 `Zone Count` 눈금(3 vs 5 vs 10)이 답일 가능성은 낮다** — 그 경계가"
+            " 지나는"
+            " 자리는 **1일 ↔ 15일**이고 거기엔 신호가 없다(1~5위 거래당 net R이 뒤섞여 있고"
+            " **단조가 아니다**). 갈리는 것은 **두 달 넘은 존**이고, `High`(10)조차 11위+만"
+            " 자른다.",
+            "",
+            "⚠️ **다만 순위는 절대 나이가 아니라 상대 순서다** — 같은 「11위+」가 TF마다 나이가"
+            " 크게 다르다(CSV의 TF별 행). 순위로 자르는 것과 나이로 자르는 것은 **다른 필터**이고,"
+            " 그 구분이 후속의 흔들 축을 정한다.",
             "",
             "## WAN-405 §부수답과의 관계",
             "",
@@ -1146,13 +1183,18 @@ def _load_frames() -> tuple[pd.DataFrame, pd.DataFrame]:
 
 
 def trades_frame(trades_by_arm: dict[str, dict[str, list[TradeRank]]]) -> pd.DataFrame:
-    """거래 단위 원자료 — `--from-csv`가 판정 줄을 복원하는 데 필요하다."""
+    """거래 단위 원자료 — `--from-csv`가 판정 줄을 복원하는 데 필요하다.
+
+    🚨 **키를 하드코딩하지 않는다** — `ARMS`/`SEGMENTS`로 돌면 그 상수에 없는 키(예: 부록
+    모듈의 조합 라벨)가 통째로 빠져 **빈 파일이 조용히 나온다**(실제로 그렇게 48바이트 gzip이
+    나왔다). 실제로 담긴 것을 돌고, 순서만 정렬해 CSV를 결정적으로 만든다.
+    """
     return pd.DataFrame.from_records(
         [
             asdict(t)
-            for arm in ARMS
-            for segment in SEGMENTS
-            for t in trades_by_arm.get(arm, {}).get(segment, [])
+            for arm in sorted(trades_by_arm)
+            for segment in sorted(trades_by_arm[arm])
+            for t in trades_by_arm[arm][segment]
         ]
     )
 
@@ -1187,6 +1229,7 @@ def trades_from_frame(frame: pd.DataFrame) -> dict[str, dict[str, list[TradeRank
                 rank=_opt(rec["rank"]),
                 rank_bar_close=_opt(rec["rank_bar_close"]),
                 alive_zones=int(rec["alive_zones"]),
+                zone_age_ms=int(rec["zone_age_ms"]),
             )
         )
     return out

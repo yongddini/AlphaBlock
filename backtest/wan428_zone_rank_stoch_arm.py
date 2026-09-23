@@ -167,6 +167,17 @@ CAP_NAMES: dict[int | None, str] = {
     1: "One(1)",
 }
 
+#: 📌 **후보 디스크 캐시(WAN-394 §0)는 `wan424_stoch_ob_arm`이 관리한다** — 이 모듈은
+#: `build_base_payloads(payload_dir=…)`를 부르고, 그쪽이 `run_cells(payload_cache=
+#: PayloadCache(payload_dir))`로 넘긴다. 🚨 **여기서 두 번째 `payload_cache`를 만들지 않는다**
+#: (키가 `_Task` 그 자체라 두 벌로 만들면 같은 칸이 두 디렉터리에 갈려 한쪽만 채워진다).
+#:
+#: 🚨 **그래서 `--payload-dir`가 이 표의 비용을 정한다** — WAN-424 §1이 쓰는 그 디렉터리를
+#: 가리키면 **279칸이 전부 히트**해 후보 생성이 2시간 18분 → **14초**다(실측). 리비전이 다르면
+#: **미스가 되고 그게 맞는 동작이다**(WAN-253/364 — 엔진이 바뀐 뒤 옛 후보를 조용히 재사용하는
+#: 것이 이 저장소 최악의 사고다).
+SHARED_PAYLOAD_CACHE_OWNER = "backtest.wan424_stoch_ob_arm.build_base_payloads"
+
 CAP_CSV = Path("backtest/reports/wan428_zone_cap_stoch_arm.csv")
 CENSUS_CSV = Path("backtest/reports/wan428_zone_rank_stoch_arm.csv")
 CHECKSUM_CSV = Path("backtest/reports/wan428_zone_rank_stoch_arm_checksum.csv")
@@ -223,6 +234,7 @@ def rank_arm_trades(
         index = _zone_index(placement.zone_key)
         rank = rank_bar_close = None
         alive = 0
+        age_ms = 0
         if item is not None and index is not None and 0 <= index < len(item.archive):
             if cell not in ranked_cache:
                 ranked_cache[cell] = _Ranked.build(item.archive)
@@ -238,6 +250,7 @@ def rank_arm_trades(
                 for _, ob in ranked.by_direction[target.direction]
                 if ob.alive_at(placement.trigger_time)
             )
+            age_ms = placement.trigger_time - target.confirmed_time
         out.append(
             TradeRank(
                 arm=combo,
@@ -254,6 +267,7 @@ def rank_arm_trades(
                 rank=rank,
                 rank_bar_close=rank_bar_close,
                 alive_zones=alive,
+                zone_age_ms=age_ms,
             )
         )
     return out
@@ -409,6 +423,8 @@ class StochRankRow(BaseModel):
     net_r_sum: float
     stop_rate: float
     mean_alive_zones: float
+    median_zone_age_days: float
+    """그 버킷 거래들의 **존 나이 중앙값**(일) — 순위가 나이의 다른 이름인지 이 팔에서도 본다."""
     mean_stop_width: float
     """그 버킷 거래들의 손절폭(= `|진입가 − 손절가| / 진입가`) 평균 — **왜 이 축을 넣었나**:
     손절폭 하한이 존 높이를 고르는 필터라 「고순위 존이 넓은가」가 이 표의 핵심 질문이다."""
@@ -454,6 +470,9 @@ def census_rows(
                         net_r_sum=sum(t.net_r for t in items),
                         stop_rate=sum(1 for t in items if t.is_stop) / len(items),
                         mean_alive_zones=_mean([float(t.alive_zones) for t in items]),
+                        median_zone_age_days=statistics.median(
+                            [t.zone_age_ms / 86_400_000 for t in items]
+                        ),
                         mean_stop_width=_mean(
                             [
                                 w
@@ -681,6 +700,18 @@ def run_measure(
     return rows, checks, trades_by_combo, caps
 
 
+def _optional(row: object, column: str, *, suffix: str = "", digits: int = 1) -> str:
+    """적재된 CSV에 **그 열이 없으면** 「—」다 — 안 잰 칸을 0으로 위장하지 않는다(WAN-194/367).
+
+    🚨 관측 열을 나중에 더하면 옛 CSV에는 그 열이 없다. 여기서 죽거나 0으로 채우면 **표가
+    거짓말을 한다** — 그래서 없으면 없다고 찍고, 요약이 그 사실을 알려진 한계에 적는다.
+    """
+    value = getattr(row, column, None)
+    if value is None:
+        return "—(미측정)"
+    return f"{_fmt(float(value), digits)}{suffix}"
+
+
 def _ratio(ret: float, mdd: float) -> str:
     """수익 ÷ MDD — 🚨 **위험당 수익**이다. 캡을 조이면 MDD는 거의 언제나 내려가므로(거래가 준다)
     MDD 단독으로는 「잘했다」와 「덜 했다」가 구분되지 않는다(WAN-378).
@@ -819,8 +850,9 @@ def render_summary(
             "",
             "## 순위 분포 — `oos_warm`",
             "",
-            "| 조합 | 순위 | 거래 | 몫 | 거래당 net R | net R 합 | 손절률 | 생존 존 | 손절폭 |",
-            "| -- | -- | --: | --: | --: | --: | --: | --: | --: |",
+            "| 조합 | 순위 | 거래 | 몫 | 거래당 net R | net R 합 | 손절률 | 나이(중앙) |"
+            " 생존 존 | 손절폭 |",
+            "| -- | -- | --: | --: | --: | --: | --: | --: | --: | --: |",
         ]
     )
     if not census.empty:
@@ -830,6 +862,7 @@ def render_summary(
                 f"| `{row.combo}` | {row.rank_bucket} | {int(row.num_trades):,} | "
                 f"{_pct(float(row.trade_share))} | {_fmt(float(row.mean_net_r))} | "
                 f"{float(row.net_r_sum):+,.1f}R | {_pct(float(row.stop_rate), 1)} | "
+                f"{_optional(row, 'median_zone_age_days', suffix='일')} | "
                 f"{_fmt(float(row.mean_alive_zones), 1)} | "
                 f"{_pct(float(row.mean_stop_width), 2)} |"
             )
@@ -858,6 +891,10 @@ def render_summary(
             "",
             "## 알려진 한계",
             "",
+            "- ⚠️ **`나이(중앙)` 열이 적재된 CSV에 없으면 「—(미측정)」이다** — 그 열은 §1 뒤에"
+            " 더해졌고 이 팔의 표는 그 **전에** 돌았다(재산출 비용 1시간 23분 · 얻는 것이 관측"
+            " 열 하나라 안 돌렸다). 순위 ↔ 나이 이야기는 **§1 표가 네 TF에서 이미 냈다**"
+            "(Spearman 0.753).",
             "- 🚨🚨 **15m이 없다 — 이 표의 가장 큰 구멍이다**(사용자 지적 2026-09-23). 이 팔의"
             " 좌표는 1h·2h·3h·4h·6h·8h·12h·1d·1w 아홉 개뿐이고, WAN-423도 WAN-424도 **15m을 한"
             " 번도 재지 않았다**. 그런데 **채택 북 거래의 66%가 15m**이다(WAN-312). 그래서 이"
@@ -887,8 +924,26 @@ def render_summary(
     return "\n".join(lines) + "\n"
 
 
+def _read_trades() -> dict[str, dict[str, list[TradeRank]]] | None:
+    """적재된 거래 원자료 — 없거나 **비어 있으면** `None`이다.
+
+    🚨 빈 파일에서 죽지 않는다: 옛 실행이 남긴 48바이트 gzip(키 하드코딩 버그의 산물)을 읽다
+    터지면 「요약만 다시 내기」가 통째로 막힌다. 없으면 없다고 찍고 판정 줄을 **지어내지 않는다**.
+    """
+    from backtest.wan428_zone_rank_census import trades_from_frame
+
+    if not TRADES_CSV.exists():
+        return None
+    try:
+        frame = pd.read_csv(TRADES_CSV)
+    except pd.errors.EmptyDataError:
+        print(f"[wan428-stoch] ⚠️ {TRADES_CSV}가 비어 있습니다 — 판정 줄을 복원하지 못합니다.")
+        return None
+    return trades_from_frame(frame) if not frame.empty else None
+
+
 def main(argv: Sequence[str] | None = None) -> int:
-    from backtest.wan428_zone_rank_census import trades_frame, trades_from_frame
+    from backtest.wan428_zone_rank_census import trades_frame
 
     parser = argparse.ArgumentParser(description="WAN-428 부록 — 스토캐스틱 팔 존 순위")
     parser.add_argument("--jobs", type=int, default=None)
@@ -900,7 +955,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.from_csv:
         census, checks = pd.read_csv(CENSUS_CSV), pd.read_csv(CHECKSUM_CSV)
         caps = pd.read_csv(CAP_CSV) if CAP_CSV.exists() else None
-        trades = trades_from_frame(pd.read_csv(TRADES_CSV)) if TRADES_CSV.exists() else None
+        trades = _read_trades()
         SUMMARY_MD.write_text(
             render_summary(census, checks, caps=caps, trades_by_combo=trades), encoding="utf-8"
         )
