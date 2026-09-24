@@ -76,6 +76,7 @@ from backtest.wan424_stoch_ob_arm import (
 
 __all__ = [
     "GRID_CSV",
+    "INHERITED_TAKE_PROFIT_LIQUIDITY",
     "NEW_TIMEFRAME",
     "SCOPE_ALL",
     "SCOPE_NO_15M",
@@ -110,6 +111,13 @@ SUMMARY_MD = Path("backtest/reports/wan430_stoch_arm_15m_summary.md")
 
 #: 「0과 구분되지 않는다」 규약 폭(WAN-366/370).
 NOISE_R = 0.005
+
+#: 익절 청산 유동성 — 이 모듈은 **정하지 않고 물려받는다**(`wan424.place`가 넘기는 그 값).
+#:
+#: 🚨 리터럴을 다시 적으면 채택 회계가 두 곳에 살아 갈라진다(WAN-370/373이 못 박은 자리). 그래서
+#: 이것은 **인용이지 정의가 아니고**, 빌려 쓴 `place`가 실제로 그 값을 넘기는지는 `wan424` 쪽
+#: 테스트가 확인한다(그쪽이 `harness.ADOPTED_TAKE_PROFIT_LIQUIDITY`를 명시한다).
+INHERITED_TAKE_PROFIT_LIQUIDITY = harness.ADOPTED_TAKE_PROFIT_LIQUIDITY
 
 
 def scopes_for(timeframes: Sequence[str]) -> tuple[str, ...]:

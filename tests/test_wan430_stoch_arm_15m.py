@@ -136,12 +136,12 @@ def test_every_scope_gets_its_own_placement_call(monkeypatch: pytest.MonkeyPatch
         seen.append(tuple(sorted(p.timeframe for p in payloads)))
         return []
 
+    payloads = [_P("BTC", "15m"), _P("BTC", "4h")]
     monkeypatch.setattr("backtest.wan430_stoch_arm_15m.place", fake_place)
     monkeypatch.setattr("backtest.wan430_stoch_arm_15m.filtered_payloads", lambda *a, **k: payloads)
     monkeypatch.setattr("backtest.wan430_stoch_arm_15m.FLOORS", (0.04,))
     monkeypatch.setattr("backtest.wan430_stoch_arm_15m.THRESHOLDS", (25.0,))
     monkeypatch.setattr("backtest.wan430_stoch_arm_15m.HOLD_BARS", (4,))
-    payloads = [_P("BTC", "15m"), _P("BTC", "4h")]
 
     run_grid(payloads, [], timeframes=("15m", "4h"), log=False)  # type: ignore[arg-type]
     assert seen == [("15m", "4h"), ("4h",), ("15m",), ("4h",)]
