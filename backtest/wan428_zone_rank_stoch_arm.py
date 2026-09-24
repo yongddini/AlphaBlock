@@ -325,13 +325,38 @@ def cap_candidates(
         cell = (payload.symbol, payload.timeframe)
         item = archives.get(cell)
         if item is None or not item.archive:
-            out.append(dataclasses.replace(payload, candidates={k: () for k in payload.candidates}))
+            # 순위를 못 매기는 칸은 **순위 대상 구간만** 비운다 — `is`를 함께 비우면 그 구간이
+            # 「캡 걸린 판」으로 오해되고, 애초에 그쪽에는 캡을 걸지 않는다(아래 주석).
+            out.append(
+                dataclasses.replace(
+                    payload,
+                    candidates={
+                        k: ((), v)[k not in RANK_SEGMENTS] for k, v in payload.candidates.items()
+                    },
+                )
+            )
             continue
         if cell not in ranked_cache:
             ranked_cache[cell] = _Ranked.build(item.archive)
         ranked = ranked_cache[cell]
         kept: dict[str, tuple[_Candidate, ...]] = {}
         for segment, cands in payload.candidates.items():
+            if segment not in RANK_SEGMENTS:
+                # 🚨 **`is`에는 캡을 걸지 않는다 — 걸면 쓰레기가 나온다.**
+                #
+                # 아카이브는 방향별로 **「최신 먼저」**다(`bullish_obs.insert(0, …)` —
+                # 원본 pine의 `unshift` 이식, `strategy/order_blocks.py:776`). `is`는 창의
+                # **앞부분**이라 빠지는 것이 **뒷날짜(=최신) 존**이고, 최신이 리스트 앞에
+                # 있으니 **머리가 잘려 남은 전부가 상수만큼 밀린다**. BTC 4h 실측: 같은
+                # 인덱스가 같은 존인 칸이 **0/244**이고 오프셋이 정확히 두 종류
+                # (강세 `+62` = 197−135 · 약세 `+119`)다.
+                #
+                # 그러면 `is` 후보가 **엉뚱한 존**의 순위를 받아 대개 `None`이 되고 캡에
+                # 전멸한다(실측 627 → 8거래). 오프셋 보정은 **하지 않는다** — 오프셋이
+                # 상수인 것은 이 셀 얘기이고, 정석은 그 구간의 아카이브를 따로 탐지하는
+                # 것이다(이 이슈 범위 밖 · §1도 같은 이유로 `is`를 뺐다).
+                kept[segment] = cands
+                continue
             rows = []
             for cand in cands:
                 index = _zone_index(cand.zone_key)
@@ -362,6 +387,8 @@ def cap_rows(
         for cap in CAPS:
             capped = cap_candidates(armed, archives, cap=cap, ranked_cache=ranked_cache)
             for seg in place_arm_segments(capped):
+                if seg.segment not in RANK_SEGMENTS:
+                    continue  # `is`는 캡을 안 걸었으므로 그 행은 뜻이 없다(위 주석)
                 pairs = sorted(
                     ((t.exit_time, net_r(t, pl)) for t, pl in seg.trades_with_placements()),
                     key=lambda x: x[0],
@@ -516,6 +543,7 @@ def checksum_rows(
     archives: dict[tuple[str, str], CellArchive],
     *,
     reference: dict[str, dict[str, list[float]]],
+    caps: Sequence[CapRow] = (),
     full_coordinates: bool,
 ) -> list[ChecksumRow]:
     """(a′) WAN-424 기준값 재현 · (b) 순위 미측정 0 · (c) 탭 시각 ∈ `tapped_times`.
@@ -604,7 +632,58 @@ def checksum_rows(
                     abs_diff=float(mismatched),
                 )
             )
+    checks.extend(_cap_share_rows(trades_by_combo, caps))
     return checks
+
+
+def _cap_share_rows(
+    trades_by_combo: dict[str, dict[str, list[TradeRank]]], caps: Sequence[CapRow]
+) -> list[ChecksumRow]:
+    """🚨 **(d) 캡 감소율 ↔ 순위 몫 — 이것은 판정이 아니라 관측이다.**
+
+    캡을 `N`으로 걸면 순위 `> N`인 후보가 사라지므로, **용량에 안 걸린 팔**에서는
+    `실제 거래 감소율 == 무제한 팔에서 순위 > N인 거래의 몫`이 **정확히** 성립한다.
+
+    📌 **차가 0이면 「캡이 순수한 거래 제거」**라는 뜻이고, 그러면 MDD 변화에 재배치가 섞이지
+    않아 그대로 읽을 수 있다. 실측(WAN-428 부록): 두 조합 × 네 캡 **8/8이 소수점까지 0.00%p**
+    였고, 그래서 그 팔이 **용량 미포화**임이 드러났다(279칸에 679거래 = 칸당 2.4건 · 첫 탭만 ·
+    재진입 없음 · 복리 끔).
+
+    🚨 **0이 아니면 틀린 게 아니라 「재배치가 일어났다」는 뜻이다** — 후보를 빼서 풀린 자본·
+    슬롯을 다른 후보가 채운 것이고(WAN-316/389), 그때는 MDD 변화를 캡의 몫으로만 읽을 수 없다.
+    채택 북(칸당 309건 · 재진입·복리 ON)에서는 **0이 아닐 것으로 예상**된다.
+
+    그래서 이 행은 **실패로 세지 않는다**(`metric`에 「관측」을 달아 종료 코드에서 뺀다).
+    """
+    rows: list[ChecksumRow] = []
+    by_key = {(r.combo, r.cap, r.segment): r for r in caps}
+    for combo in COMBOS:
+        label = combo_label(combo)
+        for segment in RANK_SEGMENTS:
+            trades = trades_by_combo.get(label, {}).get(segment)
+            base = by_key.get((label, 0, segment))
+            if not trades or base is None or not base.num_trades:
+                continue
+            for cap in CAPS:
+                if cap is None:
+                    continue
+                row = by_key.get((label, cap, segment))
+                if row is None:
+                    continue
+                expected = sum(1 for t in trades if t.rank is None or t.rank > cap) / len(trades)
+                actual = (base.num_trades - row.num_trades) / base.num_trades
+                rows.append(
+                    ChecksumRow(
+                        check="(d) 캡 감소율 ↔ 순위 몫 (관측 · 0이면 용량 미포화)",
+                        combo=f"{label} · {CAP_NAMES[cap]}",
+                        segment=segment,
+                        metric="관측: 실제 감소율 − 순위 몫",
+                        left=actual,
+                        right=expected,
+                        abs_diff=abs(actual - expected),
+                    )
+                )
+    return rows
 
 
 # --------------------------------------------------------------------------- #
@@ -696,7 +775,9 @@ def run_measure(
 
     rows = census_rows(trades_by_combo, widths)
     full = tuple(symbols) == SYMBOLS and tuple(timeframes) == TIMEFRAMES
-    checks = checksum_rows(trades_by_combo, archives, reference=reference, full_coordinates=full)
+    checks = checksum_rows(
+        trades_by_combo, archives, reference=reference, caps=caps, full_coordinates=full
+    )
     return rows, checks, trades_by_combo, caps
 
 
@@ -1001,7 +1082,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         encoding="utf-8",
     )
     print(f"[wan428-stoch] 적재: {CENSUS_CSV} · {SUMMARY_MD} ({note})")
-    failed = [c for c in checks if c.abs_diff > 1e-9 and "skipped" not in c.metric]
+    # 🚨 「관측」 행은 실패로 세지 않는다 — (d)는 판정이 아니라 용량 포화 여부의 지문이다.
+    failed = [
+        c
+        for c in checks
+        if c.abs_diff > 1e-9 and "skipped" not in c.metric and "관측" not in c.metric
+    ]
     for c in failed:
         print(
             f"[wan428-stoch] 🚨 검산 실패: {c.check} / {c.metric} 차 {c.abs_diff:.2e}", flush=True

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import dataclasses
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import pytest
@@ -122,19 +123,37 @@ def test_cap_ranks_at_the_tap_not_at_the_last_bar() -> None:
     assert len(kept_late[0].candidates["full"]) == 0  # 그 시점 3위라 캡 1에 걸린다
 
 
-def test_cap_applies_to_every_segment_key() -> None:
-    """구간마다 후보 목록이 따로다 — 하나만 걸면 나머지 구간이 무제한으로 샌다."""
+def test_cap_skips_the_cold_cut_segment() -> None:
+    """🚨 **실제 버그의 회귀** — `is`에 캡을 걸면 쓰레기가 나온다(실측 627 → 8거래).
+
+    아카이브는 방향별로 **「최신 먼저」**(`bullish_obs.insert(0, …)` — 원본 `unshift` 이식)이고
+    `is`는 창의 **앞부분**이라 빠지는 것이 **최신 존 = 리스트의 머리**다. 머리가 잘리면 남은
+    전부가 상수만큼 밀린다(BTC 4h 실측: 같은 인덱스 = 같은 존인 칸 **0/244** · 오프셋이 정확히
+    강세 `+62`·약세 `+119`). 그러면 `is` 후보가 엉뚱한 존의 순위를 받아 캡에 전멸한다.
+
+    ⚠️ 이 테스트의 이전 판은 *「캡은 모든 구간에 걸린다」*를 **assert 했다** — 그 assertion이
+    버그를 인코딩했고, 공개 표에 `is` 쓰레기 행을 실었다.
+    """
     payloads, archives = _fixture()
     out = cap_candidates(payloads, archives, cap=1, ranked_cache={})  # type: ignore[arg-type]
     assert set(out[0].candidates) == {"full", "is"}
-    assert all(len(v) == 1 for v in out[0].candidates.values())
+    assert len(out[0].candidates["full"]) == 1, "순위를 매길 수 있는 구간에는 캡이 걸린다"
+    assert len(out[0].candidates["is"]) == 3, "🚨 `is`는 손대지 않는다(아카이브가 다른 판)"
 
 
-def test_cap_empties_a_cell_with_no_archive_rather_than_passing_it_through() -> None:
-    """존 대장이 없는 칸을 **통과시키지 않는다** — 통과시키면 그 칸만 캡이 안 걸린다."""
+def test_cap_leaves_the_cold_cut_alone_even_without_an_archive() -> None:
+    """존 대장이 없는 칸에서도 `is`는 그대로다 — 비우면 그 구간이 「캡 걸린 판」으로 오해된다."""
     payloads, _ = _fixture()
     out = cap_candidates(payloads, {}, cap=1, ranked_cache={})  # type: ignore[arg-type]
-    assert all(v == () for v in out[0].candidates.values())
+    assert out[0].candidates["full"] == ()
+    assert len(out[0].candidates["is"]) == 3
+
+
+def test_cap_empties_a_rankable_cell_with_no_archive() -> None:
+    """존 대장이 없는 칸의 **순위 대상 구간**은 비운다 — 통과시키면 그 칸만 캡이 안 걸린다."""
+    payloads, _ = _fixture()
+    out = cap_candidates(payloads, {}, cap=1, ranked_cache={})  # type: ignore[arg-type]
+    assert out[0].candidates["full"] == ()
 
 
 # --------------------------------------------------------------------------- #
@@ -279,7 +298,8 @@ def test_published_cap_table_covers_every_cap_and_combo() -> None:
     frame = pd.read_csv(stoch.CAP_CSV)
     assert set(frame.cap.unique()) == {c or 0 for c in CAPS}
     assert set(frame.combo.unique()) == {combo_label(c) for c in COMBOS}
-    assert set(frame.segment.unique()) == set(SEGMENTS)
+    # 🚨 `is` 행이 없어야 한다 — 캡을 안 걸었으므로 그 행은 뜻이 없다.
+    assert set(frame.segment.unique()) == set(RANK_SEGMENTS)
     # 무제한이 캡보다 거래가 많거나 같다 — 캡은 **거르는** 축이다.
     for combo in frame.combo.unique():
         for segment in frame.segment.unique():
@@ -287,3 +307,88 @@ def test_published_cap_table_covers_every_cap_and_combo() -> None:
             unlimited = int(sub[sub.cap == 0].num_trades.iloc[0])
             for _, row in sub[sub.cap > 0].iterrows():
                 assert int(row.num_trades) <= unlimited, (combo, segment, row.cap_name)
+
+
+# --------------------------------------------------------------------------- #
+# (d) 캡 감소율 ↔ 순위 몫 — 판정이 아니라 용량 포화 여부의 지문
+# --------------------------------------------------------------------------- #
+
+
+def _cap_row_n(cap: int, trades: int) -> CapRow:
+    return CapRow(
+        combo=combo_label(COMBOS[0]),
+        cap=cap,
+        cap_name=CAP_NAMES[cap or None],
+        segment=PRIMARY_SEGMENT,
+        num_trades=trades,
+        mean_net_r=0.1,
+        se_net_r=0.05,
+        win_rate=0.55,
+        compound_return=1.0,
+        compound_mdd=0.3,
+        compound_ruined=False,
+        fixed_return=1.0,
+        fixed_mdd=0.3,
+    )
+
+
+def _ranked_trades(ranks: list[int]) -> dict[str, dict[str, list[Any]]]:
+    from backtest.wan428_zone_rank_census import TradeRank as TR
+
+    return {
+        combo_label(COMBOS[0]): {
+            PRIMARY_SEGMENT: [
+                TR(
+                    arm=combo_label(COMBOS[0]),
+                    segment=PRIMARY_SEGMENT,
+                    symbol="BTCUSDT",
+                    timeframe="4h",
+                    trigger_time=_H,
+                    entry_time=_H,
+                    net_r=0.1,
+                    is_stop=False,
+                    is_reentry=False,
+                    tap_index=0,
+                    archive_index=0,
+                    rank=r,
+                    rank_bar_close=r,
+                    alive_zones=20,
+                    zone_age_ms=_H,
+                )
+                for r in ranks
+            ]
+        }
+    }
+
+
+def test_cap_share_observation_is_zero_when_capacity_is_not_binding() -> None:
+    """용량에 안 걸린 팔에서는 `실제 감소율 == 순위 몫`이 **정확히** 성립한다(실측 8/8)."""
+    trades = _ranked_trades([1, 1, 2, 3, 4, 7])  # 순위 >3 이 2/6
+    caps = [_cap_row_n(0, 6), _cap_row_n(3, 4)]  # 6 → 4 = 감소 2/6
+    rows = stoch.checksum_rows(trades, {}, reference={}, caps=caps, full_coordinates=False)
+    obs = [r for r in rows if "관측" in r.metric and r.combo.endswith("원본 기본")]
+    assert obs, "(d) 행이 안 나왔습니다."
+    assert obs[0].abs_diff == pytest.approx(0.0)
+
+
+def test_cap_share_observation_is_nonzero_when_the_book_re_places() -> None:
+    """🚨 0이 아니면 **틀린 게 아니라 재배치가 일어났다**는 뜻이다 — 그래서 실패로 세지 않는다."""
+    trades = _ranked_trades([1, 1, 2, 3, 4, 7])  # 순위 >3 이 2/6 = 33.3%
+    caps = [_cap_row_n(0, 6), _cap_row_n(3, 5)]  # 빈 슬롯을 하나 채워 5건 남음
+    rows = stoch.checksum_rows(trades, {}, reference={}, caps=caps, full_coordinates=False)
+    obs = [r for r in rows if "관측" in r.metric and r.combo.endswith("원본 기본")]
+    assert obs[0].abs_diff > 0.1
+    # 그리고 그 행은 「관측」이라 종료 코드 계산에서 빠진다.
+    assert "관측" in obs[0].metric
+
+
+def test_cap_share_observation_counts_unranked_as_removed() -> None:
+    """순위를 못 잰 후보는 캡에 **걸리는 쪽**으로 센다 — 그게 `cap_candidates`의 동작이다."""
+    trades = _ranked_trades([1, 2])
+    trades[combo_label(COMBOS[0])][PRIMARY_SEGMENT][1] = dataclasses.replace(
+        trades[combo_label(COMBOS[0])][PRIMARY_SEGMENT][1], rank=None
+    )
+    caps = [_cap_row_n(0, 2), _cap_row_n(3, 1)]
+    rows = stoch.checksum_rows(trades, {}, reference={}, caps=caps, full_coordinates=False)
+    obs = [r for r in rows if "관측" in r.metric and r.combo.endswith("원본 기본")]
+    assert obs[0].right == pytest.approx(0.5)  # 순위 없는 1건이 「제거될 것」으로 센다
