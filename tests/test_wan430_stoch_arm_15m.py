@@ -28,6 +28,7 @@ from backtest.wan430_stoch_arm_15m import (
     FloorRow,
     ScopedRow,
     _cells_in_scope,
+    band_lines,
     build_arm_cells,
     build_base_payloads,
     checksum_lines,
@@ -40,6 +41,7 @@ from backtest.wan430_stoch_arm_15m import (
     rows_to_frame,
     run_grid,
     scopes_for,
+    threshold_bands,
 )
 
 
@@ -375,3 +377,86 @@ def test_report_paths_are_module_relative_not_cwd_relative() -> None:
     for path in (GRID_CSV, SUMMARY_MD, FLOOR_CSV, FLOOR_SUMMARY_MD):
         assert path.is_absolute(), path
         assert path.parent == wan424.REPORT_DIR, path
+
+
+# --------------------------------------------------------------------------- #
+# %K 띠 분해 — 누적 문턱은 포개져 있어 방향까지 가린다
+# --------------------------------------------------------------------------- #
+
+
+def _cum_row(thr: float, *, trades: int, net: float, segment: str = "oos_warm") -> FloorRow:
+    return FloorRow(
+        floor=0.015,
+        hold=12,
+        threshold=thr,
+        segment=segment,
+        num_trades=trades,
+        mean_net_r=net,
+        se_net_r=0.1,
+        mean_cost_r=0.05,
+        mean_gross_r=net + 0.05,
+        median_stop_width=0.02,
+    )
+
+
+def test_bands_add_back_up_to_the_widest_cumulative_row() -> None:
+    """띠는 **새 측정이 아니라 같은 수의 재배열**이다 — 더하면 누적으로 정확히 돌아와야 한다."""
+    rows = [
+        _cum_row(15.0, trades=281, net=0.1172),
+        _cum_row(20.0, trades=495, net=-0.0195),
+        _cum_row(25.0, trades=711, net=0.0992),
+    ]
+    bands = threshold_bands(rows)
+    assert sum(b.num_trades for b in bands) == 711
+    total = sum(b.mean_net_r * b.num_trades for b in bands)
+    assert total == pytest.approx(0.0992 * 711, rel=1e-12)
+
+
+def test_bands_expose_the_reversal_the_cumulative_view_hides() -> None:
+    """🚨 사용자가 잡은 자리 — 「%K<20만 뒷구간에서 진다」의 정체.
+
+    누적으로는 `<15` 양수 → `<20` **음수** → `<25` 양수라 「20만 진다」로 읽힌다. 띠로 쪼개면
+    원인이 **`15~20` 띠 하나**이고, 그 띠가 `<25`에서는 **강한 `20~25` 띠에 희석돼 사라진다.**
+    그리고 가장 좋은 띠가 **가장 덜 과매도인 `20~25`**다 — 전제와 반대인데 누적으로는 안 보인다.
+    """
+    rows = [
+        _cum_row(15.0, trades=281, net=0.1172),
+        _cum_row(20.0, trades=495, net=-0.0195),
+        _cum_row(25.0, trades=711, net=0.0992),
+    ]
+    bands = {(b.lower, b.upper): b for b in threshold_bands(rows)}
+    assert bands[(None, 15.0)].mean_net_r > 0
+    assert bands[(15.0, 20.0)].mean_net_r < 0  # 누적 `<20`을 끌어내린 띠
+    assert bands[(20.0, 25.0)].mean_net_r > bands[(None, 15.0)].mean_net_r  # 순서가 거꾸로다
+    # 누적만 보면 `<25` > `<15`가 아니다 — 띠가 그 이유를 밝힌다.
+    assert rows[2].mean_net_r < rows[0].mean_net_r
+
+
+def test_the_band_table_says_it_is_a_rearrangement_and_that_two_sigma_is_approximate() -> None:
+    """두 경고가 표에 실려야 한다 — 「새 측정 아님」과 「2σ는 근사」.
+
+    후자가 빠지면 띠별 2σ를 팔 전체 SD로 환산한 값이 **직접 잰 값처럼** 읽힌다.
+    """
+    text = "\n".join(
+        band_lines(
+            [
+                _cum_row(15.0, trades=281, net=0.1172),
+                _cum_row(20.0, trades=495, net=-0.0195),
+                _cum_row(25.0, trades=711, net=0.0992),
+            ]
+        )
+    )
+    assert "재배열" in text
+    assert "근사" in text
+    assert "0을 무는가" in text
+
+
+def test_the_floor_summary_carries_the_band_table() -> None:
+    rows = [
+        _cum_row(15.0, trades=281, net=0.1172),
+        _cum_row(20.0, trades=495, net=-0.0195),
+        _cum_row(25.0, trades=711, net=0.0992),
+    ]
+    text = render_floor_summary(rows)
+    assert "%K 띠 분해" in text
+    assert "%K 15~20" in text

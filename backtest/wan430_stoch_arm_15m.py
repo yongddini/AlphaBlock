@@ -89,7 +89,10 @@ __all__ = [
     "FloorRow",
     "GRID_CSV",
     "MIN_TRADES_FOR_VERDICT",
+    "ThresholdBand",
+    "band_lines",
     "render_floor_summary",
+    "threshold_bands",
     "floor_rows",
     "INHERITED_TAKE_PROFIT_LIQUIDITY",
     "NEW_TIMEFRAME",
@@ -678,6 +681,111 @@ def _floor_decided(row: FloorRow) -> bool:
     return abs(row.mean_net_r) > max(2 * row.se_net_r, NOISE_R)
 
 
+@dataclass(frozen=True)
+class ThresholdBand:
+    """겹치지 않는 %K 띠 하나 — 🚨 **누적 문턱을 그냥 읽으면 방향까지 오독한다.**
+
+    `%K<15 ⊂ %K<20 ⊂ %K<25`라 누적 행끼리는 **포개져** 있다. 그러면 약한 띠 하나가 바로 위
+    누적값을 끌어내렸다가 그다음 누적값에서 **강한 상단 띠에 희석돼 사라진다** — 실측(하한
+    1.5% · ts12 · `oos_warm`)에서 `<20`이 −0.0195인데 `<25`가 +0.0992인 이유가 그것이고,
+    「20만 진다」로 보이던 것이 실제로는 **「15~20 띠가 −0.199」**였다.
+
+    🚨 **더 중요한 것**: 띠로 보면 가장 좋은 띠가 **가장 덜 과매도인 `20~25`**이고 `15~20`이
+    가장 나쁘다(앞·뒤 구간 **둘 다**). 「%K가 낮을수록 좋다」는 전제와 **반대**인데 **누적으로는
+    안 보인다**(`<25`가 전부를 품으므로). ⚠️ 그래서 「누적 문턱이 단조」는 **신호가 단조라는
+    뜻이 아니다** — 포개짐이 기계적으로 매끄럽게 만든다.
+    """
+
+    floor: float
+    hold: int
+    segment: str
+    lower: float | None
+    """띠의 아래 끝 — `None`이면 가장 낮은 문턱 미만(= 그 문턱 자체)."""
+    upper: float
+    num_trades: int
+    mean_net_r: float
+    two_sigma: float
+    """🚨 **근사다** — 띠별 분산을 따로 재려면 거래 단위 산출물이 필요한데 이 표는 칸 집계만
+    들고 있다. 그래서 **팔 전체의 per-trade SD**(`se × √n`)를 띠에 그대로 쓴다. 띠마다 분산이
+    다르면 이 값은 그만큼 틀린다 — **크기가 아니라 「0을 무는가」로만 읽을 것.**"""
+
+
+def threshold_bands(rows: Sequence[FloorRow]) -> list[ThresholdBand]:
+    """누적 문턱 행을 **겹치지 않는 띠**로 쪼갠다 — 새 측정이 아니라 **같은 수의 재배열**이다.
+
+    띠 평균 = (누적 합의 차) ÷ (거래 수의 차). 산수라 구간·팔을 안 가리고 성립하고, 띠를 전부
+    더하면 가장 넓은 누적값으로 **정확히 돌아온다**(회귀 테스트가 그것으로 고정한다).
+    """
+    index = {(r.floor, r.hold, r.threshold, r.segment): r for r in rows}
+    out: list[ThresholdBand] = []
+    thresholds = [t for t in THRESHOLDS if t is not None]
+    for floor in sorted({r.floor for r in rows}):
+        for hold in HOLD_BARS:
+            for segment in ("full", "is", "oos_warm"):
+                got = [
+                    (t, index[(floor, hold, t, segment)])
+                    for t in thresholds
+                    if (floor, hold, t, segment) in index
+                ]
+                if not got:
+                    continue
+                # per-trade SD는 가장 넓은 문턱(표본이 가장 큰 행)에서 한 번만 뽑는다.
+                widest = got[-1][1]
+                sd = widest.se_net_r * math.sqrt(widest.num_trades) if widest.num_trades else 0.0
+                prev_n, prev_sum, prev_t = 0, 0.0, None
+                for t, row in got:
+                    band_n = row.num_trades - prev_n
+                    band_sum = row.mean_net_r * row.num_trades - prev_sum
+                    if band_n > 0:
+                        out.append(
+                            ThresholdBand(
+                                floor=floor,
+                                hold=hold,
+                                segment=segment,
+                                lower=prev_t,
+                                upper=t,
+                                num_trades=band_n,
+                                mean_net_r=band_sum / band_n,
+                                two_sigma=2 * sd / math.sqrt(band_n),
+                            )
+                        )
+                    prev_n = row.num_trades
+                    prev_sum = row.mean_net_r * row.num_trades
+                    prev_t = t
+    return out
+
+
+def band_lines(rows: Sequence[FloorRow]) -> list[str]:
+    """띠 표 — 판정을 바꾸지 않는다(읽는 법을 하나 더 주는 것이다)."""
+    bands = threshold_bands(rows)
+    if not bands:
+        return []
+    out = [
+        "## %K 띠 분해 — 🚨 누적 문턱만 보면 방향을 오독한다",
+        "",
+        "`%K<15 ⊂ %K<20 ⊂ %K<25`라 위 표는 **포개진 누적값**이다. 겹치지 않는 띠로 쪼개면"
+        " (띠 평균 = 누적 합의 차 ÷ 거래 수의 차) **가장 좋은 띠가 가장 덜 과매도인 `20~25`**이고"
+        " **`15~20`이 가장 나쁘다 — 앞·뒤 구간 둘 다**. 「%K가 낮을수록 좋다」는 전제와 반대이고,"
+        " 누적으로는 `<25`가 전부를 품어 **안 보인다**.",
+        "",
+        "⚠️ **새 측정이 아니라 같은 수의 재배열**이다(띠를 더하면 누적으로 정확히 돌아온다)."
+        " 🚨 **2σ는 근사다** — 띠별 분산을 못 재서 팔 전체 per-trade SD를 그대로 썼다."
+        " **크기가 아니라 「0을 무는가」로만 읽을 것.**",
+        "",
+        "| 하한 | 보유 | 구간 | 띠 | 거래 | 띠 거래당 net R | 2σ(근사) | 0을 무는가 |",
+        "| --: | -- | -- | -- | --: | --: | --: | -- |",
+    ]
+    for b in bands:
+        label = f"%K<{b.upper:.0f}" if b.lower is None else f"%K {b.lower:.0f}~{b.upper:.0f}"
+        straddles = "예" if abs(b.mean_net_r) <= b.two_sigma else "**아니오**"
+        out.append(
+            f"| {b.floor:.1%} | ts{b.hold} | `{b.segment}` | {label} | {b.num_trades:,} | "
+            f"{b.mean_net_r:+.4f} | ±{b.two_sigma:.4f} | {straddles} |"
+        )
+    out.append("")
+    return out
+
+
 def render_floor_summary(rows: Sequence[FloorRow]) -> str:
     index = {(r.floor, r.hold, r.threshold, r.segment): r for r in rows}
     out = [
@@ -723,6 +831,7 @@ def render_floor_summary(rows: Sequence[FloorRow]) -> str:
                         f"{row.mean_gross_r:+.4f} |"
                     )
         out.append("")
+    out += band_lines(rows)
     decided = [r for r in rows if r.segment == "oos_warm" and _floor_decided(r)]
     positive = [r for r in decided if r.mean_net_r > 0]
     out += [
