@@ -64,6 +64,7 @@ from __future__ import annotations
 import argparse
 import bisect
 import dataclasses
+import functools
 import math
 import time
 from collections.abc import Iterable, Sequence
@@ -74,7 +75,7 @@ from pathlib import Path
 import pandas as pd
 
 from backtest import harness
-from backtest.book_cli import iter_book_segments, net_r
+from backtest.book_cli import BookSegment, iter_book_segments, net_r
 from backtest.harness import SEGMENT_FULL, SEGMENT_IS, SEGMENT_OOS
 from backtest.leverage_book import LeverageBookParams
 from backtest.models import ExitReason
@@ -329,8 +330,14 @@ class ArmCell:
     k_values: tuple[float | None, ...]
 
 
-def _cell_arms(payload: CellPayload) -> ArmCell:
-    """워커: 한 칸의 창을 다시 읽어 구간별 서브스텝으로 시간 청산을 푼다."""
+def _cell_arms(payload: CellPayload, min_width: float = STOP_WIDTH_LOG_FLOOR) -> ArmCell:
+    """워커: 한 칸의 창을 다시 읽어 구간별 서브스텝으로 시간 청산을 푼다.
+
+    `min_width`는 **옵트인**이다 — 안 주면 `STOP_WIDTH_LOG_FLOOR`(= `min(FLOORS)`)라 이 모듈의
+    공개 CSV가 **비트 단위로 재현**된다. 더 낮은 값을 주면 팔 후보 풀이 커지므로(15m 실측: 하한
+    3% 6건 → 1% 247건 → 0.5% 837건) **한 번 낮게 만들어 두고 `filtered_payloads`로 올려 거르는**
+    쪽이 싸다(WAN-430 하한 스윕이 그렇게 쓴다). 회귀 테스트가 기본값 동일성을 값으로 고정한다.
+    """
     start_ms = parse_date_ms(harness.DEFAULT_START)
     end_ms = parse_date_ms(harness.DEFAULT_END)
     market = harness.load_market_data(
@@ -344,7 +351,7 @@ def _cell_arms(payload: CellPayload) -> ArmCell:
     }
     arms: dict[int, dict[str, tuple[_Candidate, ...]]] = {h: {} for h in HOLD_BARS}
     for segment, window in windows.items():
-        pool = arm_pool(payload.candidates.get(segment, ()), min_width=STOP_WIDTH_LOG_FLOOR)
+        pool = arm_pool(payload.candidates.get(segment, ()), min_width=min_width)
         substeps = build_substeps(window.df_1m, htf_ms) if pool else []
         derived = derive_hold_arms(pool, substeps=substeps) if pool else {h: [] for h in HOLD_BARS}
         for h, cands in derived.items():
@@ -380,11 +387,18 @@ def build_base_payloads(
     return payloads
 
 
-def build_arm_cells(payloads: Sequence[CellPayload], *, jobs: int) -> list[ArmCell]:
+def build_arm_cells(
+    payloads: Sequence[CellPayload],
+    *,
+    jobs: int,
+    min_width: float = STOP_WIDTH_LOG_FLOOR,
+) -> list[ArmCell]:
+    """팔 후보 — `min_width`를 안 주면 예전과 **비트 동일**하다(`_cell_arms` 독스트링)."""
+    worker = functools.partial(_cell_arms, min_width=min_width)
     if jobs <= 1:
-        return [_cell_arms(p) for p in payloads]
+        return [worker(p) for p in payloads]
     with ProcessPoolExecutor(max_workers=jobs) as pool:
-        return list(pool.map(_cell_arms, payloads))
+        return list(pool.map(worker, payloads))
 
 
 def filtered_payloads(
@@ -451,22 +465,34 @@ def _equity_path(rs: Sequence[float], *, compound: bool) -> tuple[float, float, 
     return eq - 1.0, mdd, False
 
 
+def place_segments(payloads: Sequence[CellPayload]) -> list[BookSegment]:
+    """배치 그 자체 — 🚨 이 팔의 북 인자가 사는 **유일한 자리**다.
+
+    `place`가 여기서 나온 구간으로 `ArmRow`를 만들고, 거래 단위가 필요한 리포트(예: WAN-430
+    §2의 비용 R 분해)는 이 함수를 직접 쓴다. 두 벌로 갈라지면 「같은 팔로 쟀다」가 거짓이 된다
+    (WAN-95/112/123).
+    """
+    return list(
+        iter_book_segments(
+            payloads,
+            book=LeverageBookParams(),
+            segments=SEGMENTS,
+            start_ms=parse_date_ms(harness.DEFAULT_START),
+            end_ms=parse_date_ms(harness.DEFAULT_END),
+            include_reentry=False,
+            compound_sizing=False,
+            min_stop_distance_fraction=0.0,
+            take_profit_liquidity=harness.ADOPTED_TAKE_PROFIT_LIQUIDITY,
+        )
+    )
+
+
 def place(
     payloads: Sequence[CellPayload], *, hold: int, floor: float, threshold: float | None
 ) -> list[ArmRow]:
     """한 칸 조합을 채택 북(한 지갑 · 복리 끔 · 가드 끔)에 배치해 구간별 행을 낸다."""
     rows: list[ArmRow] = []
-    for seg in iter_book_segments(
-        payloads,
-        book=LeverageBookParams(),
-        segments=SEGMENTS,
-        start_ms=parse_date_ms(harness.DEFAULT_START),
-        end_ms=parse_date_ms(harness.DEFAULT_END),
-        include_reentry=False,
-        compound_sizing=False,
-        min_stop_distance_fraction=0.0,
-        take_profit_liquidity=harness.ADOPTED_TAKE_PROFIT_LIQUIDITY,
-    ):
+    for seg in place_segments(payloads):
         pairs = sorted(
             ((t.exit_time, net_r(t, p)) for t, p in seg.trades_with_placements()),
             key=lambda x: x[0],
