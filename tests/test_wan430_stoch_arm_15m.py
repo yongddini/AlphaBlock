@@ -17,11 +17,15 @@ import pytest
 from backtest import wan424_stoch_ob_arm as wan424
 from backtest.wan424_stoch_ob_arm import ArmRow
 from backtest.wan430_stoch_arm_15m import (
+    FLOOR_CSV,
+    FLOOR_SUMMARY_MD,
     GRID_CSV,
     NEW_TIMEFRAME,
     SCOPE_ALL,
     SCOPE_NO_15M,
+    SUMMARY_MD,
     TIMEFRAMES_10,
+    FloorRow,
     ScopedRow,
     _cells_in_scope,
     build_arm_cells,
@@ -31,6 +35,7 @@ from backtest.wan430_stoch_arm_15m import (
     frame_to_rows,
     gate_lines,
     place,
+    render_floor_summary,
     render_summary,
     rows_to_frame,
     run_grid,
@@ -182,7 +187,40 @@ def test_the_gate_counts_timeframes_above_the_noise_line() -> None:
     ]
     (line,) = gate_lines(rows, timeframes=("15m", "1h", "4h"))
     assert "1/3 TF" in line
-    assert "15m **음수/0**" in line
+    # −0.02 ± 0.05 는 0과 구분되지 않는다 — 「음수」로 단정하지 않는다.
+    assert "15m **⚠️ 부호 미결정**" in line
+
+
+def test_the_gate_prints_both_rulers_because_they_disagree() -> None:
+    """🚨 자가 둘이고 답이 다르다 — 라벨이 아니라 **두 숫자가 실제로 갈리는 판**으로 건다.
+
+    엄격한 자만 찍으면 WAN-423 §6의 「9개 중 8개」 옆에서 「15m이 관문을 무너뜨렸다」로 읽히는데,
+    무너뜨린 것은 15m이 아니라 **자**다. 이 판은 원래 자로 3/3인데 엄격한 자로는 0/3이다.
+    """
+    rows = [
+        _row("15m", net=0.002),
+        _row("1h", net=0.003),
+        _row("4h", net=0.004),  # 셋 다 양수지만 전부 잡음선 안
+    ]
+    (line,) = gate_lines(rows, timeframes=("15m", "1h", "4h"))
+    assert "`net R > 0`) 2/2 TF → **3/3 TF**(15m 포함)" in line
+    assert "0/3 TF" in line  # 엄격한 자로는 하나도 안 선다
+
+
+def test_the_raw_ruler_shows_what_adding_fifteen_minutes_did() -> None:
+    """원래 자의 분모가 9 → 10으로 늘고 그 옆에 15m 포함 판이 선다(완료기준 2)."""
+    tfs = ("15m", "1h", "2h", "3h", "4h", "6h", "8h", "12h", "1d", "1w")
+    rows = [_row(tf, net=0.10) for tf in tfs]
+    (line,) = gate_lines(rows, timeframes=tfs)
+    assert "9/9 TF → **10/10 TF**(15m 포함)" in line
+
+
+def test_the_raw_ruler_does_not_apply_the_sample_gate() -> None:
+    """원래 자는 표본 하한을 걸지 않는다 — 걸면 WAN-423 §6과 다른 수가 된다."""
+    rows = [_row("15m", net=0.30, trades=13), _row("1h", net=0.10)]
+    (line,) = gate_lines(rows, timeframes=("15m", "1h"))
+    assert "1/1 TF → **2/2 TF**(15m 포함)" in line  # 13거래짜리도 원래 자에는 들어간다
+    assert "1/1 TF (표본 미달 1TF 제외)" in line  # 엄격한 자에서는 빠진다
 
 
 def test_the_gate_reports_fifteen_minutes_even_when_it_is_positive() -> None:
@@ -281,3 +319,59 @@ def test_the_published_grid_has_every_scope_and_reproduces_the_nine_tf_table() -
     assert NEW_TIMEFRAME in scopes
     rows = frame_to_rows(frame)
     assert any(line.startswith("- ✅ (a′)") for line in checksum_lines(rows))
+
+
+# --------------------------------------------------------------------------- #
+# §2 손절폭 하한 — 머리말이 **그 아래 표와 어긋나면 안 된다**
+# --------------------------------------------------------------------------- #
+
+
+def _floor_row(floor: float, *, trades: int, width: float) -> FloorRow:
+    return FloorRow(
+        floor=floor,
+        hold=4,
+        threshold=25.0,
+        segment="oos_warm",
+        num_trades=trades,
+        mean_net_r=0.1,
+        se_net_r=0.05,
+        mean_cost_r=0.03,
+        mean_gross_r=0.13,
+        median_stop_width=width,
+    )
+
+
+def test_the_floor_header_does_not_claim_the_top_floor_is_above_the_maximum() -> None:
+    """🚨 초판이 표 **바로 위에서** 그 표와 어긋나는 말을 했다 — 「하한 4%는 분포의 최댓값보다
+    위」라고 적어 놓고 아래 표에 하한 4% 20거래가 실려 있었다.
+
+    이 저장소가 반복해 경계한 **「라벨과 동작이 어긋남」**(WAN-91/95/112/123/159/194)의
+    **리포트 축**이다. 가장 높은 하한에 거래가 있으면 그 문장은 **거짓**이므로, 그 판을 만들어
+    머리말이 그 주장을 하지 않는지 건다.
+    """
+    rows = [_floor_row(0.005, trades=4457, width=0.0086), _floor_row(0.04, trades=20, width=0.049)]
+    text = render_floor_summary(rows)
+    top = max(r.floor for r in rows)
+    assert any(r.floor == top and r.num_trades > 0 for r in rows)
+    assert "최대값보다도 위" not in text
+    assert "최댓값보다 위" in text  # 아니라고 밝히는 정정 문장 쪽
+    assert "상위 1%보다도 바깥" in text
+
+
+def test_the_floor_header_says_the_distribution_number_is_btc_measured() -> None:
+    """0.398%·2.15%는 **BTC 실측**이지 31종목 전체의 값이 아니다 — 출처를 안 밝히면 다음 사람이
+    유니버스 전체의 분위로 읽는다."""
+    text = render_floor_summary([_floor_row(0.005, trades=10, width=0.009)])
+    assert "BTC 15m 손절폭" in text
+    assert "실측" in text
+
+
+def test_report_paths_are_module_relative_not_cwd_relative() -> None:
+    """🚨 CWD 상대 경로면 저장소 루트 밖에서 돌릴 때 **엉뚱한 자리에 쓴다**.
+
+    그리고 `wan424`와 **같은 디렉터리**라야 재현 검산(a′)이 상대 표를 찾는다 — 두 모듈이 서로
+    다른 곳에 쓰면 「비트 일치」가 「파일 없음」으로 조용히 건너뛰어진다.
+    """
+    for path in (GRID_CSV, SUMMARY_MD, FLOOR_CSV, FLOOR_SUMMARY_MD):
+        assert path.is_absolute(), path
+        assert path.parent == wan424.REPORT_DIR, path
