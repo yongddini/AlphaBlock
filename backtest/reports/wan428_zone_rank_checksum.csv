@@ -1,0 +1,13 @@
+check,segment,metric,left,right,abs_diff
+(a) oos_warm ≡ 공개 book_trades.csv 집계,oos_warm,num_trades,14843.0,14843.0,0.0
+(a) oos_warm ≡ 공개 book_trades.csv 집계,oos_warm,mean_net_r,-0.12073851686076308,-0.12073851686076308,0.0
+(b) 순위를 못 잰 거래 0건,adopted/full,num_unranked,0.0,0.0,0.0
+(c) base 거래의 탭 시각 ∈ 그 존의 tapped_times,adopted/full,num_mismatched,0.0,0.0,0.0
+(b) 순위를 못 잰 거래 0건,adopted/oos_warm,num_unranked,0.0,0.0,0.0
+(c) base 거래의 탭 시각 ∈ 그 존의 tapped_times,adopted/oos_warm,num_mismatched,0.0,0.0,0.0
+(b) 순위를 못 잰 거래 0건,no_reentry/full,num_unranked,0.0,0.0,0.0
+(c) base 거래의 탭 시각 ∈ 그 존의 tapped_times,no_reentry/full,num_mismatched,0.0,0.0,0.0
+(d) 반사실 팔에 재진입 거래 0건,no_reentry/full,num_reentry_trades,0.0,0.0,0.0
+(b) 순위를 못 잰 거래 0건,no_reentry/oos_warm,num_unranked,0.0,0.0,0.0
+(c) base 거래의 탭 시각 ∈ 그 존의 tapped_times,no_reentry/oos_warm,num_mismatched,0.0,0.0,0.0
+(d) 반사실 팔에 재진입 거래 0건,no_reentry/oos_warm,num_reentry_trades,0.0,0.0,0.0
