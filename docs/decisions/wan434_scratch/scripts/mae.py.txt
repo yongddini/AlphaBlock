@@ -1,0 +1,17 @@
+import numpy as np, pandas as pd
+from backtest import wan424_stoch_ob_arm  # noqa  3h
+from data.storage import OhlcvStore
+from data.models import timeframe_to_ms
+t=pd.read_csv("backtest/reports/wan434_trades.csv.gz"); t=t[t["조합"]=="ts4·하한4%·%K<25"].reset_index(drop=True)
+st=OhlcvStore("data/ohlcv.db"); rows=[]
+for sym,g in t.groupby("종목"):
+    m=st.load(sym,"1m",start_ms=int(g.진입시각_ms.min()),end_ms=int(g.진입시각_ms.max())+40*86400000)
+    m=m[m["closed"].astype(bool)] if "closed" in m else m
+    ot=m.open_time.to_numpy(np.int64); lo=m.low.to_numpy(float); cl=m.close.to_numpy(float)
+    for r in g.itertuples():
+        tf=timeframe_to_ms(r.시간봉); j=int(np.searchsorted(ot,r.진입시각_ms))
+        b=ot[j:]//tf; pos=np.flatnonzero(np.diff(b)!=0); je=j+int(pos[3])+1 if len(pos)>=4 else len(ot)
+        e=r.진입가
+        rows.append(dict(sym=sym,tf=r.시간봉,t=r.진입시각_ms,sw=r._12 if False else r[12],mae=lo[j:je].min()/e-1,ret=cl[je-1]/e-1))
+d=pd.DataFrame(rows)
+d.to_csv("/private/tmp/claude-501/-Users-joyongjin-AlphaBlock/d99ca3be-79b0-4cda-9ce5-de8a898e470d/scratchpad/mae.csv",index=False)

@@ -1,0 +1,41 @@
+[payload-cache] backtest/cache/wan424_payloads (pay:8ffafaaf5ada): 히트 279칸 · 미스 0칸 — 미스만 계산합니다.
+[payload-cache] 캐시 backtest/cache/wan424_payloads (pay:8ffafaaf5ada): 히트 279 · 미스 0 · 적재 0
+base 14s
+BTC/USDT:USDT 22s
+ETH/USDT:USDT 30s
+SOL/USDT:USDT 38s
+BNB/USDT:USDT 46s
+XRP/USDT:USDT 54s
+TRX/USDT:USDT 62s
+DOGE/USDT:USDT 70s
+LINK/USDT:USDT 78s
+LTC/USDT:USDT 86s
+ADA/USDT:USDT 95s
+DOT/USDT:USDT 103s
+BCH/USDT:USDT 111s
+ALGO/USDT:USDT 119s
+ATOM/USDT:USDT 128s
+ETC/USDT:USDT 136s
+THETA/USDT:USDT 144s
+VET/USDT:USDT 153s
+XLM/USDT:USDT 162s
+XMR/USDT:USDT 170s
+AVAX/USDT:USDT 179s
+UNI/USDT:USDT 190s
+SUSHI/USDT:USDT 200s
+CRV/USDT:USDT 210s
+SNX/USDT:USDT 220s
+COMP/USDT:USDT 230s
+YFI/USDT:USDT 241s
+XTZ/USDT:USDT 251s
+ZEC/USDT:USDT 260s
+DASH/USDT:USDT 268s
+NEO/USDT:USDT 277s
+EGLD/USDT:USDT 287s
+검산 k=1: 거래 2710 vs 공개 2710 · net R 합 325.035733 vs 325.035733
+{'k': 1, 'n': 2710, 'mean': np.float64(0.11993938495773643), 'se2': np.float64(0.09779610293701659), 'win': np.float64(0.5062730627306273), 'stop': np.float64(0.34501845018450183), 'fixed': np.float64(3.2503573323546657), 'fmdd': np.float64(0.5920010218404548), 'comp': np.float64(18.85704641083336), 'cmdd': np.float64(0.621250092757256), 'front': np.float64(3.6026610119553406), 'back': np.float64(3.404401643773124), 'fmean': np.float64(0.10501127525466886), 'bmean': np.float64(0.16459180146278835)}
+{'k': 2, 'n': 2653, 'mean': np.float64(0.1118511485195136), 'se2': np.float64(0.06871991264624518), 'win': np.float64(0.5966830003769318), 'stop': np.float64(0.16358839050131926), 'fixed': np.float64(2.9674109702226934), 'fmdd': np.float64(0.4974807983046132), 'comp': np.float64(16.63417738404515), 'cmdd': np.float64(0.5226390773339882), 'front': np.float64(4.055972039698951), 'back': np.float64(3.366996051351518), 'fmean': np.float64(0.1017533135759266), 'bmean': np.float64(0.1417377256734435)}
+{'k': 4, 'n': 2597, 'mean': np.float64(0.07278564001315141), 'se2': np.float64(0.03775812341835235), 'win': np.float64(0.634193299961494), 'stop': np.float64(0.05429341547939931), 'fixed': np.float64(1.8902430711415432), 'fmdd': np.float64(0.3300065721262251), 'comp': np.float64(5.421289478284676), 'cmdd': np.float64(0.36617022183294745), 'front': np.float64(3.91741930767628), 'back': np.float64(4.440204949453686), 'fmean': np.float64(0.06646653559420754), 'bmean': np.float64(0.09163634261260822)}
+{'k': 6, 'n': 2577, 'mean': np.float64(0.061218262907253865), 'se2': np.float64(0.027373817136631666), 'win': np.float64(0.6449359720605355), 'stop': np.float64(0.01979045401629802), 'fixed': np.float64(1.577594635119933), 'fmdd': np.float64(0.19289120863283182), 'comp': np.float64(3.7720946497309713), 'cmdd': np.float64(0.2175704739997667), 'front': np.float64(5.585289014727837), 'back': np.float64(6.189056745967071), 'fmean': np.float64(0.05579249863358526), 'bmean': np.float64(0.07743676261693512)}
+{'k': 8, 'n': 2567, 'mean': np.float64(0.05049982058032195), 'se2': np.float64(0.0215937547567695), 'win': np.float64(0.6482275029216985), 'stop': np.float64(0.007012076353720296), 'fixed': np.float64(1.2963303942968651), 'fmdd': np.float64(0.1059611737625159), 'comp': np.float64(2.62773616677987), 'cmdd': np.float64(0.11991400748676895), 'front': np.float64(8.075548252562823), 'back': np.float64(11.315805388180657), 'fmean': np.float64(0.04447476983458367), 'bmean': np.float64(0.06852812172309095)}
+done 290s

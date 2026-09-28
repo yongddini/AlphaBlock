@@ -1,0 +1,66 @@
+import numpy as np, pandas as pd, time, bisect, sys
+PX=sys.argv[1]
+from backtest import harness
+from backtest.run import parse_date_ms
+from data.storage import OhlcvStore
+S="/private/tmp/claude-501/-Users-joyongjin-AlphaBlock/d99ca3be-79b0-4cda-9ce5-de8a898e470d/scratchpad"
+M=60000; D=86400000; start=parse_date_ms(harness.DEFAULT_START)//M*M; end=parse_date_ms(harness.DEFAULT_END); N=(end-start)//M+1
+KS=(1,)
+FEAT={k:pd.read_csv(f'{S}/feat_k{k}.csv') for k in (1,2)}; T={k:pd.read_csv(f"{S}/bw_trades_k{k}.csv").reset_index(drop=True) for k in KS}
+store=OhlcvStore(harness.DB_PATH); t0=time.time()
+# 거래별 미실현 R 경로(1분 저가) 미리 계산
+P={k:[None]*len(T[k]) for k in KS}
+for sym in sorted(set().union(*[set(t.sym) for t in T.values()])):
+    m=store.load(sym,"1m",start_ms=start,end_ms=end)
+    if "closed" in m.columns: m=m[m["closed"].astype(bool)]
+    low=np.full(N,np.nan); low[(m.open_time.to_numpy(np.int64)-start)//M]=m[PX].to_numpy(float); low=pd.Series(low).ffill().to_numpy()
+    for k,t in T.items():
+        for i in np.flatnonzero((t.sym==sym).to_numpy()):
+            r=t.iloc[i]; a=(int(r.e)-start)//M; b=(int(r.x)-start)//M
+            P[k][i]=(a,b,(low[a:b]-r.ep)/(r.ep-r.sp) if b>a else np.zeros(0))
+print(f"경로 준비 {time.time()-t0:.0f}s",flush=True)
+def simulate(k, rule, param=None, f=0.01, throttle=False, sel=None, cap=None):
+    t=T[k]; order=np.argsort(t.e.to_numpy(),kind="stable")
+    ev=sorted([(int(t.x.iat[i]),0,i) for i in range(len(t))]+[(int(t.e.iat[i]),1,i) for i in range(len(t))])
+    e_all=np.sort(t.e.to_numpy())  # 신호 수 = 기준 거래(체결 여부 무관)
+    eq=1.0; peak=1.0; w=np.zeros(len(t)); keep=np.zeros(len(t),bool); open_n=0; open_risk=0.0
+    for tm,kind,i in ev:
+        if kind==0:
+            if keep[i]: eq+=f*w[i]*t.r.iat[i]; open_n-=1; peak=max(peak,eq); open_risk-=f*w[i]
+            continue
+        size=1.0
+        if sel is not None and not sel[i]: continue
+        ps=bisect.bisect_left(e_all,tm)-bisect.bisect_left(e_all,tm-D)
+        if rule=="cap" and open_n>=param: continue
+        if rule in ("skip","skip+budget") and 1<=ps<=10: continue
+        if rule in ("budget","skip+budget"): size=min(1.0,10.0/(ps+1))
+        if throttle: size*=min(1.0,max(0.2,1-(1-eq/peak)/0.30))
+        if cap is not None and (open_risk+f*eq*size)/eq>cap: continue
+        keep[i]=True; w[i]=eq*size; open_n+=1; open_risk+=f*w[i]
+    R=np.zeros(N); U=np.zeros(N)
+    for i in np.flatnonzero(keep):
+        a,b,path=P[k][i]; R[(int(t.x.iat[i])-start)//M]+=f*w[i]*t.r.iat[i]
+        if b>a: U[a:b]+=f*w[i]*path
+    mtm=1+np.cumsum(R)+U
+    pk=np.maximum.accumulate(mtm); dd=1-mtm/pk; mdd=dd.max(); global LAST; ii=int(np.argmax(dd)); LAST=(int(np.argmax(mtm[:ii+1])),ii)
+    day=(np.arange(N)*M+start)//D; df=pd.DataFrame({"d":day,"v":mtm})
+    prev=df.groupby("d").v.last().shift(1).fillna(1.0); worst=(df.groupby("d").v.min()/prev-1).min()
+    yrs=(end-start)/D/365.25
+    return keep.sum(), mtm[-1]-1, (mtm[-1])**(1/yrs)-1, mdd, worst
+TARGET=0.30
+def at_target(k,rule,sel,cap=None):
+    lo,hi=0.0005,0.2; best=None
+    for _ in range(14):
+        f=(lo*hi)**0.5; r=simulate(k,rule,None,f,False,sel,cap)
+        if r[3]<=TARGET: lo=f; best=(f,)+r
+        else: hi=f
+    return best
+ts=lambda x: pd.to_datetime(x*M+start,unit="ms").strftime("%Y-%m-%d %H:%M")
+F=FEAT[1]; fr=F[~F.back]; q4=np.nanquantile(fr.ret_4h,0.2); crash=(F.ret_4h<=q4).to_numpy()
+for name,sel,rule in [("선별 없음",None,"skip+budget"),("4h 급락",crash,"skip+budget"),("4h 급락",crash,"none")]:
+    for cap in (None,0.05,0.10,0.15,0.20):
+        b=at_target(1,rule,sel,cap)
+        if b is None: print(name,rule,cap,"불가"); continue
+        f,n,ret,cagr,mdd,worst=b; simulate(1,rule,None,f,False,sel,cap)
+        fb=F.back.to_numpy()
+        print(f"[{PX}] {name} {rule:11s} 동시리스크≤{'없음' if cap is None else f'{cap:.0%}'} | 거래당 {f:.2%} | 거래 {n} | 6년 {ret:+.0%} · 연 {cagr:+.1%} | MDD {mdd:.1%} {ts(LAST[0])}→{ts(LAST[1])} | 하루 최악 {worst:+.1%}",flush=True)

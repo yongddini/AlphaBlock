@@ -1,0 +1,29 @@
+"""진입은 그대로 두고 손절거리만 k배로 넓혀 같은 시간 청산(ts4)으로 다시 푼다."""
+import numpy as np, pandas as pd, time
+from backtest import wan424_stoch_ob_arm  # noqa: F401  (3h 등록)
+from data.storage import OhlcvStore
+from data.models import timeframe_to_ms
+t=pd.read_csv("backtest/reports/wan434_trades.csv.gz")
+t=t[t["조합"]=="ts4·하한4%·%K<25"].reset_index(drop=True)
+store=OhlcvStore("data/ohlcv.db"); HOLD=4; KS=(1,2,4,6,8,12)
+res={k:np.full(len(t),np.nan) for k in KS}; reason={k:[""]*len(t) for k in KS}
+t0=time.time()
+for sym,g in t.groupby("종목"):
+    lo=int(g.진입시각_ms.min()); hi=int(g.진입시각_ms.max())+HOLD*7*86400000+86400000
+    m=store.load(sym,"1m",start_ms=lo,end_ms=hi)
+    ot=m["open_time"].to_numpy(np.int64); low=m["low"].to_numpy(float); cl=m["close"].to_numpy(float)
+    for i,r in g.iterrows():
+        tf=timeframe_to_ms(r.시간봉); e=float(r.진입가); d=e-float(r.손절가)
+        j=np.searchsorted(ot,int(r.진입시각_ms))
+        if j>=len(ot) or ot[j]!=r.진입시각_ms: continue
+        b0=ot[j]//tf; jend=np.searchsorted(ot,(b0+HOLD)*tf)   # 진입 봉 포함 HOLD개 봉
+        for k in KS:
+            stop=e-k*d; seg=low[j:jend]; hit=np.nonzero(seg<=stop)[0]
+            if len(hit): px=stop; reason[k][i]="손절"
+            else: px=cl[jend-1]; reason[k][i]="시간청산"
+            res[k][i]=(px-e)/(k*d)
+    print(sym, f"{time.time()-t0:.0f}s", flush=True)
+out=t[["앞뒤","진입시각_ms","청산시각_ms","종목","net_R","gross_R","비용_R","청산사유"]].copy()
+for k in KS:
+    out[f"gross_{k}"]=res[k]; out[f"reason_{k}"]=reason[k]
+out.to_csv("/private/tmp/claude-501/-Users-joyongjin-AlphaBlock/d99ca3be-79b0-4cda-9ce5-de8a898e470d/scratchpad/wide2.csv",index=False)
