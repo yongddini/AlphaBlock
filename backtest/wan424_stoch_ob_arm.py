@@ -392,13 +392,26 @@ def build_arm_cells(
     *,
     jobs: int,
     min_width: float = STOP_WIDTH_LOG_FLOOR,
+    progress: bool = False,
 ) -> list[ArmCell]:
-    """팔 후보 — `min_width`를 안 주면 예전과 **비트 동일**하다(`_cell_arms` 독스트링)."""
+    """팔 후보 — `min_width`를 안 주면 예전과 **비트 동일**하다(`_cell_arms` 독스트링).
+
+    `progress=True`(옵트인, WAN-434)면 칸이 나올 때마다 `팔 후보 칸 37/279 (ETH 4h)`를 찍는다 —
+    이 단계가 청구서의 ~99%(약 2시간)인데 진행을 볼 방법이 없었다. 결과는 같은 순서·같은 값이다
+    (`pool.map`은 제출 순서로 내므로 찍히는 번호는 「앞에서부터 끝난 칸 수」다).
+    """
     worker = functools.partial(_cell_arms, min_width=min_width)
+    total = len(payloads)
+
+    def _report(i: int, cell: ArmCell) -> ArmCell:
+        if progress:
+            print(f"  팔 후보 칸 {i}/{total} ({cell.symbol} {cell.timeframe})", flush=True)
+        return cell
+
     if jobs <= 1:
-        return [worker(p) for p in payloads]
+        return [_report(i, worker(p)) for i, p in enumerate(payloads, start=1)]
     with ProcessPoolExecutor(max_workers=jobs) as pool:
-        return list(pool.map(worker, payloads))
+        return [_report(i, c) for i, c in enumerate(pool.map(worker, payloads), start=1)]
 
 
 def filtered_payloads(

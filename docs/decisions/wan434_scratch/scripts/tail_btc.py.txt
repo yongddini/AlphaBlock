@@ -1,0 +1,21 @@
+P2=pd.read_csv(f"{S}/feat_k2_plus.csv")
+assert (P2.e.values==T[2].e.values).all()
+fb=P2.back.to_numpy(); fr=P2[~P2.back & (P2.ps>=11)]
+q1,q2=np.nanquantile(fr.btc_4h,[1/3,2/3]); r1,r2=np.nanquantile(fr.ret_4h,[1/3,2/3])
+print(f"앞구간 몰림 진입 경계: BTC 4h {q1:+.2%}/{q2:+.2%} · 코인 4h {r1:+.2%}/{r2:+.2%}",flush=True)
+quiet=(P2.ps==0).to_numpy(); burst=(P2.ps>=11).to_numpy()
+cands={"기준(건너뛰기+예산)":None,
+ f"몰림 중엔 BTC 4h ≤ {q2:+.1%}만":quiet|(burst&(P2.btc_4h<=q2).to_numpy()),
+ f"몰림 중엔 BTC 4h ≤ {q1:+.1%}만":quiet|(burst&(P2.btc_4h<=q1).to_numpy()),
+ f"몰림 중엔 코인 4h ≤ {r2:+.1%}만":quiet|(burst&(P2.ret_4h<=r2).to_numpy()),
+ f"몰림 중엔 BTC·코인 둘 다 하위 2/3":quiet|(burst&(P2.btc_4h<=q2).to_numpy()&(P2.ret_4h<=r2).to_numpy())}
+for name,sel in cands.items():
+    for brk in (None,(3,120)):
+        b=at_target(2,"skip+budget",sel,None,brk)
+        if b is None: continue
+        f,n,ret,cagr,mdd,worst=b
+        out=[]
+        for seg,mask in (("앞",~fb),("뒤",fb)):
+            m=mask if sel is None else (mask&sel); nn,a2,c2,m2,w2=simulate(2,"skip+budget",None,f,False,m,None,brk); out.append(f"{seg} {nn}건 {a2:+.0%}/MDD{m2:.0%}")
+        lab="없음" if brk is None else "120분3회"
+        print(f"2배 | {name:26s} | 브레이크 {lab:6s} | 거래당 {f:.2%} | 거래 {n}(월 {n/70:.0f}) | 6년 {ret:+.0%} · 연 {cagr:+.1%} | 하루최악 {worst:+.1%} | "+" · ".join(out),flush=True)

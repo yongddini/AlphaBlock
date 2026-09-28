@@ -1,0 +1,88 @@
+"""탐색(WAN-434 밖): 손절거리 k배를 **채택 북**(한 지갑·칸당 1포지션·5배 상한)에서 잰다.
+
+팔 후보는 wan424와 같은 정의(롱·첫 탭·재진입 없음·하한 4%·%K<25 직전 확정봉·ts4 시간 청산)를
+numpy로 다시 풀고, 손절가만 진입가 − k·d로 옮긴다(리스크 1% 유지 → 포지션 1/k).
+검산: k=1이 공개 거래 내역(2,710건 · net R 합)과 같아야 한다.
+"""
+import bisect, dataclasses, math, sys, time
+import numpy as np, pandas as pd
+S="/private/tmp/claude-501/-Users-joyongjin-AlphaBlock/d99ca3be-79b0-4cda-9ce5-de8a898e470d/scratchpad"
+from pathlib import Path
+from backtest import harness
+from backtest.book_cli import net_r
+from backtest.models import ExitReason
+from backtest.run import parse_date_ms
+from backtest.wan424_stoch_ob_arm import (build_base_payloads, arm_pool, stoch_series, k_before, place_segments, DEFAULT_PAYLOAD_DIR)
+from common.costs import Liquidity
+from data.models import timeframe_to_ms
+from data.storage import OhlcvStore
+HOLD, FLOOR, THR = 4, 0.04, 25.0
+KS = tuple(int(x) for x in sys.argv[1].split(",")) if len(sys.argv) > 1 else (1, 2, 4, 8)
+t0 = time.time()
+payloads = build_base_payloads(jobs=4, payload_dir=Path("backtest/cache/wan424_payloads"))
+print(f"base {time.time()-t0:.0f}s", flush=True)
+store = OhlcvStore(harness.DB_PATH)
+start, end = parse_date_ms(harness.DEFAULT_START), parse_date_ms(harness.DEFAULT_END)
+by_sym = {}
+for p in payloads: by_sym.setdefault(p.symbol, []).append(p)
+new = {k: {} for k in KS}
+for sym, ps in by_sym.items():
+    m = store.load(sym, "1m", start_ms=start, end_ms=end)
+    if "closed" in m.columns: m = m[m["closed"].astype(bool)]
+    m = m.sort_values("open_time")
+    ot = m["open_time"].to_numpy(np.int64); low = m["low"].to_numpy(float); cl = m["close"].to_numpy(float)
+    for p in ps:
+        tf = timeframe_to_ms(p.timeframe)
+        kt, kv = stoch_series(store, p.symbol, p.timeframe)
+        pool = [c for c in arm_pool(p.candidates.get("full", ()), min_width=FLOOR)]
+        outs = {k: [] for k in KS}
+        for c in pool:
+            kvv = k_before(kt, kv, int(c.entry_time), tf)
+            if kvv is None or kvv >= THR: continue
+            j = int(np.searchsorted(ot, c.entry_time))
+            if j >= len(ot) or ot[j] != c.entry_time: continue
+            b = ot[j:] // tf; pos = np.flatnonzero(np.diff(b) != 0)
+            jend = j + int(pos[HOLD - 1]) + 1 if len(pos) >= HOLD else len(ot)
+            e = float(c.entry_price); d = e - float(c.stop_price)
+            for k in KS:
+                stop = e - k * d
+                hit = np.flatnonzero(low[j:jend] <= stop)
+                if len(hit):
+                    ix = j + int(hit[0]); px, rs = stop, ExitReason.STOP_LOSS
+                else:
+                    ix = jend - 1; px, rs = float(cl[ix]), ExitReason.END_OF_DATA
+                outs[k].append(dataclasses.replace(c, stop_price=stop, entry_time=int(ot[j]), exit_time=int(ot[ix]),
+                    exit_price=px, reason=rs, take_profit_price=None, entry_liquidity=Liquidity.MAKER, mfe_r=None, mae_r=None))
+        for k in KS:
+            new[k][(p.symbol, p.timeframe)] = tuple(outs[k])
+    print(f"{sym} {time.time()-t0:.0f}s", flush=True)
+ref = pd.read_csv("backtest/reports/wan434_trades.csv.gz"); ref = ref[ref["조합"] == "ts4·하한4%·%K<25"]
+rows = []
+for k in KS:
+    pl = [dataclasses.replace(p, candidates={"full": new[k][(p.symbol, p.timeframe)], "is": (), "oos": ()},
+                              reentry_candidates={}, arm_candidates={}) for p in payloads]
+    bnd = {(p.symbol, p.timeframe): p.boundary_ms for p in payloads}
+    seg = next(s for s in place_segments(pl) if s.segment == "full")
+    tr = []
+    for trade, pl_ in seg.trades_with_placements():
+        tr.append((trade.exit_time, trade.entry_time, net_r(trade, pl_), trade.exits[-1].reason == ExitReason.STOP_LOSS,
+                   pl_.trigger_time >= bnd[pl_.cell], pl_.cell[0], pl_.cell[1], float(trade.entry_price), float(pl_.stop_price)))
+    df = pd.DataFrame(tr, columns=["x", "e", "r", "stop", "back", "sym", "tf", "ep", "sp"]).sort_values("x", kind="stable")
+    df.to_csv(f"{S}/bw_trades_k{k}.csv", index=False)
+    if k == 1:
+        print(f"검산 k=1: 거래 {len(df)} vs 공개 {len(ref)} · net R 합 {df.r.sum():.6f} vs {ref.net_R.sum():.6f}", flush=True)
+    def path(r):
+        fe = 1 + np.cumsum(0.01 * r); fm = (1 - fe / np.maximum.accumulate(np.maximum(fe, 1))).max()
+        ce = np.cumprod(1 + 0.01 * r); cm = (1 - ce / np.maximum.accumulate(np.maximum(ce, 1))).max()
+        return fe[-1] - 1, fm, ce[-1] - 1, cm
+    D = 86400000; g = df.assign(d=df.e // D).groupby("d").r.agg(["sum", "size"]).to_numpy()
+    rng = np.random.default_rng(434); ms = []
+    for _ in range(1000):
+        idx = rng.integers(0, len(g), len(g)); ms.append(g[idx, 0].sum() / g[idx, 1].sum())
+    a = path(df[~df.back].r.to_numpy()); bb = path(df[df.back].r.to_numpy()); f = path(df.r.to_numpy())
+    rows.append(dict(k=k, n=len(df), mean=df.r.mean(), se2=2 * np.std(ms), win=(df.r > 0).mean(), stop=df.stop.mean(),
+                     fixed=f[0], fmdd=f[1], comp=f[2], cmdd=f[3], front=a[0] / a[1], back=bb[0] / bb[1],
+                     fmean=df[~df.back].r.mean(), bmean=df[df.back].r.mean()))
+    print(rows[-1], flush=True)
+pd.DataFrame(rows).to_csv("/private/tmp/claude-501/-Users-joyongjin-AlphaBlock/d99ca3be-79b0-4cda-9ce5-de8a898e470d/scratchpad/book_wide.csv", index=False)
+print(f"done {time.time()-t0:.0f}s")

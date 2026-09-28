@@ -1,0 +1,10 @@
+F=FEAT[2]; sel=(F.ret_4h<=-0.075).to_numpy()
+simulate(2,"skip+budget",None,0.0252,False,sel,None,(3,120))
+k=F[KEEP].copy(); D=86400000
+k["mon"]=pd.to_datetime(k.e,unit="ms").dt.to_period("M"); k["day"]=k.e//D
+pm=k.groupby("mon").size().reindex(pd.period_range("2020-09","2026-07",freq="M"),fill_value=0)
+print("총",len(k),"건 · 거래 있는 달",(pm>0).sum(),"/",len(pm),"· 0건인 달",(pm==0).sum(),"· 월 중앙값",int(pm.median()),"· 최다 달",pm.idxmax(),pm.max())
+print("월별 분포:",pd.cut(pm,[-1,0,2,5,10,20,1000]).value_counts().sort_index().to_dict())
+d=k.groupby("day").size(); print("거래 있는 날",len(d),"· 하루 최다",d.max(),"· 상위 5일 거래 비중",f"{d.nlargest(5).sum()/len(k):.0%}")
+print("상위 10일:",[(pd.to_datetime(x*D,unit="ms").strftime("%Y-%m-%d"),int(n)) for x,n in d.nlargest(10).items()])
+print("연도별",k.groupby(pd.to_datetime(k.e,unit="ms").dt.year).size().to_dict())

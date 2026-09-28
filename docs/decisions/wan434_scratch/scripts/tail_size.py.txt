@@ -1,0 +1,8 @@
+P2=pd.read_csv(f"{S}/feat_k2_plus.csv"); fb=P2.back.to_numpy()
+sel=(P2.ps==0).to_numpy()|((P2.ps>=11).to_numpy()&(P2.btc_4h<=-0.0259).to_numpy())
+for f in (0.01,0.0125,0.015,0.0175,0.0184,0.02,0.0225,0.025):
+    n,ret,cagr,mdd,worst=simulate(2,"skip+budget",None,f,False,sel,None,None)
+    out=[]
+    for seg,mask in (("앞",~fb),("뒤",fb)):
+        nn,a2,c2,m2,w2=simulate(2,"skip+budget",None,f,False,mask&sel,None,None); out.append(f"{seg} {a2:+.0%}/MDD{m2:.0%}")
+    print(f"거래당 {f:.2%} | 6년 {ret:+.0%} · 연 {cagr:+.1%} · 1만→{10000*(1+ret):,.0f} | 평가손 MDD {mdd:.1%} | 하루 최악 {worst:+.1%} | "+" · ".join(out),flush=True)

@@ -1,0 +1,32 @@
+LUNA/USDT:USDT 적재 669590 1m행 14s
+FTT/USDT:USDT 적재 2303790 1m행 63s
+[wan169] LUNA/USDT:USDT 1h: full 후보 127 · 거래 118 · 수익 -12.75%
+[wan169] LUNA/USDT:USDT 2h: full 후보 58 · 거래 58 · 수익 -10.93%
+[wan169] LUNA/USDT:USDT 3h: full 후보 37 · 거래 37 · 수익 2.17%
+[wan169] LUNA/USDT:USDT 4h: full 후보 25 · 거래 25 · 수익 -3.58%
+[wan169] LUNA/USDT:USDT 6h: full 후보 23 · 거래 23 · 수익 -3.22%
+[wan169] LUNA/USDT:USDT 8h: full 후보 18 · 거래 18 · 수익 -0.88%
+[wan169] LUNA/USDT:USDT 12h: full 후보 11 · 거래 11 · 수익 6.52%
+[wan169] LUNA/USDT:USDT 1d: full 후보 9 · 거래 9 · 수익 -1.62%
+[wan169] LUNA/USDT:USDT 1w: full 후보 1 · 거래 1 · 수익 -1.00%
+[wan169] FTT/USDT:USDT 1h: full 후보 52 · 거래 46 · 수익 -0.36%
+[wan169] FTT/USDT:USDT 2h: full 후보 27 · 거래 25 · 수익 10.44%
+[wan169] FTT/USDT:USDT 3h: full 후보 15 · 거래 14 · 수익 6.04%
+[wan169] FTT/USDT:USDT 4h: full 후보 9 · 거래 9 · 수익 0.66%
+[wan169] FTT/USDT:USDT 6h: full 후보 9 · 거래 9 · 수익 -1.58%
+[wan169] FTT/USDT:USDT 8h: full 후보 7 · 거래 6 · 수익 -0.66%
+[wan169] FTT/USDT:USDT 12h: full 후보 4 · 거래 4 · 수익 0.89%
+[wan169] FTT/USDT:USDT 1d: full 후보 1 · 거래 1 · 수익 -1.01%
+[wan169] FTT/USDT:USDT 1w: full 후보 0 · 거래 0 · 수익 0.00%
+새 종목 후보 {('LUNA/USDT:USDT', '1h'): 127, ('LUNA/USDT:USDT', '2h'): 58, ('LUNA/USDT:USDT', '3h'): 37, ('LUNA/USDT:USDT', '4h'): 25, ('LUNA/USDT:USDT', '6h'): 23, ('LUNA/USDT:USDT', '8h'): 18, ('LUNA/USDT:USDT', '12h'): 11, ('LUNA/USDT:USDT', '1d'): 9, ('LUNA/USDT:USDT', '1w'): 1, ('FTT/USDT:USDT', '1h'): 52, ('FTT/USDT:USDT', '2h'): 27, ('FTT/USDT:USDT', '3h'): 15, ('FTT/USDT:USDT', '4h'): 9, ('FTT/USDT:USDT', '6h'): 9, ('FTT/USDT:USDT', '8h'): 7, ('FTT/USDT:USDT', '12h'): 4, ('FTT/USDT:USDT', '1d'): 1, ('FTT/USDT:USDT', '1w'): 0} 225s
+[payload-cache] backtest/cache/wan424_payloads (pay:8ffafaaf5ada): 히트 279칸 · 미스 0칸 — 미스만 계산합니다.
+[payload-cache] 캐시 backtest/cache/wan424_payloads (pay:8ffafaaf5ada): 히트 279 · 미스 0 · 적재 0
+팔 후보 완료 516s {1: 80, 4: 80, 8: 80}
+기존31 1배 | 거래 2710 · +0.120R · 고정 +325%/MDD 59% (비 5.5) · 복리 +1886%/MDD 62% · 앞 비 3.6 · 뒤 비 3.4
+검산 기존31 1배 거래 2710 net R 합 325.035733 (공개 2710 · 325.035733)
++LUNA·FTT 1배 | 거래 2785 · +0.105R · 고정 +292%/MDD 62% (비 4.7) · 복리 +1316%/MDD 65% · 앞 비 3.4 · 뒤 비 1.7 || LUNA·FTT 거래 80 · 합 -29.5R · 최악 -1.03R · LUNA -31.3R · FTT +1.8R
+기존31 4배 | 거래 2597 · +0.073R · 고정 +189%/MDD 33% (비 5.7) · 복리 +542%/MDD 37% · 앞 비 3.9 · 뒤 비 4.4
++LUNA·FTT 4배 | 거래 2664 · +0.066R · 고정 +176%/MDD 33% (비 5.3) · 복리 +461%/MDD 37% · 앞 비 4.0 · 뒤 비 2.2 || LUNA·FTT 거래 67 · 합 -13.4R · 최악 -1.01R · LUNA -13.9R · FTT +0.5R
+기존31 8배 | 거래 2567 · +0.050R · 고정 +130%/MDD 11% (비 12.2) · 복리 +263%/MDD 12% · 앞 비 8.1 · 뒤 비 11.3
++LUNA·FTT 8배 | 거래 2626 · +0.046R · 고정 +122%/MDD 11% (비 11.5) · 복리 +234%/MDD 15% · 앞 비 8.3 · 뒤 비 2.8 || LUNA·FTT 거래 59 · 합 -8.1R · 최악 -1.00R · LUNA -8.3R · FTT +0.2R
+done 520s
