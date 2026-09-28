@@ -128,6 +128,22 @@ def test_arm_exit_stop_first_then_time_exit() -> None:
     assert (c2.reason, off2, c2.exit_price, c2.stop_price) == (ExitReason.END_OF_DATA, 4, 101, 90.0)
 
 
+def test_arm_exit_bar_low_fills_the_stop_at_that_minutes_low() -> None:
+    """스트레스: 손절 청산가만 그 1분 저가로 — 손절선·오프셋·손절 없는 거래는 그대로."""
+    e = _entry([99, 96, 94, 98, 99], [99, 97, 95, 99, 101])
+    base, off0 = m.arm_exit(e, 1.0)
+    low, off1 = m.arm_exit(e, 1.0, stop_fill="bar_low")
+    assert (off1, low.exit_price, low.stop_price) == (off0, 94.0, base.stop_price)
+    assert low.reason == ExitReason.STOP_LOSS
+    time_exit, _ = m.arm_exit(e, 2.0, stop_fill="bar_low")
+    assert time_exit == m.arm_exit(e, 2.0)[0]
+
+
+def test_arm_exit_rejects_unknown_stop_fill() -> None:
+    with pytest.raises(ValueError, match="stop_fill"):
+        m.arm_exit(_entry([99.0] * 3, [99.0] * 3), 1.0, stop_fill="worst")
+
+
 def test_hold_end_counts_htf_bars_from_entry() -> None:
     times = np.arange(0, 6 * H, 30 * MIN, dtype=np.int64) + 30 * MIN  # 진입 봉 중간부터
     # 봉: [0,1H)에 1개 · 이후 봉마다 2개. 4봉 = 인덱스 0..6 → 끝 7.
@@ -267,3 +283,12 @@ def test_render_grid_marks_cells_over_the_limit() -> None:
     assert "+100% · 20%" in text and "+100% · 35% ⚠️" in text
     assert "판정 근거가 아니다" in text
     assert tuple(sorted(m.GRID_RISKS)) == m.GRID_RISKS and 0.015 in m.GRID_RISKS
+
+
+def test_render_stress_labels_both_fills() -> None:
+    row = m.StressRow(
+        "기준 팔", "bar_low", "거래당 2.00%", 0.02, 10, 3, -1.2, 1.0, 0.3, -0.2, 0.5, 0.1
+    )
+    text = "\n".join(m.render_stress([row]))
+    assert "그 1분 저가 체결" in text and "3 · -1.20" in text and "판정 아님" in text
+    assert m.STRESS_GATE == -0.025 and 0.02 in m.STRESS_RISKS

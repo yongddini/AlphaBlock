@@ -89,6 +89,7 @@ REPORT_DIR = Path(__file__).resolve().parent / "reports"
 CSV_PATH = REPORT_DIR / "wan436_stoch_crowd_rules.csv"
 MONTHLY_PATH = REPORT_DIR / "wan436_monthly.csv"
 MATCHED_PATH = REPORT_DIR / "wan436_mdd_matched.csv"
+STRESS_PATH = REPORT_DIR / "wan436_stop_fill_stress.csv"
 GRID_PATH = REPORT_DIR / "wan436_gate_x_risk_grid.csv"
 SUMMARY_PATH = REPORT_DIR / "wan436_stoch_crowd_rules_summary.md"
 DEFAULT_PAYLOAD_DIR = Path(__file__).resolve().parent / "cache" / "wan424_payloads"
@@ -147,6 +148,11 @@ MATCHED_GATES: tuple[float | None, ...] = (
 )
 MATCHED_RISK_RANGE: tuple[float, float] = (0.001, 0.08)
 MATCHED_ITERATIONS = 14
+# 손절 체결 스트레스(사용자 요청 2026-09-29) — 판정과 무관한 관측. 페이퍼 병행 좌표(−2.5% · 2%)와
+# 그 주변 크기에서 「손절이 그 1분 저가에 체결됐다면」을 잰다.
+STOP_FILLS: tuple[str, ...] = ("stop", "bar_low")
+STRESS_GATE = -0.025
+STRESS_RISKS: tuple[float, ...] = (0.015, 0.0175, 0.020, 0.0222)
 # 맞출 6년 평가손 MDD — 30%는 사용자 한도, 35%는 「한도를 올리면?」 질문(2026-09-29)에 답하는 관측.
 MATCHED_TARGETS: tuple[float, ...] = (MDD_LIMIT, 0.35)
 
@@ -242,8 +248,13 @@ class ArmEntry:
         )
 
 
-def arm_exit(entry: ArmEntry, stop_multiple: float) -> tuple[_Candidate, int]:
-    """손절 배수를 적용해 청산을 푼다 → (후보, 청산 1분봉 오프셋). 손절 우선 · 손절가 체결.
+def arm_exit(
+    entry: ArmEntry, stop_multiple: float, *, stop_fill: str = "stop"
+) -> tuple[_Candidate, int]:
+    """손절 배수를 적용해 청산을 푼다 → (후보, 청산 1분봉 오프셋). 손절 우선.
+
+    `stop_fill` — `"stop"`(기본 · 손절가 체결) · `"bar_low"`(스트레스: 손절이 난 그 1분의 **저가**에
+    체결 = 1분봉이 본 최악, WAN-276 α=1과 같은 자). 1분 안의 더 깊은 갭은 여전히 못 본다.
 
     `wan424.time_exit`과 같은 식이다(진입 봉 포함 HOLD개 · 그 뒤 새 봉이 시작되기 직전 1분 종가). 그
     등식은 주장이 아니라 검산이다 — k=1이 WAN-434 공개 거래 내역과 비트로 같아야 한다.
@@ -257,10 +268,13 @@ def arm_exit(entry: ArmEntry, stop_multiple: float) -> tuple[_Candidate, int]:
         if stop_multiple == 1.0
         else e - stop_multiple * (e - float(c.stop_price))
     )
+    if stop_fill not in STOP_FILLS:
+        raise ValueError(f"stop_fill은 {STOP_FILLS} 중 하나여야 한다: {stop_fill!r}")
     hit = np.flatnonzero(entry.lows <= stop)
     if len(hit):
         off = int(hit[0])
-        px, reason = stop, ExitReason.STOP_LOSS
+        px = stop if stop_fill == "stop" else min(stop, float(entry.lows[off]))
+        reason = ExitReason.STOP_LOSS
     else:
         off = len(entry.closes) - 1
         px, reason = float(entry.closes[-1]), ExitReason.END_OF_DATA
@@ -380,6 +394,7 @@ def place(
     rules: RuleSet,
     *,
     counts: Sequence[int] | None = None,
+    stop_fill: str = "stop",
 ) -> list[PlacedTrade]:
     """규칙 적용 → 칸마다 후보 → `wan424.place_segments`(채택 북) → `full` 거래.
 
@@ -397,7 +412,7 @@ def place(
         size = rule_decision(rules, count, entry.btc_4h)
         if size <= 0.0:
             continue
-        cand, off = arm_exit(entry, rules.stop_multiple)
+        cand, off = arm_exit(entry, rules.stop_multiple, stop_fill=stop_fill)
         kept.setdefault((entry.symbol, entry.timeframe), []).append(cand)
         meta[entry.key] = (entry, size, off)
     pl = [
@@ -878,6 +893,84 @@ def render_grid(cells: Sequence[GridCell]) -> list[str]:
     ]
 
 
+@dataclass(frozen=True)
+class StressRow:
+    """손절 체결 스트레스 한 줄 — 팔 × 체결 가정 × 크기(`risk`가 nan이면 MDD 맞춤 줄)."""
+
+    arm: str
+    stop_fill: str
+    label: str
+    risk: float
+    trades: int
+    stopped: int
+    stopped_mean_r: float
+    full_return: float
+    full_mdd: float
+    worst_day: float
+    back_return: float
+    back_mdd: float
+
+
+def stress_row(
+    arm: str, stop_fill: str, label: str, risk: float, trades: Sequence[PlacedTrade]
+) -> StressRow:
+    full = simulate(trades, risk=risk)
+    back = simulate(segment_trades(trades, SEGMENT_BACK), risk=risk)
+    stops = [t.net_r for t in trades if t.stopped]
+    return StressRow(
+        arm=arm,
+        stop_fill=stop_fill,
+        label=label,
+        risk=risk,
+        trades=full.trades,
+        stopped=len(stops),
+        stopped_mean_r=float(np.mean(stops)) if stops else math.nan,
+        full_return=full.total_return,
+        full_mdd=full.mdd_low,
+        worst_day=full.worst_day,
+        back_return=back.total_return,
+        back_mdd=back.mdd_low,
+    )
+
+
+def stress_rows(arms: Sequence[tuple[str, str, Sequence[PlacedTrade]]]) -> list[StressRow]:
+    """(팔 이름, 체결 가정, 거래) 묶음마다 고정 크기 `STRESS_RISKS` + MDD 30%/35% 맞춤."""
+    out: list[StressRow] = []
+    for arm, fill, trades in arms:
+        for risk in STRESS_RISKS:
+            out.append(stress_row(arm, fill, f"거래당 {risk:.2%}", risk, trades))
+        for target in MATCHED_TARGETS:
+            risk = risk_for_mdd(trades, target=target)
+            out.append(stress_row(arm, fill, f"MDD {target:.0%} 맞춤", risk, trades))
+    return out
+
+
+_FILL_LABEL = {"stop": "손절가 체결", "bar_low": "그 1분 저가 체결"}
+
+
+def render_stress(rows: Sequence[StressRow]) -> list[str]:
+    lines = [
+        "## 손절 체결 스트레스 — 손절이 그 1분의 저가에 체결됐다면 (관측 · 판정 아님)",
+        "",
+        "기본은 손절가에 정확히 체결된다고 본다. 스트레스는 손절이 난 "
+        "**그 1분의 저가**에 체결됐다고 본다 — 1분봉이 본 최악(WAN-276 α=1과 같은 자). "
+        "🚨 1분 안의 더 깊은 갭·호가 공백은 여전히 못 본다(WAN-397/98). "
+        "진입·손절선·배치는 두 가정이 같고 **손절 거래의 청산가만** 다르다.",
+        "",
+        "| 팔 | 체결 가정 | 크기 | 거래당 | 손절(건 · 평균 R) | 6년 복리 · MDD | 하루 최악 "
+        "| 뒷구간 복리 · MDD |",
+        "| -- | -- | -- | --: | --: | --: | --: | --: |",
+    ]
+    for r in rows:
+        lines.append(
+            f"| {r.arm} | {_FILL_LABEL[r.stop_fill]} | {r.label} | {r.risk:.2%} "
+            f"| {r.stopped} · {r.stopped_mean_r:+.2f} | {r.full_return:+.0%} · {r.full_mdd:.1%} "
+            f"| {r.worst_day:+.1%} | {r.back_return:+.0%} · {r.back_mdd:.1%} |"
+        )
+    lines.append("")
+    return lines
+
+
 def render(
     rows: Sequence[Row],
     checks: Sequence[str],
@@ -886,6 +979,7 @@ def render(
     elapsed: float | None,
     matched: Sequence[MatchedRow] = (),
     grid: Sequence[GridCell] = (),
+    stress: Sequence[StressRow] = (),
 ) -> str:
     def fmt(r: Row) -> str:
         return (
@@ -954,6 +1048,7 @@ def render(
         "",
         *(render_matched(matched) if matched else []),
         *render_grid(grid),
+        *(render_stress(stress) if stress else []),
         "## 이웃 확인 (판정 아님)",
         "",
         head,
@@ -1052,6 +1147,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         for risk in GRID_RISKS
     ]
     print(f"  격자 {len(grid)}칸 완료 {time.monotonic() - started:.0f}s", flush=True)
+    gate_rules = dataclasses.replace(PROPOSED, btc_gate=STRESS_GATE)
+    stress_arms = [
+        ("기준 팔", "stop", placed[BASE]),
+        ("기준 팔", "bar_low", place(payloads, entries, BASE, counts=counts, stop_fill="bar_low")),
+        (f"≤ {STRESS_GATE:+.1%}", "stop", placed[gate_rules]),
+        (
+            f"≤ {STRESS_GATE:+.1%}",
+            "bar_low",
+            place(payloads, entries, gate_rules, counts=counts, stop_fill="bar_low"),
+        ),
+    ]
+    stress = stress_rows(stress_arms)
+    print(f"  스트레스 완료 {time.monotonic() - started:.0f}s", flush=True)
     elapsed = time.monotonic() - started
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
     pd.DataFrame([dataclasses.asdict(r) for r in rows]).to_csv(CSV_PATH, index=False)
@@ -1059,7 +1167,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     month_frame.to_csv(MONTHLY_PATH, index=False)
     pd.DataFrame([dataclasses.asdict(r) for r in matched]).to_csv(MATCHED_PATH, index=False)
     pd.DataFrame([dataclasses.asdict(c) for c in grid]).to_csv(GRID_PATH, index=False)
-    summary = render(rows, [check_line], line, month_frame, elapsed, matched, grid)
+    pd.DataFrame([dataclasses.asdict(r) for r in stress]).to_csv(STRESS_PATH, index=False)
+    summary = render(rows, [check_line], line, month_frame, elapsed, matched, grid, stress)
     SUMMARY_PATH.write_text(summary, encoding="utf-8")
     print(summary)
     return 0 if ok else 1
