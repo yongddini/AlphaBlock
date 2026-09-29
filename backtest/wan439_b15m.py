@@ -42,6 +42,7 @@ from backtest import harness
 from backtest import wan436_stoch_crowd_rules as w
 from backtest import wan438_spot_stress as m438
 from backtest import wan439_crash_size_layer as c
+from backtest.run import parse_date_ms
 
 CSV_PATH = c.REPORT_DIR / "wan439_b15m.csv"
 SUMMARY_PATH = c.REPORT_DIR / "wan439_b15m_summary.md"
@@ -163,8 +164,50 @@ def run(jobs: int, payload_dir: Path, root: Path) -> tuple[list[c.Row], list[str
                             label(v, arm), True, fill, basis, risk, s, f, boundary_ms, layered
                         )
     notes += cross_check(rows)
+    REALIZED_PATH.write_text(
+        "\n".join(["# WAN-439 §8 — 청산 기준 MDD(참고)", "", *realized_section(placed), ""]),
+        "utf-8",
+    )
     notes.append(f"총 {time.monotonic() - t0:.0f}초")
     return rows, notes
+
+
+REALIZED_PATH = c.REPORT_DIR / "wan439_b15m_realized.md"
+REALIZED_TARGET = 0.35
+
+
+def realized_section(
+    placed: dict[tuple[str, str, str], tuple[list[w.PlacedTrade], list[w.PlacedTrade]]],
+) -> list[str]:
+    """MDD를 **청산된 손익만으로** 볼 때(사용자 질문 2026-09-29) — 그 자로 크기를 맞추고, 그 크기의
+    평가손 기준 실제 낙폭을 함께 적는다. 판정 없음(참고)."""
+    years = c._years(parse_date_ms(c.WINDOW_START), parse_date_ms(c.FUT_END))
+    out = [
+        f"## ④ 청산 기준 MDD {REALIZED_TARGET:.0%} — 참고(판정 없음)",
+        "",
+        "열린 포지션의 평가손을 빼고 **청산된 손익만으로** 낙폭을 재서 크기를 맞췄다."
+        " 같은 크기에서 평가손(1분 저가)까지 넣은 실제 낙폭을 옆에 적는다.",
+        "",
+        "| 팔 | 체결 | 크기 | 8.6년 | 청산 기준 MDD | 평가손 기준 MDD(같은 크기) |",
+        "|---|---|--:|---|--:|--:|",
+    ]
+    for v in VARIANTS:
+        for arm in ARMS:
+            for fill in ("stop", "bar_low"):
+                s, f = placed[(v, arm, fill)]
+
+                def mdd_at(
+                    r: float, s: list[w.PlacedTrade] = s, f: list[w.PlacedTrade] = f
+                ) -> float:
+                    return c.chain_realized(s, f, r)[1]
+
+                risk = c.fit_risk(mdd_at, target=REALIZED_TARGET)
+                total, r_mdd, m_mdd = c.chain_realized(s, f, risk)
+                out.append(
+                    f"| {label(v, arm)} | {w._FILL_LABEL[fill]} | {risk:.2%} | {total:+.0%} · 연 "
+                    f"{c.cagr(total, years):+.1%} | {r_mdd:.1%} | {m_mdd:.1%} |"
+                )
+    return out
 
 
 def cross_check(rows: Sequence[c.Row]) -> list[str]:

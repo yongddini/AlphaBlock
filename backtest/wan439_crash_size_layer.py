@@ -295,6 +295,22 @@ def chain(
     return float(b.mtm_close[-1]) * scale - 1.0, _mdd(low)
 
 
+def chain_realized(
+    spot: Sequence[w.PlacedTrade], fut: Sequence[w.PlacedTrade], risk: float
+) -> tuple[float, float, float]:
+    """`chain`과 같은 이음 · (총수익, **실현 손익 기준** MDD, 평가손 기준 MDD).
+
+    실현 기준은 청산된 손익만 본다 — 열린 포지션의 평가손은 안 센다(사용자 질문 2026-09-29).
+    """
+    a = w.mtm_path(spot, risk=risk)
+    b = w.mtm_path(fut, risk=risk)
+    assert a.realized is not None and b.realized is not None
+    scale = float(a.mtm_close[-1])
+    realized = np.concatenate([a.realized, b.realized * scale])
+    low = np.concatenate([a.mtm_low, b.mtm_low * scale])
+    return float(b.mtm_close[-1]) * scale - 1.0, _mdd(realized), _mdd(low)
+
+
 def fit_risk(fn: Callable[[float], float], target: float = MDD_TARGET) -> float:
     """`fn(risk) → MDD`가 target 이하인 가장 큰 크기(로그 이분)."""
     lo, hi, best = FIT_LO, FIT_HI, FIT_LO

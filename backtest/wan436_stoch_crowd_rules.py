@@ -522,6 +522,8 @@ class MtmPath:
     mtm_low: np.ndarray
     mtm_close: np.ndarray
     breaches: int
+    realized: np.ndarray | None = None
+    """실현 손익만의 계좌 가치(열린 포지션 평가손 제외) — WAN-439 「청산 기준 MDD」 자."""
 
 
 def mtm_path(trades: Sequence[PlacedTrade], *, risk: float) -> MtmPath:
@@ -570,7 +572,7 @@ def mtm_path(trades: Sequence[PlacedTrade], *, risk: float) -> MtmPath:
                 u_low[a:b] += scale * (t.path_lows[idx] - t.entry_price)
                 u_close[a:b] += scale * (t.path_closes[idx] - t.entry_price)
     base = 1.0 + np.cumsum(realized)
-    return MtmPath(start, end, base + u_low, base + u_close, breaches)
+    return MtmPath(start, end, base + u_low, base + u_close, breaches, base)
 
 
 def simulate(trades: Sequence[PlacedTrade], *, risk: float) -> SimResult:
