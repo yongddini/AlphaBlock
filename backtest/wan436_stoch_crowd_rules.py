@@ -405,8 +405,17 @@ def place(
     *,
     counts: Sequence[int] | None = None,
     stop_fill: str = "stop",
+    size_layer: Sequence[float] | None = None,
+    layer_in_book: bool = True,
 ) -> list[PlacedTrade]:
     """규칙 적용 → 칸마다 후보 → `wan424.place_segments`(채택 북) → `full` 거래.
+
+    `size_layer`(WAN-439, 옵트인)는 `entries`와 같은 순서의 **얹는 층 크기 배율**이다 — 거래의
+    `size`(복리 평가 층)에 곱해지고, `layer_in_book=True`(기본)면 **채택 북 배치에도** 같은 배율이
+    거래당 리스크로 들어간다(작아진 진입이 명목 자리를 덜 차지해 다른 칸의 자리가 바뀐다,
+    WAN-341). `False`는 탐색(WAN-438 스크래치)과 같은 「복리 층에서만」 대조용이다. 안 주면 예전과
+    비트 단위로 같다. ⚠️ 규칙 넷의 예산 배율은 예전처럼 **복리 층에서만** 걸린다 — 층만 북에
+    넣어야 기준 팔(층 없음)이 WAN-436/438과 같은 숫자로 남는다.
 
     북 인자(익절 회계 `take_profit_liquidity` 포함)는 `place_segments` 한 곳에만 있다 — 여기서 다시
     쓰면 「같은 팔로 쟀다」가 거짓이 된다(WAN-95/112/123). 검산이 그 등식을 값으로 건다.
@@ -416,15 +425,23 @@ def place(
         if counts is not None
         else signal_counts([int(e.cand.entry_time) for e in entries])
     )
+    layer = list(size_layer) if size_layer is not None else [1.0] * len(entries)
+    if len(layer) != len(entries):
+        raise ValueError(f"size_layer 길이 {len(layer)} ≠ entries {len(entries)} (WAN-439).")
     kept: dict[tuple[str, str], list[_Candidate]] = {}
     meta: dict[tuple[str, str, int, float], tuple[ArmEntry, float, int]] = {}
-    for entry, count in zip(entries, counts, strict=True):
+    book_scale: dict[tuple[str, str, int, float], float] = {}
+    for entry, count, mult in zip(entries, counts, layer, strict=True):
         size = rule_decision(rules, count, entry.btc_4h)
         if size <= 0.0:
             continue
+        if not mult > 0.0:
+            raise ValueError(f"size_layer 배율은 양수여야 합니다: {mult} (WAN-439).")
         cand, off = arm_exit(entry, rules.stop_multiple, stop_fill=stop_fill)
         kept.setdefault((entry.symbol, entry.timeframe), []).append(cand)
-        meta[entry.key] = (entry, size, off)
+        meta[entry.key] = (entry, size * mult, off)
+        if mult != 1.0:
+            book_scale[entry.key] = mult
     pl = [
         dataclasses.replace(
             p,
@@ -439,7 +456,16 @@ def place(
         for p in payloads
     ]
     boundary = {(p.symbol, p.timeframe): p.boundary_ms for p in payloads}
-    seg = next(s for s in place_segments(pl) if s.segment == harness.SEGMENT_FULL)
+
+    def scale(cell: tuple[str, str], cand: _Candidate) -> float:
+        return book_scale.get(
+            (cell[0], cell[1], int(cand.entry_time), float(cand.entry_price)), 1.0
+        )
+
+    risk_scale = scale if (layer_in_book and book_scale) else None
+    seg = next(
+        s for s in place_segments(pl, risk_scale=risk_scale) if s.segment == harness.SEGMENT_FULL
+    )
     out: list[PlacedTrade] = []
     for trade, placed in seg.trades_with_placements():
         symbol, timeframe = placed.cell
@@ -487,10 +513,24 @@ class SimResult:
     day_returns: dict[int, float]
 
 
-def simulate(trades: Sequence[PlacedTrade], *, risk: float) -> SimResult:
-    """진입 순간의 확정 자본 기준 복리 · 1분마다 저가·종가로 평가한 계좌 가치."""
+@dataclass(frozen=True)
+class MtmPath:
+    """1분 평가 계좌 가치 경로(자본 1에서 시작) — `simulate`의 속(WAN-439가 두 구간을 잇는다)."""
+
+    start: int
+    end: int
+    mtm_low: np.ndarray
+    mtm_close: np.ndarray
+    breaches: int
+
+
+def mtm_path(trades: Sequence[PlacedTrade], *, risk: float) -> MtmPath:
+    """진입 순간의 확정 자본 기준 복리 · 1분마다 저가·종가로 평가한 계좌 가치 경로.
+
+    `simulate`가 이 경로 위에서 요약을 낸다 — 두 벌로 갈라지면 「같은 자로 쟀다」가 거짓이 된다.
+    """
     if not trades:
-        return SimResult(0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0, 0, {})
+        raise ValueError("거래가 없으면 경로가 없다")
     start = min(t.entry_time for t in trades) // MINUTE_MS * MINUTE_MS
     end = max(t.exit_time for t in trades)
     n = (end - start) // MINUTE_MS + 2
@@ -530,8 +570,17 @@ def simulate(trades: Sequence[PlacedTrade], *, risk: float) -> SimResult:
                 u_low[a:b] += scale * (t.path_lows[idx] - t.entry_price)
                 u_close[a:b] += scale * (t.path_closes[idx] - t.entry_price)
     base = 1.0 + np.cumsum(realized)
-    mtm_low = base + u_low
-    mtm_close = base + u_close
+    return MtmPath(start, end, base + u_low, base + u_close, breaches)
+
+
+def simulate(trades: Sequence[PlacedTrade], *, risk: float) -> SimResult:
+    """진입 순간의 확정 자본 기준 복리 · 1분마다 저가·종가로 평가한 계좌 가치."""
+    if not trades:
+        return SimResult(0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0, 0, {})
+    path = mtm_path(trades, risk=risk)
+    start, end, breaches = path.start, path.end, path.breaches
+    mtm_low, mtm_close = path.mtm_low, path.mtm_close
+    n = len(mtm_low)
     peak = np.maximum.accumulate(np.maximum(mtm_low, 1.0))
     dd = 1.0 - mtm_low / peak
     trough = int(np.argmax(dd))

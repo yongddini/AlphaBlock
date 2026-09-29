@@ -63,7 +63,7 @@ from __future__ import annotations
 
 import logging
 from bisect import bisect_left
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -546,6 +546,7 @@ def run_leverage_book(
     daily_stop_limit: int | None = None,
     circuit_breaker_scope: CircuitBreakerScope = "both",
     blocked_from_by_day: Mapping[str, int] | None = None,
+    risk_scale: Callable[[CellKey, _Candidate], float] | None = None,
 ) -> BookOutcome:
     """칸별 후보를 하나의 공통 시간축에서 공유 자본으로 배치한다.
 
@@ -608,6 +609,16 @@ def run_leverage_book(
 
     🚨 **이 팔은 「고쳤다」가 아니라 「크기를 잰다」다** — 기본값 전환은 **재-베이스라인 =
     사용자 결정**이다(WAN-365/384 부류).
+
+    `risk_scale`(WAN-439 · **옵트인** · `None`(기본)이면 예전과 **비트 단위로 같다**)은 후보마다
+    **거래당 리스크의 배율**을 준다 — `(칸, 후보) → 배율`이고 그 진입의 `risk_per_trade`만 그만큼
+    곱한다(명목 천장·북 상한은 그대로). 크기가 작아진 진입은 명목을 덜 차지하므로 **다른 칸의
+    자리가 바뀐다** — 복리 평가 층에서만 크기를 바꾸면 안 보이는 채널이다(WAN-341).
+    * 배율은 진입 순간까지 알 수 있는 정보로만 정해야 한다 — 이 함수는 그것을 검사할 수 없고
+      호출부의 책임이다(인과 검산은 호출부 테스트가 건다).
+    * `net R`(실현손익 ÷ 리스크금액)은 배율과 무관하다 — 둘 다 같은 배율로 줄어든다.
+    * 0 이하·비유한 배율은 **거부**한다(0은 「건너뛰기」인데 그건 후보를 빼는 호출부의 일이다 —
+      사이징 0으로 돌리면 `sizing` 스킵으로 조용히 세어진다).
 
     반환 거래 목록은 **배치(진입 시각) 순**이다 — 자본곡선은 청산 시각 순으로 다시
     정렬해 만든다(`build_result_from_trades`가 그렇게 한다).
@@ -718,6 +729,31 @@ def run_leverage_book(
                     ledger.credit(position)
                 del open_by_cell[cell_key]
 
+    scaled_cfgs: dict[float, BacktestConfig] = {}
+
+    def cfg_for(cell_key: CellKey, cand: _Candidate) -> BacktestConfig:
+        # WAN-439: 배율이 1이면 원래 설정 객체를 **그대로** 쓴다(비트 동일의 근거).
+        if risk_scale is None:
+            return size_cfg
+        scale = float(risk_scale(cell_key, cand))
+        if not (scale > 0.0 and scale < float("inf")):
+            raise ValueError(f"risk_scale은 양의 유한값이어야 합니다: {scale} (WAN-439).")
+        if scale == 1.0:
+            return size_cfg
+        cached = scaled_cfgs.get(scale)
+        if cached is None:
+            sizing_params = size_cfg.risk_sizing
+            assert sizing_params is not None  # apply_book_leverage가 보장.
+            cached = size_cfg.model_copy(
+                update={
+                    "risk_sizing": sizing_params.model_copy(
+                        update={"risk_per_trade": sizing_params.risk_per_trade * scale}
+                    )
+                }
+            )
+            scaled_cfgs[scale] = cached
+        return cached
+
     for cand, cell in merged:
         settle_due(cand.entry_time)
         advance(cand.entry_time)
@@ -771,14 +807,15 @@ def run_leverage_book(
             stats.skip_records.append(SkippedSetup(cell.key, "notional", cand, cash))
             continue
         rates = funding_index[cell.key].window(cand.entry_time, cand.exit_time)
-        trade = _to_trade(cand, sizing_equity, size_cfg, rates, sizing.synthetic_open)
+        cand_cfg = cfg_for(cell.key, cand)
+        trade = _to_trade(cand, sizing_equity, cand_cfg, rates, sizing.synthetic_open)
         if trade is None:
             stats.skipped_sizing += 1
             stats.skip_records.append(SkippedSetup(cell.key, "sizing", cand, cash))
             continue
 
         notional = trade.entry_price * trade.quantity
-        wanted = _unclamped_notional(cand, size_cfg, sizing_equity)
+        wanted = _unclamped_notional(cand, cand_cfg, sizing_equity)
         if wanted > 0.0 and notional < wanted * (1.0 - 1e-9):
             stats.clamped_entries += 1
         # WAN-244 유동성 한도가 **구속 제약**이었는지: 희망 명목이 `k×ADV_usd`를 넘었고
