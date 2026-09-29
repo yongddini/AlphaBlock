@@ -98,6 +98,10 @@ CURVE_SIZES: tuple[int, ...] = (35, 40, 45, 50)
 CURVE_DRAWS = 8
 CURVE_SEED = 440
 """종목 수 곡선(사용자 요청 2026-09-30) — 규칙 유니버스 안에서 무작위 부분집합 · 착수 전 고정."""
+CURVE_SIZES_LOW: tuple[int, ...] = (10, 15, 20, 25, 31)
+CURVE_SEED_LOW = 441
+"""작은 쪽(사용자 요청 2026-09-30) — 기존 35~50 뽑기가 안 바뀌게 **별도 시드**로 뽑는다.
+31은 손으로 고른 31종목과 같은 크기의 무작위 판이라 선택 편향을 가르는 비교다."""
 CURVE_PATH = REPORT_DIR / "wan440_curve.csv"
 
 _PREFIX_RE = re.compile(r"<CommonPrefixes><Prefix>([^<]+)</Prefix></CommonPrefixes>")
@@ -534,6 +538,12 @@ def curve_rows(
         (n, d, frozenset(rng.sample(pool, n))) for n in CURVE_SIZES for d in range(CURVE_DRAWS)
     ]
     draws.append((len(pool), 0, frozenset(pool)))
+    rng_low = random.Random(CURVE_SEED_LOW)
+    draws += [
+        (n, d, frozenset(rng_low.sample(pool, n)))
+        for n in CURVE_SIZES_LOW
+        for d in range(CURVE_DRAWS)
+    ]
     years = c._years(ms(c.WINDOW_START), ms(harness.DEFAULT_END))
     out: list[dict[str, object]] = []
     for v in VARIANTS:
@@ -653,13 +663,14 @@ def render(rows: Sequence[c.Row], notes: Sequence[str], universe: pd.DataFrame) 
         out += [
             "## 종목 수 곡선 — ① 미끄러짐 · MDD 35% 맞춤 연환산 (참고 · 판정 아님)",
             "",
-            f"규칙 유니버스 안에서 무작위 부분집합(시드 {CURVE_SEED} · N마다 {CURVE_DRAWS}회) · "
-            "53은 전체 한 번.",
+            f"규칙 유니버스 안에서 무작위 부분집합(N마다 {CURVE_DRAWS}회 · 35~50은 시드 "
+            f"{CURVE_SEED} · 10~31은 시드 {CURVE_SEED_LOW}) · 53은 전체 한 번.",
+            "손으로 고른 31종목은 위 표의 「31종목(현재)」 줄이다.",
             "",
             "| 변형 | N | 거래 중앙 | 연환산 중앙 | 범위 |",
             "|---|--:|--:|--:|---|",
         ]
-        for (v, n), g in cv.groupby(["variant", "n"], sort=False):
+        for (v, n), g in cv.groupby(["variant", "n"], sort=True):
             out.append(
                 f"| {v} | {n} | {int(g.trades.median()):,} | {g.cagr.median():+.1%} | "
                 f"{g.cagr.min():+.1%} ~ {g.cagr.max():+.1%} |"
