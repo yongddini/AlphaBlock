@@ -120,8 +120,12 @@ def to_store_symbol(bare: str) -> str:
     return f"{bare[:-4]}/USDT:USDT"
 
 
-def month_url(symbol: str, timeframe: str, month: str) -> str:
-    base = f"{VISION_BASE}/data/spot/monthly/klines/{symbol}/{timeframe}"
+#: 시장 → 아카이브 경로(WAN-440이 선물 `um`을 더했다 · 기본은 현물 그대로).
+MARKET_PATHS: dict[str, str] = {"spot": "spot", "um": "futures/um"}
+
+
+def month_url(symbol: str, timeframe: str, month: str, market: str = "spot") -> str:
+    base = f"{VISION_BASE}/data/{MARKET_PATHS[market]}/monthly/klines/{symbol}/{timeframe}"
     return f"{base}/{symbol}-{timeframe}-{month}.zip"
 
 
@@ -136,13 +140,21 @@ class MonthFile:
     timeframe: str
     month: str
     size_bytes: int
+    market: str = "spot"
 
 
 def list_months(
-    symbol: str, timeframe: str, *, transport: Transport = urllib_transport
+    symbol: str,
+    timeframe: str,
+    *,
+    transport: Transport = urllib_transport,
+    market: str = "spot",
 ) -> list[MonthFile]:
-    """S3 목록에서 그 종목·TF의 월별 zip과 **정확한 크기**를 얻는다(`.CHECKSUM` 제외)."""
-    prefix = f"data/spot/monthly/klines/{symbol}/{timeframe}/"
+    """S3 목록에서 그 종목·TF의 월별 zip과 **정확한 크기**를 얻는다(`.CHECKSUM` 제외).
+
+    `market`(WAN-440, 옵트인)은 `"um"`(USDT 무기한 선물)을 받는다 — 기본은 현물 그대로.
+    """
+    prefix = f"data/{MARKET_PATHS[market]}/monthly/klines/{symbol}/{timeframe}/"
     transport = retrying(transport)
     marker: str | None = None
     out: list[MonthFile] = []
@@ -158,7 +170,7 @@ def list_months(
             if not key.endswith(".zip"):
                 continue
             month = key.rsplit("-", 2)[-2] + "-" + key.rsplit("-", 1)[-1].removesuffix(".zip")
-            out.append(MonthFile(symbol, timeframe, month, int(size)))
+            out.append(MonthFile(symbol, timeframe, month, int(size), market))
         found = _MARKER_RE.search(text)
         if "<IsTruncated>true</IsTruncated>" not in text or not found:
             break
@@ -202,7 +214,7 @@ def fetch_month(
     final.parent.mkdir(parents=True, exist_ok=True)
     transport = retrying(transport)
     started = time.monotonic()
-    url = month_url(f.symbol, f.timeframe, f.month)
+    url = month_url(f.symbol, f.timeframe, f.month, f.market)
     body = transport(url)
     check = transport(url + ".CHECKSUM")
     elapsed = time.monotonic() - started
