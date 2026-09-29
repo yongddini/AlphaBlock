@@ -1,0 +1,57 @@
+"""사전 고정: 종목 수 곡선 — 31종목에서 무작위 부분집합(N=10/15/20/25 × 8회, 31 × 1) · 롱 B(9TF) · 판정 자 동일."""
+import pickle, random, statistics, sys, time
+sys.path.insert(0, "/private/tmp/claude-501/-Users-joyongjin-AlphaBlock/58d0d837-941d-4e58-825e-1174ea614022/scratchpad/explore")
+import dataclasses
+from backtest import harness
+from backtest import wan436_stoch_crowd_rules as w
+from backtest import wan438_spot_stress as m
+from backtest.payload_cache import PayloadCache
+from backtest.wan169_leverage_book import run_cells
+from backtest.wan424_stoch_ob_arm import SYMBOLS, TIMEFRAMES, apply_funding_proxy, base_cell_kwargs
+from data import spot_klines
+from data.storage import OhlcvStore
+from rsim import chain, run, summary
+from search import fit
+import short_build as sb
+D = "/private/tmp/claude-501/-Users-joyongjin-AlphaBlock/58d0d837-941d-4e58-825e-1174ea614022/scratchpad/explore"
+Y = 8.556
+def main():
+    t0 = time.monotonic(); kw = base_cell_kwargs()
+    fut, _ = apply_funding_proxy(run_cells(SYMBOLS, TIMEFRAMES, start=harness.DEFAULT_START, end=harness.DEFAULT_END, jobs=4,
+                                           payload_cache=PayloadCache(w.DEFAULT_PAYLOAD_DIR), **kw))
+    root = m.DEFAULT_ROOTS / "stress"
+    with m.working_root(root):
+        sp = run_cells(m.store_symbols(), m.TIMEFRAMES, start=m.STRESS_START, end=m.STRESS_END, jobs=4, cold_segments=False,
+                       payload_cache=PayloadCache(root / "payloads"), **kw)
+    sp = [dataclasses.replace(p, funding={"is": (), "oos": (), **p.funding}) for p in sp]
+    fe = sb.entries(fut, OhlcvStore(m.REPO_ROOT / "data/ohlcv.db"), m.ms(harness.DEFAULT_START), m.ms(harness.DEFAULT_END), 0, 10**14)
+    se = sb.entries(sp, OhlcvStore(spot_klines.root_db_path(root)), m.ms(m.STRESS_START), m.ms(m.STRESS_END), m.ms("2018-01-01"), m.ms(m.STRESS_END))
+    fe = [e for e in fe if e.sign > 0]; se = [e for e in se if e.sign > 0]
+    print("entries", len(fe), len(se), time.monotonic() - t0, flush=True)
+    rng = random.Random(438); allsym = [harness.normalize_symbol(s) for s in SYMBOLS]
+    draws = [(31, list(allsym))] + [(n, rng.sample(allsym, n)) for n in (10, 15, 20, 25) for _ in range(8)]
+    out = []
+    for n, syms in draws:
+        S = set(syms)
+        tr = {}
+        for fill in ("bar_low", "stop"):
+            tr[("fut", fill)] = sb.place([p for p in fut if p.symbol in S], [e for e in fe if e.symbol in S], fill)
+            tr[("spot", fill)] = sb.place([p for p in sp if p.symbol in S], [e for e in se if e.symbol in S], fill)
+        r = fit(lambda x: chain(run(tr[("spot", "bar_low")], risk=x), run(tr[("fut", "bar_low")], risk=x))[1], target=0.35)
+        res = {"n": n, "syms": sorted(S), "risk": r, "spot_syms": len({t.symbol for t in tr[("spot", "stop")]}),
+               "trades": len(tr[("spot", "stop")]) + len(tr[("fut", "stop")])}
+        for fill in ("bar_low", "stop"):
+            s, f = tr[("spot", fill)], tr[("fut", fill)]
+            tot, dd = chain(run(s, risk=r), run(f, risk=r))
+            res[fill] = ((1 + tot) ** (1 / Y) - 1, tot, dd, summary(run(s, risk=r)),
+                         summary(run([t for t in f if not t.back], risk=r)), summary(run([t for t in f if t.back], risk=r)))
+        out.append(res)
+        print(f"N={n:2d} 거래 {res['trades']:4d} 현물종목 {res['spot_syms']:2d} 크기 {r:.2%} | 8.6년 연 {res['bar_low'][0]:.1%} ~ {res['stop'][0]:.1%}", flush=True)
+    pickle.dump(out, open(f"{D}/symcurve.pkl", "wb"))
+    print("\n== 요약(미끄러짐 연환산 · 중앙 [최소~최대])")
+    for n in (10, 15, 20, 25, 31):
+        v = [o["bar_low"][0] for o in out if o["n"] == n]; t = [o["trades"] for o in out if o["n"] == n]
+        print(f"N={n}: 중앙 {statistics.median(v):.1%} [{min(v):.1%} ~ {max(v):.1%}] · 거래 중앙 {statistics.median(t):.0f}")
+    print("끝", time.monotonic() - t0)
+if __name__ == "__main__":
+    main()
