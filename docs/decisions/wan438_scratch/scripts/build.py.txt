@@ -1,0 +1,31 @@
+"""두 구간의 페이퍼 좌표 거래(경로 포함)를 만들어 피클로 저장한다(탐색용)."""
+import pickle, time
+from pathlib import Path
+from backtest import wan438_spot_stress as m
+from backtest import wan436_stoch_crowd_rules as w
+from data import spot_klines
+from data.storage import OhlcvStore
+OUT = Path(__file__).parent
+t0 = time.monotonic()
+res = {}
+# 6년 창 — 선물(WAN-436 좌표 그대로: 31종목 × 9TF)
+fut = w.build_base_payloads(jobs=4, payload_dir=w.DEFAULT_PAYLOAD_DIR)
+fe = w.build_entries(fut)
+fc = w.signal_counts([int(e.cand.entry_time) for e in fe])
+for fill in ("stop", "bar_low"):
+    for name, rules in (("gate", m.GATED), ("nogate", w.BASE)):
+        res[("fut", fill, name)] = w.place(fut, fe, rules, counts=fc, stop_fill=fill)
+print("fut", time.monotonic() - t0, flush=True)
+root = m.DEFAULT_ROOTS / "stress"
+sp = m.spot_payloads(root, start=m.STRESS_START, end=m.STRESS_END, jobs=4)
+st = OhlcvStore(spot_klines.root_db_path(root))
+se = m.entries_for(sp, st, start_ms=m.ms(m.STRESS_START), end_ms=m.ms(m.STRESS_END), k_threshold=25.0,
+                   entry_from_ms=m.ms("2018-01-01"), entry_to_ms=m.ms(m.STRESS_END))
+sc = w.signal_counts([int(e.cand.entry_time) for e in se])
+for fill in ("stop", "bar_low"):
+    for name, rules in (("gate", m.GATED), ("nogate", w.BASE)):
+        res[("spot", fill, name)] = w.place(sp, se, rules, counts=sc, stop_fill=fill)
+print("spot", time.monotonic() - t0, flush=True)
+pickle.dump(res, open(OUT / "trades.pkl", "wb"))
+for k, v in res.items():
+    print(k, len(v), round(w.simulate(v, risk=0.02).total_return, 3), round(w.simulate(v, risk=0.02).mdd_low, 3))

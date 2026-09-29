@@ -1,0 +1,29 @@
+import pickle, sys, dataclasses, math
+sys.path.insert(0, '.')
+from rsim import Rules, chain, run, summary
+from search import fit
+T = pickle.load(open('trades.pkl', 'rb')); F = pickle.load(open('features.pkl', 'rb'))
+def scaled(market, trades, mult, vol=8.0, crash=-0.05):
+    out = []
+    for t in trades:
+        f = F[market].get((t.symbol, t.timeframe, t.entry_time), {})
+        b24, bv = f.get('btc24', float('nan')), f.get('btc_vol', float('nan'))
+        m = mult if (b24 <= crash and not (bv >= vol)) else 1.0
+        out.append(dataclasses.replace(t, size=t.size * m))
+    return out
+def ev(arm, fill, mult, rules=Rules()):
+    s, f = T[('spot', fill, arm)], T[('fut', fill, arm)]
+    if mult < 1: s, f = scaled('spot', s, mult), scaled('fut', f, mult)
+    r = fit(lambda x: chain(run(s, risk=x, rules=rules), run(f, risk=x, rules=rules))[1])
+    tot = chain(run(s, risk=r, rules=rules), run(f, risk=r, rules=rules))[0]
+    rs = fit(lambda x: summary(run(s, risk=x, rules=rules))[1]); rf = fit(lambda x: summary(run(f, risk=x, rules=rules))[1])
+    fr = [t for t in f if not t.back]; bk = [t for t in f if t.back]
+    rfr = fit(lambda x: summary(run(fr, risk=x, rules=rules))[1]); rbk = fit(lambda x: summary(run(bk, risk=x, rules=rules))[1])
+    return r, tot, summary(run(s, risk=rs, rules=rules))[0], summary(run(f, risk=rf, rules=rules))[0], summary(run(fr, risk=rfr, rules=rules))[0], summary(run(bk, risk=rbk, rules=rules))[0]
+if __name__ == "__main__":
+    C = Rules(dd_k=1.0, dd_floor=0.5, day_loss=0.08)
+    for arm, fill in (('gate','stop'), ('gate','bar_low'), ('nogate','stop'), ('nogate','bar_low')):
+        for label, mult, rules in (('기준', 1.0, Rules()), ('투매외 ×0.5', 0.5, Rules()), ('투매외 ×0.25', 0.25, Rules()),
+                                   ('앞규칙', 1.0, C), ('앞규칙+투매외×0.5', 0.5, C), ('앞규칙+투매외×0.25', 0.25, C)):
+            r, tot, sp, fu, fr, bk = ev(arm, fill, mult, rules)
+            print(f"{arm:6s} {fill:7s} {label:16s} 크기 {r:.2%} | 8.6년30% {tot:+6.0%} | 각자30%: 창밖 {sp:+.0%} 6년 {fu:+.0%} (앞 {fr:+.0%} 뒤 {bk:+.0%})", flush=True)

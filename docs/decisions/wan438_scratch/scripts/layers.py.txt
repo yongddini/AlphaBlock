@@ -1,0 +1,31 @@
+"""얹는 층 6개 × MDD 한도 30/35/40% — 토대(진입·청산 엔진)는 그대로, 크기·진입 멈춤만."""
+import sys, dataclasses
+sys.path.insert(0, '.')
+from rsim import Rules, chain, run, summary
+from search import fit
+from capit import T, F
+def mult_of(market, t, tiers, capit):
+    f = F[market].get((t.symbol, t.timeframe, t.entry_time), {})
+    b24, bv = f.get('btc24', float('nan')), f.get('btc_vol', float('nan'))
+    if capit is not None and bv >= capit: return 1.0
+    m = 1.0
+    for th, mm in tiers:
+        if b24 <= th: m = mm
+    return m
+def layer(market, trades, tiers, capit):
+    return [dataclasses.replace(t, size=t.size * mult_of(market, t, tiers, capit)) for t in trades]
+B = [(-0.05, 0.5)]
+L = {'A 기준': ([], None, Rules()), 'B 폭락×0.5': (B, None, Rules()), 'C B+투매예외': (B, 8.0, Rules()),
+     'D B+하루손실8%': (B, None, Rules(day_loss=0.08)), 'E B+낙폭연동': (B, None, Rules(dd_k=1.0, dd_floor=0.5)),
+     'F 단계형': ([(-0.05, 0.5), (-0.10, 0.25)], None, Rules())}
+if __name__ == "__main__":
+    arm, fill = (sys.argv[1], sys.argv[2]) if len(sys.argv) > 2 else ('gate', 'stop')
+    for name, (tiers, capit, rules) in L.items():
+        s = layer('spot', T[('spot', fill, arm)], tiers, capit); f = layer('fut', T[('fut', fill, arm)], tiers, capit)
+        fr = [t for t in f if not t.back]; bk = [t for t in f if t.back]
+        for target in (0.30, 0.35, 0.40):
+            r = fit(lambda x: chain(run(s, risk=x, rules=rules), run(f, risk=x, rules=rules))[1], target=target)
+            tot, dd = chain(run(s, risk=r, rules=rules), run(f, risk=r, rules=rules))
+            ps, pfr, pbk = (summary(run(z, risk=r, rules=rules)) for z in (s, fr, bk))
+            taken = run(s, risk=r, rules=rules).taken + run(f, risk=r, rules=rules).taken
+            print(f"{arm}/{fill} {name:12s} MDD한도 {target:.0%} | 크기 {r:.2%} | 8.6년 {tot:+6.0%}/{dd:.1%} | 창밖 {ps[0]:+.0%}/{ps[1]:.1%} | 6년앞 {pfr[0]:+.0%}/{pfr[1]:.1%} | 6년뒤 {pbk[0]:+.0%}/{pbk[1]:.1%} | 거래 {taken}/{len(s)+len(f)}", flush=True)

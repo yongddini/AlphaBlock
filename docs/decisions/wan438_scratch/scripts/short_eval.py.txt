@@ -1,0 +1,49 @@
+"""사전 고정 판정(한 번만) — 롱 B 대 롱 B + 숏 거울. 결과를 보고 기준을 옮기지 않는다.
+
+통과: (롱+숏) 8.6년 연환산 > (롱) **그리고** 각자 맞춘 크기에서 창 밖 · 6년 앞 · 6년 뒤 세 구간 모두
+수익/MDD 비율이 (롱)보다 나빠지지 않는다. 자는 미끄러짐(손절 = 그 1분 불리한 극값) 평가손 MDD 35%.
+검산: (롱) 판이 앞선 B와 같아야 한다(거래 228 / 1,075 · 8.6년 약 +314% @ 2.89%).
+"""
+
+import pickle
+import sys
+
+sys.path.insert(0, "/private/tmp/claude-501/-Users-joyongjin-AlphaBlock/58d0d837-941d-4e58-825e-1174ea614022/scratchpad/explore")
+from rsim import chain, run, summary  # noqa: E402
+from search import fit  # noqa: E402
+
+D = "/private/tmp/claude-501/-Users-joyongjin-AlphaBlock/58d0d837-941d-4e58-825e-1174ea614022/scratchpad/explore"
+T = pickle.load(open(f"{D}/trades_short.pkl", "rb"))
+Y86 = 8.556
+rows = {}
+for variant in ("long", "long+short"):
+    s = {k: T[("spot", variant, k)] for k in ("stop", "bar_low")}
+    f = {k: T[("fut", variant, k)] for k in ("stop", "bar_low")}
+    r = fit(lambda x: chain(run(s["bar_low"], risk=x), run(f["bar_low"], risk=x))[1], target=0.35)
+    out = {"risk": r, "n": (len(s["stop"]), len(f["stop"]))}
+    for fill in ("bar_low", "stop"):
+        tot, dd = chain(run(s[fill], risk=r), run(f[fill], risk=r))
+        fr = [t for t in f[fill] if not t.back]
+        bk = [t for t in f[fill] if t.back]
+        out[fill] = {"8.6년": (tot, dd, (1 + tot) ** (1 / Y86) - 1), "창밖": summary(run(s[fill], risk=r)),
+                     "6년앞": summary(run(fr, risk=r)), "6년뒤": summary(run(bk, risk=r))}
+        print(f"{variant:10s} {fill:7s} 크기 {r:.2%} 거래 {out['n']} | 8.6년 {tot:+.0%} 연 {out[fill]['8.6년'][2]:.1%} "
+              f"MDD {dd:.1%} | " + " | ".join(f"{k} {out[fill][k][0]:+.0%}/{out[fill][k][1]:.1%}" for k in ("창밖", "6년앞", "6년뒤")))
+    rows[variant] = out
+b, p = rows["long"]["bar_low"], rows["long+short"]["bar_low"]
+seg = {k: p[k][0] / max(p[k][1], 1e-9) >= b[k][0] / max(b[k][1], 1e-9) for k in ("창밖", "6년앞", "6년뒤")}
+better = p["8.6년"][2] > b["8.6년"][2]
+print(f"판정: {'✅ 통과' if better and all(seg.values()) else '❌ 기각'} — 8.6년 개선 {better} · 구간별 {seg}")
+# 숏 단독(참고 · 판정 아님) — 거래당 2% 고정
+for fill in ("bar_low", "stop"):
+    s, f = T[("spot", "short", fill)], T[("fut", "short", fill)]
+    fr = [t for t in f if not t.back]
+    bk = [t for t in f if t.back]
+    parts = {"창밖": s, "6년앞": fr, "6년뒤": bk}
+    txt = []
+    for k, z in parts.items():
+        w_ = sum(t.size for t in z)
+        nr = sum(t.size * t.net_r for t in z) / w_ if w_ else float("nan")
+        ret, dd = summary(run(z, risk=0.02))
+        txt.append(f"{k} {len(z)}건 {ret:+.0%}/{dd:.1%} 거래당 {nr:+.3f}R")
+    print(f"숏 단독 {fill:7s} 2% | " + " | ".join(txt))

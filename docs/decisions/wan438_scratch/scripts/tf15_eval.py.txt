@@ -1,0 +1,69 @@
+"""사전 고정 판정(한 번만) — 9TF 대 +15m × 층 A/B. 결과를 보고 기준을 옮기지 않는다.
+
+판정 자: 8.6년 이어 붙인 경로 · 미끄러짐(손절 = 그 1분 저가) 평가손 MDD 35%에 크기 맞춤 → 연환산.
+통과: (+15m) 연환산 > (9TF) 연환산 **그리고** 그 크기에서 창 밖 · 6년 앞 · 6년 뒤 세 구간 모두
+수익/MDD가 (9TF를 같은 방식으로 맞춘 크기의) 값보다 나빠지지 않는다.
+"""
+
+import dataclasses
+import pickle
+import sys
+
+sys.path.insert(0, "/private/tmp/claude-501/-Users-joyongjin-AlphaBlock/58d0d837-941d-4e58-825e-1174ea614022/scratchpad/explore")
+from rsim import chain, run, summary  # noqa: E402
+from search import fit  # noqa: E402
+
+D = "/private/tmp/claude-501/-Users-joyongjin-AlphaBlock/58d0d837-941d-4e58-825e-1174ea614022/scratchpad/explore"
+T = pickle.load(open(f"{D}/trades_15m.pkl", "rb"))
+F = pickle.load(open(f"{D}/features.pkl", "rb"))
+Y86 = 8.556
+TARGET = 0.35
+
+
+def btc24(market, t):
+    """층 B의 입력 — 15m 거래는 features.pkl에 없으므로 직접 잰다(아래 fill_btc24가 채운다)."""
+    return F[market].get((t.symbol, t.timeframe, t.entry_time), {}).get("btc24", float("nan"))
+
+
+def layer_b(market, trades, extra):
+    out = []
+    for t in trades:
+        b = extra.get((market, t.symbol, t.timeframe, t.entry_time), btc24(market, t))
+        out.append(dataclasses.replace(t, size=t.size * (0.5 if b <= -0.05 else 1.0)))
+    return out
+
+
+def evaluate(extra):
+    rows = {}
+    for layer in ("A", "B"):
+        for variant in ("base", "+15m"):
+            s = {fill: T[("spot", variant, fill)] for fill in ("stop", "bar_low")}
+            f = {fill: T[("fut", variant, fill)] for fill in ("stop", "bar_low")}
+            if layer == "B":
+                s = {k: layer_b("spot", v, extra) for k, v in s.items()}
+                f = {k: layer_b("fut", v, extra) for k, v in f.items()}
+            r = fit(lambda x: chain(run(s["bar_low"], risk=x), run(f["bar_low"], risk=x))[1], target=TARGET)
+            out = {"risk": r}
+            for fill in ("bar_low", "stop"):
+                tot, dd = chain(run(s[fill], risk=r), run(f[fill], risk=r))
+                fr = [t for t in f[fill] if not t.back]
+                bk = [t for t in f[fill] if t.back]
+                out[fill] = {
+                    "8.6년": (tot, dd, (1 + tot) ** (1 / Y86) - 1),
+                    "창밖": summary(run(s[fill], risk=r)),
+                    "6년앞": summary(run(fr, risk=r)),
+                    "6년뒤": summary(run(bk, risk=r)),
+                }
+            out["n"] = (len(s["stop"]), len(f["stop"]))
+            rows[(layer, variant)] = out
+    return rows
+
+
+def verdict(rows, layer):
+    b, p = rows[(layer, "base")]["bar_low"], rows[(layer, "+15m")]["bar_low"]
+    better = p["8.6년"][2] > b["8.6년"][2]
+    seg_ok = {
+        k: (p[k][0] / max(p[k][1], 1e-9)) >= (b[k][0] / max(b[k][1], 1e-9)) for k in ("창밖", "6년앞", "6년뒤")
+    }
+    ok = better and all(seg_ok.values())
+    return ok, better, seg_ok

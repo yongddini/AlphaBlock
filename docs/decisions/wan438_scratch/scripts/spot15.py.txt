@@ -1,0 +1,35 @@
+"""현물 15m(거래소 원본) 2017-08~2020-08을 스트레스 루트에 추가 — 같은 검증 · 격자 밖 제거 · 불가능 틱 격리."""
+import sqlite3, time
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+import pandas as pd
+from data import spot_klines as sk
+from backtest import wan438_spot_stress as m
+t0 = time.monotonic()
+Z = Path('/Users/joyongjin/AlphaBlock/data/cache/wan438-spot')
+with ThreadPoolExecutor(6) as p:
+    lists = list(p.map(lambda s: sk.select_months(sk.list_months(s, '15m'), '2017-08', '2020-08'), sk.SPOT_SYMBOLS))
+files = [f for fs in lists for f in fs]
+print('15m 파일', len(files), f'{sum(f.size_bytes for f in files)/1e6:.1f}MB', flush=True)
+res = sk.fetch_months(files, cache_dir=Z, jobs=8)
+assert all(r.ok for r in res), [r.note for r in res if not r.ok][:5]
+print('받음', time.monotonic() - t0, flush=True)
+root = m.DEFAULT_ROOTS / 'stress'
+checks = []
+def frames():
+    for f in files:
+        fr = sk.read_month(sk.cache_path(f, Z))
+        checks.append(sk.check_month(fr, symbol=f.symbol, timeframe='15m', month=f.month))
+        yield sk.to_store_symbol(f.symbol), '15m', fr[sk.on_grid(fr, '15m')]
+n = sk.load_into_root(root, frames(), end_ms=m.ms(m.STRESS_END))
+print('적재', sum(n.values()), '격자밖', sum(c.off_grid for c in checks), '중복', sum(c.duplicates for c in checks), '구멍', sum(c.gaps for c in checks), flush=True)
+# 불가능 틱: 1분봉은 이미 격리됐다 → 15m 봉의 저가·고가를 남은 1분봉으로 다시 잰다
+conn = sqlite3.connect(sk.root_db_path(root))
+bad = conn.execute("SELECT symbol, open_time, low, high FROM ohlcv WHERE timeframe='15m' AND (low < 0.2*MIN(open,close) OR high > 5*MAX(open,close))").fetchall()
+with conn:
+    for s, t, lo, hi in bad:
+        nl, nh = conn.execute("SELECT MIN(low), MAX(high) FROM ohlcv WHERE symbol=? AND timeframe='1m' AND open_time>=? AND open_time<?", (s, t, t + 900000)).fetchone()
+        conn.execute("UPDATE ohlcv SET low=?, high=? WHERE symbol=? AND timeframe='15m' AND open_time=?", (nl, nh, s, t))
+        print('격리 15m', s, t, lo, '->', nl, flush=True)
+conn.close()
+print('끝', time.monotonic() - t0)

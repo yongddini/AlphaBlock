@@ -1,0 +1,42 @@
+"""사전 고정 시험(한 번만): 9TF(현물 8TF) 대 +15m — 같은 지갑, 페이퍼 팔(게이트 −2.5%), 손절가/1분 저가."""
+import pickle, time
+from backtest import wan438_spot_stress as m
+from backtest import wan436_stoch_crowd_rules as w
+from backtest.wan424_stoch_ob_arm import TIMEFRAMES as FUT_TF, SYMBOLS as FUT_SYM
+from backtest.wan169_leverage_book import run_cells
+from backtest.payload_cache import PayloadCache
+from backtest.wan424_stoch_ob_arm import base_cell_kwargs
+from data import spot_klines
+from data.storage import OhlcvStore
+import dataclasses
+def main():
+    D = '/private/tmp/claude-501/-Users-joyongjin-AlphaBlock/58d0d837-941d-4e58-825e-1174ea614022/scratchpad/explore'
+    t0 = time.monotonic(); res = {}
+    fut = w.build_base_payloads(jobs=4, payload_dir=w.DEFAULT_PAYLOAD_DIR, timeframes=(*FUT_TF, '15m'))
+    fs = OhlcvStore(m.REPO_ROOT / 'data/ohlcv.db')
+    fe = w.build_entries(fut, store=fs)
+    print('fut entries', len(fe), time.monotonic() - t0, flush=True)
+    root = m.DEFAULT_ROOTS / 'stress'
+    kw = base_cell_kwargs()
+    with m.working_root(root):
+        sp = run_cells(m.store_symbols(), (*m.TIMEFRAMES, '15m'), start=m.STRESS_START, end=m.STRESS_END, jobs=4,
+                       cold_segments=False, payload_cache=PayloadCache(root / 'payloads'), **kw)
+    blank = {'is': (), 'oos': ()}
+    sp = [dataclasses.replace(p, funding={**blank, **p.funding}) for p in sp]
+    st = OhlcvStore(spot_klines.root_db_path(root))
+    se = m.entries_for(sp, st, start_ms=m.ms(m.STRESS_START), end_ms=m.ms(m.STRESS_END), k_threshold=25.0,
+                       entry_from_ms=m.ms('2018-01-01'), entry_to_ms=m.ms(m.STRESS_END))
+    print('spot entries', len(se), time.monotonic() - t0, flush=True)
+    for market, pl, es in (('fut', fut, fe), ('spot', sp, se)):
+        for variant in ('base', '+15m'):
+            keep_pl = pl if variant == '+15m' else [p for p in pl if p.timeframe != '15m']
+            keep_es = es if variant == '+15m' else [e for e in es if e.timeframe != '15m']
+            counts = w.signal_counts([int(e.cand.entry_time) for e in keep_es])
+            for fill in ('stop', 'bar_low'):
+                res[(market, variant, fill)] = w.place(keep_pl, keep_es, m.GATED, counts=counts, stop_fill=fill)
+    pickle.dump(res, open(f'{D}/trades_15m.pkl', 'wb'))
+    print('done', time.monotonic() - t0, {k: len(v) for k, v in res.items()}, flush=True)
+
+
+if __name__ == "__main__":
+    main()

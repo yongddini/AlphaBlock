@@ -1,0 +1,39 @@
+"""폭락의 모양 특징(인과적 — 진입 분 **직전**까지 닫힌 1분봉만)."""
+import pickle, time
+import numpy as np
+from backtest import wan438_spot_stress as m
+from backtest import wan436_stoch_crowd_rules as w
+from data import spot_klines
+from data.storage import OhlcvStore
+D='/private/tmp/claude-501/-Users-joyongjin-AlphaBlock/58d0d837-941d-4e58-825e-1174ea614022/scratchpad/explore'
+T=pickle.load(open(f'{D}/trades.pkl','rb')); F=pickle.load(open(f'{D}/features.pkl','rb'))
+t0=time.monotonic()
+def frame(store, sym, a, b):
+    f=store.load(sym,'1m',start_ms=a,end_ms=b)
+    t=f['open_time'].to_numpy(np.int64); lo=f['low'].to_numpy(float); c=f['close'].to_numpy(float); v=(f['volume']*f['close']).to_numpy(float)
+    return t,lo,c,np.concatenate([[0.0],np.cumsum(v)])
+def feats(fr, t):
+    tt,lo,c,cv=fr
+    j=int(np.searchsorted(tt,t))  # 진입 분 앞까지(tt[:j])
+    if j<2: return {}
+    def back(mins):
+        return int(np.searchsorted(tt,t-mins*60000))
+    i1,i24,i4,i7=back(60),back(1440),back(240),back(7*1440)
+    r1=c[j-1]/c[max(i1-1,0)]-1; r24=c[j-1]/c[max(i24-1,0)]-1
+    v1=cv[j]-cv[i1]; v7=(cv[j]-cv[i7])/max((j-i7)/60,1)
+    low4=lo[i4:j].min() if j>i4 else np.nan
+    return dict(r1=r1, r24=r24, speed=(r1/r24 if r24<-0.01 else np.nan), vol=v1/v7 if v7>0 else np.nan, off_low=c[j-1]/low4-1)
+for market, store, a, b in (('spot',OhlcvStore(spot_klines.root_db_path(m.DEFAULT_ROOTS/'stress')),m.ms('2017-12-01'),m.ms('2020-09-01')),
+                            ('fut',OhlcvStore(m.REPO_ROOT/'data/ohlcv.db'),m.ms('2020-08-01'),m.ms('2026-07-23'))):
+    keys=set(); [keys.add((t.symbol,t.timeframe,t.entry_time)) for k,v in T.items() if k[0]==market for t in v]
+    btc=frame(store,w.BTC_SYMBOL,a,b)
+    bysym={}
+    for k in keys: bysym.setdefault(k[0],[]).append(k)
+    for sym,ks in bysym.items():
+        fr=frame(store,sym,a,b)
+        for k in ks:
+            f=F[market].setdefault(k,{})
+            for n,v in feats(btc,k[2]).items(): f['btc_'+n]=v
+            for n,v in feats(fr,k[2]).items(): f['sym_'+n]=v
+    print(market,len(keys),time.monotonic()-t0,flush=True)
+pickle.dump(F,open(f'{D}/features.pkl','wb'))

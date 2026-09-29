@@ -1,0 +1,28 @@
+import sys
+sys.path.insert(0, "/private/tmp/claude-501/-Users-joyongjin-AlphaBlock/58d0d837-941d-4e58-825e-1174ea614022/scratchpad/explore")
+import numpy as np
+from backtest import wan436_stoch_crowd_rules as w
+from backtest import wan438_spot_stress as m
+from data import spot_klines
+from data.storage import OhlcvStore
+from rsim import chain, run, summary
+from tf15_eval import T, layer_b
+extra = {}
+for market, store, a, b in (("spot", OhlcvStore(spot_klines.root_db_path(m.DEFAULT_ROOTS / "stress")), m.ms("2017-12-01"), m.ms("2020-09-01")),
+                            ("fut", OhlcvStore(m.REPO_ROOT / "data/ohlcv.db"), m.ms("2020-08-01"), m.ms("2026-07-23"))):
+    f = w._minute_frame(store, w.BTC_SYMBOL, a, b); tt, cc = f["open_time"].to_numpy(np.int64), f["close"].to_numpy(float)
+    for k, v in T.items():
+        if k[0] != market: continue
+        for t in v:
+            j = int(np.searchsorted(tt, t.entry_time)) - 1; i = int(np.searchsorted(tt, int(tt[j]) - 1440 * 60000, side="right")) - 1
+            extra[(market, t.symbol, t.timeframe, t.entry_time)] = float(cc[j] / cc[i] - 1)
+Y = {"8.6년": 8.556, "창밖": 2.667, "6년앞": 3.89, "6년뒤": 1.96}
+for variant, r in (("base", 0.0289), ("+15m", 0.0292)):
+    for fill in ("bar_low", "stop"):
+        s = layer_b("spot", T[("spot", variant, fill)], extra); f = layer_b("fut", T[("fut", variant, fill)], extra)
+        fr = [t for t in f if not t.back]; bk = [t for t in f if t.back]
+        tot, dd = chain(run(s, risk=r), run(f, risk=r))
+        cells = {"8.6년": (len(s) + len(f), tot, dd), "창밖": (len(s), *summary(run(s, risk=r))),
+                 "6년앞": (len(fr), *summary(run(fr, risk=r))), "6년뒤": (len(bk), *summary(run(bk, risk=r)))}
+        n15 = sum(t.timeframe == "15m" for t in s + f)
+        print(variant, fill, r, "15m거래", n15, " | ".join(f"{k} {n}건 {x:+.0%}(연{(1+x)**(1/Y[k])-1:+.0%})/{d:.1%}" for k, (n, x, d) in cells.items()))

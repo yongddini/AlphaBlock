@@ -1,0 +1,181 @@
+"""사전 고정 시험(한 번만): 롱 페이퍼 팔 B + 숏 거울(같은 신호 수 규칙 · 층 B 거울) — 같은 지갑.
+
+숏 거울: 저항 OB 첫 탭 · 재진입 없음 · 손절폭 ≥ 4% · 직전 확정봉 %K > 75 · ts4 · 손절 2배 ·
+직전 24h 숏 신호 1~10 건너뜀 · 몰림(11+) 중 BTC 4h ≥ +2.5%일 때만 · 24h 예산 10 ·
+층 B 거울(BTC 24h ≥ +5%면 ×0.5) · 미끄러짐 = 그 1분 고가 체결. 새 파라미터 없음.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import math
+import pickle
+import time
+
+import numpy as np
+
+from backtest import harness
+from backtest import wan436_stoch_crowd_rules as w
+from backtest import wan438_spot_stress as m
+from backtest.book_cli import net_r
+from backtest.models import ExitReason
+from backtest.payload_cache import PayloadCache
+from backtest.wan169_leverage_book import run_cells
+from backtest.wan424_stoch_ob_arm import SYMBOLS as FUT_SYM
+from backtest.wan424_stoch_ob_arm import TIMEFRAMES as FUT_TF
+from backtest.wan424_stoch_ob_arm import apply_funding_proxy, base_cell_kwargs, k_before, stoch_series, stop_width
+from common.costs import Liquidity
+from data import spot_klines
+from data.models import timeframe_to_ms
+from data.storage import OhlcvStore
+
+D = "/private/tmp/claude-501/-Users-joyongjin-AlphaBlock/58d0d837-941d-4e58-825e-1174ea614022/scratchpad/explore"
+K_SHORT = 75.0
+LAYER = 0.05
+
+
+@dataclasses.dataclass(frozen=True)
+class Entry:
+    symbol: str
+    timeframe: str
+    cand: object
+    sign: int
+    btc_4h: float
+    btc_24h: float
+    times: np.ndarray
+    worst: np.ndarray
+    """롱이면 1분 저가 · 숏이면 1분 고가(불리한 극값)."""
+    closes: np.ndarray
+
+
+def minute(store, sym, a, b):
+    f = w._minute_frame(store, sym, a, b)
+    return (f["open_time"].to_numpy(np.int64), f["low"].to_numpy(float),
+            f["high"].to_numpy(float), f["close"].to_numpy(float))
+
+
+def entries(payloads, store, start, end, entry_from, entry_to):
+    btc_t, _, _, btc_c = minute(store, w.BTC_SYMBOL, start - w.DAY_MS * 2, end)
+    by = {}
+    for p in payloads:
+        by.setdefault(p.symbol, []).append(p)
+    out = []
+    for sym, cells in by.items():
+        ot, lo, hi, cl = minute(store, sym, start, end)
+        for p in cells:
+            tf_ms = timeframe_to_ms(p.timeframe)
+            kt, kv = stoch_series(store, p.symbol, p.timeframe)
+            for c in p.candidates.get(harness.SEGMENT_FULL, ()):
+                if c.is_reentry or c.tap_index != 0 or c.entry_price <= 0 or stop_width(c) < w.FLOOR:
+                    continue
+                if not (entry_from <= int(c.entry_time) < entry_to):
+                    continue
+                k = k_before(kt, kv, int(c.entry_time), tf_ms)
+                sign = 1 if c.side.sign > 0 else -1
+                if k is None or (sign > 0 and k >= w.K_THRESHOLD) or (sign < 0 and k <= K_SHORT):
+                    continue
+                j = int(np.searchsorted(ot, c.entry_time))
+                if j >= len(ot) or ot[j] != c.entry_time:
+                    continue
+                je = j + w.hold_end(ot[j:], tf_ms)
+                jb = int(np.searchsorted(btc_t, int(c.entry_time))) - 1
+                i4 = int(np.searchsorted(btc_t, int(btc_t[jb]) - 240 * 60000, side="right")) - 1
+                i24 = int(np.searchsorted(btc_t, int(btc_t[jb]) - 1440 * 60000, side="right")) - 1
+                out.append(Entry(sym, p.timeframe, c, sign,
+                                 float(btc_c[jb] / btc_c[i4] - 1) if i4 >= 0 else math.nan,
+                                 float(btc_c[jb] / btc_c[i24] - 1) if i24 >= 0 else math.nan,
+                                 ot[j:je].copy(), (lo if sign > 0 else hi)[j:je].copy(), cl[j:je].copy()))
+    return out
+
+
+def decision(e: Entry, count: int) -> float:
+    """WAN-436 규칙(BASE + 게이트 −2.5%)과 그 거울 × 층 B(와 그 거울)."""
+    if w.SKIP_LOW <= count <= w.SKIP_HIGH:
+        return 0.0
+    if count >= w.CROWD_MIN:
+        b = e.btc_4h
+        if math.isnan(b) or (e.sign > 0 and b > m.GATE) or (e.sign < 0 and b < -m.GATE):
+            return 0.0
+    size = min(1.0, w.BUDGET / (count + 1))
+    crash = e.btc_24h <= -LAYER if e.sign > 0 else e.btc_24h >= LAYER
+    return size * (0.5 if crash else 1.0)
+
+
+def exit_of(e: Entry, fill: str):
+    c = e.cand
+    ep = float(c.entry_price)
+    stop = ep - w.STOP_MULTIPLE * (ep - float(c.stop_price))
+    hit = np.flatnonzero(e.worst <= stop) if e.sign > 0 else np.flatnonzero(e.worst >= stop)
+    if len(hit):
+        off = int(hit[0])
+        if fill == "stop":
+            px = stop
+        else:
+            px = min(stop, float(e.worst[off])) if e.sign > 0 else max(stop, float(e.worst[off]))
+        reason = ExitReason.STOP_LOSS
+    else:
+        off, px, reason = len(e.closes) - 1, float(e.closes[-1]), ExitReason.END_OF_DATA
+    cand = dataclasses.replace(c, stop_price=stop, exit_time=int(e.times[off]), exit_price=px, reason=reason,
+                               take_profit_price=None, entry_liquidity=Liquidity.MAKER, mfe_r=None, mae_r=None)
+    return cand, off
+
+
+def place(payloads, ents, fill):
+    kept, meta = {}, {}
+    for side in (1, -1):
+        es = [e for e in ents if e.sign == side]
+        counts = w.signal_counts([int(e.cand.entry_time) for e in es])
+        for e, n in zip(es, counts, strict=True):
+            size = decision(e, n)
+            if size <= 0:
+                continue
+            cand, off = exit_of(e, fill)
+            kept.setdefault((e.symbol, e.timeframe), []).append(cand)
+            meta[(e.symbol, e.timeframe, int(cand.entry_time), float(cand.entry_price), side)] = (e, size, off)
+    pl = [dataclasses.replace(p, candidates={harness.SEGMENT_FULL: tuple(sorted(kept.get((p.symbol, p.timeframe), ()),
+                                                                                  key=lambda c: c.trigger_time)),
+                                             harness.SEGMENT_IS: (), harness.SEGMENT_OOS: ()},
+                              reentry_candidates={}, arm_candidates={}) for p in payloads]
+    seg = next(s for s in w.place_segments(pl) if s.segment == harness.SEGMENT_FULL)
+    bound = {(p.symbol, p.timeframe): p.boundary_ms for p in payloads}
+    out = []
+    for trade, placed in seg.trades_with_placements():
+        sym, tf = placed.cell
+        side = 1 if trade.side.sign > 0 else -1
+        e, size, off = meta[(sym, tf, int(trade.entry_time), float(trade.entry_price), side)]
+        out.append(w.PlacedTrade(symbol=sym, timeframe=tf, entry_time=int(trade.entry_time), exit_time=int(trade.exit_time),
+                                 net_r=net_r(trade, placed), stopped=trade.exits[-1].reason == ExitReason.STOP_LOSS,
+                                 back=int(placed.trigger_time) >= bound[placed.cell], size=size,
+                                 entry_price=float(trade.entry_price), stop_price=float(placed.stop_price),
+                                 path_times=e.times[:off], path_lows=e.worst[:off], path_closes=e.closes[:off]))
+    return out
+
+
+def main():
+    t0 = time.monotonic()
+    kw = base_cell_kwargs()
+    fut, _ = apply_funding_proxy(run_cells(FUT_SYM, FUT_TF, start=harness.DEFAULT_START, end=harness.DEFAULT_END, jobs=4,
+                                           short_enabled=True, payload_cache=PayloadCache(w.DEFAULT_PAYLOAD_DIR), **kw))
+    print("fut payloads", time.monotonic() - t0, flush=True)
+    root = m.DEFAULT_ROOTS / "stress"
+    with m.working_root(root):
+        sp = run_cells(m.store_symbols(), m.TIMEFRAMES, start=m.STRESS_START, end=m.STRESS_END, jobs=4, cold_segments=False,
+                       short_enabled=True, payload_cache=PayloadCache(root / "payloads"), **kw)
+    sp = [dataclasses.replace(p, funding={"is": (), "oos": (), **p.funding}) for p in sp]
+    print("spot payloads", time.monotonic() - t0, flush=True)
+    fe = entries(fut, OhlcvStore(m.REPO_ROOT / "data/ohlcv.db"), m.ms(harness.DEFAULT_START), m.ms(harness.DEFAULT_END),
+                 0, 10**14)
+    se = entries(sp, OhlcvStore(spot_klines.root_db_path(root)), m.ms(m.STRESS_START), m.ms(m.STRESS_END),
+                 m.ms("2018-01-01"), m.ms(m.STRESS_END))
+    print("entries", len(fe), len(se), sum(e.sign < 0 for e in fe), sum(e.sign < 0 for e in se), time.monotonic() - t0, flush=True)
+    res = {}
+    for market, pl, es in (("fut", fut, fe), ("spot", sp, se)):
+        for variant, keep in (("long", lambda e: e.sign > 0), ("long+short", lambda e: True), ("short", lambda e: e.sign < 0)):
+            for fill in ("stop", "bar_low"):
+                res[(market, variant, fill)] = place(pl, [e for e in es if keep(e)], fill)
+    pickle.dump(res, open(f"{D}/trades_short.pkl", "wb"))
+    print("done", time.monotonic() - t0, {k: len(v) for k, v in res.items()}, flush=True)
+
+
+if __name__ == "__main__":
+    main()
