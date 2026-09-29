@@ -303,8 +303,17 @@ def working_root(root: Path) -> Iterator[None]:
         os.chdir(previous)
 
 
-def spot_payloads(root: Path, *, start: str, end: str, jobs: int) -> list[CellPayload]:
+def spot_payloads(
+    root: Path,
+    *,
+    start: str,
+    end: str,
+    jobs: int,
+    timeframes: Sequence[str] = TIMEFRAMES,
+) -> list[CellPayload]:
     """현물 루트에서 base 후보 — 인자는 `wan424.base_cell_kwargs` 그대로(차가운 절단만 끈다).
+
+    `timeframes`(옵트인, WAN-439)는 TF 목록만 바꾼다 — 안 주면 8TF 그대로라 캐시 키·결과가 같다.
 
     차가운 절단(`is`/`oos`)은 이 이슈가 안 읽는 구간이라 끈다(`full` 후보는 불변 — WAN-301).
     펀딩 대리는 걸지 않는다 — 현물에는 펀딩이 없다.
@@ -316,7 +325,7 @@ def spot_payloads(root: Path, *, start: str, end: str, jobs: int) -> list[CellPa
     with working_root(root):
         payloads = run_cells(
             store_symbols(),
-            TIMEFRAMES,
+            tuple(timeframes),
             start=start,
             end=end,
             jobs=jobs,

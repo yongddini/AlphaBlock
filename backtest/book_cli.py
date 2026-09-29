@@ -34,7 +34,7 @@ wan169가 칸마다 full·is·oos 후보와 따뜻한 경계(`boundary_ms`)를 �
 from __future__ import annotations
 
 import io
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
 import pandas as pd
@@ -43,6 +43,7 @@ from pydantic import BaseModel, ConfigDict
 from backtest import harness
 from backtest.leverage_book import (
     BookOutcome,
+    CellKey,
     CircuitBreakerScope,
     LeverageBookParams,
     PlacedSetup,
@@ -57,7 +58,7 @@ from backtest.wan169_leverage_book import (
 )
 from backtest.wan180_leverage_book_nine import apply_funding_proxy
 from backtest.wan228_reentry_census import ReentryEntryRule
-from backtest.zone_limit_backtest import build_result_from_trades
+from backtest.zone_limit_backtest import _Candidate, build_result_from_trades
 from common.costs import Liquidity
 from common.timefmt import format_kst
 from strategy.models import InvalidationCancel
@@ -287,6 +288,7 @@ def iter_book_segments(
     daily_stop_limit: int | None = None,
     circuit_breaker_scope: CircuitBreakerScope = "both",
     blocked_from_by_day: Mapping[str, int] | None = None,
+    risk_scale: Callable[[CellKey, _Candidate], float] | None = None,
 ) -> list[BookSegment]:
     """`build_book_rows`의 속 — 집계 행뿐 아니라 그 행을 만든 `BookOutcome`까지 돌려준다.
 
@@ -295,7 +297,8 @@ def iter_book_segments(
     `daily_loss_limit_r`·`daily_stop_limit`·`circuit_breaker_scope`·`blocked_from_by_day`
     (WAN-410 §1-1, 옵트인)는 **하루 손실 서킷브레이커**를 그대로 흘려보낸다 — 안 주면
     예전과 **비트 단위로 같다**. 스위치의 뜻·경계는 `run_leverage_book` 독스트링이 정본이다
-    (여기서 다시 정의하지 않는다 — 두 벌로 적으면 갈라진다).
+    (여기서 다시 정의하지 않는다 — 두 벌로 적으면 갈라진다). `risk_scale`(WAN-439, 옵트인)도
+    같다 — 후보별 거래당 리스크 배율을 그대로 흘려보낸다.
     """
     unknown = [s for s in segments if s not in SUPPORTED_SEGMENTS]
     if unknown:
@@ -326,6 +329,7 @@ def iter_book_segments(
             daily_stop_limit=daily_stop_limit,
             circuit_breaker_scope=circuit_breaker_scope,
             blocked_from_by_day=blocked_from_by_day,
+            risk_scale=risk_scale,
         )
         result = build_result_from_trades(
             outcome.trades, outcome.effective_config, BOOK_ANNUALIZATION_TF

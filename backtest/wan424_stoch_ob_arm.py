@@ -67,7 +67,7 @@ import dataclasses
 import functools
 import math
 import time
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -78,7 +78,7 @@ import pandas as pd
 from backtest import harness
 from backtest.book_cli import BookSegment, iter_book_segments, net_r
 from backtest.harness import SEGMENT_FULL, SEGMENT_IS, SEGMENT_OOS
-from backtest.leverage_book import LeverageBookParams
+from backtest.leverage_book import CellKey, LeverageBookParams
 from backtest.models import ExitReason
 from backtest.payload_cache import PayloadCache
 from backtest.run import parse_date_ms
@@ -496,13 +496,23 @@ def _equity_path(rs: Sequence[float], *, compound: bool) -> tuple[float, float, 
     return eq - 1.0, mdd, False
 
 
-def place_segments(payloads: Sequence[CellPayload]) -> list[BookSegment]:
+def place_segments(
+    payloads: Sequence[CellPayload],
+    *,
+    risk_scale: Callable[[CellKey, _Candidate], float] | None = None,
+) -> list[BookSegment]:
     """배치 그 자체 — 🚨 이 팔의 북 인자가 사는 **유일한 자리**다.
+
+    `risk_scale`(WAN-439, 옵트인)은 후보별 거래당 리스크 배율을 북에 그대로 흘려보낸다 — 안 주면
+    예전과 비트 단위로 같다(뜻은 `run_leverage_book` 독스트링이 정본).
 
     `place`가 여기서 나온 구간으로 `ArmRow`를 만들고, 거래 단위가 필요한 리포트(예: WAN-430
     §2의 비용 R 분해)는 이 함수를 직접 쓴다. 두 벌로 갈라지면 「같은 팔로 쟀다」가 거짓이 된다
     (WAN-95/112/123).
     """
+    # 안 줄 때는 인자 자체를 안 넘긴다 — 이 호출의 인자 목록이 곧 「같은 팔」의 대조 대상이다
+    # (wan428 스파이 테스트).
+    extra: dict[str, Any] = {} if risk_scale is None else {"risk_scale": risk_scale}
     return list(
         iter_book_segments(
             payloads,
@@ -514,6 +524,7 @@ def place_segments(payloads: Sequence[CellPayload]) -> list[BookSegment]:
             compound_sizing=False,
             min_stop_distance_fraction=0.0,
             take_profit_liquidity=harness.ADOPTED_TAKE_PROFIT_LIQUIDITY,
+            **extra,
         )
     )
 

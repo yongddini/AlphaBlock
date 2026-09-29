@@ -254,6 +254,9 @@ _UNPINNED_BY_DESIGN: dict[str, str] = {
     # WAN-438 — WAN-436 팔을 현물 루트에서 돈다. base 후보 인자는 `wan424.base_cell_kwargs`
     # (인과 엔진) 그대로이고 바꾼 것은 데이터와 창뿐이다 — 대조의 선물 쪽이 WAN-424 캐시(인과)다.
     "wan438_spot_stress.py": "wan424 base 인자 재사용(인과 엔진) · 현물 루트 · 선물 캐시 대조",
+    # WAN-439 — WAN-438 팔 위에 크기 층만 얹는다(후보 경로 무수정 · 인과 엔진).
+    "wan439_crash_size_layer.py": "wan424/wan438 후보 경로 재사용(인과 엔진) · 크기 층만",
+    "wan439_b15m.py": "wan439 경로 그대로 · TF에 15m만 더함(인과 엔진)",
 }
 
 
