@@ -292,3 +292,11 @@ def test_render_stress_labels_both_fills() -> None:
     text = "\n".join(m.render_stress([row]))
     assert "그 1분 저가 체결" in text and "3 · -1.20" in text and "판정 아님" in text
     assert m.STRESS_GATE == -0.025 and 0.02 in m.STRESS_RISKS
+
+
+def test_output_paths_keep_the_verdict_files_and_suffix_other_lenses() -> None:
+    """판정 좌표(pen_5bp)는 원래 이름 — 다른 렌즈는 이름에 렌즈를 붙여 판정 파일을 덮지 않는다."""
+    assert m.output_paths("pen_5bp")["summary"] == m.SUMMARY_PATH
+    other = m.output_paths("baseline")
+    assert other["csv"].name == "wan436_stoch_crowd_rules_baseline.csv"
+    assert set(other.values()).isdisjoint(m.output_paths("pen_5bp").values())

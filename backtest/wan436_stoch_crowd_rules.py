@@ -980,6 +980,7 @@ def render(
     matched: Sequence[MatchedRow] = (),
     grid: Sequence[GridCell] = (),
     stress: Sequence[StressRow] = (),
+    fill_lens: str = "pen_5bp",
 ) -> str:
     def fmt(r: Row) -> str:
         return (
@@ -1004,7 +1005,7 @@ def render(
         "",
         "롱 · 31종목 × 9TF(1h~1w) · 못 박은 6년 · 첫 탭 · 재진입 없음 · 손절폭 ≥ 4% · 직전 "
         "확정봉 %K<25 · "
-        "ts4 시간 청산 · `pen_5bp` × 같은 분 익절 금지 · 채택 북 배치 · **진입 시점 자본 기준 "
+        f"ts4 시간 청산 · `{fill_lens}` × 같은 분 익절 금지 · 채택 북 배치 · **진입 시점 자본 기준 "
         "복리** · "
         "**1분 평가손 포함 MDD** · 핀 없음.",
         "",
@@ -1070,7 +1071,7 @@ def render(
         "* 규칙의 **모양**은 WAN-434 탐색이 뒷구간까지 보고 골랐다(경계값만 앞구간) — 뒷구간 "
         "통과는 필요조건이다.",
         "* 명목 상한은 복리 끔 배치에서 걸렸다 — 복리 사이징에서 5배를 넘은 진입 수를 표에 싣는다.",
-        "* 전부 `pen_5bp` 렌즈 · 채택 좌표가 아니다(채택 북 −0.12R과 나란히 놓지 말 것) · "
+        f"* 전부 `{fill_lens}` 렌즈 · 채택 좌표가 아니다(채택 북 −0.12R과 나란히 놓지 말 것) · "
         "「엣지 없음」(WAN-84/88/111/114/124/151/201/248/386) 불변(다른 질문).",
     ]
     if elapsed is not None:
@@ -1083,20 +1084,50 @@ def render(
 # ---------------------------------------------------------------------------
 
 
+def output_paths(fill_lens: str) -> dict[str, Path]:
+    """판정 좌표(`pen_5bp`)는 원래 이름 · 다른 렌즈는 이름에 렌즈를 붙여 **덮지 않는다**."""
+    base = {
+        "csv": CSV_PATH,
+        "monthly": MONTHLY_PATH,
+        "matched": MATCHED_PATH,
+        "grid": GRID_PATH,
+        "stress": STRESS_PATH,
+        "summary": SUMMARY_PATH,
+    }
+    if fill_lens == "pen_5bp":
+        return base
+    return {k: p.with_name(f"{p.stem}_{fill_lens}{p.suffix}") for k, p in base.items()}
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("--jobs", type=int, default=harness.default_jobs())
     parser.add_argument("--payload-dir", type=Path, default=DEFAULT_PAYLOAD_DIR)
+    parser.add_argument(
+        "--fill",
+        default="pen_5bp",
+        help="체결 렌즈(기본 pen_5bp = 판정 좌표). baseline 등은 관측이고 "
+        "산출물 이름에 렌즈가 붙는다"
+        " · WAN-434 검산은 pen_5bp에서만 성립하므로 건너뛴다",
+    )
     args = parser.parse_args(argv)
     started = time.monotonic()
-    payloads = build_base_payloads(jobs=args.jobs, payload_dir=args.payload_dir)
+    payloads = build_base_payloads(
+        jobs=args.jobs, payload_dir=args.payload_dir, fill_lens=args.fill
+    )
     print(f"base 후보 {time.monotonic() - started:.0f}s · 칸 {len(payloads)}", flush=True)
     entries = build_entries(payloads, progress=True)
     counts = signal_counts([int(e.cand.entry_time) for e in entries])
     print(f"팔 후보 {len(entries)}건 {time.monotonic() - started:.0f}s", flush=True)
 
     off_trades = place(payloads, entries, OFF, counts=counts)
-    check_line, ok = checksum_wan434(off_trades)
+    if args.fill == "pen_5bp":
+        check_line, ok = checksum_wan434(off_trades)
+    else:
+        check_line, ok = (
+            f"⏭️ WAN-434 검산 건너뜀 — 체결 렌즈 `{args.fill}`(공개 거래 내역은 `pen_5bp`)",
+            True,
+        )
     print(check_line, flush=True)
 
     arms: list[tuple[str, RuleSet, float]] = [
@@ -1162,14 +1193,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"  스트레스 완료 {time.monotonic() - started:.0f}s", flush=True)
     elapsed = time.monotonic() - started
     REPORT_DIR.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame([dataclasses.asdict(r) for r in rows]).to_csv(CSV_PATH, index=False)
+    paths = output_paths(args.fill)
+    pd.DataFrame([dataclasses.asdict(r) for r in rows]).to_csv(paths["csv"], index=False)
     month_frame = pd.concat(months, ignore_index=True)
-    month_frame.to_csv(MONTHLY_PATH, index=False)
-    pd.DataFrame([dataclasses.asdict(r) for r in matched]).to_csv(MATCHED_PATH, index=False)
-    pd.DataFrame([dataclasses.asdict(c) for c in grid]).to_csv(GRID_PATH, index=False)
-    pd.DataFrame([dataclasses.asdict(r) for r in stress]).to_csv(STRESS_PATH, index=False)
-    summary = render(rows, [check_line], line, month_frame, elapsed, matched, grid, stress)
-    SUMMARY_PATH.write_text(summary, encoding="utf-8")
+    month_frame.to_csv(paths["monthly"], index=False)
+    pd.DataFrame([dataclasses.asdict(r) for r in matched]).to_csv(paths["matched"], index=False)
+    pd.DataFrame([dataclasses.asdict(c) for c in grid]).to_csv(paths["grid"], index=False)
+    pd.DataFrame([dataclasses.asdict(r) for r in stress]).to_csv(paths["stress"], index=False)
+    summary = render(
+        rows, [check_line], line, month_frame, elapsed, matched, grid, stress, args.fill
+    )
+    paths["summary"].write_text(summary, encoding="utf-8")
     print(summary)
     return 0 if ok else 1
 
