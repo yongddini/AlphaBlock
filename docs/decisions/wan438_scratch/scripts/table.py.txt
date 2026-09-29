@@ -1,0 +1,22 @@
+import sys
+sys.path.insert(0, '.')
+from rsim import Rules, chain, run, summary
+from search import fit
+from capit import scaled, T
+arms = [('기준(현 페이퍼 규칙)', 1.0, 1e12, Rules()),
+        ('하루손실8%+낙폭연동', 1.0, 1e12, Rules(dd_k=1.0, dd_floor=0.5, day_loss=0.08)),
+        ('폭락국면 크기 ×0.5', 0.5, 1e12, Rules()),
+        ('폭락국면(투매 제외) ×0.5', 0.5, 8.0, Rules())]
+def parts(s, f, r, rules):
+    fr = [t for t in f if not t.back]; bk = [t for t in f if t.back]
+    out = {}
+    tot, dd = chain(run(s, risk=r, rules=rules), run(f, risk=r, rules=rules)); out['8.6년'] = (tot, dd)
+    for name, z in (('창밖', s), ('6년', f), ('6년앞', fr), ('6년뒤', bk)):
+        out[name] = summary(run(z, risk=r, rules=rules))
+    return out
+for label, mult, vol, rules in arms:
+    s = scaled('spot', T[('spot','stop','gate')], mult, vol, -0.05); f = scaled('fut', T[('fut','stop','gate')], mult, vol, -0.05)
+    r30 = fit(lambda x: chain(run(s, risk=x, rules=rules), run(f, risk=x, rules=rules))[1])
+    for tag, r in (('2%', 0.02), (f'{r30:.2%}(30%맞춤)', r30)):
+        o = parts(s, f, r, rules)
+        print(label, tag, ' | '.join(f"{k} {v[0]:+.0%}/{v[1]:.1%}" for k, v in o.items()), flush=True)

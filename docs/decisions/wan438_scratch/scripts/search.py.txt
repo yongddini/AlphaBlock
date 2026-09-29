@@ -1,0 +1,94 @@
+"""착수 전 고정 격자로 규칙을 찾는다 — 8.6년 이어 붙인 경로의 MDD 30% 맞춤 복리."""
+
+from __future__ import annotations
+
+import math
+import pickle
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+from rsim import Rules, chain, run, summary  # noqa: E402
+
+HERE = Path(__file__).parent
+T = pickle.load(open(HERE / "trades.pkl", "rb"))
+TARGET = 0.30
+KEEP = 0.85
+
+GRID: list[tuple[str, Rules]] = [("기준(규칙 없음)", Rules())]
+GRID += [(f"하루손실 {x:.0%}", Rules(day_loss=x)) for x in (0.05, 0.08, 0.10, 0.15)]
+for x in (0.10, 0.15, 0.20, 0.30):
+    GRID.append((f"동시리스크 {x:.0%} 건너뛰기", Rules(open_risk=x)))
+    GRID.append((f"동시리스크 {x:.0%} 남은만큼", Rules(open_risk=x, shrink=True)))
+for b in (5.0, 10.0, 15.0):
+    GRID.append((f"24h예산 {b:g} 건너뛰기", Rules(budget=b)))
+    GRID.append((f"24h예산 {b:g} 남은만큼", Rules(budget=b, shrink=True)))
+
+
+GRID2: list[tuple[str, Rules]] = [("기준(규칙 없음)", Rules())]
+for k in (1.0, 2.0, 3.0):
+    for fl in (0.25, 0.5):
+        GRID2.append((f"낙폭연동 k{k:g} 하한{fl:g}", Rules(dd_k=k, dd_floor=fl)))
+GRID2 += [(f"롤링24h손실 {x:.0%}", Rules(roll_loss=x)) for x in (0.05, 0.08, 0.10)]
+
+
+GRID3: list[tuple[str, Rules]] = [("기준(규칙 없음)", Rules())]
+for k in (1.0, 2.0):
+    GRID3.append((f"낙폭k{k:g}+하루손실8%", Rules(dd_k=k, dd_floor=0.5, day_loss=0.08)))
+    GRID3.append((f"낙폭k{k:g}+하루손실10%", Rules(dd_k=k, dd_floor=0.5, day_loss=0.10)))
+    GRID3.append((f"낙폭k{k:g}+롤링24h10%", Rules(dd_k=k, dd_floor=0.5, roll_loss=0.10)))
+
+
+def fit(fn, target=TARGET, lo=0.002, hi=0.08, it=16):
+    """fn(risk) -> mdd 가 target 이하인 가장 큰 risk(로그 이분)."""
+    best = lo
+    for _ in range(it):
+        mid = math.sqrt(lo * hi)
+        if fn(mid) <= target:
+            best = lo = mid
+        else:
+            hi = mid
+    return best
+
+
+def evaluate(arm: str, fill: str, rules: Rules):
+    spot, fut = T[("spot", fill, arm)], T[("fut", fill, arm)]
+    r = fit(lambda k: chain(run(spot, risk=k, rules=rules), run(fut, risk=k, rules=rules))[1])
+    ps, pf = run(spot, risk=r, rules=rules), run(fut, risk=r, rules=rules)
+    tot, dd = chain(ps, pf)
+    # 구간별 자기 MDD 30% 맞춤(두 구간 각각에서 이기는지)
+    rs = fit(lambda k: summary(run(spot, risk=k, rules=rules))[1])
+    rf = fit(lambda k: summary(run(fut, risk=k, rules=rules))[1])
+    return {
+        "risk": r,
+        "chain_ret": tot,
+        "chain_mdd": dd,
+        "keep_spot": ps.taken / ps.total,
+        "keep_fut": pf.taken / pf.total,
+        "spot_ret": summary(ps)[0],
+        "spot_mdd": summary(ps)[1],
+        "fut_ret": summary(pf)[0],
+        "fut_mdd": summary(pf)[1],
+        "spot_ret@30": summary(run(spot, risk=rs, rules=rules))[0],
+        "fut_ret@30": summary(run(fut, risk=rf, rules=rules))[0],
+        "risk_spot@30": rs,
+        "risk_fut@30": rf,
+    }
+
+
+if __name__ == "__main__":
+    arm = sys.argv[1] if len(sys.argv) > 1 else "gate"
+    fill = sys.argv[2] if len(sys.argv) > 2 else "stop"
+    which = sys.argv[3] if len(sys.argv) > 3 else "1"
+    grid = {"1": GRID, "2": GRID2, "3": GRID3}[which]
+    rows = []
+    for name, rules in grid:
+        e = evaluate(arm, fill, rules)
+        rows.append((name, e))
+        print(
+            f"{name:22s} 크기 {e['risk']:.2%} | 8.6년 {e['chain_ret']:+8.0%} MDD {e['chain_mdd']:.1%} | "
+            f"유지 현물 {e['keep_spot']:.0%} 선물 {e['keep_fut']:.0%} | "
+            f"각자30%: 현물 {e['spot_ret@30']:+.0%} 선물 {e['fut_ret@30']:+.0%}",
+            flush=True,
+        )
+    pickle.dump(rows, open(HERE / f"search_{arm}_{fill}_{len(grid)}.pkl", "wb"))

@@ -302,13 +302,23 @@ def hold_end(times_from_entry: np.ndarray, timeframe_ms: int, hold: int = HOLD) 
 
 
 def build_entries(
-    payloads: Sequence[CellPayload], *, store: OhlcvStore | None = None, progress: bool = False
+    payloads: Sequence[CellPayload],
+    *,
+    store: OhlcvStore | None = None,
+    progress: bool = False,
+    start_ms: int | None = None,
+    end_ms: int | None = None,
+    k_threshold: float = K_THRESHOLD,
 ) -> list[ArmEntry]:
     """팔 후보(롱 · 첫 탭 · 재진입 아님 · 손절폭 ≥ 4% · 직전 확정봉 %K < 25)와 그 보유 구간
-    1분봉."""
+    1분봉.
+
+    `start_ms`·`end_ms`·`k_threshold`(옵트인, WAN-438)는 1분봉 창과 %K 문턱이다 — 안 주면 채택 창 ·
+    %K<25 그대로라 예전과 비트 동일하다(현물 루트 · 문턱 민감도 팔이 쓴다).
+    """
     store = store or OhlcvStore(harness.DB_PATH)
-    start = parse_date_ms(harness.DEFAULT_START)
-    end = parse_date_ms(harness.DEFAULT_END)
+    start = parse_date_ms(harness.DEFAULT_START) if start_ms is None else start_ms
+    end = parse_date_ms(harness.DEFAULT_END) if end_ms is None else end_ms
     btc = _minute_frame(store, BTC_SYMBOL, start - DAY_MS, end)
     btc_t = btc["open_time"].to_numpy(np.int64)
     btc_c = btc["close"].to_numpy(float)
@@ -326,7 +336,7 @@ def build_entries(
             k_times, k_values = stoch_series(store, p.symbol, p.timeframe)
             for c in arm_pool(p.candidates.get(harness.SEGMENT_FULL, ()), min_width=FLOOR):
                 kv = k_before(k_times, k_values, int(c.entry_time), tf_ms)
-                if kv is None or kv >= K_THRESHOLD:
+                if kv is None or kv >= k_threshold:
                     continue
                 j = int(np.searchsorted(ot, c.entry_time))
                 if j >= len(ot) or ot[j] != c.entry_time:

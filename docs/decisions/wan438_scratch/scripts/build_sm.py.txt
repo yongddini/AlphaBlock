@@ -1,0 +1,29 @@
+"""손절 배수를 바꾼 거래(페이퍼 팔 · 손절가/1분 저가 체결)."""
+import pickle, time, dataclasses
+from backtest import wan438_spot_stress as m
+from backtest import wan436_stoch_crowd_rules as w
+from data import spot_klines
+from data.storage import OhlcvStore
+D='/private/tmp/claude-501/-Users-joyongjin-AlphaBlock/58d0d837-941d-4e58-825e-1174ea614022/scratchpad/explore'
+t0=time.monotonic(); res={}
+KS=(1.5, 2.0, 3.0, 4.0)
+fut=w.build_base_payloads(jobs=4, payload_dir=w.DEFAULT_PAYLOAD_DIR)
+fs=OhlcvStore(m.REPO_ROOT/'data/ohlcv.db')
+fe=w.build_entries(fut, store=fs)
+fc=w.signal_counts([int(e.cand.entry_time) for e in fe])
+for k in KS:
+    for fill in ('stop','bar_low'):
+        for name, base in (('gate', m.GATED), ('nogate', w.BASE)):
+            res[('fut',fill,name,k)]=w.place(fut, fe, dataclasses.replace(base, stop_multiple=k), counts=fc, stop_fill=fill)
+print('fut', time.monotonic()-t0, flush=True)
+root=m.DEFAULT_ROOTS/'stress'
+sp=m.spot_payloads(root, start=m.STRESS_START, end=m.STRESS_END, jobs=4)
+st=OhlcvStore(spot_klines.root_db_path(root))
+se=m.entries_for(sp, st, start_ms=m.ms(m.STRESS_START), end_ms=m.ms(m.STRESS_END), k_threshold=25.0, entry_from_ms=m.ms('2018-01-01'), entry_to_ms=m.ms(m.STRESS_END))
+sc=w.signal_counts([int(e.cand.entry_time) for e in se])
+for k in KS:
+    for fill in ('stop','bar_low'):
+        for name, base in (('gate', m.GATED), ('nogate', w.BASE)):
+            res[('spot',fill,name,k)]=w.place(sp, se, dataclasses.replace(base, stop_multiple=k), counts=sc, stop_fill=fill)
+pickle.dump(res, open(f'{D}/trades_sm.pkl','wb'))
+print('done', time.monotonic()-t0, flush=True)

@@ -1,0 +1,39 @@
+"""거래마다 진입 순간(인과적) 특징을 붙인다 — 24h 신호 수 · BTC 4h/24h/72h 수익률 · 몰림 시작 후 경과 · TF · 손절폭."""
+import pickle, bisect, time
+import numpy as np
+from backtest import wan438_spot_stress as m
+from backtest import wan436_stoch_crowd_rules as w
+from data import spot_klines
+from data.storage import OhlcvStore
+t0=time.monotonic()
+T = pickle.load(open('/private/tmp/claude-501/-Users-joyongjin-AlphaBlock/58d0d837-941d-4e58-825e-1174ea614022/scratchpad/explore/trades.pkl','rb'))
+def btc_series(store, a, b):
+    f = w._minute_frame(store, w.BTC_SYMBOL, a, b)
+    return f['open_time'].to_numpy(np.int64), f['close'].to_numpy(float)
+def ret(tt, cc, t, mins):
+    j = int(np.searchsorted(tt, t)) - 1
+    i = int(np.searchsorted(tt, int(tt[j]) - mins*60000, side='right')) - 1
+    return float(cc[j]/cc[i]-1) if i >= 0 and j >= 0 else np.nan
+out = pickle.load(open('/private/tmp/claude-501/-Users-joyongjin-AlphaBlock/58d0d837-941d-4e58-825e-1174ea614022/scratchpad/explore/features.pkl','rb'))
+for market, entries_fn, store, a, b in (
+    ('fut', None, OhlcvStore(m.REPO_ROOT/'data/ohlcv.db'), m.ms('2020-09-01'), m.ms('2026-07-23')),):
+    tt, cc = btc_series(store, a, b)
+    # 신호 시각 = 팔 후보 전체(게이트 전) — trades.pkl에는 배치된 거래만 있으므로 후보를 다시 만든다
+    if market == 'fut':
+        pl = w.build_base_payloads(jobs=4, payload_dir=w.DEFAULT_PAYLOAD_DIR)
+        es = w.build_entries(pl, store=store)
+    else:
+        pl = m.spot_payloads(m.DEFAULT_ROOTS/'stress', start=m.STRESS_START, end=m.STRESS_END, jobs=4)
+        es = m.entries_for(pl, store, start_ms=m.ms(m.STRESS_START), end_ms=m.ms(m.STRESS_END), k_threshold=25.0, entry_from_ms=m.ms('2018-01-01'), entry_to_ms=m.ms(m.STRESS_END))
+    sig = sorted(int(e.cand.entry_time) for e in es)
+    feat = {}
+    for e in es:
+        t = int(e.cand.entry_time)
+        n24 = bisect.bisect_left(sig, t) - bisect.bisect_left(sig, t - 86400000)
+        n6 = bisect.bisect_left(sig, t) - bisect.bisect_left(sig, t - 6*3600000)
+        c = e.cand
+        feat[(e.symbol, e.timeframe, t)] = dict(n24=n24, n6=n6, btc4=ret(tt,cc,t,240), btc24=ret(tt,cc,t,1440), btc72=ret(tt,cc,t,4320),
+            width=(c.entry_price-c.stop_price)/c.entry_price, tf=e.timeframe)
+    out[market] = feat
+    print(market, len(feat), time.monotonic()-t0, flush=True)
+pickle.dump(out, open('/private/tmp/claude-501/-Users-joyongjin-AlphaBlock/58d0d837-941d-4e58-825e-1174ea614022/scratchpad/explore/features.pkl','wb'))

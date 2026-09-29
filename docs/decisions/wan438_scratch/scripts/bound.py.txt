@@ -1,0 +1,14 @@
+import sys
+sys.path.insert(0, '.')
+from rsim import run, summary
+from search import fit
+from layers import layer, B
+from capit import T
+Y86 = 8.556
+for name, tiers, capit in (('A 기준', [], None), ('B 폭락×0.5', B, None), ('C B+투매예외', B, 8.0)):
+    f_low = layer('fut', T[('fut', 'bar_low', 'gate')], tiers, capit)
+    f_stop = layer('fut', T[('fut', 'stop', 'gate')], tiers, capit)
+    r = fit(lambda x: summary(run(f_low, risk=x))[1], target=0.35)
+    lo, st = summary(run(f_low, risk=r))[0], summary(run(f_stop, risk=r))[0]
+    print(f"{name}: 6년만 미끄러짐MDD35% 크기 {r:.2%} → 6년 {lo:+.0%}~{st:+.0%} | 2018~2020을 0%로 쳐도 8.6년 연 {(1+lo)**(1/Y86)-1:.1%} ~ {(1+st)**(1/Y86)-1:.1%}")
+print("8.6년 연 40%에 필요한 총수익:", f"{1.4**Y86-1:+.0%}")

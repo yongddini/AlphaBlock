@@ -1,0 +1,20 @@
+import pickle, sys, datetime as dt
+sys.path.insert(0, '.')
+import numpy as np
+from rsim import Rules, run, summary, chain, MINUTE_MS
+from search import evaluate
+T = pickle.load(open('trades.pkl', 'rb'))
+CAND = Rules(dd_k=1.0, dd_floor=0.5, day_loss=0.08)
+BR = Rules(day_loss=0.08)
+def when(p):
+    peak = np.maximum.accumulate(np.maximum(p.mtm_low, 1.0)); dd = 1 - p.mtm_low / peak
+    i = int(np.argmax(dd)); return dt.datetime.fromtimestamp((p.start + i * MINUTE_MS) / 1000, dt.UTC).strftime('%Y-%m-%d'), round(float(dd[i]), 3)
+print("== 6년 선물, 크기 2% 고정")
+for name, r in (("기준", Rules()), ("하루손실8%", BR), ("후보", CAND)):
+    p = run(T[('fut', 'stop', 'gate')], risk=0.02, rules=r)
+    print(name, "수익 %+.0f%%" % (100 * summary(p)[0]), "MDD", when(p), "거래", p.taken)
+print("== 견고성(8.6년 30% 맞춤)")
+for arm, fill in (('gate', 'bar_low'), ('nogate', 'stop'), ('nogate', 'bar_low')):
+    b = evaluate(arm, fill, Rules()); c = evaluate(arm, fill, CAND)
+    print(arm, fill, "기준 %+.0f%% 후보 %+.0f%% 유지 %.0f/%.0f%%" % (100*b['chain_ret'], 100*c['chain_ret'], 100*c['keep_spot'], 100*c['keep_fut']),
+          "| 6년만 %+.0f%% → %+.0f%%" % (100*b['fut_ret@30'], 100*c['fut_ret@30']))

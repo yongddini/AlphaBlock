@@ -1,0 +1,26 @@
+import pickle
+import sys
+
+sys.path.insert(0, "/private/tmp/claude-501/-Users-joyongjin-AlphaBlock/58d0d837-941d-4e58-825e-1174ea614022/scratchpad/explore")
+from rsim import Rules, chain, run, summary  # noqa: E402
+from search import fit  # noqa: E402
+
+D = "/private/tmp/claude-501/-Users-joyongjin-AlphaBlock/58d0d837-941d-4e58-825e-1174ea614022/scratchpad/explore"
+T = pickle.load(open(f"{D}/trades_sm.pkl", "rb"))
+rules = Rules()
+for arm in ("gate", "nogate"):
+    for fill in ("stop", "bar_low"):
+        base_n = None
+        for k in (1.5, 2.0, 3.0, 4.0):
+            s, f = T[("spot", fill, arm, k)], T[("fut", fill, arm, k)]
+            r = fit(lambda x: chain(run(s, risk=x), run(f, risk=x))[1])
+            tot, dd = chain(run(s, risk=r), run(f, risk=r))
+            rs = fit(lambda x: summary(run(s, risk=x))[1])
+            rf = fit(lambda x: summary(run(f, risk=x))[1])
+            n = len(s) + len(f)
+            base_n = base_n or n
+            print(
+                f"{arm:6s} {fill:7s} 손절{k:g}배 | 거래 {len(s)}+{len(f)} | 8.6년30% 크기 {r:.2%} 수익 {tot:+.0%} | "
+                f"창밖30% {summary(run(s, risk=rs))[0]:+.0%} | 6년30% {summary(run(f, risk=rf))[0]:+.0%}",
+                flush=True,
+            )

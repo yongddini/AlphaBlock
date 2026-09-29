@@ -1,0 +1,43 @@
+"""15m 시험 실행 — BTC 24h(진입 직전 확정 1분봉) 계산 + 사전 고정 판정 출력."""
+
+import pickle
+import sys
+
+import numpy as np
+
+sys.path.insert(0, "/private/tmp/claude-501/-Users-joyongjin-AlphaBlock/58d0d837-941d-4e58-825e-1174ea614022/scratchpad/explore")
+from backtest import wan436_stoch_crowd_rules as w  # noqa: E402
+from backtest import wan438_spot_stress as m  # noqa: E402
+from data import spot_klines  # noqa: E402
+from data.storage import OhlcvStore  # noqa: E402
+from tf15_eval import T, evaluate, verdict  # noqa: E402
+
+extra = {}
+for market, store, a, b in (
+    ("spot", OhlcvStore(spot_klines.root_db_path(m.DEFAULT_ROOTS / "stress")), m.ms("2017-12-01"), m.ms("2020-09-01")),
+    ("fut", OhlcvStore(m.REPO_ROOT / "data/ohlcv.db"), m.ms("2020-08-01"), m.ms("2026-07-23")),
+):
+    f = w._minute_frame(store, w.BTC_SYMBOL, a, b)
+    tt, cc = f["open_time"].to_numpy(np.int64), f["close"].to_numpy(float)
+    for k, v in T.items():
+        if k[0] != market:
+            continue
+        for t in v:
+            j = int(np.searchsorted(tt, t.entry_time)) - 1
+            i = int(np.searchsorted(tt, int(tt[j]) - 1440 * 60000, side="right")) - 1
+            extra[(market, t.symbol, t.timeframe, t.entry_time)] = (
+                float(cc[j] / cc[i] - 1) if i >= 0 and j >= 0 else float("nan")
+            )
+
+rows = evaluate(extra)
+for (layer, variant), o in rows.items():
+    for fill in ("bar_low", "stop"):
+        x = o[fill]
+        print(
+            f"층{layer} {variant:5s} {fill:7s} 크기 {o['risk']:.2%} 거래 {o['n'][0]}+{o['n'][1]} | "
+            f"8.6년 {x['8.6년'][0]:+.0%} 연 {x['8.6년'][2]:.1%} MDD {x['8.6년'][1]:.1%} | "
+            + " | ".join(f"{k} {x[k][0]:+.0%}/{x[k][1]:.1%}" for k in ("창밖", "6년앞", "6년뒤"))
+        )
+for layer in ("A", "B"):
+    ok, better, seg = verdict(rows, layer)
+    print(f"판정 층{layer}: {'✅ 통과' if ok else '❌ 기각'} — 8.6년 개선 {better} · 구간별 {seg}")

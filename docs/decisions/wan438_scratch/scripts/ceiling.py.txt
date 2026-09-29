@@ -1,0 +1,25 @@
+import pickle, sys
+sys.path.insert(0, '.')
+from rsim import Rules, chain, run, summary
+from search import fit
+from backtest.run import parse_date_ms as ms
+T = pickle.load(open('trades.pkl', 'rb'))
+s, f = T[('spot','stop','gate')], T[('fut','stop','gate')]
+def chained(s, f, rules=Rules()):
+    r = fit(lambda x: chain(run(s, risk=x, rules=rules), run(f, risk=x, rules=rules))[1])
+    return r, chain(run(s, risk=r, rules=rules), run(f, risk=r, rules=rules))[0]
+print('기준', chained(s, f))
+# 신탁: 2020-03-12~13(UTC) 진입 현물 거래를 전부 지움
+cut = [t for t in s if not (ms('2020-03-12') <= t.entry_time < ms('2020-03-14'))]
+print('신탁(03-12~13 현물 거래 삭제)', len(s)-len(cut), chained(cut, f))
+cut2 = [t for t in s if not (ms('2020-03-01') <= t.entry_time < ms('2020-04-01'))]
+print('신탁(2020-03 전체 삭제)', len(s)-len(cut2), chained(cut2, f))
+# 선물은 규칙 없이 자기 30% 크기 = 선물 단독 최대
+rf = fit(lambda x: summary(run(f, risk=x))[1]); print('선물 단독 30% 크기', rf, summary(run(f, risk=rf)))
+C = Rules(dd_k=1.0, dd_floor=0.5, day_loss=0.08)
+r, tot = chained(s, f, C); print('후보', r, tot)
+for name, rr, rules in (('기준', 0.0163, Rules()), ('후보', r, C)):
+    ps, pf = run(s, risk=rr, rules=rules), run(f, risk=rr, rules=rules)
+    front = [t for t in f if not t.back]; back = [t for t in f if t.back]
+    print(name, '창밖', [round(x,3) for x in summary(ps)], '6년', [round(x,3) for x in summary(pf)],
+          '앞', [round(x,3) for x in summary(run(front, risk=rr, rules=rules))], '뒤', [round(x,3) for x in summary(run(back, risk=rr, rules=rules))])

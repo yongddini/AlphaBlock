@@ -71,6 +71,7 @@ from collections.abc import Iterable, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 
@@ -380,16 +381,28 @@ def build_base_payloads(
             start=harness.DEFAULT_START,
             end=harness.DEFAULT_END,
             jobs=jobs,
-            take_profit_liquidity=harness.ADOPTED_TAKE_PROFIT_LIQUIDITY,
-            retap_mode="once",
-            reentry=False,
-            engine_check=False,
-            fill=harness.fill_preset(fill_lens),
-            no_same_step_tp=True,
             payload_cache=PayloadCache(payload_dir),
+            **base_cell_kwargs(fill_lens),
         )
     )
     return payloads
+
+
+def base_cell_kwargs(fill_lens: str = "pen_5bp") -> dict[str, Any]:
+    """base 후보를 만드는 `run_cells` 인자 — 🚨 이 팔의 후보 규약이 사는 **유일한 자리**다.
+
+    창(`start`/`end`)·병렬·캐시는 호출부 몫이고 나머지(롱 · 첫 탭 · 재진입 없음 · 체결 렌즈 ·
+    같은 분 익절 금지 · 익절 메이커)는 여기서만 읽는다 — 다른 창으로 같은 팔을 도는 측정(WAN-438
+    현물 루트)이 인자를 베껴 두 벌로 갈라지지 않게 한다(WAN-95/112/123).
+    """
+    return {
+        "take_profit_liquidity": harness.ADOPTED_TAKE_PROFIT_LIQUIDITY,
+        "retap_mode": "once",
+        "reentry": False,
+        "engine_check": False,
+        "fill": harness.fill_preset(fill_lens),
+        "no_same_step_tp": True,
+    }
 
 
 def build_arm_cells(

@@ -1,0 +1,12 @@
+import sys
+sys.path.insert(0, '.')
+from rsim import chain, run, summary
+from search import fit
+from capit import scaled, T
+for arm, fill in (('gate','stop'), ('gate','bar_low'), ('nogate','stop'), ('nogate','bar_low')):
+    for mult in (1.0, 0.75, 0.5, 0.25):
+        s = scaled('spot', T[('spot', fill, arm)], mult, 1e12, -0.05); f = scaled('fut', T[('fut', fill, arm)], mult, 1e12, -0.05)
+        r = fit(lambda x: chain(run(s, risk=x), run(f, risk=x))[1]); tot = chain(run(s, risk=r), run(f, risk=r))[0]
+        fr = [t for t in f if not t.back]; bk = [t for t in f if t.back]
+        res = [summary(run(z, risk=fit(lambda x, z=z: summary(run(z, risk=x))[1])))[0] for z in (s, f, fr, bk)]
+        print(f"{arm:6s} {fill:7s} 폭락국면×{mult:g} | 크기 {r:.2%} 8.6년30% {tot:+6.0%} | 각자30%: 창밖 {res[0]:+.0%} 6년 {res[1]:+.0%} 앞 {res[2]:+.0%} 뒤 {res[3]:+.0%}", flush=True)

@@ -1,0 +1,27 @@
+"""BTC 장기 추세(전날까지 확정된 일봉 종가 대 SMA 50/100/200) — 인과적."""
+import pickle, numpy as np, pandas as pd
+from backtest import wan438_spot_stress as m
+from backtest import wan436_stoch_crowd_rules as w
+from data import spot_klines
+from data.storage import OhlcvStore
+D='/private/tmp/claude-501/-Users-joyongjin-AlphaBlock/58d0d837-941d-4e58-825e-1174ea614022/scratchpad/explore'
+F=pickle.load(open(f'{D}/features.pkl','rb'))
+def daily(store, a, b):
+    f=store.load(w.BTC_SYMBOL,'1d',start_ms=a,end_ms=b)
+    return f['open_time'].to_numpy(np.int64), f['close'].to_numpy(float)
+# 선물 DB의 BTC 일봉은 2020-07부터라 200일 SMA가 2021-02까지 안 선다 → 추세는 현물 BTC 일봉으로 잰다(가격 차이 무시 가능)
+spot=OhlcvStore(spot_klines.root_db_path(m.DEFAULT_ROOTS/'stress'))
+ov=OhlcvStore(spot_klines.root_db_path(m.DEFAULT_ROOTS/'overlap'))
+fut=OhlcvStore(m.REPO_ROOT/'data/ohlcv.db')
+t1,c1=daily(spot,0,m.ms('2020-09-01'))
+t3,c3=daily(fut,m.ms('2020-09-01'),m.ms('2026-08-01'))
+tt=np.concatenate([t1,t3]); cc=np.concatenate([c1,c3])
+s=pd.Series(cc,index=tt)
+ma={n:s.rolling(n).mean().to_numpy() for n in (50,100,200)}
+for market in F:
+    for k,f in F[market].items():
+        t=k[2]; j=int(np.searchsorted(tt,(t//86400000)*86400000))-1  # 전날까지 닫힌 일봉
+        for n in (50,100,200):
+            f[f'ma{n}']=float(cc[j]/ma[n][j]-1) if j>=0 and not np.isnan(ma[n][j]) else np.nan
+pickle.dump(F,open(f'{D}/features.pkl','wb'))
+print('ok', tt[0], len(tt))

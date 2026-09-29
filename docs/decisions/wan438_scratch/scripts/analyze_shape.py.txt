@@ -1,0 +1,33 @@
+import pickle
+import sys
+
+import pandas as pd
+
+D = "/private/tmp/claude-501/-Users-joyongjin-AlphaBlock/58d0d837-941d-4e58-825e-1174ea614022/scratchpad/explore"
+T = pickle.load(open(f"{D}/trades.pkl", "rb"))
+F = pickle.load(open(f"{D}/features.pkl", "rb"))
+arm = sys.argv[1] if len(sys.argv) > 1 else "gate"
+rows = []
+for market in ("spot", "fut"):
+    for t in T[(market, "stop", arm)]:
+        f = F[market].get((t.symbol, t.timeframe, t.entry_time), {})
+        part = "현물" if market == "spot" else ("선물뒤" if t.back else "선물앞")
+        rows.append({"part": part, "r": t.net_r, "sr": t.size * t.net_r, **f})
+d = pd.DataFrame(rows)
+crash = d[d["btc24"] <= -0.05]
+print("폭락 국면(BTC 24h ≤ −5%)", crash.groupby("part").agg(n=("r", "size"), R=("r", "mean"), sr=("sr", "sum")).round(3).to_string())
+cuts = {
+    "btc_speed": [-10, 0.1, 0.25, 0.5, 10],
+    "btc_vol": [0, 2, 4, 8, 1000],
+    "sym_vol": [0, 2, 4, 8, 1000],
+    "btc_off_low": [-1, 0.005, 0.015, 0.03, 1],
+    "sym_off_low": [-1, 0.01, 0.03, 0.06, 1],
+    "btc_r1": [-1, -0.03, -0.01, 0, 1],
+    "sym_r24": [-1, -0.25, -0.15, -0.08, 1],
+}
+for col, bins in cuts.items():
+    x = crash.copy()
+    x["b"] = pd.cut(x[col], bins)
+    g = x.groupby(["b", "part"], observed=True).agg(n=("r", "size"), R=("r", "mean")).unstack("part")
+    print(f"\n== {col} (폭락 국면만)")
+    print(g.round(3).to_string())

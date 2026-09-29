@@ -1,0 +1,163 @@
+"""규칙을 얹은 복리 · 1분 평가손 시뮬레이터(탐색용).
+
+`wan436.simulate`와 같은 식(진입 순간 확정 자본 × 거래당 리스크 × 크기 배율 · 1분 저가/종가 평가) 위에
+**진입 순간 상태로 들어갈지/얼마나 들어갈지** 정하는 층만 더한다. 규칙을 다 끄면 `simulate`와 같아야 한다.
+"""
+
+from __future__ import annotations
+
+import math
+from collections import deque
+from dataclasses import dataclass
+
+import numpy as np
+
+MINUTE_MS = 60_000
+DAY_MS = 86_400_000
+KST_MS = 9 * 3_600_000
+
+
+@dataclass(frozen=True)
+class Rules:
+    day_loss: float | None = None
+    """KST 하루 실현손실이 그날 시작 자본의 이 비율 이상이면 그날 남은 진입을 막는다."""
+    open_risk: float | None = None
+    """열린 포지션 리스크 합(자본 대비)이 이 값을 넘게 되는 진입을 막는다(shrink면 남은 만큼만)."""
+    budget: float | None = None
+    """직전 24시간 동안 쓴 크기 배율 합 + 이번 크기 ≤ budget(진짜 상한). shrink면 남은 만큼만."""
+    shrink: bool = False
+    dd_k: float | None = None
+    """낙폭 연동 크기: 크기 × max(dd_floor, 1 − dd_k × (실현 자본 고점 대비 낙폭)). 거래를 막지 않는다."""
+    dd_floor: float = 0.25
+    roll_loss: float | None = None
+    """직전 24시간 실현손실(그 시점 자본 대비) ≥ 이 값이면 진입을 막는다(달력 하루 대신 롤링)."""
+    min_size: float = 0.05
+    """shrink로 줄인 크기가 이보다 작으면 건너뛴다."""
+
+
+@dataclass
+class Path:
+    start: int
+    mtm_low: np.ndarray
+    mtm_close: np.ndarray
+    taken: int
+    total: int
+    size_sum: float
+
+
+def run(trades, *, risk: float, rules: Rules = Rules()) -> Path:
+    if not trades:
+        return Path(0, np.ones(1), np.ones(1), 0, 0, 0.0)
+    start = min(t.entry_time for t in trades) // MINUTE_MS * MINUTE_MS
+    end = max(t.exit_time for t in trades)
+    n = (end - start) // MINUTE_MS + 2
+    events = []
+    for i, t in enumerate(trades):
+        events.append((t.exit_time, 0, i))
+        events.append((t.entry_time, 1, i))
+    events.sort()
+    eq = 1.0
+    weight = [0.0] * len(trades)
+    taken = [False] * len(trades)
+    open_risk = 0.0  # 열린 포지션의 리스크 금액 합(절대값, 자본 단위)
+    day = None
+    day_start_eq = 1.0
+    blocked_day = None
+    recent: deque[tuple[int, float]] = deque()
+    recent_sum = 0.0
+    peak = 1.0
+    losses: deque[tuple[int, float]] = deque()
+    loss_sum = 0.0
+    for tm, kind, i in events:
+        t = trades[i]
+        if kind == 0:
+            if taken[i]:
+                pnl = risk * weight[i] * t.net_r
+                eq += pnl
+                peak = max(peak, eq)
+                open_risk -= risk * weight[i]
+                if pnl < 0:
+                    losses.append((tm, -pnl))
+                    loss_sum += -pnl
+            continue
+        if rules.roll_loss is not None:
+            while losses and losses[0][0] <= tm - DAY_MS:
+                loss_sum -= losses.popleft()[1]
+            if loss_sum >= rules.roll_loss * eq:
+                continue
+        d = (tm + KST_MS) // DAY_MS
+        if d != day:
+            day, day_start_eq = d, eq
+        size = t.size
+        if rules.dd_k is not None:
+            size *= max(rules.dd_floor, 1.0 - rules.dd_k * (1.0 - eq / peak))
+        if rules.day_loss is not None:
+            if blocked_day == d:
+                continue
+            if eq <= day_start_eq * (1.0 - rules.day_loss):
+                blocked_day = d
+                continue
+        if rules.budget is not None:
+            while recent and recent[0][0] <= tm - DAY_MS:
+                recent_sum -= recent.popleft()[1]
+            room = rules.budget - recent_sum
+            if size > room:
+                if not rules.shrink or room < rules.min_size:
+                    continue
+                size = room
+        if rules.open_risk is not None:
+            room = rules.open_risk * eq - open_risk
+            need = risk * eq * size
+            if need > room:
+                if not rules.shrink or room <= 0 or room / (risk * eq) < rules.min_size:
+                    continue
+                size = room / (risk * eq)
+        taken[i] = True
+        weight[i] = eq * size
+        open_risk += risk * weight[i]
+        if rules.budget is not None:
+            recent.append((tm, size))
+            recent_sum += size
+    realized = np.zeros(n)
+    u_low = np.zeros(n)
+    u_close = np.zeros(n)
+    for i, t in enumerate(trades):
+        if not taken[i]:
+            continue
+        realized[(t.exit_time - start) // MINUTE_MS] += risk * weight[i] * t.net_r
+        if len(t.path_times):
+            a = (int(t.path_times[0]) - start) // MINUTE_MS
+            b = (t.exit_time - start) // MINUTE_MS
+            if b > a:
+                grid = np.arange(a, b)
+                idx = np.searchsorted((t.path_times - start) // MINUTE_MS, grid, side="right") - 1
+                scale = risk * weight[i] / (t.entry_price - t.stop_price)
+                u_low[a:b] += scale * (t.path_lows[idx] - t.entry_price)
+                u_close[a:b] += scale * (t.path_closes[idx] - t.entry_price)
+    base = 1.0 + np.cumsum(realized)
+    return Path(
+        start,
+        base + u_low,
+        base + u_close,
+        sum(taken),
+        len(trades),
+        float(sum(w for w, k in zip(weight, taken) if k)),
+    )
+
+
+def mdd(low: np.ndarray, close: np.ndarray | None = None) -> float:
+    peak = np.maximum.accumulate(np.maximum(low if close is None else close, 1.0))
+    peak = np.maximum.accumulate(np.maximum(low, 1.0))
+    return float((1.0 - low / peak).max())
+
+
+def chain(a: Path, b: Path) -> tuple[float, float]:
+    """a 다음 b를 이어 붙인 (총수익, 평가손 MDD). b는 a의 마지막 종가 평가액에서 시작한다."""
+    scale = float(a.mtm_close[-1])
+    low = np.concatenate([a.mtm_low, b.mtm_low * scale])
+    final = float(b.mtm_close[-1]) * scale
+    return final - 1.0, mdd(low)
+
+
+def summary(p: Path) -> tuple[float, float]:
+    return float(p.mtm_close[-1]) - 1.0, mdd(p.mtm_low)

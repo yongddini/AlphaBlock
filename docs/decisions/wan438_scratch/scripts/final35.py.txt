@@ -1,0 +1,11 @@
+import sys
+sys.path.insert(0, '.')
+from rsim import Rules, chain, run, summary
+from layers import layer, B
+from capit import T
+Y86, Y6 = 8.556, 5.85
+for name, tiers, capit, r in (('A 기준', [], None, 0.0162), ('B 폭락×0.5', B, None, 0.0289), ('C B+투매예외', B, 8.0, 0.0276)):
+    for fill in ('bar_low', 'stop'):
+        s = layer('spot', T[('spot', fill, 'gate')], tiers, capit); f = layer('fut', T[('fut', fill, 'gate')], tiers, capit)
+        tot, dd = chain(run(s, risk=r), run(f, risk=r)); f6 = summary(run(f, risk=r))
+        print(f"{name} {fill:7s} 크기 {r:.2%} | 8.6년 {tot:+.0%} 연 {(1+tot)**(1/Y86)-1:.1%} MDD {dd:.1%} | 6년 {f6[0]:+.0%} 연 {(1+f6[0])**(1/Y6)-1:.1%} MDD {f6[1]:.1%}")

@@ -251,6 +251,9 @@ _UNPINNED_BY_DESIGN: dict[str, str] = {
     # WAN-424 §1 기준값 재현으로 팔 동일성을 값으로 못 박는다.
     "wan428_zone_rank_stoch_arm.py": "wan424 §1 팔(인과 엔진) 재사용 · 기준값 재현 (검산 a′)",
     "wan428_zone_cap_book.py": "wan408 후보·배치 재사용(채택 인과) · 검산 (a) ≡ 인자 없는 채택 북",
+    # WAN-438 — WAN-436 팔을 현물 루트에서 돈다. base 후보 인자는 `wan424.base_cell_kwargs`
+    # (인과 엔진) 그대로이고 바꾼 것은 데이터와 창뿐이다 — 대조의 선물 쪽이 WAN-424 캐시(인과)다.
+    "wan438_spot_stress.py": "wan424 base 인자 재사용(인과 엔진) · 현물 루트 · 선물 캐시 대조",
 }
 
 

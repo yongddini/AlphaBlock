@@ -1,0 +1,38 @@
+"""특징 버킷별 거래당 net R — 현물 창 밖 · 선물 앞구간 · 선물 뒷구간이 같은 방향인 칸을 찾는다."""
+
+import pickle
+import sys
+
+import numpy as np
+import pandas as pd
+
+T = pickle.load(open("trades.pkl", "rb"))
+F = pickle.load(open("features.pkl", "rb"))
+arm = sys.argv[1] if len(sys.argv) > 1 else "nogate"
+rows = []
+for market in ("spot", "fut"):
+    for t in T[(market, "stop", arm)]:
+        f = F[market].get((t.symbol, t.timeframe, t.entry_time))
+        if f is None:
+            continue
+        part = "현물" if market == "spot" else ("선물뒤" if t.back else "선물앞")
+        rows.append({"part": part, "r": t.net_r, "size": t.size, "sr": t.size * t.net_r, **f})
+d = pd.DataFrame(rows)
+print(d.groupby("part").agg(n=("r", "size"), meanR=("r", "mean"), sumSR=("sr", "sum")).round(3))
+
+cuts = {
+    "n24": [-1, 0, 10, 20, 40, 1000],
+    "n6": [-1, 0, 5, 10, 20, 1000],
+    "btc4": [-1, -0.05, -0.025, -0.01, 0, 1],
+    "btc24": [-1, -0.10, -0.05, -0.02, 0, 0.03, 1],
+    "btc72": [-1, -0.15, -0.08, -0.03, 0, 0.05, 1],
+    "width": [0, 0.05, 0.07, 0.10, 0.15, 1],
+}
+for col, bins in cuts.items():
+    d["b"] = pd.cut(d[col], bins)
+    g = d.groupby(["b", "part"], observed=True).agg(n=("r", "size"), R=("r", "mean")).unstack("part")
+    print(f"\n== {col}")
+    print(g.round(3).to_string())
+g = d.groupby(["tf", "part"]).agg(n=("r", "size"), R=("r", "mean")).unstack("part")
+print("\n== tf")
+print(g.round(3).to_string())

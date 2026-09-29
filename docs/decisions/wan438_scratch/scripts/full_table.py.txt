@@ -1,0 +1,17 @@
+import sys
+sys.path.insert(0, '.')
+from rsim import Rules, chain, run, summary
+from layers import layer, B
+from capit import T
+Y = {'8.6년': 8.556, '창밖': 2.667, '6년앞': 3.89, '6년뒤': 1.96}
+arms = (('A 페이퍼 팔 그대로', [], None, Rules(), 0.0162), ('B A+폭락 국면×0.5', B, None, Rules(), 0.0289),
+        ('C B+투매 예외', B, 8.0, Rules(), 0.0276), ('D B+하루손실8% 멈춤', B, None, Rules(day_loss=0.08), 0.0351))
+for name, tiers, capit, rules, r in arms:
+    for fill in ('bar_low', 'stop'):
+        s = layer('spot', T[('spot', fill, 'gate')], tiers, capit); f = layer('fut', T[('fut', fill, 'gate')], tiers, capit)
+        ps, pf = run(s, risk=r, rules=rules), run(f, risk=r, rules=rules)
+        tot, dd = chain(ps, pf)
+        fr = summary(run([t for t in f if not t.back], risk=r, rules=rules)); bk = summary(run([t for t in f if t.back], risk=r, rules=rules))
+        sp = summary(ps)
+        cells = {'8.6년': (tot, dd), '창밖': sp, '6년앞': fr, '6년뒤': bk}
+        print(name, fill, f"{r:.2%}", ' | '.join(f"{k} {v[0]:+.0%}(연{(1+v[0])**(1/Y[k])-1:+.0%})/{v[1]:.1%}" for k, v in cells.items()))

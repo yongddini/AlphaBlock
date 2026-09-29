@@ -1,0 +1,8 @@
+[payload-cache] /Users/joyongjin/AlphaBlock-wt/wan438/backtest/cache/wan424_payloads (pay:8ffafaaf5ada): 히트 0칸 · 미스 279칸 — 미스만 계산합니다.
+[payload-cache] 캐시 /Users/joyongjin/AlphaBlock-wt/wan438/backtest/cache/wan424_payloads (pay:8ffafaaf5ada): 히트 0 · 미스 279 · 적재 279
+fut payloads 4481.587444082834
+[payload-cache] /Users/joyongjin/AlphaBlock-wt/wan438/data/cache/wan438-roots/stress/payloads (pay:8ffafaaf5ada): 히트 0칸 · 미스 168칸 — 미스만 계산합니다.
+[payload-cache] 캐시 /Users/joyongjin/AlphaBlock-wt/wan438/data/cache/wan438-roots/stress/payloads (pay:8ffafaaf5ada): 히트 0 · 미스 168 · 적재 168
+spot payloads 4906.23301800061
+entries 5126 909 2416 442 5257.647310791537
+done 5262.42637533322 {('fut', 'long', 'stop'): 1075, ('fut', 'long', 'bar_low'): 1075, ('fut', 'long+short', 'stop'): 1632, ('fut', 'long+short', 'bar_low'): 1632, ('fut', 'short', 'stop'): 557, ('fut', 'short', 'bar_low'): 557, ('spot', 'long', 'stop'): 228, ('spot', 'long', 'bar_low'): 228, ('spot', 'long+short', 'stop'): 401, ('spot', 'long+short', 'bar_low'): 401, ('spot', 'short', 'stop'): 173, ('spot', 'short', 'bar_low'): 173}
