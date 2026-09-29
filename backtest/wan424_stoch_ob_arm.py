@@ -366,8 +366,13 @@ def build_base_payloads(
     payload_dir: Path,
     symbols: Sequence[str] = SYMBOLS,
     timeframes: Sequence[str] = TIMEFRAMES,
+    fill_lens: str = "pen_5bp",
 ) -> list[CellPayload]:
-    """base 후보 — 롱 온리 · 첫 탭 · 재진입 없음 · `pen_5bp` × 같은 분 익절 금지 · 익절 메이커."""
+    """base 후보 — 롱 온리 · 첫 탭 · 재진입 없음 · `pen_5bp` × 같은 분 익절 금지 · 익절 메이커.
+
+    `fill_lens`(옵트인, WAN-436)는 체결 렌즈만 바꾼다 — 안 주면 `pen_5bp` 그대로라 캐시 키·결과가
+    예전과 비트 동일하다.
+    """
     payloads, _donor = apply_funding_proxy(
         run_cells(
             symbols,
@@ -379,7 +384,7 @@ def build_base_payloads(
             retap_mode="once",
             reentry=False,
             engine_check=False,
-            fill=harness.fill_preset("pen_5bp"),
+            fill=harness.fill_preset(fill_lens),
             no_same_step_tp=True,
             payload_cache=PayloadCache(payload_dir),
         )
