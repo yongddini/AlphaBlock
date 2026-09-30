@@ -195,6 +195,40 @@ def test_simulate_counts_notional_cap_breaches() -> None:
     assert m.simulate(trades, risk=0.01).cap_breaches == 10
 
 
+def test_zero_duration_loss_shrinks_the_next_trades_sizing_equity() -> None:
+    """WAN-443: 진입 분 = 청산 분인 손절(보유 0분)도 뒤 거래의 크기 자본에서 빠져야 한다.
+
+    옛 정렬은 `(exit, 0) < (entry, 1)`이라 자기 청산이 자기 진입보다 먼저 처리돼
+    `weight = 0`이었다 — 최종 자본에는 들어가는데 뒤 거래가 1.0으로 사이징됐다(총 0.0).
+    """
+    trades = [_trade(0, 0, -1.0), _trade(5 * MIN, 10 * MIN, 1.0)]
+    res = m.simulate(trades, risk=0.1)
+    # 1 − 0.1 = 0.9 → 둘째 거래가 0.9로 사이징 → +0.09 → 총 −0.01
+    assert res.total_return == pytest.approx(-0.01)
+
+
+def test_other_trades_exit_still_precedes_a_new_entry_at_the_same_minute() -> None:
+    """엔진 규약 유지: 같은 분에 끝난 **다른** 거래의 손익은 그 분의 새 진입 크기에 들어간다."""
+    trades = [_trade(0, 5 * MIN, -1.0), _trade(5 * MIN, 10 * MIN, 1.0)]
+    assert m.simulate(trades, risk=0.1).total_return == pytest.approx(-0.01)
+
+
+def test_zero_duration_loss_is_unknown_to_entries_in_the_same_minute() -> None:
+    """같은 분에 함께 들어온 진입은 그 분 안의 손절을 모른다(인과) — 자본 1.0으로 사이징."""
+    trades = [_trade(0, 0, -1.0), _trade(0, 10 * MIN, 1.0)]
+    assert m.simulate(trades, risk=0.1).total_return == pytest.approx(0.0)
+
+
+def test_zero_duration_trades_do_not_leak_open_notional() -> None:
+    """보유 0분 거래의 명목이 청산 뒤에도 남아 한도 초과를 부풀리면 안 된다(WAN-443).
+
+    명목 10%짜리 60건이 옛 정렬에선 전부 누적(6배 > 5배)돼 뒤 진입이 초과로 세어졌다.
+    """
+    trades = [_trade(i * MIN, i * MIN, 0.0) for i in range(60)]
+    trades.append(_trade(100 * MIN, 110 * MIN, 0.0))
+    assert m.simulate(trades, risk=0.01).cap_breaches == 0
+
+
 def test_segment_split() -> None:
     ts = [_trade(0, MIN, 1.0, back=False), _trade(MIN, 2 * MIN, 1.0, back=True)]
     assert [t.back for t in m.segment_trades(ts, m.SEGMENT_BACK)] == [True]
@@ -300,3 +334,12 @@ def test_output_paths_keep_the_verdict_files_and_suffix_other_lenses() -> None:
     other = m.output_paths("baseline")
     assert other["csv"].name == "wan436_stoch_crowd_rules_baseline.csv"
     assert set(other.values()).isdisjoint(m.output_paths("pen_5bp").values())
+
+
+def test_legacy_zero_duration_order_reproduces_pre_wan443_numbers() -> None:
+    """재현 전용 옵트인은 옛 동작(보유 0분 손실이 뒤 거래 크기에서 안 빠짐)을 그대로 낸다 —
+    WAN-439 검산 앵커(WAN-436/438 공개 CSV)가 이 경로로만 비트 재현된다."""
+    trades = [_trade(0, 0, -1.0), _trade(5 * MIN, 10 * MIN, 1.0)]
+    legacy = m.simulate(trades, risk=0.1, legacy_zero_duration_order=True)
+    assert legacy.total_return == pytest.approx(0.0)
+    assert m.simulate(trades, risk=0.1).total_return == pytest.approx(-0.01)

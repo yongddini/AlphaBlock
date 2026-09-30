@@ -1,5 +1,7 @@
 # WAN-439 §2 — B + 15m (두 자)
 
+> 🚨 **시점 배너(WAN-443, 2026-09-30)** — 이 표의 수치는 `mtm_path`가 **보유 0분 거래(진입 분 = 청산 분)의 손익을 뒤 거래 크기에서 빼지 않던** 옛 정렬 위의 값이다. 고친 뒤 WAN-439 재측정은 **판정 불변 · 8.6년 연환산 −0.2~0.6%p · 맞춤 크기 ±0.005%p**였고 이 표는 덮어쓰지 않았다(재산출은 사용자 결정). `docs/decisions/wan443.md` · `backtest/reports/wan443_zero_duration_impact.csv`.
+
 > 자동 생성(`uv run python -m backtest.wan439_b15m`). 결정문 `docs/decisions/wan439.md`.
 > 🚨 채택 근거 아님 · 기본값·토대·페이퍼 규칙 불변.
 

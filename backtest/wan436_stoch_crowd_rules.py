@@ -526,19 +526,30 @@ class MtmPath:
     """실현 손익만의 계좌 가치(열린 포지션 평가손 제외) — WAN-439 「청산 기준 MDD」 자."""
 
 
-def mtm_path(trades: Sequence[PlacedTrade], *, risk: float) -> MtmPath:
+def mtm_path(
+    trades: Sequence[PlacedTrade], *, risk: float, legacy_zero_duration_order: bool = False
+) -> MtmPath:
     """진입 순간의 확정 자본 기준 복리 · 1분마다 저가·종가로 평가한 계좌 가치 경로.
 
     `simulate`가 이 경로 위에서 요약을 낸다 — 두 벌로 갈라지면 「같은 자로 쟀다」가 거짓이 된다.
+
+    `legacy_zero_duration_order=True`는 **WAN-443 이전 공개 CSV 재현 전용**이다(검산 앵커만 쓴다) —
+    보유 0분 거래의 청산을 자기 진입보다 먼저 처리해 그 손익이 뒤 거래의 크기 자본에서 빠지지
+    않던 옛 동작이다. 새 측정에 쓰지 말 것.
     """
     if not trades:
         raise ValueError("거래가 없으면 경로가 없다")
     start = min(t.entry_time for t in trades) // MINUTE_MS * MINUTE_MS
     end = max(t.exit_time for t in trades)
     n = (end - start) // MINUTE_MS + 2
+    # 같은 시각은 「먼저 열린 거래의 청산 → 새 진입」(엔진 규약). 단 보유 0분 거래(진입 분 =
+    # 청산 분)는 **자기 진입 뒤에** 청산한다(종류 2) — 종류 0으로 두면 자기 진입보다 먼저
+    # 처리돼 `weight[i] = 0`이라 손익이 `eq`에 안 들어가고(뒤 거래 크기가 낙관) 명목도 영구히
+    # 남는다(WAN-443). 같은 분에 들어온 다른 진입은 그 손실을 모르고 크기를 받는다(인과).
     events: list[tuple[int, int, int]] = []
     for i, t in enumerate(trades):
-        events.append((t.exit_time, 0, i))  # 같은 시각은 청산 먼저(엔진 규약)
+        zero = t.exit_time <= t.entry_time and not legacy_zero_duration_order
+        events.append((t.exit_time, 2 if zero else 0, i))
         events.append((t.entry_time, 1, i))
     events.sort()
     eq = 1.0
@@ -548,7 +559,7 @@ def mtm_path(trades: Sequence[PlacedTrade], *, risk: float) -> MtmPath:
     breaches = 0
     for _tm, kind, i in events:
         t = trades[i]
-        if kind == 0:
+        if kind != 1:
             eq += risk * weight[i] * t.net_r
             open_notional -= notional[i]
             continue
@@ -575,11 +586,16 @@ def mtm_path(trades: Sequence[PlacedTrade], *, risk: float) -> MtmPath:
     return MtmPath(start, end, base + u_low, base + u_close, breaches, base)
 
 
-def simulate(trades: Sequence[PlacedTrade], *, risk: float) -> SimResult:
-    """진입 순간의 확정 자본 기준 복리 · 1분마다 저가·종가로 평가한 계좌 가치."""
+def simulate(
+    trades: Sequence[PlacedTrade], *, risk: float, legacy_zero_duration_order: bool = False
+) -> SimResult:
+    """진입 순간의 확정 자본 기준 복리 · 1분마다 저가·종가로 평가한 계좌 가치.
+
+    `legacy_zero_duration_order`는 `mtm_path`와 같다(WAN-443 이전 공개 CSV 재현 전용).
+    """
     if not trades:
         return SimResult(0, 0.0, 0.0, 0.0, 0.0, 0.0, 0, 0, 0, {})
-    path = mtm_path(trades, risk=risk)
+    path = mtm_path(trades, risk=risk, legacy_zero_duration_order=legacy_zero_duration_order)
     start, end, breaches = path.start, path.end, path.breaches
     mtm_low, mtm_close = path.mtm_low, path.mtm_close
     n = len(mtm_low)
