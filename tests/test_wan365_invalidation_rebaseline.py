@@ -257,6 +257,7 @@ _UNPINNED_BY_DESIGN: dict[str, str] = {
     # WAN-439 — WAN-438 팔 위에 크기 층만 얹는다(후보 경로 무수정 · 인과 엔진).
     "wan439_crash_size_layer.py": "wan424/wan438 후보 경로 재사용(인과 엔진) · 크기 층만",
     "wan439_b15m.py": "wan439 경로 그대로 · TF에 15m만 더함(인과 엔진)",
+    "wan440_universe.py": "wan439 경로 그대로 · 종목만 규칙으로 넓힘(인과 엔진)",
 }
 
 

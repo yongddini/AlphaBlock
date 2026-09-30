@@ -309,6 +309,7 @@ def build_entries(
     start_ms: int | None = None,
     end_ms: int | None = None,
     k_threshold: float = K_THRESHOLD,
+    btc_store: OhlcvStore | None = None,
 ) -> list[ArmEntry]:
     """팔 후보(롱 · 첫 탭 · 재진입 아님 · 손절폭 ≥ 4% · 직전 확정봉 %K < 25)와 그 보유 구간
     1분봉.
@@ -319,7 +320,9 @@ def build_entries(
     store = store or OhlcvStore(harness.DB_PATH)
     start = parse_date_ms(harness.DEFAULT_START) if start_ms is None else start_ms
     end = parse_date_ms(harness.DEFAULT_END) if end_ms is None else end_ms
-    btc = _minute_frame(store, BTC_SYMBOL, start - DAY_MS, end)
+    # `btc_store`(옵트인, WAN-440): 종목 1분봉과 다른 루트의 BTC로 몰림 게이트를 잰다 — 여러 루트를
+    # 한 시장으로 묶을 때 BTC가 둘로 갈리지 않게 한다. 안 주면 예전처럼 `store`의 BTC다.
+    btc = _minute_frame(btc_store or store, BTC_SYMBOL, start - DAY_MS, end)
     btc_t = btc["open_time"].to_numpy(np.int64)
     btc_c = btc["close"].to_numpy(float)
     by_symbol: dict[str, list[CellPayload]] = {}

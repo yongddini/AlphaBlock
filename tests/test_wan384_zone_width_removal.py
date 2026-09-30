@@ -270,6 +270,7 @@ _NO_PIN_NEEDED: frozenset[str] = frozenset(
         # 「층 없음 ≡ WAN-436/438 공개 CSV」 검산이 깨진다.
         "wan439_crash_size_layer",
         "wan439_b15m",  # 같은 모듈의 §2 — TF에 15m만 더한다
+        "wan440_universe",  # WAN-439 경로 그대로 · 종목만 규칙으로 넓힌다
         # 존 병합 × 재탭 2×2(WAN-388)도 같다 — 필터를 켠 채 낸 표가 아니라 **필터 꺼진 채택
         # 북** 위에서 존 정의와 재탭 정책만 갈아끼운 표다(핀 없음이 설계, WAN-305). 검산
         # (a-1)/(a-2)가 `split_every` 팔 ≡ 인자 없는 채택 북을 못 박는다.

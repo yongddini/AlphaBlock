@@ -1,0 +1,47 @@
+"""무작위 31종목 최악(draw 5) vs 최선(draw 2) — 구간별 · 연도별 · 최악의 날 · 종목별."""
+import dataclasses, datetime as dt
+import pandas as pd, numpy as np
+from backtest import harness
+from backtest import wan436_stoch_crowd_rules as w
+from backtest import wan438_spot_stress as m438
+from backtest import wan439_crash_size_layer as c
+from backtest import wan440_universe as u
+from backtest.wan424_stoch_ob_arm import SYMBOLS as S31, build_base_payloads
+from data import spot_klines as sk
+from data.storage import OhlcvStore
+ms=u.ms
+rule=u.rule_symbols(); rule_store={u.store_symbol(s) for s in rule}
+new_fut=sorted(s for s in rule if u.store_symbol(s) not in set(S31))
+tfs=(*c.FUT_TIMEFRAMES,'15m')
+main_pl=build_base_payloads(jobs=4,payload_dir=w.DEFAULT_PAYLOAD_DIR,symbols=S31,timeframes=tfs)
+new_pl=u.root_payloads(u.FUT_ROOT,new_fut,tfs,harness.DEFAULT_START,harness.DEFAULT_END,4)
+bb={p.timeframe:p.boundary_ms for p in main_pl if p.symbol=='BTC/USDT:USDT'}
+new_pl=[dataclasses.replace(p,boundary_ms=bb[p.timeframe]) for p in new_pl]
+ms_=OhlcvStore(harness.DB_PATH)
+fut=u.market_from('선물',[(main_pl,ms_),(new_pl,OhlcvStore(sk.root_db_path(u.FUT_ROOT)))],start_ms=ms(harness.DEFAULT_START),end_ms=ms(harness.DEFAULT_END),entry_from_ms=0,entry_to_ms=1<<62,btc_store=ms_,btc_from_ms=ms(harness.DEFAULT_START)-(c.VOL_BASE_MIN+60)*c.MINUTE_MS)
+stress=m438.DEFAULT_ROOTS/'stress'
+old_sp=m438.spot_payloads(stress,start=m438.STRESS_START,end=m438.STRESS_END,jobs=4,timeframes=(*m438.TIMEFRAMES,'15m'))
+old_syms={p.symbol for p in old_sp}
+spot_new=sorted(s for s in rule if u.store_symbol(s) not in old_syms and u.store_symbol(s) in u._root_symbols(u.SPOT_ROOT))
+new_sp=u.root_payloads(u.SPOT_ROOT,spot_new,(*m438.TIMEFRAMES,'15m'),m438.STRESS_START,m438.STRESS_END,4)
+st=OhlcvStore(sk.root_db_path(stress))
+spot=u.market_from('현물',[(old_sp,st),(new_sp,OhlcvStore(sk.root_db_path(u.SPOT_ROOT)))],start_ms=ms(m438.STRESS_START),end_ms=ms(m438.STRESS_END),entry_from_ms=ms(c.WINDOW_START),entry_to_ms=ms(m438.STRESS_END),btc_store=st,btc_from_ms=ms(c.STRESS_BTC_FROM))
+import pickle
+pickle.dump((spot,fut),open('/private/tmp/claude-501/-Users-joyongjin-AlphaBlock/8404b15f-f496-418c-a3bc-1a764034c1b0/scratchpad/markets440.pkl','wb'))
+cv=pd.read_csv(u.CURVE_PATH)
+g=cv[(cv.variant=='+15m')&(cv.n==31)]
+def day(ms_): return dt.datetime.fromtimestamp(ms_/1000,dt.UTC).strftime('%Y-%m-%d')
+for name,d in (('최악 draw5',5),('최선 draw2',2)):
+    row=g[g.draw==d].iloc[0]; chosen={x+'/USDT:USDT' for x in row.symbols.split()}
+    s=c.place_arm(u.restrict(spot,chosen),c.ARM_B,'bar_low',in_book=True); f=c.place_arm(u.restrict(fut,chosen),c.ARM_B,'bar_low',in_book=True)
+    for label,risk in (('자기크기',row.risk),('고정3%',0.03)):
+        tot,dd=c.chain(s,f,risk); fr=[t for t in f if not t.back]; bk=[t for t in f if t.back]
+        ss,sf,sb=(w.simulate(x,risk=risk) for x in (s,fr,bk))
+        print(f'== {name} {label} {risk:.2%}: 8.6y {tot:+.0%} MDD {dd:.1%} | 창밖 {ss.total_return:+.0%}/{ss.mdd_low:.1%} worst {day(ss.mdd_trough_ms)} | 앞 {sf.total_return:+.0%}/{sf.mdd_low:.1%} trough {day(sf.mdd_trough_ms)} | 뒤 {sb.total_return:+.0%}/{sb.mdd_low:.1%}',flush=True)
+    allt=[*s,*f]
+    df=pd.DataFrame({'sym':[t.symbol.split('/')[0] for t in allt],'r':[t.net_r*t.size for t in allt],'y':[day(t.exit_time)[:4] for t in allt],'d':[day(t.exit_time) for t in allt]})
+    print(' 연도별 net R(크기 반영):', df.groupby('y').r.sum().round(1).to_dict())
+    print(' 최악 5일:', df.groupby('d').r.sum().nsmallest(5).round(1).to_dict())
+    print(' 종목별 최악 5:', df.groupby('sym').r.sum().nsmallest(5).round(1).to_dict(), '최선 5:', df.groupby('sym').r.sum().nlargest(5).round(1).to_dict())
+    print(' 거래당 net R', round(df.r.mean(),4), '거래', len(df), flush=True)
+    print(' 종목:', row.symbols)
