@@ -283,13 +283,19 @@ def _mdd(low: np.ndarray) -> float:
 
 
 def chain(
-    spot: Sequence[w.PlacedTrade], fut: Sequence[w.PlacedTrade], risk: float
+    spot: Sequence[w.PlacedTrade],
+    fut: Sequence[w.PlacedTrade],
+    risk: float,
+    *,
+    legacy_zero_duration_order: bool = False,
 ) -> tuple[float, float]:
     """창 밖 다음 선물 6년을 이어 붙인 (총수익, 평가손 MDD).
 
-    뒤 구간은 앞 구간 마지막 종가 평가액에서 시작한다(탐색 `rsim.chain`과 같은 식)."""
-    a = w.mtm_path(spot, risk=risk)
-    b = w.mtm_path(fut, risk=risk)
+    뒤 구간은 앞 구간 마지막 종가 평가액에서 시작한다(탐색 `rsim.chain`과 같은 식).
+    `legacy_zero_duration_order`는 `w.mtm_path`에 그대로 넘긴다 — WAN-443 이전 공개 CSV 대조 전용.
+    """
+    a = w.mtm_path(spot, risk=risk, legacy_zero_duration_order=legacy_zero_duration_order)
+    b = w.mtm_path(fut, risk=risk, legacy_zero_duration_order=legacy_zero_duration_order)
     scale = float(a.mtm_close[-1])
     low = np.concatenate([a.mtm_low, b.mtm_low * scale])
     return float(b.mtm_close[-1]) * scale - 1.0, _mdd(low)
@@ -488,17 +494,24 @@ def reference_lines(rows: Sequence[Row], arm: str, *, in_book: bool = True) -> l
 
 
 def checksum(spot: Sequence[w.PlacedTrade], fut: Sequence[w.PlacedTrade]) -> list[str]:
-    """A 팔(층 없음) · 손절가 체결 · 거래당 2% = WAN-438/436 공개 CSV와 같아야 한다."""
+    """A 팔(층 없음) · 손절가 체결 · 거래당 2% = WAN-438/436 공개 CSV와 같아야 한다.
+
+    공개 CSV는 WAN-443 이전 정렬(보유 0분 거래의 손익이 뒤 거래 크기에서 안 빠짐)로 났다 — 검산은
+    배선(후보·배치)이 같은지를 보는 것이라 **그 옛 정렬로** 대조하고, 지금 정렬의 값을 옆에 적는다.
+    """
     lines: list[str] = []
     for name, trades, anchor in (("현물 창 밖", spot, ANCHOR_SPOT), ("선물 6년", fut, ANCHOR_FUT)):
-        sim = w.simulate(trades, risk=ANCHOR_RISK)
+        sim = w.simulate(trades, risk=ANCHOR_RISK, legacy_zero_duration_order=True)
         got = {"trades": sim.trades, "total_return": sim.total_return, "mdd_low": sim.mdd_low}
         diff = max(abs(float(got[k]) - float(anchor[k])) for k in anchor)
         if diff > CHECKSUM_TOL:
             raise AssertionError(f"검산 실패 — {name}: {got} vs 공개 {anchor} (차 {diff:.2e})")
+        now = w.simulate(trades, risk=ANCHOR_RISK)
+        zero = sum(t.exit_time <= t.entry_time for t in trades)
         lines.append(
             f"{name}: 거래 {sim.trades} · 수익 {sim.total_return:+.4%} · MDD "
-            f"{sim.mdd_low:.4%} — 공개 CSV와 최대 차 {diff:.2e}"
+            f"{sim.mdd_low:.4%} — 공개 CSV와 최대 차 {diff:.2e}(WAN-443 이전 정렬) · "
+            f"보유 0분 {zero}건 · 지금 정렬 수익 {now.total_return:+.4%} · MDD {now.mdd_low:.4%}"
         )
     return lines
 
