@@ -1,0 +1,87 @@
+"""모멘텀 월간 갈아끼우기(탐색 · 착수 전 고정): 53종목 풀에서 매달 1일 직전 L일 수익률 상위 31종목."""
+import pickle, datetime as dt, bisect
+import numpy as np, pandas as pd
+from backtest import harness
+from backtest import wan436_stoch_crowd_rules as w
+from backtest import wan438_spot_stress as m438
+from backtest import wan439_crash_size_layer as c
+from backtest import wan440_universe as u
+from data import spot_klines as sk
+from data.storage import OhlcvStore
+D='/private/tmp/claude-501/-Users-joyongjin-AlphaBlock/8404b15f-f496-418c-a3bc-1a764034c1b0/scratchpad'
+spot,fut=pickle.load(open(f'{D}/markets440.pkl','rb'))
+DAY=86_400_000; N=31
+def daily(stores, symbols, a, b):
+    out={}
+    for s in symbols:
+        for st in stores:
+            f=st.load(s,'1d',start_ms=a,end_ms=b)
+            if len(f):
+                f=f.sort_values('open_time'); out[s]=(f.open_time.to_numpy(np.int64), f.close.to_numpy(float)); break
+    return out
+fut_syms=sorted({p.symbol for p in fut.payloads}); spot_syms=sorted({p.symbol for p in spot.payloads})
+fut_d=daily([OhlcvStore(harness.DB_PATH),OhlcvStore(sk.root_db_path(u.FUT_ROOT))],fut_syms,u.ms('2019-06-01'),u.ms(harness.DEFAULT_END))
+stress=m438.DEFAULT_ROOTS/'stress'
+spot_d=daily([OhlcvStore(sk.root_db_path(stress)),OhlcvStore(sk.root_db_path(u.SPOT_ROOT))],spot_syms,u.ms('2017-01-01'),u.ms(m438.STRESS_END))
+def month_starts(a,b):
+    d=dt.datetime.fromtimestamp(a/1000,dt.UTC).replace(day=1,hour=0,minute=0,second=0,microsecond=0)
+    out=[]
+    while d.timestamp()*1000<b:
+        out.append(int(d.timestamp()*1000)); d=(d.replace(day=28)+dt.timedelta(days=4)).replace(day=1)
+    return out
+WEEK=7*DAY
+def week_starts(a,b):
+    # 1970-01-01은 목요일 — 월요일 0시 UTC 격자는 (t - 4일) % 7일 == 0
+    t=a-((a-4*DAY)%WEEK)
+    out=[]
+    while t<b:
+        out.append(t); t+=WEEK
+    return out
+def members(daily_map, a, b, look, top=True, starts=None):
+    """월초 t: 종가가 t 이전(= open_time + 1일 ≤ t)인 봉만 · 직전 look일 수익률 · 상위/하위 N."""
+    res={}
+    for t in (starts or month_starts)(a,b):
+        sc=[]
+        for s,(ot,cl) in daily_map.items():
+            j=bisect.bisect_right(ot, t-DAY)-1  # 마지막 확정 일봉
+            if j<0: continue
+            i=bisect.bisect_right(ot, ot[j]-look*DAY)-1
+            if i<0 or ot[j]-ot[0] < 90*DAY: continue
+            sc.append((cl[j]/cl[i]-1, s))
+        sc.sort(reverse=top)
+        res[t]={s for _,s in sc[:N]}
+    return res
+def filt(mk, mem):
+    ts=sorted(mem)
+    keep=[]
+    for k,e in enumerate(mk.entries):
+        t=int(e.cand.entry_time); i=bisect.bisect_right(ts,t)-1
+        if i>=0 and e.symbol in mem[ts[i]]: keep.append(k)
+    es=[mk.entries[k] for k in keep]
+    return c.Market(mk.name, mk.payloads, es, w.signal_counts([int(e.cand.entry_time) for e in es]), [mk.btc_24h[k] for k in keep],[mk.vol_ratio[k] for k in keep])
+bd=sorted(p.boundary_ms for p in fut.payloads if p.symbol=='BTC/USDT:USDT')[0]
+years=c._years(u.ms(c.WINDOW_START),u.ms(harness.DEFAULT_END))
+def evaluate(label, s_mk, f_mk):
+    s=c.place_arm(s_mk,c.ARM_B,'bar_low',in_book=True); f=c.place_arm(f_mk,c.ARM_B,'bar_low',in_book=True)
+    r=c.fit_risk(lambda x: c.chain(s,f,x)[1], target=0.35)
+    t1,d1=c.chain(s,f,r)
+    s3=c.place_arm(s_mk,c.ARM_B,'stop',in_book=True); f3=c.place_arm(f_mk,c.ARM_B,'stop',in_book=True)
+    t2,d2=c.chain(s3,f3,r)
+    print(f'{label}|{r:.2%}|{t1:+.0%}|{c.cagr(t1,years):+.1%}|{d1:.1%}|{t2:+.0%}|{c.cagr(t2,years):+.1%}|{d2:.1%}', flush=True)
+fa,fb=u.ms(harness.DEFAULT_START),u.ms(harness.DEFAULT_END); sa,sb=u.ms(c.WINDOW_START),u.ms(m438.STRESS_END)
+def k_starts(k):
+    def f(a,b):
+        t=a-((a-4*DAY)%WEEK)  # 월요일 0시 UTC에 맞춘 뒤 k일 간격
+        out=[]
+        while t<b:
+            out.append(t); t+=k*DAY
+        return out
+    return f
+from backtest.wan424_stoch_ob_arm import SYMBOLS as S31
+evaluate('손으로 고른 31종목', u.restrict(spot,set(S31)&{p.symbol for p in spot.payloads}), u.restrict(fut,set(S31)))
+for look,k,top,name in ((90,1,True,'90일·1일마다'),(90,3,True,'90일·3일마다'),(90,5,True,'90일·5일마다'),(90,7,True,'90일·7일마다'),(90,14,True,'90일·14일마다'),(30,7,True,'30일·7일마다'),(14,7,True,'14일·7일마다'),(90,7,False,'90일·7일마다 하위(대조)')):
+    mf=members(fut_d,fa,fb,look,top,k_starts(k)); ms_=members(spot_d,sa,sb,look,top,k_starts(k))
+    evaluate(name, filt(spot,ms_), filt(fut,mf))
+for look,name in ((90,'90일·월간'),(30,'30일·월간'),(180,'180일·월간')):
+    mf=members(fut_d,fa,fb,look,True); ms_=members(spot_d,sa,sb,look,True)
+    evaluate(name, filt(spot,ms_), filt(fut,mf))
