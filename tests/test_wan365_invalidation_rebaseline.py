@@ -262,6 +262,7 @@ _UNPINNED_BY_DESIGN: dict[str, str] = {
     "wan444_liquidity_universe.py": "wan442 장비 그대로 · 목록만 거래대금 상위로(인과 엔진)",
     "wan445_width_sizing.py": "wan442 장비 그대로 · 크기만 손절폭 비례(인과 엔진)",
     "wan447_funding_carry.py": "wan442 장비 그대로 · 자본곡선에 펀딩 캐리를 곱할 뿐(인과 엔진)",
+    "wan448_stop_fill_ticks.py": "wan442 장비 그대로 · 두 체결 극단의 net R 가중합(인과 엔진)",
 }
 
 
