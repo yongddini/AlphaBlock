@@ -259,6 +259,7 @@ _UNPINNED_BY_DESIGN: dict[str, str] = {
     "wan439_b15m.py": "wan439 경로 그대로 · TF에 15m만 더함(인과 엔진)",
     "wan440_universe.py": "wan439 경로 그대로 · 종목만 규칙으로 넓힘(인과 엔진)",
     "wan442_momentum_rotation.py": "wan440 시장 그대로 · 목록만 모멘텀으로 교체(인과 엔진)",
+    "wan444_liquidity_universe.py": "wan442 장비 그대로 · 목록만 거래대금 상위로(인과 엔진)",
 }
 
 
