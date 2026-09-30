@@ -275,6 +275,7 @@ _NO_PIN_NEEDED: frozenset[str] = frozenset(
         "wan444_liquidity_universe",  # WAN-442 장비 그대로 · 목록만 거래대금 상위로
         "wan445_width_sizing",  # WAN-442 장비 그대로 · 크기만 손절폭 비례
         "wan447_funding_carry",  # WAN-442 장비 그대로 · 자본곡선에 캐리만 곱한다
+        "wan448_stop_fill_ticks",  # WAN-442 장비 그대로 · 두 체결 극단의 가중합
         # 존 병합 × 재탭 2×2(WAN-388)도 같다 — 필터를 켠 채 낸 표가 아니라 **필터 꺼진 채택
         # 북** 위에서 존 정의와 재탭 정책만 갈아끼운 표다(핀 없음이 설계, WAN-305). 검산
         # (a-1)/(a-2)가 `split_every` 팔 ≡ 인자 없는 채택 북을 못 박는다.
