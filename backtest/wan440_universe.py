@@ -373,8 +373,20 @@ def verdict(rows: Sequence[c.Row], ruler: str, variant: str) -> tuple[bool, list
     return ok, lines
 
 
-def run(jobs: int) -> tuple[list[c.Row], list[str]]:
-    c.assert_adopted_take_profit_liquidity()
+@dataclass
+class Markets:
+    """규칙 53종목 풀의 두 시장(현물 창 밖 · 선물 6년) — WAN-442가 같은 경로로 다시 쓴다."""
+
+    spot: c.Market
+    fut: c.Market
+    boundary_ms: int
+    old_spot_syms: set[str]
+    rule_store: set[str]
+    notes: list[str]
+
+
+def build_markets(jobs: int) -> Markets:
+    """규칙 유니버스 전체의 현물 · 선물 시장(팔 후보 + BTC 특징)을 만든다."""
     t0 = time.monotonic()
     notes: list[str] = []
     rule = rule_symbols()
@@ -443,6 +455,15 @@ def run(jobs: int) -> tuple[list[c.Row], list[str]]:
     if bounds[-1] - bounds[0] > 7 * 86_400_000:
         raise AssertionError(f"앞/뒤 경계가 일주일 넘게 벌어졌다: {bounds[0]}~{bounds[-1]}")
     boundary_ms = bounds[len(bounds) // 2]
+    return Markets(spot, fut, boundary_ms, old_spot_syms, rule_store, notes)
+
+
+def run(jobs: int) -> tuple[list[c.Row], list[str]]:
+    c.assert_adopted_take_profit_liquidity()
+    t0 = time.monotonic()
+    built = build_markets(jobs)
+    spot, fut, boundary_ms = built.spot, built.fut, built.boundary_ms
+    old_spot_syms, rule_store, notes = built.old_spot_syms, built.rule_store, built.notes
 
     # 현물 창 밖은 두 유니버스 모두 「그 종목에 현물 데이터가 있으면 쓴다」로 맞춘다 — WAN-438
     # 루트는 손으로 고른 21종목뿐이라(SOL·DOT·COMP·CRV·SNX·YFI 없음) 그대로 두면 31종목과 규칙
