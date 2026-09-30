@@ -459,11 +459,63 @@ class Run:
     notes: list[str]
 
 
-def run(built: u.Markets) -> Run:
-    c.assert_adopted_take_profit_liquidity()
-    t0 = time.monotonic()
+@dataclass
+class Setting:
+    """목록을 얹기 전의 공통 준비 — 일봉 · 리밸런싱 격자 · 풀로 좁힌 시장.
+
+    WAN-444가 같은 경로를 쓴다(두 벌로 갈라지면 무작위 20회가 같은 판이 아니게 된다).
+    """
+
+    spot_d: dict[str, Daily]
+    fut_d: dict[str, Daily]
+    spot_times: list[int]
+    fut_times: list[int]
+    spot_pool: c.Market
+    fut_pool: c.Market
+    hand_spot: c.Market
+    hand_fut: c.Market
+    boundary_ms: int
+    note: str
+
+    def rotations(
+        self, member_fn: Callable[[Mapping[str, Daily], int], frozenset[str]]
+    ) -> tuple[Rotation, Rotation]:
+        return (
+            Rotation(
+                tuple(self.spot_times), tuple(member_fn(self.spot_d, t) for t in self.spot_times)
+            ),
+            Rotation(
+                tuple(self.fut_times), tuple(member_fn(self.fut_d, t) for t in self.fut_times)
+            ),
+        )
+
+    def random_rotations(self) -> list[tuple[Rotation, Rotation]]:
+        """무작위 교체 20회 — 판 번호 k의 시드는 `RANDOM_SEED + k`(현물 · 선물 같은 시드)."""
+        return [
+            (
+                Rotation(
+                    tuple(self.spot_times),
+                    tuple(random_members(self.spot_d, self.spot_times, RANDOM_SEED + k)),
+                ),
+                Rotation(
+                    tuple(self.fut_times),
+                    tuple(random_members(self.fut_d, self.fut_times, RANDOM_SEED + k)),
+                ),
+            )
+            for k in range(RANDOM_DRAWS)
+        ]
+
+    def evaluate_rotation(
+        self, mode: str, config: str, stage: str, rot: tuple[Rotation, Rotation]
+    ) -> tuple[Pick, list[c.Row]]:
+        force = mode == MODE_FORCE
+        s_mk, cut_s = apply_rotation(self.spot_pool, rot[0], force_close=force)
+        f_mk, cut_f = apply_rotation(self.fut_pool, rot[1], force_close=force)
+        return evaluate(mode, config, stage, s_mk, f_mk, self.boundary_ms, cut_s + cut_f)
+
+
+def setting(built: u.Markets) -> Setting:
     spot, fut, boundary_ms = built.spot, built.fut, built.boundary_ms
-    notes = list(built.notes)
     pool = set(built.rule_store)
     spot_syms = {p.symbol for p in spot.payloads}
     fut_d = load_daily(
@@ -481,58 +533,57 @@ def run(built: u.Markets) -> Run:
     )
     fut_times = rebalance_times(u.ms(harness.DEFAULT_START), u.ms(harness.DEFAULT_END))
     spot_times = rebalance_times(u.ms(c.WINDOW_START), u.ms(m438.STRESS_END))
-    notes.append(
+    note = (
         f"일봉 — 선물 {len(fut_d)}종목 · 현물 {len(spot_d)}종목 · 리밸런싱 선물 "
         f"{len(fut_times)}회 · 현물 {len(spot_times)}회 · 앞/뒤 경계(대표) {m438._utc(boundary_ms)}"
     )
     # 풀 밖 종목(UNI · AVAX)은 모멘텀 · 무작위 목록에 오를 수 없다 — 시장도 풀로 먼저 좁힌다.
-    spot_pool = u.restrict(spot, pool & spot_syms)
-    fut_pool = u.restrict(fut, pool)
+    return Setting(
+        spot_d=spot_d,
+        fut_d=fut_d,
+        spot_times=spot_times,
+        fut_times=fut_times,
+        spot_pool=u.restrict(spot, pool & spot_syms),
+        fut_pool=u.restrict(fut, pool),
+        hand_spot=u.restrict(spot, set(SYMBOLS_31) & spot_syms),
+        hand_fut=u.restrict(fut, set(SYMBOLS_31)),
+        boundary_ms=boundary_ms,
+        note=note,
+    )
 
-    def rotations(
-        member_fn: Callable[[Mapping[str, Daily], int], frozenset[str]],
-    ) -> tuple[Rotation, Rotation]:
-        return (
-            Rotation(tuple(spot_times), tuple(member_fn(spot_d, t) for t in spot_times)),
-            Rotation(tuple(fut_times), tuple(member_fn(fut_d, t) for t in fut_times)),
-        )
 
+def run(built: u.Markets) -> Run:
+    c.assert_adopted_take_profit_liquidity()
+    t0 = time.monotonic()
+    st = setting(built)
+    boundary_ms = st.boundary_ms
+    notes = [*built.notes, st.note]
     cache: dict[str, tuple[Rotation, Rotation]] = {}
 
     def momentum(defn: str, looks: Sequence[int], top: bool = True) -> tuple[Rotation, Rotation]:
         key = config_label(defn, looks, top=top)
         if key not in cache:
-            cache[key] = rotations(lambda d, t: select(d, t, defn, looks, top=top))
+            cache[key] = st.rotations(lambda d, t: select(d, t, defn, looks, top=top))
         return cache[key]
 
     picks: list[Pick] = []
     rows: list[c.Row] = []
 
     def eval_rot(mode: str, config: str, stage: str, rot: tuple[Rotation, Rotation]) -> Pick:
-        force = mode == MODE_FORCE
-        s_mk, cut_s = apply_rotation(spot_pool, rot[0], force_close=force)
-        f_mk, cut_f = apply_rotation(fut_pool, rot[1], force_close=force)
-        pick, rr = evaluate(mode, config, stage, s_mk, f_mk, boundary_ms, cut_s + cut_f)
+        pick, rr = st.evaluate_rotation(mode, config, stage, rot)
         picks.append(pick)
         rows.extend(rr)
         return pick
 
     # 손으로 고른 31종목 고정 — 목록이 안 바뀌어 두 처리가 같다. 검산(옛 정렬 ≡ WAN-440)도 여기서.
-    hand_s = u.restrict(spot, set(SYMBOLS_31) & spot_syms)
-    hand_f = u.restrict(fut, set(SYMBOLS_31))
+    hand_s, hand_f = st.hand_spot, st.hand_fut
     notes.append(checksum_hand31(hand_s, hand_f))
     for mode in MODES:
         pick, rr = evaluate(mode, HAND31, "대조", hand_s, hand_f, boundary_ms)
         picks.append(pick)
         rows.extend(rr)
 
-    random_rots = [
-        (
-            Rotation(tuple(spot_times), tuple(random_members(spot_d, spot_times, RANDOM_SEED + k))),
-            Rotation(tuple(fut_times), tuple(random_members(fut_d, fut_times, RANDOM_SEED + k))),
-        )
-        for k in range(RANDOM_DRAWS)
-    ]
+    random_rots = st.random_rotations()
     for mode in MODES:
         stage1 = [
             eval_rot(
