@@ -1,0 +1,39 @@
+import numpy as np, pandas as pd
+from backtest import harness, wan440_universe as u, wan438_spot_stress as m438, wan439_crash_size_layer as c
+from backtest import wan442_momentum_rotation as m
+from backtest.wan424_stoch_ob_arm import SYMBOLS
+from data import spot_klines as sk
+from data.storage import OhlcvStore
+stress = m438.DEFAULT_ROOTS / "stress"
+w0, b, f1 = u.ms(c.WINDOW_START), u.ms(harness.DEFAULT_START), u.ms(harness.DEFAULT_END)
+spot = m.load_daily([OhlcvStore(sk.root_db_path(stress)), OhlcvStore(sk.root_db_path(u.SPOT_ROOT))], SYMBOLS, u.ms("2017-12-01"), u.ms(m438.STRESS_END))
+fut = m.load_daily([OhlcvStore(harness.DB_PATH), OhlcvStore(sk.root_db_path(u.FUT_ROOT))], SYMBOLS, u.ms("2020-09-01"), f1)
+def rets(d, lo, hi):
+    out = {}
+    for s, x in d.items():
+        k = (x.open_time >= lo) & (x.open_time < hi)
+        if k.sum() < 2: continue
+        out[s] = pd.Series(x.close[k], index=pd.to_datetime(x.open_time[k], unit="ms")).pct_change().dropna()
+    return pd.DataFrame(out)
+seg1 = rets(spot, w0, u.ms(m438.STRESS_END)); seg2 = rets(fut, b, f1)
+def stats(r, years):
+    eq = (1 + r.fillna(0)).cumprod(); mdd = float((1 - eq / eq.cummax()).max())
+    return float(eq.iloc[-1]) ** (1 / years) - 1, mdd, float(eq.iloc[-1]) - 1
+yrs = (f1 - w0) / 86400000 / 365.25
+btc = pd.concat([seg1["BTC/USDT:USDT"], seg2["BTC/USDT:USDT"]])
+ew = pd.concat([seg1.mean(axis=1), seg2.mean(axis=1)])
+for name, r in (("BTC 보유", btc), ("31종목 균등(매일 재조정)", ew)):
+    cg, mdd, tot = stats(r, yrs); print(f"{name}: 연 {cg:+.1%} · 총 {tot:+.0%} · MDD {mdd:.1%}")
+for lab, lo, hi in (("6년 뒤(2024-08~)", u.ms("2024-08-09"), f1),):
+    for name, r in (("BTC", btc), ("31균등", ew)):
+        rr = r[(r.index >= pd.to_datetime(lo, unit="ms")) & (r.index < pd.to_datetime(hi, unit="ms"))]
+        y = (hi - lo) / 86400000 / 365.25; cg, mdd, tot = stats(rr, y); print(f"  {lab} {name}: 연 {cg:+.1%} · MDD {mdd:.1%} · 수익/MDD {tot/mdd:+.2f}")
+print("seg1 cols", seg1.shape, "seg2", seg2.shape)
+# 같은 MDD 35%가 되도록 보유 비중을 줄인 판(나머지는 현금 · 매일 재조정)
+for name, r in (("BTC", btc), ("31균등", ew)):
+    lo, hi = 0.01, 1.0
+    for _ in range(40):
+        mid = (lo + hi) / 2
+        if stats(r * mid, yrs)[1] <= 0.35: lo = mid
+        else: hi = mid
+    cg, mdd, tot = stats(r * lo, yrs); print(f"MDD35 맞춤 {name}: 비중 {lo:.0%} · 연 {cg:+.1%} · MDD {mdd:.1%}")

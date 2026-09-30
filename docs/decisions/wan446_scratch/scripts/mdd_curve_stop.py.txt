@@ -1,0 +1,25 @@
+import pickle, time, numpy as np
+from backtest import harness, wan439_crash_size_layer as c, wan440_universe as u, wan442_momentum_rotation as m
+t0=time.monotonic()
+with m.MARKETS_PATH.open("rb") as fh: built=pickle.load(fh)
+st=m.setting(built)
+w0,f1=u.ms(c.WINDOW_START),u.ms(harness.DEFAULT_END); yrs=c._years(w0,f1)
+TARGETS=(0.30,0.35)
+def curve(s_mk,f_mk):
+    s=c.place_arm(s_mk,c.ARM_B,"stop",in_book=True); f=c.place_arm(f_mk,c.ARM_B,"stop",in_book=True)
+    out=[]
+    for tg in TARGETS:
+        r=c.fit_risk(lambda x: c.chain(s,f,x)[1], target=tg)
+        tot,mdd=c.chain(s,f,r); out.append((r,c.cagr(tot,yrs),mdd))
+    return out
+rows={}
+rows["손으로 고른 31종목"]=curve(st.hand_spot,st.hand_fut)
+rnd=[]
+for k,rot in enumerate(st.random_rotations()):
+    s_mk,_=m.apply_rotation(st.spot_pool,rot[0],force_close=False); f_mk,_=m.apply_rotation(st.fut_pool,rot[1],force_close=False)
+    rnd.append(curve(s_mk,f_mk))
+print("목표MDD | 31종목(크기·연) | 무작위20 중앙 연 (최소~최대) · 25% 넘은 판")
+for i,tg in enumerate(TARGETS):
+    h=rows["손으로 고른 31종목"][i]; cs=sorted(x[i][1] for x in rnd)
+    print(f"{tg:.0%} | {h[0]:.2%} · {h[1]:+.1%} | {np.median(cs):+.1%} ({cs[0]:+.1%}~{cs[-1]:+.1%}) · {sum(v>=0.25 for v in cs)}/20 | 크기 중앙 {np.median([x[i][0] for x in rnd]):.2%}")
+print(f"{time.monotonic()-t0:.0f}s")

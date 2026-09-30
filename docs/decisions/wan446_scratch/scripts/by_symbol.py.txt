@@ -1,0 +1,24 @@
+import pickle, pandas as pd, numpy as np
+from backtest import wan439_crash_size_layer as c, wan442_momentum_rotation as m
+with m.MARKETS_PATH.open("rb") as fh: built=pickle.load(fh)
+st=m.setting(built)
+RISK=0.03
+rows=[]
+for mk in (st.hand_spot, st.hand_fut):
+    b24={(e.symbol,e.timeframe,int(e.cand.entry_time),float(e.cand.entry_price)):b for e,b in zip(mk.entries,mk.btc_24h)}
+    for fill in ("stop","bar_low"):
+        for t in c.place_arm(mk,c.ARM_B,fill,in_book=True):
+            b=b24[(t.symbol,t.timeframe,t.entry_time,t.entry_price)]
+            rows.append(dict(fill=fill,sym=t.symbol.split("/")[0],tf=t.timeframe,net_r=t.net_r,contrib=RISK*t.size*t.net_r*100,
+                             crash=bool(b<=c.CRASH_THRESHOLD),day=pd.to_datetime(t.entry_time,unit="ms").normalize()))
+df=pd.DataFrame(rows); df.to_csv("/private/tmp/claude-501/-Users-joyongjin-AlphaBlock/8404b15f-f496-418c-a3bc-1a764034c1b0/scratchpad/by_symbol_trades.csv",index=False)
+for fill in ("stop","bar_low"):
+    d=df[df.fill==fill]
+    g=d.groupby("sym").agg(n=("net_r","size"),win=("net_r",lambda x:(x>0).mean()),r=("net_r","mean"),all_=("contrib","sum"))
+    nc=d[~d.crash].groupby("sym").agg(n_nc=("net_r","size"),r_nc=("net_r","mean"),ex=("contrib","sum"))
+    cr=d[d.crash].groupby("sym").agg(n_cr=("net_r","size"),crash=("contrib","sum"))
+    t=g.join(nc).join(cr).fillna(0).sort_values("all_",ascending=False)
+    print(f"\n=== {fill} · 폭락 = 진입 직전 BTC 24h ≤ -5% · 기여 = 거래당 {RISK:.0%} 단순합(복리 아님, 초기자본 대비 %)")
+    print(f"전체 거래 {len(d)} · 폭락 거래 {d.crash.sum()} ({d.crash.mean():.1%}) · 폭락 기여 {d[d.crash].contrib.sum():+.0f}% · 제외 {d[~d.crash].contrib.sum():+.0f}% · 전체 {d.contrib.sum():+.0f}%")
+    pd.set_option("display.width",200)
+    print(t.round(3).to_string())
