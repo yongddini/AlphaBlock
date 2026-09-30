@@ -1,0 +1,46 @@
+import pickle, time, dataclasses
+from backtest import harness, wan436_stoch_crowd_rules as w, wan438_spot_stress as m438
+from backtest import wan439_crash_size_layer as c, wan440_universe as u, wan442_momentum_rotation as m
+from data import spot_klines as sk
+from data.storage import OhlcvStore
+t0=time.monotonic()
+with m.MARKETS_PATH.open("rb") as fh: built=pickle.load(fh)
+st=m.setting(built)
+FLOORS=(0.01,0.015,0.02,0.03,0.04)
+main=OhlcvStore(harness.DB_PATH); stress=OhlcvStore(sk.root_db_path(m438.DEFAULT_ROOTS/"stress")); sroot=OhlcvStore(sk.root_db_path(u.SPOT_ROOT))
+def width(e): return (float(e.cand.entry_price)-float(e.cand.stop_price))/float(e.cand.entry_price)
+def rebuild(mk, parts, start, end, efrom, eto, btc_store, btc_from):
+    old=[(e,b,v) for e,b,v in zip(mk.entries,mk.btc_24h,mk.vol_ratio) if e.timeframe!="15m"]
+    w.FLOOR=min(FLOORS); new=[]
+    for pls,store in parts:
+        es=w.build_entries(pls,store=store,start_ms=start,end_ms=end,btc_store=btc_store)
+        new+=[e for e in es if efrom<=int(e.cand.entry_time)<eto]
+    w.FLOOR=w.ADOPTED_FLOOR
+    b24,vr=c.btc_features(btc_store,new,btc_from,end)
+    return old, list(zip(new,b24,vr))
+def market(mk, old, new, floor):
+    rows=old+[x for x in new if width(x[0])>=floor-1e-12]
+    rows.sort(key=lambda x:(int(x[0].cand.entry_time),x[0].symbol,x[0].timeframe))
+    es=[r[0] for r in rows]
+    return c.Market(mk.name,mk.payloads,es,w.signal_counts([int(e.cand.entry_time) for e in es]),[r[1] for r in rows],[r[2] for r in rows])
+f15=[p for p in st.hand_fut.payloads if p.timeframe=="15m"]
+fo,fn=rebuild(st.hand_fut,[(f15,main)],u.ms(harness.DEFAULT_START),u.ms(harness.DEFAULT_END),0,1<<62,main,u.ms(harness.DEFAULT_START)-(c.VOL_BASE_MIN+60)*c.MINUTE_MS)
+s15=[p for p in st.hand_spot.payloads if p.timeframe=="15m"]
+so,sn=rebuild(st.hand_spot,[([p for p in s15 if p.symbol in built.old_spot_syms],stress),([p for p in s15 if p.symbol not in built.old_spot_syms],sroot)],
+              u.ms(m438.STRESS_START),u.ms(m438.STRESS_END),u.ms(c.WINDOW_START),u.ms(m438.STRESS_END),stress,u.ms(c.STRESS_BTC_FROM))
+print(f"재생성 {time.monotonic()-t0:.0f}s · 15m 후보(하한 1%) 선물 {len(fn)} · 현물 {len(sn)}",flush=True)
+# 검산: 하한 4% 재생성 ≡ 원래 15m 후보
+key=lambda e:(e.symbol,e.timeframe,int(e.cand.entry_time),float(e.cand.entry_price))
+for mk,new in ((st.hand_fut,fn),(st.hand_spot,sn)):
+    a={key(e) for e in mk.entries if e.timeframe=="15m"}; b={key(x[0]) for x in new if width(x[0])>=0.04-1e-12}
+    print("검산 4%:", mk.name, len(a), len(b), a==b, flush=True)
+w0,f1=u.ms(c.WINDOW_START),u.ms(harness.DEFAULT_END); yrs=c._years(w0,f1)
+print("하한 | 15m 거래 | 앞 크기·연 | 뒤 수익/MDD | 8.6년 연(1분 최저가 · MDD35) | 8.6년 연(손절가 · MDD35)")
+for fl in FLOORS:
+    smk,fmk=market(st.hand_spot,so,sn,fl),market(st.hand_fut,fo,fn,fl)
+    pick,_=m.evaluate(m.MODE_DROP,f"15m 하한 {fl:.1%}","floor",smk,fmk,st.boundary_ms)
+    s=c.place_arm(smk,c.ARM_B,"stop",in_book=True); f=c.place_arm(fmk,c.ARM_B,"stop",in_book=True)
+    r=c.fit_risk(lambda x:c.chain(s,f,x)[1],target=0.35); tot,_=c.chain(s,f,r)
+    n15=sum(t.timeframe=="15m" for t in s+f)
+    print(f"{fl:.1%} | {n15} | {pick.front_risk:.2%} · {pick.front_cagr:+.1%} | {pick.back_ratio:+.2f} ({pick.back_return:+.0%}/{pick.back_mdd:.1%}) | {pick.full_risk:.2%} · {pick.full_cagr:+.1%} | {r:.2%} · {c.cagr(tot,yrs):+.1%}",flush=True)
+print(f"총 {time.monotonic()-t0:.0f}s")

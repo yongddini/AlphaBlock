@@ -1,0 +1,15 @@
+import pickle, numpy as np
+from backtest import wan439_crash_size_layer as c, wan442_momentum_rotation as m
+with m.MARKETS_PATH.open("rb") as fh: built=pickle.load(fh)
+st=m.setting(built)
+print("rules", c.RULES)
+w=[];o=[];tfs=[]
+for mk in (st.hand_spot, st.hand_fut):
+    for e in mk.entries: o.append((float(e.cand.entry_price)-float(e.cand.stop_price))/float(e.cand.entry_price))
+    for t in c.place_arm(mk,c.ARM_B,"stop",in_book=True):
+        w.append((t.entry_price-t.stop_price)/t.entry_price); tfs.append(t.timeframe)
+w=np.array(w); o=np.array(o)
+q=lambda a: " / ".join(f"{x:.1%}" for x in np.quantile(a,[0.1,0.25,0.5,0.75,0.9]))
+print("원래 존 손절폭(후보) 10/25/50/75/90%:", q(o), "최소", f"{o.min():.2%}")
+print("실제 거래 손절폭(2배 적용) 10/25/50/75/90%:", q(w), "최소", f"{w.min():.2%}", "n", len(w))
+import collections; print(collections.Counter(tfs))

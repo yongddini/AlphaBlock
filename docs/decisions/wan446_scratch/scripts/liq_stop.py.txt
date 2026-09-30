@@ -1,0 +1,10 @@
+import pickle
+from backtest import harness, wan439_crash_size_layer as c, wan440_universe as u, wan442_momentum_rotation as m, wan444_liquidity_universe as liq
+with m.MARKETS_PATH.open("rb") as fh: built=pickle.load(fh)
+st=m.setting(built); w0,f1=u.ms(c.WINDOW_START),u.ms(harness.DEFAULT_END); yrs=c._years(w0,f1)
+top=st.rotations(lambda d,t: liq.select_liquidity(d,t,top=True))
+s_mk,_=m.apply_rotation(st.spot_pool,top[0],force_close=False); f_mk,_=m.apply_rotation(st.fut_pool,top[1],force_close=False)
+for fill in ("bar_low","stop"):
+    s=c.place_arm(s_mk,c.ARM_B,fill,in_book=True); f=c.place_arm(f_mk,c.ARM_B,fill,in_book=True)
+    r=c.fit_risk(lambda x: c.chain(s,f,x)[1], target=0.35); tot,mdd=c.chain(s,f,r)
+    print(f"거래대금 상위 31 · {fill} · MDD35 크기 {r:.2%} · 연 {c.cagr(tot,yrs):+.1%} · MDD {mdd:.1%}")
