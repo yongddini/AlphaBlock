@@ -284,3 +284,16 @@ def test_verdict_is_cagr_plus_three_segments_at_a_size_only() -> None:
         for r in rows
     ]
     assert not m.verdict(slower, m.ARM_B)[0]
+
+
+def test_chain_passes_legacy_zero_duration_order_through() -> None:
+    """WAN-443: `chain(legacy_zero_duration_order=True)`는 옛 정렬(보유 0분 손익이 뒤 크기에서
+    안 빠짐)을 쓴다 — WAN-440 `checksum_31`이 옛 공개 CSV와 대조할 때 이 경로를 탄다."""
+    zero = _trade(0, 0, -1.0, [])  # 진입 분 = 청산 분 · 손실
+    later = _trade(MIN, 5 * MIN, 1.0, [100.0] * 4)
+    spot = [_trade(0, 4 * MIN, 0.0, [100.0] * 4)]
+    new_total, _ = m.chain(spot, [zero, later], 0.1)
+    old_total, _ = m.chain(spot, [zero, later], 0.1, legacy_zero_duration_order=True)
+    assert new_total != old_total
+    legacy = w.mtm_path([zero, later], risk=0.1, legacy_zero_duration_order=True)
+    assert old_total == pytest.approx(float(legacy.mtm_close[-1]) - 1.0)

@@ -588,9 +588,24 @@ def checksum_31(
     placed: dict[tuple[str, str], tuple[list[w.PlacedTrade], list[w.PlacedTrade]]],
     rows_ref: Path,
 ) -> list[str]:
-    """31종목 · +15m · B · ① 맞춤 크기 = WAN-439 §8 B+15m(같은 입력이면 같은 수)."""
+    """31종목 · +15m · B · ① 맞춤 크기 = WAN-439 §8 B+15m(같은 입력이면 같은 수).
+
+    WAN-439 §8 공개 CSV는 WAN-443 이전 정렬(보유 0분 거래의 손익이 뒤 거래 크기에서 안 빠짐)로
+    났다 — 이 검산은 배선(후보 · 배치)이 같은지를 보는 것이라 **그 옛 정렬로** 대조하고, 지금 정렬의
+    크기를 옆에 적는다(WAN-439 `checksum`과 같은 처리).
+    """
     s, f = placed[(label(U31, "+15m"), "bar_low")]
-    risk = c.fit_risk(lambda r: c.chain(s, f, r)[1], target=0.35)
+
+    def legacy_mdd(r: float) -> float:
+        return c.chain(s, f, r, legacy_zero_duration_order=True)[1]
+
+    def now_mdd(r: float) -> float:
+        return c.chain(s, f, r)[1]
+
+    risk = c.fit_risk(legacy_mdd, target=0.35)
+    now = c.fit_risk(now_mdd, target=0.35)
+    zero = sum(t.exit_time <= t.entry_time for t in (*s, *f))
+    tail = f" · 보유 0분 {zero}건 · 지금 정렬 크기 {now:.4%}"
     ref = 0.02915  # WAN-439 §8 표기(소수 넷째 자리) — 아래는 정확한 값을 CSV에서 읽는다
     b15 = REPORT_DIR / "wan439_b15m.csv"
     if b15.exists():
@@ -605,9 +620,12 @@ def checksum_31(
             ref = float(hit.risk.iloc[0])
             if abs(ref - risk) > 1e-12:
                 raise AssertionError(f"31종목 +15m B가 WAN-439 §8과 다르다: {risk} vs {ref}")
-            return [f"31종목 +15m · B ① 크기 {risk:.4%} ≡ WAN-439 §8 (차 {abs(ref - risk):.2e})"]
+            return [
+                f"31종목 +15m · B ① 크기 {risk:.4%} ≡ WAN-439 §8 (차 {abs(ref - risk):.2e} · "
+                f"WAN-443 이전 정렬){tail}"
+            ]
     del rows_ref
-    return [f"31종목 +15m · B ① 크기 {risk:.4%} (WAN-439 §8 CSV 없음 — 대조 건너뜀)"]
+    return [f"31종목 +15m · B ① 크기 {risk:.4%} (WAN-439 §8 CSV 없음 — 대조 건너뜀){tail}"]
 
 
 # ---------------------------------------------------------------------------
@@ -615,10 +633,24 @@ def checksum_31(
 # ---------------------------------------------------------------------------
 
 
+ZERO_DURATION_BANNER = (
+    "> 🚨 **시점 배너(WAN-443, 2026-09-30)** — 이 표의 수치는 `mtm_path`가 **보유 0분 거래(진입 "
+    "분 = 청산 분)의 손익을 뒤 거래 크기에서 빼지 않던** WAN-443 이전 정렬 위의 값이다(31종목 B "
+    "+ 15m 기준 1,409거래 중 10건 · 크기 가중 net R −3.47). **새 정렬로는 다시 재지 "
+    "않았다**(사용자 결정 2026-09-30). WAN-439에서는 같은 수정으로 판정이 안 바뀌었지만(8.6년 "
+    "연환산 −0.2~0.6%p) 그것이 **WAN-440 판정(31종목 vs 53종목)도 그대로라는 증거는 아니다** — "
+    "추정일 뿐이다. 검산(`checksum_31`)은 WAN-439 §8 공개 CSV와 옛 정렬로 대조한다. "
+    "`docs/decisions/wan443.md`."
+)
+"""WAN-443 시점 배너 — 요약을 다시 만들어도 남도록 렌더가 싣는다(이 표는 새 정렬로 안 쟀다)."""
+
+
 def render(rows: Sequence[c.Row], notes: Sequence[str], universe: pd.DataFrame) -> str:
     inc = universe[universe.included]
     out = [
         "# WAN-440 — 스토캐스틱 팔 종목 확대(규칙 유니버스)",
+        "",
+        ZERO_DURATION_BANNER,
         "",
         "> 자동 생성(`uv run python -m backtest.wan440_universe --part run`). "
         "결정문 `docs/decisions/wan440.md`.",

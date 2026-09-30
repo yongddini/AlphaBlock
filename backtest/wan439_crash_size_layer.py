@@ -283,13 +283,19 @@ def _mdd(low: np.ndarray) -> float:
 
 
 def chain(
-    spot: Sequence[w.PlacedTrade], fut: Sequence[w.PlacedTrade], risk: float
+    spot: Sequence[w.PlacedTrade],
+    fut: Sequence[w.PlacedTrade],
+    risk: float,
+    *,
+    legacy_zero_duration_order: bool = False,
 ) -> tuple[float, float]:
     """창 밖 다음 선물 6년을 이어 붙인 (총수익, 평가손 MDD).
 
-    뒤 구간은 앞 구간 마지막 종가 평가액에서 시작한다(탐색 `rsim.chain`과 같은 식)."""
-    a = w.mtm_path(spot, risk=risk)
-    b = w.mtm_path(fut, risk=risk)
+    뒤 구간은 앞 구간 마지막 종가 평가액에서 시작한다(탐색 `rsim.chain`과 같은 식).
+    `legacy_zero_duration_order`는 `w.mtm_path`에 그대로 넘긴다 — WAN-443 이전 공개 CSV 대조 전용.
+    """
+    a = w.mtm_path(spot, risk=risk, legacy_zero_duration_order=legacy_zero_duration_order)
+    b = w.mtm_path(fut, risk=risk, legacy_zero_duration_order=legacy_zero_duration_order)
     scale = float(a.mtm_close[-1])
     low = np.concatenate([a.mtm_low, b.mtm_low * scale])
     return float(b.mtm_close[-1]) * scale - 1.0, _mdd(low)
