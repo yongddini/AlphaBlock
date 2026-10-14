@@ -429,3 +429,48 @@ def test_missing_db_fails(tmp_path: Path) -> None:
     """없는 DB 경로를 주면 조용히 통과하지 않고 실패한다(0이 아닌 종료 코드)."""
     proc = _run(tmp_path / "does-not-exist.db", "--yes", "--no-restart", "--no-backup")
     assert proc.returncode != 0
+
+
+# WAN-451: 있을 때만 함께 비우는 페이퍼 상태 테이블.
+OPTIONAL_PAPER_TABLES = (
+    "tsmom_rebalances",
+    "paper_equity_marks",
+    "live_engine_state",
+    "circuit_breaker_notice",
+)
+
+
+def test_optional_state_tables_are_exported_and_wiped_when_present(tmp_path: Path) -> None:
+    """엔진 C 원장·엔진 스냅샷이 있으면 장부와 함께 CSV로 남기고 비운다(옛 규칙 섞임 방지)."""
+    db = tmp_path / "ohlcv.db"
+    before = _make_db(db, with_backtest=False)
+    conn = sqlite3.connect(db)
+    try:
+        for i, table in enumerate(OPTIONAL_PAPER_TABLES, start=3):
+            conn.execute(f"CREATE TABLE {table} (id INTEGER)")
+            conn.executemany(f"INSERT INTO {table} (id) VALUES (?)", [(j,) for j in range(i)])
+        conn.commit()
+    finally:
+        conn.close()
+
+    export_parent = tmp_path / "exports"
+    proc = _run(db, "--yes", "--no-restart", "--export-dir", str(export_parent))
+    assert proc.returncode == 0, proc.stderr
+
+    for table in PAPER_TABLES + OPTIONAL_PAPER_TABLES:
+        assert _count(db, table) == 0, f"{table} 가 비워지지 않았다"
+    for table in PROTECTED_TABLES:
+        assert _count(db, table) == before[table], f"{table}(시세) 가 건드려졌다"
+    (run_dir,) = list(export_parent.iterdir())
+    exported = {p.stem for p in run_dir.glob("*.csv")}
+    assert exported == set(PAPER_TABLES + OPTIONAL_PAPER_TABLES), exported
+
+
+def test_missing_optional_tables_do_not_block_reset(tmp_path: Path) -> None:
+    """엔진 C를 한 번도 안 돌린 DB(선택 테이블 없음)도 예전처럼 리셋된다."""
+    db = tmp_path / "ohlcv.db"
+    _make_db(db, with_backtest=False)
+    proc = _run(db, "--yes", "--no-restart", "--export-dir", str(tmp_path / "x"))
+    assert proc.returncode == 0, proc.stderr
+    for table in PAPER_TABLES:
+        assert _count(db, table) == 0

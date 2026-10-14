@@ -8,6 +8,9 @@
 #    거래기록 4개 테이블(paper_trades · open_positions · live_limit_orders ·
 #    live_runner_sessions)만 비운다. DB 파일 하나(기본 data/ohlcv.db)에 시세와
 #    거래기록이 함께 들어 있으므로 파일을 통째로 지우면 안 된다.
+#    WAN-451: 다음 상태 테이블은 **있을 때만** 함께 내보내고 비운다 — 엔진 C 원장
+#    (tsmom_rebalances · paper_equity_marks) · 엔진 스냅샷(live_engine_state) ·
+#    서킷브레이커 알림 상태(circuit_breaker_notice).
 #
 # 기본 동작(WAN-399 = 사용자 결정 2026-09-07·09-18): **장부 CSV 내보내기 → DELETE** 까지만 한다.
 #   • 지우기 전에 거래기록 4개 테이블을 CSV로 떨군다(시각이 붙은 새 디렉터리 — 덮어쓰지
@@ -92,10 +95,22 @@ command -v systemctl >/dev/null && HAVE_SYSTEMCTL=1
 
 count() { sqlite3 "$DB" "SELECT COUNT(*) FROM $1;" 2>/dev/null || echo "N/A"; }
 
+# 있을 때만 함께 비우는 페이퍼 상태 테이블(WAN-451). 엔진 C 원장 둘은 엔진 C가 한 번이라도
+# 돌아야 생기고, 엔진 스냅샷·서킷브레이커 알림 상태는 규칙이 바뀌는 리셋에서 옛 규칙의 것이
+# 새 장부에 섞이면 안 된다(옛 스냅샷이 48h 안 재기동에 복원되는 구멍 — WAN-451 §2-4).
+# 없는 테이블을 목록에 넣으면 내보내기·DELETE가 실패해 리셋 전체가 멈추므로 **있는 것만** 넣는다.
+OPTIONAL_PAPER_TABLES=(tsmom_rebalances paper_equity_marks live_engine_state circuit_breaker_notice)
+table_exists() {
+    [[ "$(sqlite3 "$DB" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='$1';" 2>/dev/null)" == "1" ]]
+}
+for t in "${OPTIONAL_PAPER_TABLES[@]}"; do
+    if table_exists "$t"; then PAPER_TABLES+=("$t"); fi
+done
+
 TABLES=("${PAPER_TABLES[@]}")
 if [[ "$INCLUDE_BACKTEST" -eq 1 ]]; then TABLES+=("${BACKTEST_TABLES[@]}"); fi
 
-# 내보내기 대상 = 페이퍼 장부 4개(백테스트 장부는 코드로 다시 적재할 수 있고 클 수 있어 뺀다 ·
+# 내보내기 대상 = 페이퍼 장부(기본 4개 + 있으면 위 선택 테이블 · 백테스트 장부는 코드로 다시 적재할 수 있고 클 수 있어 뺀다 ·
 # 시세 테이블은 애초에 안 지우므로 절대 내보내지 않는다 — 수 GB를 CSV로 뱉는 사고 방지).
 EXPORT_TABLES=("${PAPER_TABLES[@]}")
 [[ -n "$EXPORT_PARENT" ]] || EXPORT_PARENT="$(dirname "$DB")/paper-reset-exports"

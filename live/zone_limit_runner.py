@@ -84,7 +84,10 @@ from live.order_journal import SKIP_REASON_ZONE_WIDTH, OrderJournal
 from live.paper import PaperPosition
 from live.price_feed import PriceFeed
 from live.runtime_state import DataGapSkip, PendingOrderSnapshot, RuntimeStateStore
+from live.tsmom_runner import TsmomRebalancer
 from live.zone_limit_notifier import ZoneLimitNotifier
+from paper.tsmom_ledger import TsmomLedgerStore
+from strategy import tsmom
 from strategy.models import ConfluenceParams, OrderBlockDirection, SignalExitReason
 
 if TYPE_CHECKING:  # 무거운 임포트를 런타임 경로에 올리지 않는다(진입점이 지연 임포트한다).
@@ -123,6 +126,7 @@ class ZoneLimitPaperRunner:
         price_feed: PriceFeed | None = None,
         engine_state: EngineStateStore | None = None,
         catchup_max_ms: int = DEFAULT_CATCHUP_MAX_MS,
+        tsmom: TsmomRebalancer | None = None,
         sleep: Callable[[float], None] = time.sleep,
         now_ms: Callable[[], int] = lambda: int(time.time() * 1000),
     ) -> None:
@@ -139,6 +143,8 @@ class ZoneLimitPaperRunner:
         #: 재시작 영속화 저장소(WAN-306). None이면 저장/복원 없음(옛 동작 그대로).
         self._engine_state = engine_state
         self._catchup_max_ms = catchup_max_ms
+        #: 엔진 C 일 리밸런싱(WAN-451 ⑥). None이면 예전과 비트 동일하다.
+        self._tsmom = tsmom
         self._notifier = notifier
         #: 옵트인 웹소켓 틱 피드(WAN-246). None이면 확정 1분봉만 소비(예전과 비트 동일).
         self._price_feed = price_feed
@@ -352,6 +358,11 @@ class ZoneLimitPaperRunner:
         if self._engine_state is not None:
             for symbol, timeframe in self._series:
                 self._save_state(symbol, timeframe)
+        if self._tsmom is not None:
+            try:
+                self._tsmom.tick(now)
+            except Exception:  # noqa: BLE001 — 엔진 C 오류가 오더블록 루프를 멈추지 않도록.
+                _logger.exception("엔진 C 리밸런싱 실패(WAN-451)")
         self._journal.heartbeat(self._session_id, now_ms=now)
         self._check_circuit_breaker(now)
         if self._notifier is not None:
@@ -825,6 +836,19 @@ def expire_stale_pending(
     return expired
 
 
+def engine_settings_for(settings: Settings) -> Settings:
+    """실행 엔진에 넘길 설정 — 엔진 C를 켜면 일 손실 서킷브레이커를 끈다(WAN-451 ⑧).
+
+    서킷브레이커는 정본(WAN-449 팔 · 엔진 C 백테스트)에 **없는 규칙**이다. 켜 두면 페이퍼만
+    다른 규칙으로 돈다(WAN-305). 게다가 그 판정은 `paper_trades`만 합산해 엔진 C 손익을 못
+    본다. 엔진 C가 꺼져 있으면 설정을 그대로 돌려준다(옛 러너 동작 비트 동일).
+    """
+    if not settings.live_tsmom_enabled:
+        return settings
+    limits = settings.risk_limits.model_copy(update={"daily_loss_limit_fraction": None})
+    return settings.model_copy(update={"risk_limits": limits})
+
+
 def build_paper_recorder(
     paper_store: PaperTradeStore,
     settings: Settings,
@@ -876,11 +900,15 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
     # **같은** `resolve_book_sizing`으로 사이징하고, 거래당 리스크 금액(장부)은 북의 거래당
     # 사이징(cap_only=1배·combined=N배)으로 재야 라벨과 실제가 어긋나지 않는다.
     book = settings.live_leverage_book
+    # 엔진 C(WAN-451): 원장을 지갑에 물리고, 일 손실 서킷브레이커를 끈다(⑧ — 정본에 없는 규칙).
+    tsmom_ledger = TsmomLedgerStore(settings.db_path) if settings.live_tsmom_enabled else None
+    engine_settings = engine_settings_for(settings)
     executor = PaperExecutor(
-        engine=build_execution_engine(settings, leverage_book=book),
+        engine=build_execution_engine(engine_settings, leverage_book=book),
         store=paper_store,
         recorder=recorder,
         sizing=book_per_trade_sizing(settings.risk_sizing, book),
+        tsmom_ledger=tsmom_ledger,
     )
     # 재시작 영속화 저장소(WAN-306) — 장부와 같은 DB. 러너가 매 서브스텝 저장하고
     # 기동 시 복원 + 공백 따라잡기 재생한다(모듈 독스트링 §재시작 정책).
@@ -889,7 +917,9 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
         now = int(time.time() * 1000)
         session_id = journal.start_session(now_ms=now)
 
-        series = build_series(settings)
+        series = build_series(settings) if settings.live_zone_limit_enabled else []
+        if not settings.live_zone_limit_enabled:
+            _logger.info("옛 오더블록 페이퍼 꺼짐(WAN-451 ⑦) — 시리즈 0개, 대기 주문 없음")
         # 매매 이벤트 알림(WAN-189, 페이퍼 한정). 텔레그램 미설정이면 build_telegram_client가
         # None을 주고 알림기는 드라이런(로그만)으로 돈다 — `notifier`의 기존 관행 그대로다.
         # 엔진보다 **먼저** 만든다 — 엔진의 스킵 훅이 알림기를 참조하기 때문이다(WAN-221).
@@ -935,7 +965,7 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
         # 옵트인 웹소켓 틱 피드(WAN-246, 페이퍼 한정 · 공개 체결 스트림만). 기본 꺼짐이면
         # None → 러너는 확정 1분봉만 소비(예전과 비트 동일). 켜면 심볼별 실시간 체결가로
         # 대기 주문 체결을 앞당긴다.
-        if settings.live_tick_feed_enabled:
+        if settings.live_tick_feed_enabled and series:
             from live.price_feed import CcxtProTickFeed
 
             symbols = sorted({sym for sym, _ in series})
@@ -946,6 +976,28 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
                 "웹소켓 틱 피드 켜짐(WAN-246): %d 심볼 · %s (페이퍼 한정, 공개 체결 스트림)",
                 len(symbols),
                 settings.live_tick_feed_exchange,
+            )
+
+        tsmom_rebalancer: TsmomRebalancer | None = None
+        if tsmom_ledger is not None:
+            telegram = build_telegram_client(settings)
+            tsmom_rebalancer = TsmomRebalancer(
+                store=store,
+                ledger=tsmom_ledger,
+                wallet=executor,
+                funding_store=funding_store,
+                notify=(
+                    (lambda text: telegram.send_message(text, parse_mode=None))
+                    if telegram is not None and settings.paper_trade_notify_enabled
+                    else None
+                ),
+            )
+            _logger.info(
+                "엔진 C 켜짐(WAN-451): %s · 하루 1회 00:00 UTC(KST 09:00) 리밸런싱 · "
+                "k=%.3f λ=%.3f · 서킷브레이커 꺼짐",
+                ", ".join(tsmom.ASSETS),
+                tsmom.K,
+                tsmom.LAMBDA,
             )
 
         runner = ZoneLimitPaperRunner(
@@ -963,6 +1015,7 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
             price_feed=price_feed,
             engine_state=engine_state,
             catchup_max_ms=int(settings.live_catchup_max_hours * 3_600_000),
+            tsmom=tsmom_rebalancer,
         )
         # 재시작 복원(WAN-306): 이전 세션의 엔진 상태(전이 맥락·탭 표식·대기 주문·재진입
         # 재무장)를 되살린다 — 복원된 주문은 아래 재평가/폐기에서 제외한다(따라잡기 재생이
@@ -1004,5 +1057,7 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
         store.close()
         journal.close()
         paper_store.close()
+        if tsmom_ledger is not None:
+            tsmom_ledger.close()
         if funding_store is not None:
             funding_store.close()

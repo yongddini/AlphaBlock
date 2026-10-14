@@ -34,6 +34,7 @@ from execution.risk import CircuitBreakerStatus
 from execution.sizing import PositionSizingParams
 from live.paper import ClosedTrade, PaperPosition
 from paper.store import PaperTradeRecord, PaperTradeRecorder, PaperTradeStore, TradeDollars
+from paper.tsmom_ledger import TsmomLedgerStore
 from strategy.models import SignalExitReason
 
 _logger = logging.getLogger(__name__)
@@ -141,11 +142,16 @@ class PaperExecutor:
         store: PaperTradeStore,
         recorder: PaperTradeRecorder,
         sizing: PositionSizingParams,
+        tsmom_ledger: TsmomLedgerStore | None = None,
     ) -> None:
         self._engine = engine
         self._store = store
         self._recorder = recorder
         self._sizing = sizing
+        #: 엔진 C 원장(WAN-451). 있으면 재시작 자본 복원에 그 정산 손익 합도 더한다 —
+        #: 두 엔진이 한 지갑을 쓰므로 자본 = 초기 + 팔 실현 합 + 엔진 C 정산 합이다.
+        #: None이면 예전과 비트 동일하다.
+        self._tsmom_ledger = tsmom_ledger
         # 일일 손실 서킷브레이커를 DB(paper_trades) 재계산으로 전환한다(WAN-38). 러너가
         # 재시작돼도 "오늘(KST) 청산 손익 합"을 원장에서 다시 읽어 차단 상태가 유지된다 —
         # 인메모리 누적만 쓰면 재시작 시 0으로 리셋돼 브레이크가 풀린다.
@@ -186,16 +192,27 @@ class PaperExecutor:
                 initial,
             )
             return
-        if total == 0.0:
+        tsmom_total = 0.0 if self._tsmom_ledger is None else self._tsmom_ledger.total_net_pnl()
+        if total == 0.0 and tsmom_total == 0.0:
             return  # 거래 없음(또는 정확히 상쇄) — 초기 자본 그대로.
-        restored = initial + total
+        restored = initial + total + tsmom_total
         self._engine.restore_equity(restored)
         _logger.info(
-            "누적 북 자본 복원(WAN-238): 초기 %.2f + 실현손익 Σ%.2f = %.2f",
+            "누적 북 자본 복원(WAN-238/451): 초기 %.2f + 실현손익 Σ%.2f + 엔진 C Σ%.2f = %.2f",
             initial,
             total,
+            tsmom_total,
             restored,
         )
+
+    def apply_external_pnl(self, amount: float) -> None:
+        """엔진 C 정산 손익을 지갑 자본에 더한다(WAN-451).
+
+        엔진 C는 `paper_trades` 왕복을 안 거치고 원장(`tsmom_rebalances`)에 하루 1행을
+        남긴다. 호출부는 **원장에 먼저 쓰고** 이것을 부른다 — 그 사이에 죽어도 재시작 때
+        `_restore_equity`가 원장 합계로 다시 계산하므로 지갑과 원장이 어긋나지 않는다.
+        """
+        self._engine.restore_equity(self._engine.equity + amount)
 
     def circuit_breaker_status(self, now_ms: int) -> CircuitBreakerStatus:
         """현재 서킷브레이커 상태 스냅샷(러너 알림·대시보드, WAN-38)."""

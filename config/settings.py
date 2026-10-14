@@ -230,6 +230,14 @@ class Settings(BaseSettings):
     # 위험의 모양만 바꾼다(WAN-90) · MDD·최대 동시 리스크가 오른다(WAN-273 알고 받는 손해).
     # 페이퍼 한정 — 실거래 배선은 별도(WAN-241/235 넷팅 선행), `ALPHABLOCK_LIVE_TRADING=false` 유지.
     live_reentry_entry_rule: Literal["off", "band"] = Field(default="band")
+    # 「팔 + 추세추종」 페이퍼 단계 스위치(WAN-451 · 사용자 결정 2026-10-14 범위 B 단계적).
+    # ② 단계 = 옛 오더블록 페이퍼를 끄고(⑦ 병행 없음) 엔진 C만 돌린다:
+    #   ALPHABLOCK_LIVE_ZONE_LIMIT_ENABLED=false + ALPHABLOCK_LIVE_TSMOM_ENABLED=true
+    # 🚨 기본값은 **지금 동작 그대로**(옛 러너 켬 · 엔진 C 끔)다 — 이 스위치를 넘기는 순간이
+    # 규칙이 바뀌는 리셋 이음매(`scripts/paper-reset.sh`, WAN-392/399)라 배포만으로 조용히
+    # 바뀌면 안 된다. 엔진 C를 켜면 일 손실 서킷브레이커는 **꺼진다**(⑧ — 정본에 없는 규칙).
+    live_zone_limit_enabled: bool = Field(default=True)
+    live_tsmom_enabled: bool = Field(default=False)
     # 전략 재평가 시 각 시리즈에서 사용할 최근 봉 수(최장 EMA 365봉 워밍업 여유 포함).
     live_signal_lookback_bars: int = Field(default=1500, ge=1)
     # 이미 보낸 신호를 기록해 재시작 시 중복 발송을 막는 상태 파일 경로.
