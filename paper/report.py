@@ -186,6 +186,7 @@ _DIRECTION_LABELS: Mapping[OrderBlockDirection, str] = {
 _EXIT_REASON_LABELS: Mapping[SignalExitReason, str] = {
     SignalExitReason.TAKE_PROFIT: "익절",
     SignalExitReason.STOP_LOSS: "손절",
+    SignalExitReason.TIME_EXIT: "시간청산",
 }
 
 

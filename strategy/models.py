@@ -212,6 +212,8 @@ class SignalExitReason(StrEnum):
     """진입가 너머 가장 가까운 EMA/VWMA 선에 도달(전량 익절)."""
     STOP_LOSS = "stop_loss"
     """진입 근거 오더블록이 breaker로 무효화(손절)."""
+    TIME_EXIT = "time_exit"
+    """보유 봉 수를 채워 시간으로 청산(스토캐스틱 팔 ts4, WAN-451) — 시장가(테이커)."""
 
 
 class PlannedExit(BaseModel):

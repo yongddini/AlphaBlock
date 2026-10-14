@@ -241,7 +241,7 @@ class PaperExecutor:
         outcome = self._engine.on_entry(intent, now_ms=now_ms)
         risk_amount: float | None = None
         if outcome.accepted and outcome.position is not None:
-            risk_amount = equity_before * self._sizing.risk_per_trade
+            risk_amount = equity_before * self._sizing.risk_per_trade * intent.risk_scale
             entry_fee = outcome.fill.fee if outcome.fill is not None else 0.0
             self._store.record_open(outcome.position, risk_amount=risk_amount, entry_fee=entry_fee)
         return TradeReport(

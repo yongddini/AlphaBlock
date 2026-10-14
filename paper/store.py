@@ -103,6 +103,8 @@ LEGACY_EXIT_LIQUIDITY: Liquidity = Liquidity.TAKER
 _EXIT_REASON_BY_SIGNAL: dict[SignalExitReason, ExitReason] = {
     SignalExitReason.TAKE_PROFIT: ExitReason.TAKE_PROFIT,
     SignalExitReason.STOP_LOSS: ExitReason.STOP_LOSS,
+    # 시간 청산(WAN-451 팔 ts4) — 백테스트 `wan436.arm_exit`이 `END_OF_DATA`로 회계한다(테이커).
+    SignalExitReason.TIME_EXIT: ExitReason.END_OF_DATA,
 }
 
 #: 사유별 청산 유동성 판정의 **단일 소스**를 그대로 물어보기 위한 채택 설정(WAN-370).

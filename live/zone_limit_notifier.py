@@ -75,6 +75,7 @@ FILTER_SKIP_EVENT = "filter_skip"
 _EXIT_WORDS: dict[SignalExitReason, str] = {
     SignalExitReason.TAKE_PROFIT: "익절 청산",
     SignalExitReason.STOP_LOSS: "손절 청산",
+    SignalExitReason.TIME_EXIT: "시간 청산",
 }
 
 

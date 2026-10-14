@@ -50,11 +50,14 @@ _EXIT_TIME = 2_000
 _EXITS: dict[SignalExitReason, float] = {
     SignalExitReason.TAKE_PROFIT: 103.0,
     SignalExitReason.STOP_LOSS: 98.0,
+    SignalExitReason.TIME_EXIT: 101.0,  # 팔 시간 청산(WAN-451)
 }
 
 _SIGNAL_TO_ENGINE: dict[SignalExitReason, ExitReason] = {
     SignalExitReason.TAKE_PROFIT: ExitReason.TAKE_PROFIT,
     SignalExitReason.STOP_LOSS: ExitReason.STOP_LOSS,
+    # 팔 시간 청산(WAN-451) — 백테스트 `wan436.arm_exit`이 END_OF_DATA로 회계한다(테이커).
+    SignalExitReason.TIME_EXIT: ExitReason.END_OF_DATA,
 }
 
 

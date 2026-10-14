@@ -76,9 +76,10 @@ from config.settings import Settings
 from data.freshness import format_window_gaps, window_gap_summary
 from data.gaps import Gap, find_gaps
 from data.storage import OhlcvStore
-from execution.engine import EntryIntent
+from execution.engine import EntryIntent, ExecutionOutcome
+from live.arm_rules import ArmDecision, ArmParams, evaluate_arm_fill, is_time_exit_minute
 from live.engine_state import EngineStateStore, SeriesStateSnapshot
-from live.executor import PaperExecutor
+from live.executor import PaperExecutor, TradeReport
 from live.limit_engine import EngineEvent, ReentryEntryRule, ZoneLimitLiveEngine
 from live.limit_orders import LimitOrderStatus, expiry_deadline_ms
 from live.order_journal import SKIP_REASON_ZONE_WIDTH, OrderJournal
@@ -88,7 +89,7 @@ from live.runtime_state import DataGapSkip, PendingOrderSnapshot, RuntimeStateSt
 from live.tsmom_runner import TsmomRebalancer
 from live.zone_limit_notifier import ZoneLimitNotifier
 from paper.tsmom_ledger import TsmomLedgerStore
-from strategy import tsmom
+from strategy import stoch, tsmom
 from strategy.models import ConfluenceParams, OrderBlockDirection, SignalExitReason
 
 if TYPE_CHECKING:  # 무거운 임포트를 런타임 경로에 올리지 않는다(진입점이 지연 임포트한다).
@@ -105,6 +106,10 @@ _MINUTE_MS = 60_000
 #: 공백 따라잡기 재생의 기본 한도(ms) — 설정 `live_catchup_max_hours`(기본 48h)가 정본이고
 #: 이 상수는 러너를 직접 조립하는 테스트/도구의 기본값이다.
 DEFAULT_CATCHUP_MAX_MS = 48 * 3_600_000
+#: 팔 %K를 계산할 확정봉 꼬리 길이 — %K 선이 의존하는 29봉 + 여유(WAN-451).
+_ARM_K_BARS = 80
+#: 팔 폭락 판정의 기준 종목(정본 `wan439` BTC 선물).
+_ARM_BTC_SYMBOL = "BTC/USDT:USDT"
 
 
 class ZoneLimitPaperRunner:
@@ -128,6 +133,7 @@ class ZoneLimitPaperRunner:
         engine_state: EngineStateStore | None = None,
         catchup_max_ms: int = DEFAULT_CATCHUP_MAX_MS,
         tsmom: TsmomRebalancer | None = None,
+        arm: ArmParams | None = None,
         reuse_loads: bool = True,
         sleep: Callable[[float], None] = time.sleep,
         now_ms: Callable[[], int] = lambda: int(time.time() * 1000),
@@ -147,6 +153,8 @@ class ZoneLimitPaperRunner:
         self._catchup_max_ms = catchup_max_ms
         #: 엔진 C 일 리밸런싱(WAN-451 ⑥). None이면 예전과 비트 동일하다.
         self._tsmom = tsmom
+        #: 스토캐스틱 팔 진입·청산 규칙(WAN-451 ③). None이면 예전과 비트 동일하다.
+        self._arm = arm
         self._notifier = notifier
         #: 옵트인 웹소켓 틱 피드(WAN-246). None이면 확정 1분봉만 소비(예전과 비트 동일).
         self._price_feed = price_feed
@@ -231,7 +239,7 @@ class ZoneLimitPaperRunner:
             )
             self._handle_events(step_events)
             events += step_events
-            self._check_exits(symbol, timeframe, low=low, high=high, time_ms=t)
+            self._check_exits(symbol, timeframe, low=low, high=high, close=close, time_ms=t)
             self._last_substep[key] = t
             # 서브스텝마다 저장한다 — 성기게 저장하면 크래시 후 따라잡기가 이미 집행한
             # 구간을 다시 집행해 장부·거래가 중복된다(`live.engine_state`).
@@ -584,18 +592,32 @@ class ZoneLimitPaperRunner:
         report = None
         disposition_done = False
         try:
-            report = self._executor.enter(
-                EntryIntent(
-                    symbol=fill.symbol,
-                    timeframe=fill.timeframe,
-                    direction=fill.direction,
-                    entry_price=fill.price,
-                    entry_time=fill.time,
-                    stop_price=fill.stop_price,
-                    take_profit_price=fill.take_profit_price,
-                ),
-                now_ms=fill.time,
+            decision = self._arm_decision(
+                fill.symbol, fill.timeframe, fill.price, fill.stop_price, fill.time
             )
+            if decision is not None and not decision.accepted:
+                # 팔 규칙 거부(WAN-451 ③) — 체결은 됐지만 진입하지 않는다. 다른 거부와 같은 길로
+                # 장부·알림에 남긴다(조용히 버리지 않는다, WAN-194).
+                report = TradeReport(
+                    outcome=ExecutionOutcome.rejected(decision.reason, decision.reason_code),
+                    open_positions=self._executor.open_positions,
+                    equity=self._executor.equity,
+                )
+            else:
+                report = self._executor.enter(
+                    EntryIntent(
+                        symbol=fill.symbol,
+                        timeframe=fill.timeframe,
+                        direction=fill.direction,
+                        entry_price=fill.price,
+                        entry_time=fill.time,
+                        stop_price=fill.stop_price if decision is None else decision.stop_price,
+                        # 팔은 익절이 없다(시간 청산 · 손절만, WAN-436).
+                        take_profit_price=fill.take_profit_price if decision is None else None,
+                        risk_scale=1.0 if decision is None else decision.size_scale,
+                    ),
+                    now_ms=fill.time,
+                )
             if journal_id is not None:
                 self._journal.record_entry_result(
                     journal_id,
@@ -645,8 +667,62 @@ class ZoneLimitPaperRunner:
                 except Exception:  # noqa: BLE001 — 폴백 처분마저 실패하면 로그만 남긴다.
                     _logger.exception("처분 기록 폴백 실패: journal_id=%d", journal_id)
 
+    def _arm_decision(
+        self,
+        symbol: str,
+        timeframe: str,
+        entry_price: float,
+        ob_stop: float | None,
+        entry_ms: int,
+    ) -> ArmDecision | None:
+        """팔 규칙 판정(WAN-451 ③) — 팔이 꺼져 있으면 None(옛 동작 그대로).
+
+        %K는 그 칸 TF의 **확정봉**으로, BTC 24h는 확정 1분봉으로 낸다(둘 다 체결 시각 이전만 —
+        인과). %K 선은 최근 29봉에만 의존하므로 짧은 꼬리(`_ARM_K_BARS`)로 계산해도 값이 같다.
+        """
+        if self._arm is None:
+            return None
+        if ob_stop is None:
+            return ArmDecision(False, "sizing", "손절 참조가 없음")
+        tf_ms = timeframe_to_ms(timeframe)
+        bars = self._store.load(
+            symbol, timeframe, start_ms=entry_ms - _ARM_K_BARS * tf_ms, end_ms=entry_ms
+        )
+        if not bars.empty and "closed" in bars.columns:
+            bars = bars[bars["closed"].astype(bool)]
+        bars = bars[bars["open_time"].astype("int64") + tf_ms <= entry_ms]
+        k = stoch.stoch_k_line(
+            [float(v) for v in bars["high"]],
+            [float(v) for v in bars["low"]],
+            [float(v) for v in bars["close"]],
+        )
+        lookback = self._arm.crash_lookback_minutes
+        btc = self._store.load(
+            _ARM_BTC_SYMBOL, "1m", start_ms=entry_ms - (lookback + 10) * _MINUTE_MS, end_ms=entry_ms
+        )
+        if not btc.empty and "closed" in btc.columns:
+            btc = btc[btc["closed"].astype(bool)]
+        return evaluate_arm_fill(
+            self._arm,
+            entry_price=entry_price,
+            ob_stop=ob_stop,
+            entry_ms=entry_ms,
+            tf_ms=tf_ms,
+            htf_closed_times=[int(t) for t in bars["open_time"]],
+            htf_closed_k=k,
+            btc_minute_times=[int(t) for t in btc["open_time"]],
+            btc_minute_closes=[float(c) for c in btc["close"]],
+        )
+
     def _check_exits(
-        self, symbol: str, timeframe: str, *, low: float, high: float, time_ms: int
+        self,
+        symbol: str,
+        timeframe: str,
+        *,
+        low: float,
+        high: float,
+        time_ms: int,
+        close: float | None = None,
     ) -> None:
         """오픈 페이퍼 포지션의 손절/익절을 이 1분봉 범위로 판정한다(백테스트와 같은 규칙:
         손절 우선 `stop_before_take_profit`, 청산가는 참조가 그대로)."""
@@ -671,6 +747,15 @@ class ZoneLimitPaperRunner:
         elif tp_hit:
             assert tp is not None
             self._exit(symbol, timeframe, tp, time_ms, SignalExitReason.TAKE_PROFIT)
+        elif (
+            self._arm is not None
+            and close is not None
+            and is_time_exit_minute(
+                time_ms, position.entry_time, timeframe_to_ms(timeframe), self._arm.hold_bars
+            )
+        ):
+            # 시간 청산(WAN-451 팔 ts4) — 손절을 먼저 봤고, 경계 직전 1분봉 종가에 시장가로 나간다.
+            self._exit(symbol, timeframe, close, time_ms, SignalExitReason.TIME_EXIT)
 
     def _exit(
         self, symbol: str, timeframe: str, price: float, time_ms: int, reason: SignalExitReason
@@ -915,10 +1000,50 @@ def engine_settings_for(settings: Settings) -> Settings:
     다른 규칙으로 돈다(WAN-305). 게다가 그 판정은 `paper_trades`만 합산해 엔진 C 손익을 못
     본다. 엔진 C가 꺼져 있으면 설정을 그대로 돌려준다(옛 러너 동작 비트 동일).
     """
-    if not settings.live_tsmom_enabled:
+    if not (settings.live_tsmom_enabled or settings.live_arm_enabled):
         return settings
     limits = settings.risk_limits.model_copy(update={"daily_loss_limit_fraction": None})
     return settings.model_copy(update={"risk_limits": limits})
+
+
+#: 팔 거래당 리스크 = 맞춤 크기 2.8533% × λ 0.885(WAN-449 · `reports/wan452_notes.txt`).
+ARM_RISK_PER_TRADE = 0.028533 * 0.885
+#: 팔이 요구하는 관통 체결(bp, 정본 `pen_5bp`).
+ARM_FILL_PENETRATION_BPS = 5.0
+
+
+def arm_settings_problems(settings: Settings) -> list[str]:
+    """팔을 켰을 때 함께 맞아야 하는 설정 중 어긋난 것 — 비면 통과(WAN-451 ③).
+
+    러너가 이 값들을 조용히 덮어쓰지 않는 이유: 덮어쓰면 `.env`에 적힌 값과 실제로 도는 값이
+    달라진다(「라벨과 동작이 어긋남」, WAN-91/95/112/123/159). 그래서 어긋나면 기동을 거부하고
+    무엇을 넣어야 하는지 알려 준다.
+    """
+    problems: list[str] = []
+    if settings.confluence.retap_mode != "once":
+        problems.append(
+            f"첫 탭만이어야 한다: ALPHABLOCK_CONFLUENCE__RETAP_MODE=once"
+            f" (지금 {settings.confluence.retap_mode})"
+        )
+    if settings.live_reentry_entry_rule != "off":
+        problems.append(
+            "재진입이 꺼져 있어야 한다: ALPHABLOCK_LIVE_REENTRY_ENTRY_RULE=off"
+            f" (지금 {settings.live_reentry_entry_rule})"
+        )
+    if settings.confluence.fill_penetration_bps != ARM_FILL_PENETRATION_BPS:
+        problems.append(
+            "5bp 관통 체결이어야 한다: ALPHABLOCK_CONFLUENCE__FILL_PENETRATION_BPS=5"
+            f" (지금 {settings.confluence.fill_penetration_bps})"
+        )
+    if abs(settings.risk_sizing.risk_per_trade - ARM_RISK_PER_TRADE) > 1e-6:
+        problems.append(
+            f"거래당 리스크가 {ARM_RISK_PER_TRADE:.9f}이어야 한다:"
+            f" ALPHABLOCK_RISK_SIZING__RISK_PER_TRADE={ARM_RISK_PER_TRADE:.9f}"
+            f" (지금 {settings.risk_sizing.risk_per_trade})"
+        )
+    if not settings.live_zone_limit_enabled:
+        problems.append("팔은 오더블록 시리즈 위에서 돈다: ALPHABLOCK_LIVE_ZONE_LIMIT_ENABLED=true")
+    return problems
 
 
 def build_paper_recorder(
@@ -1072,6 +1197,25 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
                 tsmom.LAMBDA,
             )
 
+        arm_params: ArmParams | None = None
+        if settings.live_arm_enabled:
+            problems = arm_settings_problems(settings)
+            if problems:
+                raise SystemExit(
+                    "스토캐스틱 팔(ALPHABLOCK_LIVE_ARM_ENABLED=true)을 켜려면 다음을 맞춰야 한다"
+                    " (WAN-451 ③):\n- " + "\n- ".join(problems)
+                )
+            arm_params = ArmParams()
+            _logger.info(
+                "스토캐스틱 팔 켜짐(WAN-451): 하한 %.0f%% · %%K < %.0f · 손절 ×%.0f · ts%d · "
+                "폭락 ×%.1f · 서킷브레이커 꺼짐 (⚠️ 몰림 규칙·종목 교체는 아직 없음)",
+                arm_params.min_stop_width * 100,
+                arm_params.k_threshold,
+                arm_params.stop_multiple,
+                arm_params.hold_bars,
+                arm_params.crash_multiplier,
+            )
+
         runner = ZoneLimitPaperRunner(
             store=store,
             engine=engine,
@@ -1088,6 +1232,7 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
             engine_state=engine_state,
             catchup_max_ms=int(settings.live_catchup_max_hours * 3_600_000),
             tsmom=tsmom_rebalancer,
+            arm=arm_params,
         )
         # 재시작 복원(WAN-306): 이전 세션의 엔진 상태(전이 맥락·탭 표식·대기 주문·재진입
         # 재무장)를 되살린다 — 복원된 주문은 아래 재평가/폐기에서 제외한다(따라잡기 재생이

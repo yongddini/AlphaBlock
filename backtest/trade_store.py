@@ -193,6 +193,9 @@ _ENGINE_NON_SOURCE: frozenset[str] = frozenset(
         # 뿐 오더블록 후보·체결·손익 어디에도 안 실린다. 엔진 목록에 넣으면 이 파일을 손볼
         # 때마다 payload·야간 타임라인 캐시가 통째로 무효화된다(`btc_day_regime.py`와 같은 이유).
         "strategy/tsmom.py",
+        # 스토캐스틱 %K 단일 소스(WAN-451) — 팔의 진입 게이트 값이고 오더블록 후보·체결·손익에
+        # 안 실린다(엔진 목록에 넣으면 이 파일을 손볼 때마다 캐시가 통째로 무효화된다).
+        "strategy/stoch.py",
     }
 )
 
