@@ -203,6 +203,36 @@ class OhlcvStore:
             (value,) = cur.fetchone()
         return int(value) if value is not None else None
 
+    def window_fingerprint(
+        self, symbol: str, timeframe: str, *, start_ms: int | None
+    ) -> tuple[int | None, int, int]:
+        """`start_ms` 이후 저장 행의 지문 `(MAX(open_time), COUNT(*), SUM(closed))` (WAN-451).
+
+        상시 러너가 매분 같은 상위TF 창을 다시 읽지 않도록, 「지난번 읽은 뒤로 이 창에
+        새 행이 들어왔나 · 빠졌나 · 확정 여부가 바뀌었나」를 인덱스 범위 집계 한 번으로
+        본다. 파생 TF(`2h`)는 원본 TF(`1h`)의 행을 본다(리샘플 입력이 그것이다) — 시작은
+        `_load_derived`와 같은 버킷 경계로 내린다.
+
+        ⚠️ **값만 바뀐 같은 시각 행(UPSERT로 OHLC만 고침)은 못 잡는다** — 러너는 새 봉이
+        들어올 때(= MAX가 바뀔 때)만 창을 엔진에 먹이므로 그때 다시 읽어 결과가 같다
+        (`live.zone_limit_runner._load_htf_tail` 독스트링).
+        """
+        source = _DERIVED_TIMEFRAMES.get(timeframe, timeframe)
+        query = (
+            "SELECT MAX(open_time), COUNT(*), COALESCE(SUM(closed), 0) FROM ohlcv"
+            " WHERE symbol = ? AND timeframe = ?"
+        )
+        params: list[object] = [symbol, source]
+        if start_ms is not None:
+            if timeframe in _DERIVED_TIMEFRAMES:
+                tgt_ms = timeframe_to_ms(timeframe)
+                start_ms = (start_ms // tgt_ms) * tgt_ms
+            query += " AND open_time >= ?"
+            params.append(start_ms)
+        with self._lock:
+            mx, cnt, closed = self._conn.execute(query, params).fetchone()
+        return (None if mx is None else int(mx), int(cnt), int(closed))
+
     def first_open_time(self, symbol: str, timeframe: str) -> int | None:
         """해당 심볼·타임프레임의 가장 오래된 `open_time`. 없으면 None."""
         with self._lock:
