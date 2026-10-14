@@ -1647,6 +1647,29 @@ def _latest_funding_ms(store: FundingRateStore, symbol: str) -> int | None:
     return latest.funding_time if latest is not None else None
 
 
+def cmd_tsmom_parity(args: argparse.Namespace, settings: Settings) -> int:
+    """`alphablock tsmom-parity` — 엔진 C 페이퍼 원장 ↔ 저장 일봉으로 다시 계산한 값 (WAN-451).
+
+    읽기 전용이다. 원장 행마다 그날 목표(배율·신호)를 같은 단일 소스(`strategy.tsmom`)로 다시
+    내고 체결가·목표 명목과 함께 맞댄다. 하나라도 다르면 종료 코드 1(감시에 물릴 수 있게).
+    러너 공백으로 건너뛴 날은 보여 주되 실패로 세지 않는다(소급 거래하지 않는 설계).
+    """
+    import time as _time
+
+    from data.storage import OhlcvStore
+    from live.tsmom_parity import check_tsmom_parity, render_tsmom_parity
+    from paper.engine_c_report import read_engine_c
+
+    db_path = args.db or settings.db_path
+    now = int(_time.time() * 1000)
+    since = None if args.days is None else now - int(args.days) * 86_400_000
+    view = read_engine_c(db_path, since_ms=since)
+    with OhlcvStore(db_path) as store:
+        report = check_tsmom_parity(store, view.rows, now_ms=now)
+    print(render_tsmom_parity(report))
+    return 0 if report.ok else 1
+
+
 def cmd_doctor(args: argparse.Namespace, settings: Settings) -> int:
     """`alphablock doctor` — DB 무결성·위생 점검(WAN-194 §2·§4·§5).
 
@@ -2183,6 +2206,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p_parity.set_defaults(func=cmd_parity)
+
+    p_tsmom_parity = sub.add_parser(
+        "tsmom-parity",
+        help="엔진 C 페이퍼 원장 ↔ 저장 일봉 재계산 대조(WAN-451 · 불일치면 종료 코드 1)",
+    )
+    p_tsmom_parity.add_argument("--db", default=None, help="DB 경로(기본: 설정의 db_path)")
+    p_tsmom_parity.add_argument(
+        "--days", type=int, default=None, help="최근 N일 리밸런싱만(기본: 전부)"
+    )
+    p_tsmom_parity.set_defaults(func=cmd_tsmom_parity)
 
     p_trades = sub.add_parser(
         "trades",
