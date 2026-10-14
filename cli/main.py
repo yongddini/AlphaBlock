@@ -1670,6 +1670,32 @@ def cmd_tsmom_parity(args: argparse.Namespace, settings: Settings) -> int:
     return 0 if report.ok else 1
 
 
+def cmd_universe(args: argparse.Namespace, settings: Settings) -> int:
+    """`alphablock universe [--at YYYY-MM-DD]` — 팔의 그 주 종목 목록(WAN-451 ③).
+
+    읽기 전용이다. 수집기(`ALPHABLOCK_UNIVERSE_ENABLED`)가 월요일 00:00 UTC마다 남긴 목록과 지난주
+    대비 변화 · 순위표를 보여 준다. `--at`은 UTC 날짜이고 그 날짜가 속한 주를 본다. 그 주 목록이
+    없으면 종료 코드 1(감시에 물릴 수 있게).
+    """
+    import time as _time
+    from datetime import UTC, datetime
+
+    from data.universe import rebalance_at
+    from data.universe_pool import UniverseStore, render_rotation
+
+    db_path = args.db if args.db is not None else settings.db_path
+    if args.at:
+        at_ms = int(datetime.fromisoformat(args.at).replace(tzinfo=UTC).timestamp() * 1000)
+    else:
+        at_ms = int(_time.time() * 1000)
+    want = rebalance_at(at_ms)
+    with UniverseStore(db_path) as store:
+        snap = store.at(at_ms)
+        prev = store.previous(snap.rebalance_ms) if snap is not None else None
+    print(render_rotation(snap, prev, want_ms=want, extra=args.extra))
+    return 0 if snap is not None and snap.rebalance_ms == want else 1
+
+
 def cmd_doctor(args: argparse.Namespace, settings: Settings) -> int:
     """`alphablock doctor` — DB 무결성·위생 점검(WAN-194 §2·§4·§5).
 
@@ -2216,6 +2242,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--days", type=int, default=None, help="최근 N일 리밸런싱만(기본: 전부)"
     )
     p_tsmom_parity.set_defaults(func=cmd_tsmom_parity)
+
+    p_universe = sub.add_parser(
+        "universe",
+        help="팔의 그 주 종목 목록 · 지난주 대비 변화(WAN-451 · 그 주 목록이 없으면 종료 코드 1)",
+    )
+    p_universe.add_argument("--db", default=None, help="DB 경로(기본: 설정의 db_path)")
+    p_universe.add_argument("--at", default=None, help="UTC 날짜 YYYY-MM-DD(기본: 지금)")
+    p_universe.add_argument(
+        "--extra", type=int, default=5, help="목록 밖 다음 순위를 몇 개 더 보일지(기본 5)"
+    )
+    p_universe.set_defaults(func=cmd_universe)
 
     p_trades = sub.add_parser(
         "trades",

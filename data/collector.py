@@ -146,6 +146,43 @@ def report_funding_task_exit(task: asyncio.Task[None]) -> None:
         )
 
 
+def report_universe_task_exit(task: asyncio.Task[None]) -> None:
+    """후보 풀 루프가 끝나면 시끄럽게 남긴다(정상 종료가 없는 루프 · WAN-422 §3과 같은 규약)."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    logger.error(
+        "후보 풀·종목 목록 태스크가 종료됐습니다 — 봉 수집은 계속됩니다: %r",
+        exc,
+        exc_info=exc,
+    )
+
+
+async def _run_universe(settings: Settings, store: OhlcvStore) -> None:
+    """후보 풀 일봉 + 매주 목록 루프(WAN-451 ③). 거래소 인스턴스는 따로 만든다(스레드 공유 회피)."""
+    from data.universe_pool import UniverseStore, run_universe_loop
+
+    telegram = build_telegram_client(settings)
+
+    def _notify(text: str) -> None:
+        if telegram is not None:
+            telegram.send_message(text, parse_mode=None)
+
+    universe = UniverseStore(settings.db_path)
+    try:
+        await run_universe_loop(
+            create_exchange(settings),
+            store,
+            universe,
+            lookback_days=settings.lookback_days_for("1d"),
+            request_interval_seconds=settings.universe_request_interval_seconds,
+            delay_seconds=settings.universe_refresh_delay_seconds,
+            notify=_notify,
+        )
+    finally:
+        universe.close()
+
+
 async def _backfill_funding(settings: Settings, exchange: FundingRateSource) -> None:
     """OHLCV 백필 직후 펀딩 이력을 백필한다(WAN-63).
 
@@ -279,6 +316,13 @@ async def run_collector(
                 )
                 funding_task.add_done_callback(report_funding_task_exit)
 
+            # 팔의 후보 풀 일봉 + 매주 종목 목록(WAN-451 ③). 스트림 접속을 늦추지 않게
+            # 백그라운드로 돈다(첫 적재는 수백 종목이라 수 분 — WAN-314 기동 지연 사고와 같은 자리).
+            universe_task: asyncio.Task[None] | None = None
+            if settings.universe_enabled:
+                universe_task = asyncio.create_task(_run_universe(settings, store))
+                universe_task.add_done_callback(report_universe_task_exit)
+
             # 프로세스 레벨 워치독 스레드(WAN-173 (2)). in-process 재접속(아래 유휴
             # 워치독)조차 못 돌 만큼 이벤트 루프가 멎으면 hang→exit로 바꿔 서비스
             # 매니저가 재시작하게 한다. 진행 시각은 백필 완료 직후로 초기화한다.
@@ -318,6 +362,8 @@ async def run_collector(
             finally:
                 if funding_task is not None:
                     funding_task.cancel()
+                if universe_task is not None:
+                    universe_task.cancel()
                 if watchdog is not None:
                     watchdog.stop()
     finally:

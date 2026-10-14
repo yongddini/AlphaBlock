@@ -32,7 +32,7 @@ import math
 import pickle
 import time
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -44,6 +44,15 @@ from backtest import wan439_crash_size_layer as c
 from backtest import wan440_universe as u
 from backtest import wan442_momentum_rotation as m
 from backtest.wan424_stoch_ob_arm import SYMBOLS as SYMBOLS_31
+from data.universe import (  # 단일 소스(WAN-451) · liq.*로 재노출
+    LIQ_DAYS as LIQ_DAYS,
+)
+from data.universe import (
+    liquidity as liquidity,
+)
+from data.universe import (
+    select_liquidity as select_liquidity,
+)
 
 __all__ = ["SYMBOLS_31"]
 
@@ -54,7 +63,6 @@ PICKS_PATH = REPORT_DIR / "wan444_liquidity_picks.csv"
 SUMMARY_PATH = REPORT_DIR / "wan444_liquidity_universe_summary.md"
 
 # --- 착수 전 고정 ---------------------------------------------------------------------------
-LIQ_DAYS = 30
 """거래대금 평균을 내는 창(일) — 한 값 · 스윕하지 않는다."""
 TOP = "거래대금 상위 31종목"
 BOTTOM = "거래대금 하위 31종목(대조)"
@@ -68,32 +76,6 @@ CHECK_TOL = 1e-12
 # ---------------------------------------------------------------------------
 # 규칙 — 순수 함수 (t 이전에 닫힌 일봉만)
 # ---------------------------------------------------------------------------
-
-
-def liquidity(d: m.Daily, j: int, days: int = LIQ_DAYS) -> float | None:
-    """확정 일봉 j까지 직전 `days`일(j 포함) 평균 거래대금. 없거나 0이면 None."""
-    lo = int(np.searchsorted(d.open_time, int(d.open_time[j]) - days * m.DAY_MS, side="right"))
-    window = d.quote[lo : j + 1]
-    if len(window) == 0:
-        return None
-    mean = float(window.mean())
-    return mean if mean > 0.0 else None
-
-
-def select_liquidity(
-    daily: Mapping[str, m.Daily], t: int, *, top: bool = True, n: int = m.TOP_N
-) -> frozenset[str]:
-    """시각 t의 목록 — 편입 자격(WAN-442와 같다)이 있는 종목 중 거래대금 순 n개(동점은 이름순)."""
-    scores: dict[str, float] = {}
-    for sym, d in daily.items():
-        j = m.eligible(d, t)
-        if j is None:
-            continue
-        v = liquidity(d, j)
-        if v is not None:
-            scores[sym] = v
-    order = sorted(scores, key=lambda s: (-scores[s] if top else scores[s], s))
-    return frozenset(order[:n])
 
 
 def verdict(rule: m.Pick, randoms: Sequence[m.Pick]) -> tuple[bool, list[str]]:
