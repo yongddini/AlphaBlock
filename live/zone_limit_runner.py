@@ -67,6 +67,7 @@ import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
+import numpy as np
 import pandas as pd
 
 from backtest.sweep import timeframe_to_ms
@@ -127,6 +128,7 @@ class ZoneLimitPaperRunner:
         engine_state: EngineStateStore | None = None,
         catchup_max_ms: int = DEFAULT_CATCHUP_MAX_MS,
         tsmom: TsmomRebalancer | None = None,
+        reuse_loads: bool = True,
         sleep: Callable[[float], None] = time.sleep,
         now_ms: Callable[[], int] = lambda: int(time.time() * 1000),
     ) -> None:
@@ -158,6 +160,13 @@ class ZoneLimitPaperRunner:
         self._last_htf: dict[Series, int] = {}
         #: 시리즈별 마지막으로 소비한 1분봉 시각(그 이후만 새로 읽는다).
         self._last_substep: dict[Series, int] = {}
+        #: 읽기 재사용(WAN-451 ④ — 팔 310 시리즈에서 매분 폴링 50초의 59%가 같은 상위TF 창
+        #: 재로드였다). False면 매번 저장소에서 다시 읽는다(옛 동작 — 동등성 테스트용).
+        self._reuse_loads = reuse_loads
+        #: 시리즈 → (창 지문, 마지막으로 읽은 상위TF 꼬리). 지문이 같으면 다시 안 읽는다.
+        self._htf_tail_cache: dict[Series, tuple[tuple[object, ...], pd.DataFrame]] = {}
+        #: 이번 폴링의 심볼별 1분봉 — (읽기 시작 ms, 확정 1분봉). 폴링마다 비운다.
+        self._minute_cache: dict[str, tuple[int, pd.DataFrame]] = {}
         #: 시리즈별 결측 건너뜀 기록(WAN-314) — 상태 파일에서 이어받아 재시작을 넘어
         #: 보존한다(해소된 기록도 남는다: 나중에 성적을 읽을 때 그 구간의 빈칸이
         #: 「기회 없음」이 아니라 「데이터 결측」이었음을 알 수 있어야 한다).
@@ -194,11 +203,17 @@ class ZoneLimitPaperRunner:
         # 시리즈는 `restore_state`가 심은 커서부터 이어져 공백 구간을 따라잡는다(WAN-306).
         if since is None:
             since = last_closed_time + htf_ms - _MINUTE_MS
-        df_1m = self._store.load(symbol, "1m", start_ms=since + 1)
-        if "closed" in df_1m.columns and not df_1m.empty:
-            df_1m = df_1m[df_1m["closed"].astype(bool)]
-        for row in df_1m.itertuples(index=False):
-            t = int(row.open_time)
+        df_1m = self._minute_bars(symbol, since + 1)
+        # 열 배열을 직접 돈다(WAN-451 ④ — `itertuples`는 시리즈마다 반복자 생성 비용이 크다).
+        # 값은 같다: 아래에서 `int`/`float`로 바꾸는 것도 예전 그대로다.
+        for t_raw, low_raw, high_raw, close_raw in zip(
+            df_1m["open_time"].to_numpy(),
+            df_1m["low"].to_numpy(),
+            df_1m["high"].to_numpy(),
+            df_1m["close"].to_numpy(),
+            strict=True,
+        ):
+            t = int(t_raw)
             # 이 1분봉이 닫힌 시각(t+1분)까지 확정된 상위TF 봉만 창에 담는다 — 연속
             # 가동에서 폴링이 봤을 창과 같다(그보다 미래의 봉을 먹이면 재생이 존
             # 대장/전이 상태를 미리 알게 돼 연속 실행과 갈라진다).
@@ -210,7 +225,7 @@ class ZoneLimitPaperRunner:
             if fed:
                 self._handle_events(fed)
                 events += fed
-            low, high, close = float(row.low), float(row.high), float(row.close)
+            low, high, close = float(low_raw), float(high_raw), float(close_raw)
             step_events = self._engine.on_substep(
                 symbol, timeframe, time_ms=t, low=low, high=high, close=close
             )
@@ -249,9 +264,51 @@ class ZoneLimitPaperRunner:
         start = self._store.tail_window_start(
             symbol, timeframe, bars=self._lookback_bars, end_ms=end_ms
         )
+        if not self._reuse_loads:
+            if start is None:
+                return self._store.load(symbol, timeframe)
+            return self._store.load(symbol, timeframe, start_ms=start)
+        # 재사용(WAN-451 ④): 창 시작 · 그 뒤 저장 행의 (최신 시각 · 개수 · 확정 수)가 지난번과
+        # 같으면 저장 내용도 같다 — 다시 읽지 않는다. 같은 시각 행의 **값만** 바뀐 경우는 이
+        # 지문이 못 잡지만, 엔진에 창을 먹이는 것은 새 봉이 들어올 때(= 최신 시각이 바뀔 때)
+        # 뿐이라 그때 다시 읽고 결과가 같다(`_feed_htf_window`가 마지막 봉이 안 바뀌면 안
+        # 먹인다). 동등성은 `reuse_loads=False` 대조 테스트가 동작으로 고정한다.
+        key = (symbol, timeframe)
+        fingerprint = (start, *self._store.window_fingerprint(symbol, timeframe, start_ms=start))
+        cached = self._htf_tail_cache.get(key)
+        if cached is not None and cached[0] == fingerprint:
+            return cached[1]
         if start is None:
-            return self._store.load(symbol, timeframe)
-        return self._store.load(symbol, timeframe, start_ms=start)
+            df = self._store.load(symbol, timeframe)
+        else:
+            df = self._store.load(symbol, timeframe, start_ms=start)
+        self._htf_tail_cache[key] = (fingerprint, df)
+        return df
+
+    def _minute_bars(self, symbol: str, start_ms: int) -> pd.DataFrame:
+        """`start_ms` 이후 확정 1분봉 — 한 폴링 안에서는 **심볼당 한 번만** 읽는다(WAN-451 ④).
+
+        한 종목을 여러 TF가 감시하면(팔은 10개) 예전에는 같은 1분봉을 TF마다 다시 읽었다.
+        이번 폴링에 이미 더 이른 시각부터 읽어 둔 게 있으면 잘라 쓴다. 폴링 사이에는
+        `poll_once`가 비운다. ⚠️ 그래서 한 폴링 안의 시리즈들은 **같은 스냅샷**을 본다(옛
+        동작은 폴링 도중 수집기가 넣은 봉을 뒤 시리즈만 볼 수 있었다 — 다음 폴링에 반영된다).
+        """
+        if not self._reuse_loads:
+            return self._load_minutes(symbol, start_ms)
+        cached = self._minute_cache.get(symbol)
+        if cached is None or cached[0] > start_ms:
+            cached = (start_ms, self._load_minutes(symbol, start_ms))
+            self._minute_cache[symbol] = cached
+        frame = cached[1]
+        if cached[0] == start_ms:
+            return frame
+        return frame[frame["open_time"] >= start_ms]
+
+    def _load_minutes(self, symbol: str, start_ms: int) -> pd.DataFrame:
+        df_1m = self._store.load(symbol, "1m", start_ms=start_ms)
+        if "closed" in df_1m.columns and not df_1m.empty:
+            df_1m = df_1m[df_1m["closed"].astype(bool)]
+        return df_1m
 
     def _feed_htf_window(
         self,
@@ -267,6 +324,22 @@ class ZoneLimitPaperRunner:
         않는다. 창에 구멍이 있으면(볼린저·RSI가 조용히 틀린 값을 내는 조건, WAN-156 §3)
         로그를 남기고 None을 반환해 호출부가 시리즈 평가를 중단하게 한다.
         """
+        key = (symbol, timeframe)
+        prev = self._last_htf.get(key)
+        if self._reuse_loads:
+            # 먼저 「창의 마지막 봉」만 이진 탐색으로 본다(WAN-451 ④) — 정상 운영에서는 매분
+            # 「새 봉 없음」으로 끝나는데, 그걸 알려고 1500행 창을 매번 걸러 만들 필요가 없다.
+            # 아래 옛 경로와 같은 조건(창이 비었나 · 마지막 봉이 이미 먹인 봉 이하인가)이다.
+            times = closed_all["open_time"].to_numpy()
+            end = (
+                len(times)
+                if cutoff_open_time is None
+                else int(np.searchsorted(times, cutoff_open_time, side="right"))
+            )
+            if end == 0:
+                return []
+            if prev is not None and int(times[end - 1]) <= prev:
+                return []
         window = closed_all
         if cutoff_open_time is not None:
             window = closed_all[closed_all["open_time"] <= cutoff_open_time]
@@ -274,8 +347,6 @@ class ZoneLimitPaperRunner:
         if window.empty:
             return []
         last_time = int(window["open_time"].iloc[-1])
-        key = (symbol, timeframe)
-        prev = self._last_htf.get(key)
         if prev is not None and last_time <= prev:
             return []
         gaps = find_gaps([int(t) for t in window["open_time"].tolist()], timeframe)
@@ -332,6 +403,7 @@ class ZoneLimitPaperRunner:
         """모든 시리즈를 한 번씩 폴링하고 하트비트·상태 스냅샷을 남긴다."""
         cycle_started = self._now_ms()
         emitted: list[EngineEvent] = []
+        self._minute_cache.clear()  # 1분봉 재사용은 한 폴링 안에서만(WAN-451 ④)
         for symbol, timeframe in self._series:
             try:
                 emitted += self.poll_series(symbol, timeframe)
