@@ -61,6 +61,12 @@ from data.funding import FundingRateStore
 from data.models import FundingRate
 from data.storage import OhlcvStore
 from data.tick_probe import VISION_BASE, urllib_transport
+from data.universe import (  # 단일 소스(WAN-451) · u.*로 재노출
+    QUOTE as QUOTE,
+)
+from data.universe import (
+    is_usdt_perp as is_usdt_perp,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REPORT_DIR = REPO_ROOT / "backtest" / "reports"
@@ -76,7 +82,6 @@ ZIP_CACHE = REPO_ROOT / "data" / "cache" / "wan440-zips"
 # --- 착수 전 고정 ---------------------------------------------------------------------------
 LISTED_BEFORE = "2020-09-15"
 """첫 선물 1분봉이 이 시각(UTC 00:00) **이전**이면 대상."""
-QUOTE = "USDT"
 FUT_FIRST_MONTH = "2020-01"
 FUT_LAST_MONTH = "2026-07"
 FUT_NATIVE_TFS: tuple[str, ...] = ("1m", "15m", "1h", "4h", "6h", "8h", "12h", "1d", "1w")
@@ -134,11 +139,6 @@ def archive_symbols(market_path: str = "futures/um") -> list[str]:
             break
         marker = found.group(1)
     return out
-
-
-def is_usdt_perp(symbol: str) -> bool:
-    """`…USDT`이고 만기물(`_YYMMDD`)이 아닌 것. 비ASCII 이름은 2020년 이후 상장이라 대상 밖이다."""
-    return symbol.isascii() and symbol.endswith(QUOTE) and "_" not in symbol
 
 
 def first_open_ms(symbol: str, month: str) -> int:

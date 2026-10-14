@@ -170,6 +170,15 @@ class Settings(BaseSettings):
     # None이면 기존 룩백(30일) 동작을 유지한다.
     funding_backfill_start: str | None = Field(default=None)
 
+    # 팔의 후보 풀 일봉 수집 + 매주 종목 목록 계산(WAN-451 ③ 단계 · 결정 ①나 ②나).
+    # 켜면 수집기가 지금 상장된 USDT 무기한 전체의 **1d만** REST로 모으고(하루 1회 ·
+    # 00:00 UTC + 지연) 월요일마다 거래대금 상위 31종목 목록을 `universe_rotations`에 남긴다.
+    # 첫 적재는 수백 종목 × 1~2쪽이라 요청 간격을 둔다(바이낸스 가중치 한도). 기본 꺼짐 —
+    # 켜도 1분봉 수집 종목·러너 감시 종목은 아직 안 바뀐다(다음 단계).
+    universe_enabled: bool = Field(default=False)
+    universe_refresh_delay_seconds: float = Field(default=120.0, ge=0)
+    universe_request_interval_seconds: float = Field(default=0.5, ge=0)
+
     # 백테스트 손익에 펀딩비를 반영할지(WAN-91). 위 `funding_enabled`(수집 on/off)와
     # 별개 개념이다 — 이 값은 `BacktestConfig.funding_enabled`에 실린다
     # (`risk_sizing_enabled`와 동일 패턴, `default_backtest_config`가 배선).

@@ -44,7 +44,6 @@ WAN-440에서 **어떤 31종목이냐에 따라 연 5~30%로 흔들린다**는 �
 from __future__ import annotations
 
 import argparse
-import bisect
 import dataclasses
 import math
 import pickle
@@ -65,6 +64,42 @@ from backtest import wan440_universe as u
 from backtest.wan424_stoch_ob_arm import SYMBOLS as SYMBOLS_31
 from data import spot_klines as sk
 from data.storage import OhlcvStore
+from data.universe import (  # 단일 소스(WAN-451) · 옛 이름(m.*)으로 재노출
+    DAY_MS as DAY_MS,
+)
+from data.universe import (
+    FRESH_DAYS as FRESH_DAYS,
+)
+from data.universe import (
+    MIN_AGE_DAYS as MIN_AGE_DAYS,
+)
+from data.universe import (
+    REBALANCE_DAYS as REBALANCE_DAYS,
+)
+from data.universe import (
+    TOP_N as TOP_N,
+)
+from data.universe import (
+    WEEK_MS as WEEK_MS,
+)
+from data.universe import (
+    Daily as Daily,
+)
+from data.universe import (
+    Rotation as Rotation,
+)
+from data.universe import (
+    eligible as eligible,
+)
+from data.universe import (
+    last_closed as last_closed,
+)
+from data.universe import (
+    load_daily as load_daily,
+)
+from data.universe import (
+    rebalance_times as rebalance_times,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REPORT_DIR = REPO_ROOT / "backtest" / "reports"
@@ -73,16 +108,7 @@ PICKS_PATH = REPORT_DIR / "wan442_momentum_picks.csv"
 SUMMARY_PATH = REPORT_DIR / "wan442_momentum_rotation_summary.md"
 MARKETS_PATH = REPO_ROOT / "backtest" / "cache" / "wan442_markets.pkl"
 
-DAY_MS = 86_400_000
-WEEK_MS = 7 * DAY_MS
-
 # --- 착수 전 고정 ---------------------------------------------------------------------------
-TOP_N = 31
-REBALANCE_DAYS = 7
-"""리밸런싱 간격(일) — 월요일 00:00 UTC 격자."""
-MIN_AGE_DAYS = 90
-FRESH_DAYS = 3
-"""직전 확정 일봉이 이 일수 안에 있어야 편입 자격(상폐 · 정지 종목 배제)."""
 STAGE1_LOOKBACK = 90
 SKIP_DAYS = 7
 VOL_RECENT_DAYS = 30
@@ -119,33 +145,8 @@ SIZE_FIXED = "고정 3%"
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class Daily:
-    open_time: np.ndarray
-    close: np.ndarray
-    quote: np.ndarray
-    """거래대금 = 거래량 × 종가."""
-
-
-def last_closed(d: Daily, t: int) -> int:
-    """시각 t에 이미 닫힌 마지막 일봉의 인덱스(`open_time + 1일 ≤ t`) · 없으면 −1."""
-    return int(np.searchsorted(d.open_time, t - DAY_MS, side="right")) - 1
-
-
 def _at_or_before(d: Daily, ms: int) -> int:
     return int(np.searchsorted(d.open_time, ms, side="right")) - 1
-
-
-def eligible(d: Daily, t: int) -> int | None:
-    """편입 자격이 있으면 직전 확정 일봉 인덱스, 없으면 None."""
-    j = last_closed(d, t)
-    if j < 0:
-        return None
-    if int(d.open_time[j]) < t - FRESH_DAYS * DAY_MS:
-        return None
-    if int(d.open_time[j]) - int(d.open_time[0]) < MIN_AGE_DAYS * DAY_MS:
-        return None
-    return j
 
 
 def score(defn: str, d: Daily, j: int, look: int) -> float | None:
@@ -188,16 +189,6 @@ def score(defn: str, d: Daily, j: int, look: int) -> float | None:
             return None
         return float(cl[j] / cl[i] - 1.0) * float(recent.mean()) / float(base.mean())
     raise ValueError(f"모르는 정의: {defn!r}")
-
-
-def rebalance_times(start_ms: int, end_ms: int, days: int = REBALANCE_DAYS) -> list[int]:
-    """`start_ms` 이하의 월요일 00:00 UTC부터 `days`일 간격(1970-01-01은 목요일)."""
-    t = start_ms - ((start_ms - 4 * DAY_MS) % WEEK_MS)
-    out: list[int] = []
-    while t < end_ms:
-        out.append(t)
-        t += days * DAY_MS
-    return out
 
 
 def select(
@@ -253,15 +244,6 @@ def random_members(
 # ---------------------------------------------------------------------------
 # 목록을 시장에 적용 — 진입 시각의 목록 · 강제 청산은 보유 구간을 자른다
 # ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True)
-class Rotation:
-    times: tuple[int, ...]
-    members: tuple[frozenset[str], ...]
-
-    def index_at(self, t: int) -> int:
-        return bisect.bisect_right(self.times, t) - 1
 
 
 def apply_rotation(mk: c.Market, rot: Rotation, *, force_close: bool) -> tuple[c.Market, int]:
@@ -429,27 +411,6 @@ def config_label(defn: str, lookbacks: Sequence[int], *, top: bool = True) -> st
 # ---------------------------------------------------------------------------
 # 실행
 # ---------------------------------------------------------------------------
-
-
-def load_daily(
-    stores: Sequence[OhlcvStore], symbols: Sequence[str], start_ms: int, end_ms: int
-) -> dict[str, Daily]:
-    out: dict[str, Daily] = {}
-    for s in symbols:
-        for st in stores:
-            f = st.load(s, "1d", start_ms=start_ms, end_ms=end_ms)
-            if "closed" in f.columns:
-                f = f[f["closed"].astype(bool)]
-            if len(f):
-                f = f.sort_values("open_time")
-                close = f["close"].to_numpy(float)
-                out[s] = Daily(
-                    f["open_time"].to_numpy(np.int64),
-                    close,
-                    f["volume"].to_numpy(float) * close,
-                )
-                break
-    return out
 
 
 @dataclass
