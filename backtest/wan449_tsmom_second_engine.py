@@ -200,8 +200,8 @@ class ArmDaily:
     risk: float
 
 
-def arm_daily(built: u.Markets) -> ArmDaily:
-    """WAN-448 측정 α · 거래대금 상위 31 · 캐리 없음 · MDD 35% 맞춤 크기의 일 수익."""
+def arm_trades(built: u.Markets) -> tuple[list[w.PlacedTrade], list[w.PlacedTrade], float]:
+    """팔의 (현물 구간 거래, 선물 구간 거래, MDD 35% 맞춤 크기) — WAN-448 측정 α · 상위 31."""
     s = m.setting(built)
     top = s.rotations(lambda d, t: liq.select_liquidity(d, t, top=True))
     smk, _ = m.apply_rotation(s.spot_pool, top[0], force_close=False)
@@ -218,6 +218,13 @@ def arm_daily(built: u.Markets) -> ArmDaily:
         for k, mk in ((0, smk), (1, fmk))
     )
     risk = c.fit_risk(lambda x: c.chain(sp, fu, x)[1], target=c.MDD_TARGET)
+    return sp, fu, risk
+
+
+def arm_daily_from(
+    sp: Sequence[w.PlacedTrade], fu: Sequence[w.PlacedTrade], risk: float
+) -> ArmDaily:
+    """거래 목록과 크기에서 일 수익·일 저가를 낸다(WAN-450이 거래를 덜어낸 판에 다시 쓴다)."""
     a = w.mtm_path(sp, risk=risk)
     b = w.mtm_path(fu, risk=risk)
     scale = float(a.mtm_close[-1])
@@ -231,6 +238,11 @@ def arm_daily(built: u.Markets) -> ArmDaily:
     day_low = pd.concat([pd.Series(1.0, index=start), day_low]).fillna(day_close)
     prev = day_close.shift(1).fillna(1.0)
     return ArmDaily(day_close / prev - 1.0, day_low / prev - 1.0, risk)
+
+
+def arm_daily(built: u.Markets) -> ArmDaily:
+    """WAN-448 측정 α · 거래대금 상위 31 · 캐리 없음 · MDD 35% 맞춤 크기의 일 수익."""
+    return arm_daily_from(*arm_trades(built))
 
 
 def combine(
@@ -352,9 +364,12 @@ def fit_variant(
     return Variant(name, k, lam, float(dd.max()), day, yearly(eq), eq)
 
 
-def run(built: u.Markets) -> tuple[pd.DataFrame, list[Variant], list[str], dict[str, float]]:
+def run(
+    built: u.Markets, arm: ArmDaily | None = None
+) -> tuple[pd.DataFrame, list[Variant], list[str], dict[str, float]]:
+    """`arm`을 주면 다시 만들지 않는다(WAN-450이 같은 거래 목록을 함께 쓴다) — 값은 같다."""
     t0 = time.monotonic()
-    arm = arm_daily(built)
+    arm = arm if arm is not None else arm_daily(built)
     s = m.setting(built)
     with fc.FUNDING_CACHE.open("rb") as fh:
         rows, _fetched = pickle.load(fh)
