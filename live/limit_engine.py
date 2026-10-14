@@ -929,6 +929,7 @@ class ZoneLimitLiveEngine:
             rsi_overbought=params.rsi_overbought,
             limit_valid_bars=valid_bars,
             cancel_on_condition_fail=params.cancel_limit_on_condition_fail,
+            fill_penetration_bps=params.fill_penetration_bps,
             placed_ms=time_ms,
             tap_index=tap_index,
             zone_width_atr=zone_width_atr,
@@ -985,8 +986,11 @@ def _validate_live_params(params: ConfluenceParams) -> None:
         raise ValueError(
             "라이브 엔진은 long_max_deviation 게이트를 배선하지 않았습니다(채택 기본값 None)."
         )
-    if params.fill_penetration_bps != 0.0 or params.fill_dropout_rate != 0.0:
+    # 관통 요구(`fill_penetration_bps`)는 라이브에서도 같은 산식으로 판정한다(WAN-451 ⑤ —
+    # 팔은 `pen_5bp`로 판정했다). 무작위 탈락(`fill_dropout_rate`)은 큐 우선순위의 **통계적
+    # 근사**라 개별 주문에 재현할 수 없다 — 그것만 거부한다.
+    if params.fill_dropout_rate != 0.0:
         raise ValueError(
-            "체결 보수화 렌즈(fill_penetration_bps/fill_dropout_rate)는 백테스트 민감도"
-            " 전용입니다 — 라이브는 실제 체결을 재는 쪽이라 적용할 수 없습니다."
+            "체결 탈락 렌즈(fill_dropout_rate)는 백테스트 민감도 전용입니다 — 무작위 탈락은"
+            " 개별 라이브 주문에 재현할 수 없습니다(관통 요구 fill_penetration_bps는 지원)."
         )
