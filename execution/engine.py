@@ -125,6 +125,9 @@ class EntryIntent(BaseModel):
     stop_price: float | None = None
     """손절 참조가(오더블록 무효화). 사이징의 손절 거리 기준. 없으면 진입 불가."""
     take_profit_price: float | None = None
+    risk_scale: float = Field(default=1.0, gt=0.0, le=1.0)
+    """이 거래만의 리스크 배율(WAN-451 팔 — 폭락 국면 ×0.5). 사이징의 `risk_per_trade`에 곱한다.
+    **기본 1.0 = 옛 동작 그대로**(배율 없음)."""
 
 
 class ExecutionOutcome(BaseModel):
@@ -287,6 +290,12 @@ class ExecutionEngine:
             size_params = book_sizing.params
             size_open = book_sizing.synthetic_open
 
+        if intent.risk_scale != 1.0:
+            # 거래별 리스크 배율(WAN-451) — 북 사이징이 정한 파라미터 위에 얹는다(백테스트
+            # `run_leverage_book(risk_scale=)`처럼 `risk_per_trade`에만 곱한다).
+            size_params = size_params.model_copy(
+                update={"risk_per_trade": size_params.risk_per_trade * intent.risk_scale}
+            )
         # 수량과 함께 **왜 그 수량인지**를 받는다(WAN-275). 0이면 어느 가드에 걸렸는지를
         # 구체 사유로 실어 보낸다 — 예전의 "사이징 수량 0" 한 뭉치를 세분화. 수량 계산·
         # 거부 동작은 불변이라 `size_open=0.0`(북 없음)은 예전 per-trade clamp와 비트 동일.

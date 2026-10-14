@@ -89,6 +89,7 @@ from backtest.zone_limit_backtest import _Candidate
 from common.costs import Liquidity
 from data.models import timeframe_to_ms
 from data.storage import OhlcvStore
+from strategy import stoch
 
 REPORT_DIR = Path(__file__).resolve().parent / "reports"
 CSV_PATH = REPORT_DIR / "wan424_stoch_ob_arm.csv"
@@ -127,8 +128,8 @@ TIMEFRAMES: tuple[str, ...] = ("1h", "2h", "3h", "4h", "6h", "8h", "12h", "1d", 
 SEGMENTS: tuple[str, ...] = ("full", "is", "oos_warm")
 
 #: 트레이딩뷰 스토캐스틱(20,10,10) — %K 선 = SMA(raw %K, 10). 결정문이 못 박은 정의다.
-K_LENGTH = 20
-K_SMOOTH = 10
+K_LENGTH = stoch.K_LENGTH
+K_SMOOTH = stoch.K_SMOOTH
 
 HOLD_BARS: tuple[int, ...] = (4, 8, 12, 16, 24)
 FLOORS: tuple[float, ...] = (0.03, 0.04)
@@ -163,59 +164,9 @@ register_3h()
 # ---------------------------------------------------------------------------
 
 
-def stoch_k_line(
-    high: Sequence[float],
-    low: Sequence[float],
-    close: Sequence[float],
-    *,
-    length: int = K_LENGTH,
-    smooth: int = K_SMOOTH,
-) -> list[float | None]:
-    """봉 i의 %K 선(= SMA(raw %K, smooth)) — 봉 i가 **닫혀야** 아는 값이다.
-
-    raw %K = 100·(종가 − 최근 `length`봉 최저) / (최고 − 최저). 폭이 0이면 50(스크래치 규약).
-    워밍업(raw가 `length`봉, 평활이 `smooth`개 모자란 자리)은 `None`이다.
-    """
-    n = len(close)
-    if not (len(high) == len(low) == n):
-        raise ValueError("high/low/close 길이가 다릅니다.")
-    raw: list[float | None] = []
-    for i in range(n):
-        if i + 1 < length:
-            raw.append(None)
-            continue
-        hi = max(high[i + 1 - length : i + 1])
-        lo = min(low[i + 1 - length : i + 1])
-        raw.append(50.0 if hi <= lo else 100.0 * (close[i] - lo) / (hi - lo))
-    out: list[float | None] = []
-    for i in range(n):
-        if i + 1 < smooth:
-            out.append(None)
-            continue
-        window = raw[i + 1 - smooth : i + 1]
-        vals = [v for v in window if v is not None]
-        out.append(sum(vals) / smooth if len(vals) == smooth else None)
-    return out
-
-
-def k_before(
-    times: Sequence[int], k: Sequence[float | None], entry_ms: int, tf_ms: int
-) -> float | None:
-    """진입 시각이 속한 봉의 **직전 확정봉** %K — 인과적으로 알 수 있는 가장 최신 값.
-
-    스크래치(`hold_ls.py` `k_at`) 규약을 그대로 옮긴다: 진입 봉 `b = floor(t/tf)·tf`가
-    저장돼 있으면 그 앞 봉의 값, 없으면(데이터 구멍) `b` 이하 마지막 봉의 **한 칸 앞** 값.
-    두 경우 모두 진입 시점 이전에 닫힌 봉이다(뒤쪽은 한 봉 더 보수적이다).
-    """
-    if not times:
-        return None
-    bar = (entry_ms // tf_ms) * tf_ms
-    i = bisect.bisect_left(times, bar)
-    if i >= len(times) or times[i] != bar:
-        i = bisect.bisect_right(times, bar) - 1
-        if i < 0:
-            return None
-    return k[i - 1] if i - 1 >= 0 else None
+# `stoch_k_line`·`k_before`의 단일 소스는 `strategy.stoch`다(WAN-451 — 페이퍼 러너도 쓴다).
+stoch_k_line = stoch.stoch_k_line
+k_before = stoch.k_before
 
 
 def stoch_series(
