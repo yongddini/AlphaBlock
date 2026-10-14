@@ -12,6 +12,8 @@ WAN-33의 성과 집계(`paper.performance`)를 재사용해, 한
 * 전체 거래 수·승률·순손익률(%)·합계 R·MDD(%)
 * 심볼·TF 시리즈별 상위/하위(순손익률 기준)
 * 거래가 0건이면 "거래 없음 + 러너 상태 한 줄"로 짧게(무음 실패 방지)
+* 엔진 C(추세추종, WAN-451) 줄 — 호출부가 `paper.engine_c_report`로 만들어 넘긴다. 팔 거래가
+  없어도 엔진 C 줄이 있으면 「거래 없음」으로 끝내지 않는다.
 """
 
 from __future__ import annotations
@@ -92,6 +94,7 @@ def build_digest(
     period_label: str,
     runner_line: str | None = None,
     top_n: int = DEFAULT_TOP_N,
+    engine_c_lines: Sequence[str] = (),
 ) -> str:
     """성과 집계를 텔레그램용 마크다운 다이제스트 문자열로 만든다.
 
@@ -102,7 +105,13 @@ def build_digest(
     """
     overall = performance.overall
     if overall.num_trades == 0:
-        return _empty_digest(period_label, runner_line)
+        if not engine_c_lines:
+            return _empty_digest(period_label, runner_line)
+        # 엔진 C만 도는 기간(WAN-451 ② 단계)에는 팔 거래가 없는 게 보통이다 — 「거래 없음」으로
+        # 끝내면 엔진 C가 통째로 안 보인다.
+        lines = [HEADER, f"기간: `{period_label}`", "", "팔: 기간 내 청산 거래 없음", ""]
+        lines.extend(engine_c_lines)
+        return "\n".join(lines)
 
     lines = [
         HEADER,
@@ -127,4 +136,7 @@ def build_digest(
             lines.append("*하위 시리즈*")
             lines.extend(_series_line(s) for s in bottom)
 
+    if engine_c_lines:
+        lines.append("")
+        lines.extend(engine_c_lines)
     return "\n".join(lines)

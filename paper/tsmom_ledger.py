@@ -73,7 +73,7 @@ CREATE TABLE IF NOT EXISTS paper_equity_marks (
 )
 """
 
-_REBALANCE_COLUMNS = (
+REBALANCE_COLUMNS = (
     "asset",
     "as_of_ms",
     "executed_ms",
@@ -143,7 +143,7 @@ class RebalanceRow:
         return self.settled_pnl - self.funding - self.cost
 
     def as_row(self) -> tuple[object, ...]:
-        return tuple(getattr(self, c) for c in _REBALANCE_COLUMNS)
+        return tuple(getattr(self, c) for c in REBALANCE_COLUMNS)
 
 
 def plan_rebalance(
@@ -262,8 +262,8 @@ class TsmomLedgerStore:
 
     def append(self, row: RebalanceRow) -> None:
         """한 행을 넣는다 — 같은 (자산, as_of)가 이미 있으면 **거부한다**(덮으면 이중 계상)."""
-        placeholders = ", ".join("?" for _ in _REBALANCE_COLUMNS)
-        columns = ", ".join(_REBALANCE_COLUMNS)
+        placeholders = ", ".join("?" for _ in REBALANCE_COLUMNS)
+        columns = ", ".join(REBALANCE_COLUMNS)
         sql = f"INSERT INTO tsmom_rebalances ({columns}) VALUES ({placeholders})"
         try:
             with self._lock, self._conn:
@@ -294,7 +294,7 @@ class TsmomLedgerStore:
         return 0.0 if row is None else float(row[0])
 
     def rows(self, asset: str | None = None) -> list[RebalanceRow]:
-        sql = f"SELECT {', '.join(_REBALANCE_COLUMNS)} FROM tsmom_rebalances"
+        sql = f"SELECT {', '.join(REBALANCE_COLUMNS)} FROM tsmom_rebalances"
         params: Sequence[object] = ()
         if asset is not None:
             sql += " WHERE asset = ?"
@@ -302,7 +302,7 @@ class TsmomLedgerStore:
         sql += " ORDER BY as_of_ms, asset"
         with self._lock:
             fetched = self._conn.execute(sql, params).fetchall()
-        return [RebalanceRow(**dict(zip(_REBALANCE_COLUMNS, r, strict=True))) for r in fetched]
+        return [RebalanceRow(**dict(zip(REBALANCE_COLUMNS, r, strict=True))) for r in fetched]
 
     def record_mark(self, mark: EquityMark) -> None:
         """시가평가 자본을 남긴다 — 같은 시각은 덮는다(같은 시각의 평가는 하나다)."""
