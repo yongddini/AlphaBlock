@@ -658,9 +658,11 @@ class TestLiveParamValidation:
         with pytest.raises(ValueError, match="재현할 수 없습니다"):
             ZoneLimitLiveEngine(params=tap)
 
-    def test_rejects_fill_conservatism_lenses(self) -> None:
-        with pytest.raises(ValueError, match="민감도"):
-            ZoneLimitLiveEngine(params=_params(fill_penetration_bps=5.0))
+    def test_rejects_fill_dropout_but_accepts_penetration(self) -> None:
+        """무작위 탈락은 개별 주문에 재현할 수 없어 거부하고, 관통 요구는 지원한다(WAN-451 ⑤)."""
+        with pytest.raises(ValueError, match="fill_dropout_rate"):
+            ZoneLimitLiveEngine(params=_params(fill_dropout_rate=0.5))
+        ZoneLimitLiveEngine(params=_params(fill_penetration_bps=5.0))
 
     def test_rejects_min_rr(self) -> None:
         with pytest.raises(ValueError, match="min_rr"):
@@ -675,3 +677,15 @@ class TestLiveParamValidation:
     def test_band_reentry_requires_deviation_filter(self) -> None:
         with pytest.raises(ValueError, match="볼린저 필터가 있어야"):
             ZoneLimitLiveEngine(params=_params(deviation_filter=None), reentry_entry_rule="band")
+
+
+def test_engine_carries_penetration_requirement_onto_orders(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """설정한 관통 요구가 실제 주문에 실린다(라벨만 붙고 터치 체결로 도는 사고 방지)."""
+    engine = _rest_without_touch(monkeypatch, params=_params(fill_penetration_bps=5.0))
+    order = engine.book.pending(_SYMBOL, _TF)
+    assert order is not None and order.fill_penetration_bps == 5.0
+    default = _rest_without_touch(monkeypatch)
+    order0 = default.book.pending(_SYMBOL, _TF)
+    assert order0 is not None and order0.fill_penetration_bps == 0.0
