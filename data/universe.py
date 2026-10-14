@@ -43,6 +43,14 @@ LIQ_DAYS = 30
 """거래대금 평균 창(일, 직전 확정 일봉 포함)."""
 QUOTE = "USDT"
 
+#: 팔이 매매하는 TF(정본 `wan424.TIMEFRAMES` 9개 + 15m — WAN-430/440).
+ARM_TIMEFRAMES: tuple[str, ...] = ("15m", "1h", "2h", "3h", "4h", "6h", "8h", "12h", "1d", "1w")
+#: 수집기가 원천 kline으로 받는 TF(1분봉 포함). 2h는 저장소가 1h에서 파생하고(WAN-24),
+#: 3h는 바이낸스에 없어 수집기가 1h에서 접어 저장한다(`BUILT_TIMEFRAMES`).
+ARM_STREAM_TIMEFRAMES: tuple[str, ...] = ("1m", "15m", "1h", "4h", "6h", "8h", "12h", "1d", "1w")
+#: 수집기가 만들어 저장하는 TF → 원천 TF.
+BUILT_TIMEFRAMES: dict[str, str] = {"3h": "1h"}
+
 #: 1970-01-01은 목요일이라 월요일 00:00 UTC 격자는 epoch에서 4일 밀려 있다.
 _MONDAY_OFFSET_MS = 4 * DAY_MS
 

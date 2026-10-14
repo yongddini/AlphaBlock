@@ -62,8 +62,25 @@ def _default_timeframes() -> list[str]:
 
 
 def _default_backfill_lookback_days() -> dict[str, int]:
-    """타임프레임별 백필 룩백(일). 과도한 과거 요청을 막기 위한 기본값."""
-    return {"1m": 3, "5m": 10, "15m": 30, "1h": 120, "4h": 365, "1d": 1825}
+    """타임프레임별 백필 룩백(일). 과도한 과거 요청을 막기 위한 기본값.
+
+    6h·8h·12h·1w는 스토캐스틱 팔(WAN-451 ③)이 처음 받는 종목에 쓴다 — 러너의 탐지 창
+    (`live_signal_lookback_bars` 1500봉)을 채울 만큼이다(1w는 상장일부터). 1h는 120 → 190일로
+    늘렸다 — 3h를 1h에서 접으므로(`data.derived_bars`) 3h도 1500봉을 갖게 하려는 것이다. 룩백은
+    **저장분이 없을 때만** 쓰이므로 이미 수집 중인 종목은 영향이 없다.
+    """
+    return {
+        "1m": 3,
+        "5m": 10,
+        "15m": 30,
+        "1h": 190,
+        "4h": 365,
+        "6h": 375,
+        "8h": 500,
+        "12h": 750,
+        "1d": 1825,
+        "1w": 3650,
+    }
 
 
 def _default_live_signal_symbols() -> list[str]:
@@ -178,6 +195,8 @@ class Settings(BaseSettings):
     universe_enabled: bool = Field(default=False)
     universe_refresh_delay_seconds: float = Field(default=120.0, ge=0)
     universe_request_interval_seconds: float = Field(default=0.5, ge=0)
+    # 팔 수집 계획(그 주 목록 + 보유 종목)이 바뀌었는지 수집기가 다시 보는 간격(초).
+    universe_plan_check_seconds: float = Field(default=60.0, gt=0)
 
     # 백테스트 손익에 펀딩비를 반영할지(WAN-91). 위 `funding_enabled`(수집 on/off)와
     # 별개 개념이다 — 이 값은 `BacktestConfig.funding_enabled`에 실린다

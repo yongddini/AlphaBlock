@@ -6194,6 +6194,8 @@ backtest.wan447_funding_carry --part run` · 2,336초).
   import) · 수집기가 상장 USDT 무기한 전체의 1d만 모아 월요일마다 31종목을 `universe_rotations`에 남긴다(기본 꺼짐
   `ALPHABLOCK_UNIVERSE_ENABLED` · `alphablock universe`). 🚨 **풀이 정본과 다르다**(지금 상장 전체 vs 53종목 고정 ·
   사용자 결정 ②나 · 이 풀의 백테스트 없음). 검산: 정본 풀 306주 전부 400일 창 = 전 이력(차이 0).
+  같은 스위치가 그 주 31종목 + 보유 종목을 1m·전 TF로 수집한다(`data/collection_plan.py` · 연결당 200 스트림 ·
+  3h는 1h에서 접음 = 정본 1분봉 접기와 OHLCV 불일치 0 · 31종목 54.9만 봉).
 
 ## 실험 도구 — 새 리포트 스크립트를 짜기 전에 읽을 것 (WAN-101)
 
