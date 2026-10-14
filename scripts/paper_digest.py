@@ -32,6 +32,7 @@ from common.telegram import build_telegram_client
 from common.timefmt import kst_log_format, use_kst_logging
 from config.settings import Settings, get_settings
 from paper.digest import build_digest, format_period_label
+from paper.engine_c_report import engine_c_digest_lines, read_engine_c
 from paper.performance import build_performance
 from paper.store import PaperTradeRecord, PaperTradeStore
 
@@ -148,17 +149,27 @@ def generate_digest(
 
     period_label = format_period_label(since_ms, until_ms)
     performance = build_performance(records)
+    # 엔진 C(WAN-451): 팔 장부 밖(`tsmom_rebalances`·`paper_equity_marks`)에 있다 — 읽기 전용.
+    engine_c: list[str] = []
+    try:
+        engine_c = engine_c_digest_lines(
+            read_engine_c(db_path, since_ms=since_ms, until_ms=until_ms)
+        )
+    except sqlite3.Error:
+        _logger.warning("엔진 C 원장을 읽지 못했습니다 (%s) — 엔진 C 줄 생략", db_path)
 
     if performance.overall.num_trades == 0:
         return build_digest(
             performance,
             period_label=period_label,
             runner_line=_runner_status_line(settings),
+            engine_c_lines=engine_c,
         )
 
     return build_digest(
         performance,
         period_label=period_label,
+        engine_c_lines=engine_c,
     )
 
 

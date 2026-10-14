@@ -143,6 +143,13 @@ from live.trade_timeline import (
     live_timeline_rows,
     resolve_day_window,
 )
+from paper.engine_c_report import (
+    EngineCView,
+    holdings_frame,
+    mark_stats,
+    read_engine_c,
+    rebalance_frame,
+)
 from paper.performance import build_performance
 from paper.report import (
     performance_to_dataframe,
@@ -1994,13 +2001,61 @@ def _wallet_balance(
     return initial_equity + sum(pnl for pnl in pnls if pnl is not None)
 
 
+def _render_engine_c(settings: Settings, view: EngineCView, *, arm_pnl: float | None) -> None:
+    """엔진 C(추세추종, WAN-451) — 보유 · 하루 시가평가 자본 · 리밸런싱 원장.
+
+    엔진 C는 `paper_trades`가 아니라 자기 원장(`tsmom_rebalances`·`paper_equity_marks`)에
+    남으므로, 이 블록이 없으면 화면에서 통째로 사라진다. `arm_pnl`은 팔 실현손익 합(재구성
+    불가면 None) — 지갑은 두 엔진이 같이 쓴다.
+    """
+    st.subheader("엔진 C (추세추종 · BTC·ETH)")
+    cards = st.columns(3)
+    if arm_pnl is not None:
+        wallet = settings.paper_equity + arm_pnl + view.total_net_pnl
+        cards[0].metric(
+            "지갑 잔고(팔 + 엔진 C)",
+            f"{wallet:,.0f}",
+            delta=f"{wallet - settings.paper_equity:+,.2f}",
+            help="초기 자본 + 팔 실현손익 합 + 엔진 C 정산 합(매일 정산이라 미실현 없음).",
+        )
+    cards[1].metric("엔진 C 누적 손익($)", f"{view.total_net_pnl:+,.2f}")
+    stats = mark_stats(view.marks)
+    cards[2].metric(
+        "MDD (하루 1회 시가평가)",
+        "—" if stats is None else f"−{stats.max_drawdown_pct:.2f}%",
+        help="00:00 UTC(KST 09:00) 리밸런싱 직후 남기는 시가평가 자본으로 잰 최대 낙폭.",
+    )
+    if view.holdings:
+        st.caption("지금 보유")
+        st.dataframe(holdings_frame(view), use_container_width=True, hide_index=True)
+    if view.marks:
+        st.caption("하루 1회 시가평가 자본(KST 09:00)")
+        st.line_chart(
+            pd.DataFrame(
+                {"자본": [m.equity for m in view.marks]},
+                index=pd.to_datetime([m.mark_ms for m in view.marks], unit="ms", utc=True)
+                .tz_convert("Asia/Seoul")
+                .tz_localize(None),
+            )
+        )
+    if view.rows:
+        st.caption("리밸런싱 원장(최근이 위)")
+        st.dataframe(rebalance_frame(view), use_container_width=True, hide_index=True)
+
+
 def _render_balance(settings: Settings) -> None:
     db_path = settings.db_path
     with PaperTradeStore(db_path) as store:
         series = store.list_series()
         records = [r for s, tf in series for r in store.list_records(s, tf)]
+    engine_c = read_engine_c(db_path)
 
     if not records:
+        if not engine_c.empty:
+            # 엔진 C만 도는 단계(WAN-451 ②)에는 팔 거래가 없는 게 보통이다.
+            st.info("팔(오더블록) 페이퍼 거래는 아직 없습니다 — 아래는 엔진 C 기록입니다.")
+            _render_engine_c(settings, engine_c, arm_pnl=0.0)
+            return
         st.info(
             "누적된 페이퍼 거래가 없습니다. 러너(`python -m live.runner`)가 청산을 내면 "
             "여기에 성과가 집계됩니다."
@@ -2047,7 +2102,9 @@ def _render_balance(settings: Settings) -> None:
         )
     else:
         delta = None if initial_cap is None else f"{balance - initial_cap:+,.2f}"
-        cards[0].metric("지갑 잔고", f"{balance:,.0f}", delta=delta)
+        # 엔진 C가 있으면 이 카드는 팔 몫만이다 — 두 엔진 합은 아래 엔진 C 블록이 보여 준다.
+        label = "지갑 잔고" if engine_c.empty else "지갑 잔고(팔 몫)"
+        cards[0].metric(label, f"{balance:,.0f}", delta=delta)
     cards[1].metric("누적 실현손익", f"{overall.total_return_pct:+.2f}%")
     cards[2].metric(
         "미실현손익",
@@ -2135,6 +2192,10 @@ def _render_balance(settings: Settings) -> None:
             help="CSV는 필터와 무관하게 **전체 원장**입니다(데이터 축 — WAN-190).",
             mime="text/csv",
         )
+
+    if not engine_c.empty:
+        arm_pnl = None if balance is None else balance - initial_cap
+        _render_engine_c(settings, engine_c, arm_pnl=arm_pnl)
 
 
 # --- 진입/미진입 사유 장부 탭 (WAN-219) --------------------------------------
