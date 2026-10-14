@@ -42,19 +42,22 @@ from backtest import wan447_funding_carry as fc
 from backtest import wan448_stop_fill_ticks as st
 from data import spot_klines as sk
 from data.storage import OhlcvStore
+from strategy import tsmom
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REPORT_DIR = REPO_ROOT / "backtest" / "reports"
 DAILY_CSV = REPORT_DIR / "wan449_daily.csv"
 SUMMARY_PATH = REPORT_DIR / "wan449_tsmom_summary.md"
 
-ASSETS: tuple[str, ...] = ("BTC/USDT:USDT", "ETH/USDT:USDT")
-LOOKBACKS: tuple[int, ...] = (20, 60, 120, 250)
-VOL_TARGET = 0.20
-VOL_WINDOW = 60
-MAX_LEVERAGE = 2.0
-COST = 0.0009
-DAYS_PER_YEAR = 365.0
+# 엔진 C 정본 상수·목표 계산의 단일 소스는 `strategy.tsmom`이다
+# (WAN-451 — 페이퍼 러너가 같은 식을 쓴다).
+ASSETS = tsmom.ASSETS
+LOOKBACKS = tsmom.LOOKBACKS
+VOL_TARGET = tsmom.VOL_TARGET
+VOL_WINDOW = tsmom.VOL_WINDOW
+MAX_LEVERAGE = tsmom.MAX_LEVERAGE
+COST = tsmom.COST
+DAYS_PER_YEAR = tsmom.DAYS_PER_YEAR
 FUT_FROM = "2020-09-15"
 FRONT_END = "2024-08-08"
 """앞구간 끝 = WAN-442 대표 경계(합성 비율 k를 여기서만 정한다)."""
@@ -69,12 +72,8 @@ VARIANT_CLOSE = "엔진 C 종가만(초안)"
 VARIANT_CARRY = "정본 + 캐리 50%"
 
 
-def tsmom_weights(price: pd.Series, returns: pd.Series) -> pd.Series:
-    """그날 종가에 정한 포지션(다음 날 수익에 적용) — 신호 × 변동성 목표 · |배율| ≤ 2."""
-    sig = sum(np.sign(price / price.shift(lb) - 1.0) for lb in LOOKBACKS) / len(LOOKBACKS)
-    vol = returns.rolling(VOL_WINDOW).std() * math.sqrt(DAYS_PER_YEAR)
-    wgt = (sig * VOL_TARGET / vol).clip(-MAX_LEVERAGE, MAX_LEVERAGE)
-    return wgt.fillna(0.0)
+tsmom_weights = tsmom.tsmom_weights
+"""그날 종가에 정한 포지션 — `strategy.tsmom.tsmom_weights` 그 자체(WAN-451 단일 소스)."""
 
 
 @dataclass(frozen=True)

@@ -189,6 +189,10 @@ _ENGINE_NON_SOURCE: frozenset[str] = frozenset(
         "execution/broker.py",
         "execution/engine.py",
         "execution/models.py",
+        # 엔진 C(시계열 모멘텀) 목표 배율의 단일 소스(WAN-451) — BTC·ETH 일봉으로 배율을 낼
+        # 뿐 오더블록 후보·체결·손익 어디에도 안 실린다. 엔진 목록에 넣으면 이 파일을 손볼
+        # 때마다 payload·야간 타임라인 캐시가 통째로 무효화된다(`btc_day_regime.py`와 같은 이유).
+        "strategy/tsmom.py",
     }
 )
 
