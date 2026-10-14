@@ -148,6 +148,14 @@ class PendingLimitOrder:
     rsi_overbought: float = 70.0
     limit_valid_bars: int | None = 24
     cancel_on_condition_fail: bool = False
+    fill_penetration_bps: float = 0.0
+    """체결에 요구하는 관통 폭(bp). **기본 0 = 닿으면 체결(옛 동작 그대로)**.
+
+    0보다 크면 가격이 지정가를 그만큼 **지나쳐야** 체결로 본다(롱 `low <= 지정가×(1−bp/1e4)`,
+    숏 `high >= 지정가×(1+bp/1e4)`). 체결가는 여전히 지정가다. 백테스트
+    `backtest.substep.simulate_zone_limit_trade(penetration_bps=)`와 **같은 산식**이다 — 팔은
+    `pen_5bp`로 판정했으므로 페이퍼도 같은 문턱으로 체결해야 같은 선상이다(WAN-451 ⑤ · WAN-305).
+    """
     placed_ms: int | None = None
     tap_index: int = 0
     zone_width_atr: float | None = None
@@ -171,6 +179,10 @@ class PendingLimitOrder:
             raise ValueError(
                 "live_limit을 쓰면 익절 목표는 체결 순간에 산출되므로 "
                 "take_profit_price를 함께 줄 수 없습니다."
+            )
+        if self.fill_penetration_bps < 0.0:
+            raise ValueError(
+                f"fill_penetration_bps는 음수일 수 없습니다: {self.fill_penetration_bps}"
             )
         if self.limit_price is not None:
             self.last_limit_price = self.limit_price
@@ -223,7 +235,10 @@ class PendingLimitOrder:
                 self.first_rested_ms = now_ms
             self.last_limit_price = current_limit
 
-        touched = low <= current_limit if self.is_long else high >= current_limit
+        # 관통 문턱(WAN-451 ⑤) — 백테스트 `_fill_trigger`와 글자 그대로 같은 산식이다.
+        penetration = current_limit * (self.fill_penetration_bps / 10_000.0)
+        trigger = current_limit - penetration if self.is_long else current_limit + penetration
+        touched = low <= trigger if self.is_long else high >= trigger
         if not touched:
             return None
 
