@@ -161,9 +161,13 @@ def _pick(frame: pd.DataFrame, group: str, fr: float, series: str) -> pd.Series:
 
 
 def test_published_zero_carry_panel_is_the_wan449_main_variant() -> None:
-    """완료기준 3 — 캐리 0% · 실제 ≡ WAN-449 정본(공개 일별 CSV의 해마다 수익)."""
+    """완료기준 3 — 캐리 0% · 실제 ≡ WAN-449 정본(공개 일별 CSV의 해마다 수익).
+
+    WAN-450은 옛 같은 1분 규약(청산 먼저)으로 고정한 표라 그 규약의 WAN-449 곡선과 맞댄다(WAN-451
+    재산출 2026-10-15 전 기록 · `e.LEGACY_DAILY_CSV`).
+    """
     row = _pick(_panels(), "판", 0.0, fc.SERIES_ACTUAL)
-    eq = pd.read_csv(e.DAILY_CSV, index_col=0, parse_dates=True)["combo_eq"]
+    eq = pd.read_csv(e.LEGACY_DAILY_CSV, index_col=0, parse_dates=True)["combo_eq"]
     for y, v in e.yearly(eq).items():
         assert row[f"y{y}"] == pytest.approx(float(v), abs=1e-9)
     assert row["lambda"] == pytest.approx(0.885, abs=5e-4) and row["k"] == pytest.approx(

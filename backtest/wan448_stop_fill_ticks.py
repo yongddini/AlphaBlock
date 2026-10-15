@@ -261,8 +261,8 @@ def run(built: u.Markets, *, log: bool = True) -> tuple[pd.DataFrame, list[GridR
     fmk, _ = m.apply_rotation(st.fut_pool, top[1], force_close=False)
     placed = {
         fill: (
-            c.place_arm(smk, c.ARM_B, fill, in_book=True),
-            c.place_arm(fmk, c.ARM_B, fill, in_book=True),
+            c.place_arm(smk, c.ARM_B, fill, in_book=True, same_minute=w.SAME_MINUTE_EXIT_FIRST),
+            c.place_arm(fmk, c.ARM_B, fill, in_book=True, same_minute=w.SAME_MINUTE_EXIT_FIRST),
         )
         for fill in c.FILLS
     }

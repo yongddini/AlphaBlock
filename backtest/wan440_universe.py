@@ -489,16 +489,24 @@ def run(jobs: int) -> tuple[list[c.Row], list[str]]:
     for key, (s_mk, f_mk) in markets.items():
         for fill in c.FILLS:
             placed[(key, fill)] = (
-                c.place_arm(s_mk, c.ARM_B, fill, in_book=True),
-                c.place_arm(f_mk, c.ARM_B, fill, in_book=True),
+                c.place_arm(
+                    s_mk, c.ARM_B, fill, in_book=True, same_minute=w.SAME_MINUTE_EXIT_FIRST
+                ),
+                c.place_arm(
+                    f_mk, c.ARM_B, fill, in_book=True, same_minute=w.SAME_MINUTE_EXIT_FIRST
+                ),
             )
     ck_s = restrict(spot, old_spot_syms)
     ck_f = restrict(fut, set(SYMBOLS_31))
     notes += checksum_31(
         {
             (label(U31, "+15m"), "bar_low"): (
-                c.place_arm(ck_s, c.ARM_B, "bar_low", in_book=True),
-                c.place_arm(ck_f, c.ARM_B, "bar_low", in_book=True),
+                c.place_arm(
+                    ck_s, c.ARM_B, "bar_low", in_book=True, same_minute=w.SAME_MINUTE_EXIT_FIRST
+                ),
+                c.place_arm(
+                    ck_f, c.ARM_B, "bar_low", in_book=True, same_minute=w.SAME_MINUTE_EXIT_FIRST
+                ),
             )
         },
         rows_ref=c.CSV_PATH,
@@ -572,8 +580,12 @@ def curve_rows(
             s_mk, f_mk = restrict(spot, set(chosen)), restrict(fut, set(chosen))
             if v == "9TF":
                 s_mk, f_mk = s_mk.without(TF15), f_mk.without(TF15)
-            s = c.place_arm(s_mk, c.ARM_B, "bar_low", in_book=True)
-            f = c.place_arm(f_mk, c.ARM_B, "bar_low", in_book=True)
+            s = c.place_arm(
+                s_mk, c.ARM_B, "bar_low", in_book=True, same_minute=w.SAME_MINUTE_EXIT_FIRST
+            )
+            f = c.place_arm(
+                f_mk, c.ARM_B, "bar_low", in_book=True, same_minute=w.SAME_MINUTE_EXIT_FIRST
+            )
 
             def mdd_at(r: float, s: list[w.PlacedTrade] = s, f: list[w.PlacedTrade] = f) -> float:
                 return c.chain(s, f, r)[1]

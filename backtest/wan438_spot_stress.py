@@ -80,6 +80,7 @@ from backtest.wan424_stoch_ob_arm import base_cell_kwargs, build_base_payloads
 from backtest.wan436_stoch_crowd_rules import (
     BASE,
     DAY_MS,
+    SAME_MINUTE_EXIT_FIRST,
     ArmEntry,
     PlacedTrade,
     RuleSet,
@@ -361,7 +362,14 @@ def place_all(
 ) -> dict[str, list[PlacedTrade]]:
     counts = signal_counts([int(e.cand.entry_time) for e in entries])
     return {
-        name: place(payloads, entries, rules, counts=counts, stop_fill=stop_fill)
+        name: place(
+            payloads,
+            entries,
+            rules,
+            counts=counts,
+            stop_fill=stop_fill,
+            same_minute=SAME_MINUTE_EXIT_FIRST,
+        )
         for name, rules in RULE_ARMS
     }
 

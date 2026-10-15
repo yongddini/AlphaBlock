@@ -97,7 +97,7 @@ from live.arm_signals import ArmSignal, ArmSignalStore
 from live.engine_state import EngineStateStore, SeriesStateSnapshot
 from live.executor import PaperExecutor, TradeReport
 from live.limit_engine import EngineEvent, ReentryEntryRule, ZoneLimitLiveEngine
-from live.limit_orders import LimitOrderStatus, expiry_deadline_ms
+from live.limit_orders import LimitFill, LimitOrderStatus, expiry_deadline_ms
 from live.order_journal import SKIP_REASON_ZONE_WIDTH, OrderJournal
 from live.paper import PaperPosition
 from live.price_feed import PriceFeed
@@ -211,6 +211,8 @@ class ZoneLimitPaperRunner:
         #: 보존한다(해소된 기록도 남는다: 나중에 성적을 읽을 때 그 구간의 빈칸이
         #: 「기회 없음」이 아니라 「데이터 결측」이었음을 알 수 있어야 한다).
         self._gap_skips: dict[Series, DataGapSkip] = {}
+        #: 시리즈별 지금 소비 중인 1분봉 (open_time, 저가, 고가) — 같은 1분 가격 순서 판정용.
+        self._minute_bar: dict[Series, tuple[int, float, float]] = {}
         if runtime_state is not None:
             for skip in runtime_state.load().data_gap_skips:
                 self._gap_skips[(skip.symbol, skip.timeframe)] = skip
@@ -267,10 +269,8 @@ class ZoneLimitPaperRunner:
                 self._handle_events(fed)
                 events += fed
             low, high, close = float(low_raw), float(high_raw), float(close_raw)
-            if self._engine.independent_orders:
-                # 정본 북은 같은 1분에 청산이 먼저 자리를 비운다(반개구간 — `exit_time == now`인
-                # 포지션은 그 분의 새 진입 전에 정산된다). 그 분에 새로 연 포지션은 아래에서 본다.
-                self._check_exits(symbol, timeframe, low=low, high=high, close=close, time_ms=t)
+            # 같은 1분 가격 순서(WAN-451)가 이 1분의 범위를 읽는다(`_stop_first`).
+            self._minute_bar[key] = (t, low, high)
             step_events = self._engine.on_substep(
                 symbol, timeframe, time_ms=t, low=low, high=high, close=close
             )
@@ -684,6 +684,7 @@ class ZoneLimitPaperRunner:
                 if self._engine.independent_orders and event.fill is not None:
                     # 팔: 탭마다 독립 주문이 곧 진짜 주문이다 — 칸에 포지션이 없으면 진입
                     # 판정을 탄다(정본 북과 같은 규칙, WAN-451).
+                    self._stop_first(event.fill)
                     self._handle_fill(event)
             else:
                 if self._notifier is not None and event.kind == "cancelled_expired":
@@ -805,6 +806,36 @@ class ZoneLimitPaperRunner:
                     )
                 except Exception:  # noqa: BLE001 — 폴백 처분마저 실패하면 로그만 남긴다.
                     _logger.exception("처분 기록 폴백 실패: journal_id=%d", journal_id)
+
+    def _stop_first(self, fill: LimitFill) -> None:
+        """같은 1분 가격 순서(WAN-451 · 정본 `w436.ADOPTED_SAME_MINUTE`).
+
+        칸의 포지션이 이 1분에 손절되고 새 체결가가 그 손절가 **이하**(숏은 이상)면 — 가격이
+        손절가를 먼저 지나 더 가서 체결된 것이라 손절이 먼저다. 그때만 손절을 먼저 정산해 칸을
+        비운다. 그 밖에는 체결이 먼저라 포지션이 열린 채로 판정한다(`cell_busy`). 시간 청산은 그
+        1분 종가라 언제나 체결보다 뒤다(아래 `_check_exits`가 그대로 처리한다).
+        """
+        bar = self._minute_bar.get((fill.symbol, fill.timeframe))
+        if bar is None or bar[0] != fill.time:
+            return
+        position = next(
+            (
+                p
+                for p in self._executor.open_positions
+                if p.symbol == fill.symbol and p.timeframe == fill.timeframe
+            ),
+            None,
+        )
+        if position is None or position.stop_price is None:
+            return
+        stop = position.stop_price
+        _t, low, high = bar
+        if position.direction is OrderBlockDirection.BULLISH:
+            first = low <= stop and fill.price <= stop
+        else:
+            first = high >= stop and fill.price >= stop
+        if first:
+            self._exit(fill.symbol, fill.timeframe, stop, fill.time, SignalExitReason.STOP_LOSS)
 
     def _record_signal(self, event: EngineEvent) -> None:
         """그림자 체결 하나를 신호 장부에 남긴다 — 몰림 규칙이 세는 모집단인지 함께 적는다."""
@@ -1256,8 +1287,9 @@ def engine_settings_for(settings: Settings) -> Settings:
     return settings.model_copy(update={"risk_limits": limits})
 
 
-#: 팔 거래당 리스크 = 맞춤 크기 2.8533% × λ 0.885(WAN-449 · `reports/wan452_notes.txt`).
-ARM_RISK_PER_TRADE = 0.028533 * 0.885
+#: 팔 거래당 리스크 = 맞춤 크기 2.8172% × λ 0.906(WAN-449 재산출 2026-10-15 — 같은 1분 가격 순서
+#: 규약 · 옛 값 2.8533% × 0.885).
+ARM_RISK_PER_TRADE = 0.028172 * 0.906
 #: 팔이 요구하는 관통 체결(bp, 정본 `pen_5bp`).
 ARM_FILL_PENETRATION_BPS = 5.0
 

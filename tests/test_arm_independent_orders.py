@@ -208,6 +208,56 @@ def test_runner_enters_from_the_first_fill_and_skips_while_holding(
     assert runner._signals is not None and len(runner._signals.rows(0, 10**13)) == 2
 
 
+@pytest.mark.parametrize(
+    ("price", "ob_stop", "low", "want"),
+    [
+        # 체결가 125 ≤ 앞 포지션 2배 손절 126 — 가격이 손절가를 먼저 지나 더 내려가 체결됐다.
+        (125.0, 118.0, 124.0, [("entered", ""), ("entered", "")]),
+        # 체결가 127 > 126 — 내려오는 가격이 지정가에 먼저 닿았다. 그 순간 포지션은 열려 있다.
+        (127.0, 120.0, 124.0, [("entered", ""), ("rejected", "cell_busy")]),
+    ],
+)
+def test_same_minute_follows_the_price_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    price: float,
+    ob_stop: float,
+    low: float,
+    want: list[tuple[str, str]],
+) -> None:
+    """같은 1분에 앞 포지션 손절과 다음 체결 — 정본 `w436.fill_before_exit`와 같은 가격 순서."""
+    from tests.test_arm_rules import _fill_event
+
+    runner, journal, session, db = _crowd_runner(tmp_path, ["SYN/USDT:USDT"])
+    monkeypatch.setattr(runner, "_crowd_gate", lambda _event, decision: decision)
+    runner._engine = ZoneLimitLiveEngine(
+        params=runner._params, journal=journal, session_id=session, independent_orders=True
+    )
+    first = _shadow_fill(
+        _fill_event(journal, session, price=140.0, ob_stop=133.0), ("bullish", 7, 8)
+    )
+    runner._handle_events([first])
+    (pos,) = runner._executor.open_positions
+    assert pos.stop_price == pytest.approx(126.0)
+    second = _shadow_fill(
+        _fill_event(journal, session, price=price, ob_stop=ob_stop), ("bullish", 9, 9), after_ms=_M
+    )
+    assert second.fill is not None
+    runner._minute_bar[("SYN/USDT:USDT", "15m")] = (second.fill.time, low, 141.0)
+    runner._handle_events([second])
+    rows = (
+        sqlite3.connect(db)
+        .execute(
+            "SELECT entry_status, COALESCE(entry_reject_code, '') FROM live_limit_orders"
+            " ORDER BY id"
+        )
+        .fetchall()
+    )
+    assert rows == want
+    (now,) = runner._executor.open_positions
+    assert now.entry_price == (price if want[1][0] == "entered" else 140.0)
+
+
 def test_shadow_fill_does_not_enter_without_independent_orders(tmp_path: Path) -> None:
     """몰림 신호만 세는 그림자(옛 엔진 · 대조 테스트)는 진입을 만들지 않는다."""
     from tests.test_arm_rules import _fill_event
@@ -356,10 +406,15 @@ def _live_entries(symbol: str, tf: str, start: int, end: int, *, independent: bo
     return sorted(int(r[0]) for r in rows if start <= int(r[0]) < end)
 
 
-def _canon_entries(symbol: str, tf: str, start: int, end: int) -> list[int]:
-    """정본 팔 — 탭마다 독립 체결 · 팔 게이트 · 칸당 포지션 1개(같은 분 청산 먼저)."""
+def _canon_entries(symbol: str, tf: str, start: int, end: int) -> tuple[list[int], list[int]]:
+    """정본 팔 — 탭마다 독립 체결 · 팔 게이트 · 칸당 포지션 1개 → (옛 규약, 가격 순서) 진입 시각.
+
+    옛 규약은 같은 1분에 청산을 먼저 정산한다. 가격 순서(채택)는 정본 `w436.fill_before_exit`가
+    정한다 — 앞 포지션 손절가보다 높은 체결은 체결이 먼저라 못 들어간다.
+    """
     from backtest import wan436_stoch_crowd_rules as w436
     from backtest import wan439_crash_size_layer as w439
+    from backtest.models import ExitReason
     from backtest.wan169_leverage_book import run_cells
     from backtest.wan424_stoch_ob_arm import base_cell_kwargs
     from data.storage import OhlcvStore
@@ -384,31 +439,45 @@ def _canon_entries(symbol: str, tf: str, start: int, end: int) -> list[int]:
         (e for e in entries if start <= e.cand.entry_time < end),
         key=lambda e: (int(e.cand.entry_time), float(e.cand.entry_price)),
     )
-    out: list[int] = []
-    free_at = -1
-    for e in entries:
-        cand, _off = w436.arm_exit(e, w439.RULES.stop_multiple)
-        if int(cand.entry_time) < free_at:
-            continue
-        out.append(int(cand.entry_time))
-        free_at = int(cand.exit_time)
-    return out
+    exits = [w436.arm_exit(e, w439.RULES.stop_multiple)[0] for e in entries]
+
+    def seq(price_order: bool) -> list[int]:
+        out: list[int] = []
+        prev = None
+        for cand in exits:
+            t = int(cand.entry_time)
+            if prev is not None and t < int(prev.exit_time):
+                continue
+            if (
+                price_order
+                and prev is not None
+                and t == int(prev.exit_time)
+                and (
+                    prev.reason != ExitReason.STOP_LOSS
+                    or float(cand.entry_price) > float(prev.stop_price)
+                )
+            ):
+                continue  # 체결이 앞 포지션 청산보다 먼저 — 칸에 포지션이 있어 못 들어간다.
+            out.append(t)
+            prev = cand
+        return out
+
+    return seq(False), seq(True)
 
 
 def test_real_data_live_entries_equal_the_canonical_arm() -> None:
     """UNI 1d 2025-01-27 ~ 02-10 — 같은 1분에 「앞 포지션 손절」과 「다음 존 체결」이 겹친다.
 
-    02-03 09:44(KST) 첫 진입 → 11:07 급락 1분에 그 포지션이 2배 손절에 닿고, 같은 1분에 가격이
-    아래 존에 들어와 체결된다. 정본 북은 그 분의 청산을 먼저 정산해 두 번째도 들어간다(4일 뒤
-    시간 청산 +26%). 옛 러너는 체결을 청산보다 먼저 판정해 칸이 찬 것으로 보고 놓쳤다
-    (`cell_busy`). 몰림 규칙은 뺐다(칸 하나로는 신호 수가 정본과 다르다).
+    02-03 09:44(KST) 첫 진입 → 11:07 급락 1분에 그 포지션이 2배 손절(7.110)에 닿고, 같은 1분에
+    가격이 아래 존에 들어와 7.136에 체결된다. 체결가가 손절가보다 높으니 내려오는 가격이 지정가에
+    먼저 닿았다 — 그 순간 포지션은 아직 열려 있어 못 들어간다(가격 순서 · 2026-10-15 채택). 옛
+    규약(청산 먼저)이면 두 번째도 들어갔다. 몰림 규칙은 뺐다(칸 하나로는 신호 수가 정본과 다르다).
     """
     symbol, tf = "UNI/USDT:USDT", "1d"
     end = 1_739_145_600_000  # 2025-02-10
     start = end - 14 * _DAY
     if not _real_available(symbol, end):
         pytest.skip("실데이터(data/ohlcv.db) 없음")
-    canon = _canon_entries(symbol, tf, start, end)
-    assert len(canon) == 2
-    assert _live_entries(symbol, tf, start, end, independent=True) == canon
-    assert _live_entries(symbol, tf, start, end, independent=False) == canon[:1]
+    exit_first, price_order = _canon_entries(symbol, tf, start, end)
+    assert len(exit_first) == 2 and price_order == exit_first[:1]
+    assert _live_entries(symbol, tf, start, end, independent=True) == price_order

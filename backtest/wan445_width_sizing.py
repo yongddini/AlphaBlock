@@ -167,7 +167,9 @@ def _multiplier_note(spot: c.Market, fut: c.Market, ref: float) -> str:
 
 def _breach_note(label: str, fut: c.Market, risk: float) -> str:
     """8.6년 맞춤 크기에서 선물 복리 경로의 명목 한도(자본 × 5) 초과 진입 수 — 정보용."""
-    placed = c.place_arm(fut, c.ARM_B, c.FIT_FILL, in_book=True)
+    placed = c.place_arm(
+        fut, c.ARM_B, c.FIT_FILL, in_book=True, same_minute=w.SAME_MINUTE_EXIT_FIRST
+    )
     path = w.mtm_path(placed, risk=risk)
     return f"{label}: 8.6년 맞춤 크기 {risk:.2%}에서 복리 명목 한도 초과 진입 {path.breaches}건"
 

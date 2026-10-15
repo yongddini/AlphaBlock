@@ -334,8 +334,8 @@ def evaluate(
 ) -> tuple[Pick, list[c.Row]]:
     placed = {
         fill: (
-            c.place_arm(spot_mk, c.ARM_B, fill, in_book=True),
-            c.place_arm(fut_mk, c.ARM_B, fill, in_book=True),
+            c.place_arm(spot_mk, c.ARM_B, fill, in_book=True, same_minute=w.SAME_MINUTE_EXIT_FIRST),
+            c.place_arm(fut_mk, c.ARM_B, fill, in_book=True, same_minute=w.SAME_MINUTE_EXIT_FIRST),
         )
         for fill in c.FILLS
     }
@@ -598,8 +598,8 @@ def checksum_hand31(spot: c.Market, fut: c.Market) -> str:
     배선(시장 · 배치)이 WAN-440과 같은지 보는 검산이라 옛 정렬로 대조하고 지금 정렬 값을 옆에
     적는다.
     """
-    s = c.place_arm(spot, c.ARM_B, "bar_low", in_book=True)
-    f = c.place_arm(fut, c.ARM_B, "bar_low", in_book=True)
+    s = c.place_arm(spot, c.ARM_B, "bar_low", in_book=True, same_minute=w.SAME_MINUTE_EXIT_FIRST)
+    f = c.place_arm(fut, c.ARM_B, "bar_low", in_book=True, same_minute=w.SAME_MINUTE_EXIT_FIRST)
 
     def legacy(r: float) -> float:
         return c.chain(s, f, r, legacy_zero_duration_order=True)[1]

@@ -342,8 +342,12 @@ def run(built: u.Markets) -> tuple[list[Result], list[str]]:
             f_mk, _ = m.apply_rotation(st.fut_pool, rot[1], force_close=False)
         placed = {
             fill: (
-                c.place_arm(s_mk, c.ARM_B, fill, in_book=True),
-                c.place_arm(f_mk, c.ARM_B, fill, in_book=True),
+                c.place_arm(
+                    s_mk, c.ARM_B, fill, in_book=True, same_minute=w.SAME_MINUTE_EXIT_FIRST
+                ),
+                c.place_arm(
+                    f_mk, c.ARM_B, fill, in_book=True, same_minute=w.SAME_MINUTE_EXIT_FIRST
+                ),
             )
             for fill in c.FILLS
         }
