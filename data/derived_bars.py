@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 
 from data.models import Candle, timeframe_to_ms
 from data.resample import resample_ohlcv
@@ -81,10 +82,18 @@ def _build_range(
     return inserted
 
 
-def build_all_derived(store: OhlcvStore, symbols: list[str]) -> int:
-    """여러 종목의 생성 TF 전부를 채운다(실패한 종목은 로그만 남기고 계속)."""
+def build_all_derived(
+    store: OhlcvStore, symbols: list[str], *, progress: Callable[[], None] | None = None
+) -> int:
+    """여러 종목의 생성 TF 전부를 채운다(실패한 종목은 로그만 남기고 계속).
+
+    `progress`는 종목 하나를 시작할 때마다 부른다(수집기 워치독 진행 표시 ·
+    `ArmCollection.catch_up`).
+    """
     total = 0
     for sym in symbols:
+        if progress is not None:
+            progress()
         for target in BUILT_TIMEFRAMES:
             try:
                 total += build_derived(store, sym, target, backfill_older=True)

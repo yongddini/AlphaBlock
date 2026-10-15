@@ -431,7 +431,8 @@ async def run_collector(
             if arm is not None:
                 plan = arm.compute()
                 arm.adopt(plan)
-                filled = await asyncio.to_thread(arm.catch_up)
+                # 접속 전이라 메시지가 없다 — 쌍마다 진행을 찍어 워치독이 죽이지 않게 한다(WAN-451).
+                filled = await asyncio.to_thread(arm.catch_up, tracker.mark)
                 # 이미 모으던 팔 종목의 이력을 뒤로 늘리는 일(오래된 존 기억, WAN-451)은 수 분~십수
                 # 분이라 스트림 접속을 막지 않게 백그라운드로 돈다(WAN-314 기동 지연 사고).
                 history_task = asyncio.create_task(asyncio.to_thread(arm.extend_history))
