@@ -1,16 +1,18 @@
-"""존-지정가 페이퍼 러너 통합 테스트 (WAN-45).
+"""존-지정가 페이퍼 러너 통합 테스트 (WAN-45 · WAN-451).
 
 완료 기준의 통합 시나리오를 저장소(실제 SQLite) + 모의 틱 스트림(합성 1분봉)으로
-재현한다: 기본값(`entry_mode="zone_limit"`)에서 러너가 지정가를 예약하고, 터치에
-체결돼 페이퍼 포지션이 열리고, 손절/익절로 청산되며, 그 전 과정이 체결률 장부와
-운영 상태 스냅샷에 남는다. `python -m live.runner`의 기본값 위임도 검증한다.
+재현한다: 러너가 지정가를 예약하고, 터치에 체결돼 스토캐스틱 팔 규칙으로 페이퍼 포지션이
+열리고, 2배 손절로 청산되며, 그 전 과정이 체결률 장부와 운영 상태 스냅샷에 남는다.
+`python -m live.runner`의 위임과 진입점의 기동 거부(옛 오더블록 페이퍼 설정)도 검증한다.
+
+합성 상위TF는 내리막(130→101)이다 — 팔의 %K가 낮아(진입 조건 %K < 25) 체결이 진입이 된다.
+밴드(≈98.8)는 존(90~95) 위라 지정가는 존 근단 + 2bp(≈95.019), 2배 손절은 ≈84.98이다.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
-from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -22,21 +24,20 @@ from data.models import Candle
 from data.storage import OhlcvStore
 from execution.engine import build_execution_engine
 from live import limit_engine
+from live.arm_rules import REJECT_CODE_ARM_STOP_FLOOR, ArmParams
 from live.executor import PaperExecutor
 from live.limit_engine import ZoneLimitLiveEngine
 from live.order_journal import OrderJournal
-from live.paper import ClosedTrade, PaperPosition
 from live.runtime_state import RuntimeStateStore
 from live.zone_limit_notifier import ZoneLimitNotifier
 from live.zone_limit_runner import ZoneLimitPaperRunner
 from paper.performance import build_performance
-from paper.store import PaperTradeRecorder, PaperTradeStore, TradeDollars, build_record
+from paper.store import PaperTradeRecorder, PaperTradeStore
 from strategy.models import (
     ConfluenceParams,
     OrderBlock,
     OrderBlockDirection,
     OrderBlockResult,
-    SignalExitReason,
 )
 
 _H = 3_600_000
@@ -45,6 +46,10 @@ _SYMBOL = "BTC/USDT:USDT"
 _TF = "1h"
 _N_CLOSED = 30
 _FORMING = _N_CLOSED * _H
+#: 내리막 시딩(130→101) — 팔 %K가 낮다.
+_DESC_CLOSES = [130.0 - i for i in range(_N_CLOSED)]
+#: 2배 손절(≈84.98)을 관통하는 1분봉 저가.
+_BELOW_STOP = 84.0
 
 
 def _zone() -> OrderBlock:
@@ -105,7 +110,6 @@ def _make_rig(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
-    reentry_entry_rule: str | None = None,
     zone: OrderBlock | None = None,
     closes: list[float] | None = None,
     now_ms: object = None,
@@ -114,7 +118,10 @@ def _make_rig(
     db = tmp_path / "ohlcv.db"
     store = OhlcvStore(db)
     store.upsert_candles(
-        [_htf_candle(i, close=closes[i] if closes is not None else 100.0) for i in range(_N_CLOSED)]
+        [
+            _htf_candle(i, close=closes[i] if closes is not None else _DESC_CLOSES[i])
+            for i in range(_N_CLOSED)
+        ]
     )
 
     settings = Settings(db_path=str(db))
@@ -129,15 +136,7 @@ def _make_rig(
         recorder=recorder,
         sizing=settings.risk_sizing,
     )
-    engine = ZoneLimitLiveEngine(
-        params=params,
-        journal=journal,
-        session_id=session,
-        has_position=lambda s, t: any(
-            p.symbol == s and p.timeframe == t for p in executor.open_positions
-        ),
-        reentry_entry_rule=reentry_entry_rule,  # type: ignore[arg-type]
-    )
+    engine = ZoneLimitLiveEngine(params=params, journal=journal, session_id=session)
     state_path = tmp_path / "runtime_state.json"
     runner = ZoneLimitPaperRunner(
         store=store,
@@ -150,6 +149,7 @@ def _make_rig(
         lookback_bars=500,
         poll_interval_seconds=1.0,
         runtime_state=RuntimeStateStore(state_path),
+        arm=ArmParams(),
         now_ms=now_ms if now_ms is not None else (lambda: 999_999),  # type: ignore[arg-type]
     )
     return {
@@ -175,16 +175,8 @@ def rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, o
     _close_rig(d)
 
 
-@pytest.fixture()
-def reentry_rig(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str, object]]:
-    """재진입 band를 켠 러너(채택 규칙, WAN-273/274)."""
-    d = _make_rig(tmp_path, monkeypatch, reentry_entry_rule="band")
-    yield d
-    _close_rig(d)
-
-
 def test_reserve_fill_open_and_exit_roundtrip(rig: dict[str, object]) -> None:
-    """예약 → 체결 → 페이퍼 포지션 오픈 → 익절 청산의 전체 왕복(통합, 완료 기준 1)."""
+    """예약 → 체결 → 팔 진입 → 2배 손절 청산의 전체 왕복(통합, 완료 기준 1)."""
     store: OhlcvStore = rig["store"]  # type: ignore[assignment]
     runner: ZoneLimitPaperRunner = rig["runner"]  # type: ignore[assignment]
     executor: PaperExecutor = rig["executor"]  # type: ignore[assignment]
@@ -202,16 +194,16 @@ def test_reserve_fill_open_and_exit_roundtrip(rig: dict[str, object]) -> None:
     assert len(positions) == 1
     entry = positions[0]
     assert entry.entry_price == pytest.approx(95.0 * 1.0002)
-    assert entry.stop_price == 90.0
-    expected_tp = entry.entry_price + 1.5 * (entry.entry_price - 90.0)
-    assert entry.take_profit_price == pytest.approx(expected_tp)
+    # 팔: 손절은 존 경계까지 거리의 2배, 익절은 없다(시간 청산 · 손절만, WAN-436).
+    assert entry.stop_price == pytest.approx(entry.entry_price - 2 * (entry.entry_price - 90.0))
+    assert entry.take_profit_price is None
 
     # 체결이 장부에 남았다(체결률 실측 — 1급 산출물).
     stats = journal.fill_stats()
     assert len(stats) == 1 and stats[0].filled == 1
 
-    # 3) 익절 목표를 관통하는 1분봉 → 포지션 청산(고정 1.5R).
-    store.upsert_candles([_m1(_FORMING + 2 * _M, 95.0, 103.5, 103.0)])
+    # 3) 2배 손절을 관통하는 1분봉 → 포지션 청산.
+    store.upsert_candles([_m1(_FORMING + 2 * _M, _BELOW_STOP, 95.5, 85.0)])
     runner.poll_once()
     assert executor.open_positions == []
     paper_store: PaperTradeStore = rig["paper_store"]  # type: ignore[assignment]
@@ -233,7 +225,7 @@ def test_wallet_reconstruction_matches_runner_equity(rig: dict[str, object]) -> 
 
     store.upsert_candles([_m1(_FORMING + _M, 94.9, 99.0, 95.2)])
     runner.poll_once()
-    store.upsert_candles([_m1(_FORMING + 2 * _M, 95.0, 103.5, 103.0)])
+    store.upsert_candles([_m1(_FORMING + 2 * _M, _BELOW_STOP, 95.5, 85.0)])
     runner.poll_once()
 
     records = paper_store.list_records(_SYMBOL, _TF)
@@ -261,101 +253,125 @@ def test_stop_loss_exit(rig: dict[str, object]) -> None:
     runner.poll_once()
     assert len(executor.open_positions) == 1
 
-    # 손절 참조가(존 하단 90)를 관통 → 손절 청산. 같은 봉에서 손절이 익절보다 우선한다.
+    # 2배 손절(≈84.98)을 관통 → 손절 청산. 존 하단(90)만 깨서는 안 나간다(팔의 손절은 2배).
     store.upsert_candles([_m1(_FORMING + _M, 89.5, 104.0, 90.5)])
     runner.poll_once()
-    assert executor.open_positions == []
-
-
-# -- 익절 후 존 내 재진입 (WAN-273/274) --------------------------------------
-
-
-def test_reentry_reenters_same_zone_after_take_profit(reentry_rig: dict[str, object]) -> None:
-    """재진입 band를 켜면 익절 후 같은 존에 다시 진입해 두 번째 거래가 성사된다."""
-    store: OhlcvStore = reentry_rig["store"]  # type: ignore[assignment]
-    runner: ZoneLimitPaperRunner = reentry_rig["runner"]  # type: ignore[assignment]
-    executor: PaperExecutor = reentry_rig["executor"]  # type: ignore[assignment]
-    paper_store: PaperTradeStore = reentry_rig["paper_store"]  # type: ignore[assignment]
-
-    # 1) base 체결 → 포지션 오픈.
-    store.upsert_candles([_m1(_FORMING + _M, 94.9, 99.0, 95.2)])
-    runner.poll_once()
     assert len(executor.open_positions) == 1
-
-    # 2) 익절 관통 → 청산 + 같은 존에 band 재무장(이 봉에서는 재무장 주문이 아직 안 걸린 뒤라
-    #    체결 안 됨 — 백테스트 재진입도 익절 직후 서브스텝부터 대기한다).
-    store.upsert_candles([_m1(_FORMING + 2 * _M, 95.0, 103.5, 103.0)])
+    store.upsert_candles([_m1(_FORMING + 2 * _M, _BELOW_STOP, 95.0, 85.0)])
     runner.poll_once()
     assert executor.open_positions == []
-    assert paper_store.count(_SYMBOL, _TF) == 1
-    assert runner._engine.book.pending(_SYMBOL, _TF) is not None  # 재무장 대기.
-
-    # 3) 재무장 지정가에 닿았다가 다시 익절 관통 → 두 번째 거래가 같은 존에서 성사된다.
-    store.upsert_candles([_m1(_FORMING + 3 * _M, 94.9, 103.5, 103.0)])
-    runner.poll_once()
-    assert paper_store.count(_SYMBOL, _TF) == 2
 
 
-def test_reentry_off_ends_zone_after_take_profit(rig: dict[str, object]) -> None:
-    """재진입 off(기본 rig)면 같은 시나리오에서 두 번째 거래가 생기지 않는다(대조군)."""
-    store: OhlcvStore = rig["store"]  # type: ignore[assignment]
-    runner: ZoneLimitPaperRunner = rig["runner"]  # type: ignore[assignment]
-    paper_store: PaperTradeStore = rig["paper_store"]  # type: ignore[assignment]
-
-    store.upsert_candles([_m1(_FORMING + _M, 94.9, 99.0, 95.2)])
-    runner.poll_once()
-    store.upsert_candles([_m1(_FORMING + 2 * _M, 95.0, 103.5, 103.0)])
-    runner.poll_once()
-    assert runner._engine.book.pending(_SYMBOL, _TF) is None  # 재무장 없음.
-    store.upsert_candles([_m1(_FORMING + 3 * _M, 94.9, 103.5, 103.0)])
-    runner.poll_once()
-    assert paper_store.count(_SYMBOL, _TF) == 1  # 익절로 존이 끝났다.
+# -- 진입점: 옛 오더블록 페이퍼 거부 · 엔진 C 전용 · 팔 배선 (WAN-451) -------
 
 
-def test_run_zone_limit_runner_wires_reentry_rule_from_settings(
+class _NoRunRunner:
+    """진입점이 만든 러너의 인자만 잡고 아무것도 안 돈다."""
+
+    captured: dict[str, object] = {}
+
+    def __init__(self, **kwargs: object) -> None:
+        _NoRunRunner.captured = kwargs
+
+    def restore_state(self, *, now_ms: int) -> set[int]:
+        return set()  # WAN-306: 진입점이 기동 시 상태 복원을 부른다.
+
+    def sync_series(self, now_ms: int) -> tuple[list[object], list[object]]:
+        return [], []
+
+    def run(self, *, max_polls: int | None = None) -> None:
+        pass
+
+
+def _entry_settings(tmp_path: Path, **over: object) -> Settings:
+    db = tmp_path / "ohlcv.db"
+    OhlcvStore(db).close()  # 빈 DB 파일 생성(러너가 열 수 있게).
+    base: dict[str, object] = {
+        "db_path": str(db),
+        "paper_trade_notify_enabled": False,
+        "live_runtime_state_path": str(tmp_path / "state.json"),
+    }
+    base.update(over)
+    return Settings(**base)  # type: ignore[arg-type]
+
+
+def test_run_zone_limit_runner_refuses_the_old_orderblock_paper(tmp_path: Path) -> None:
+    """오더블록을 켜고 팔을 끈 설정은 기동을 거부한다 — 옛 오더블록 페이퍼는 없어졌다.
+
+    조용히 다른 규칙으로 돌면 라벨과 동작이 어긋난다(WAN-91/95/112/123/159)."""
+    settings = _entry_settings(tmp_path, live_zone_limit_enabled=True, live_arm_enabled=False)
+    with pytest.raises(SystemExit, match="WAN-451"):
+        zlr.run_zone_limit_runner(settings, once=True)
+
+
+def test_runner_refuses_series_without_the_arm(tmp_path: Path) -> None:
+    """러너 클래스도 같다 — 오더블록 시리즈에 팔 규칙이 없으면 만들어지지 않는다."""
+    db = tmp_path / "x.db"
+    settings = Settings(db_path=str(db))
+    journal = OrderJournal(db)
+    paper_store = PaperTradeStore(db)
+    executor = PaperExecutor(
+        engine=build_execution_engine(settings),
+        store=paper_store,
+        recorder=PaperTradeRecorder(paper_store, cost_model=settings.costs, funding_store=None),
+        sizing=settings.risk_sizing,
+    )
+    with pytest.raises(ValueError, match="팔 규칙"):
+        ZoneLimitPaperRunner(
+            store=OhlcvStore(db),
+            engine=ZoneLimitLiveEngine(params=settings.confluence),
+            journal=journal,
+            session_id=journal.start_session(now_ms=0),
+            executor=executor,
+            params=settings.confluence,
+            series=[(_SYMBOL, _TF)],
+            lookback_bars=100,
+            poll_interval_seconds=0,
+        )
+    journal.close()
+    paper_store.close()
+
+
+def test_run_zone_limit_runner_engine_c_only_has_no_series(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`run_zone_limit_runner`가 설정의 재진입 규칙을 엔진에 물려준다 — 기본 band · off→None."""
+    """엔진 C만(오더블록 끔): 시리즈 0개 · 팔·목록·신호 장부 없이 돈다."""
+    monkeypatch.setattr(zlr, "ZoneLimitPaperRunner", _NoRunRunner)
+    settings = _entry_settings(
+        tmp_path, live_zone_limit_enabled=False, live_arm_enabled=False, live_tsmom_enabled=True
+    )
+    zlr.run_zone_limit_runner(settings, once=True)
+    got = _NoRunRunner.captured
+    assert got["series"] == []
+    assert got["arm"] is None and got["universe"] is None and got["signals"] is None
+    assert got["tsmom"] is not None
+
+
+def test_run_zone_limit_runner_wires_the_arm(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """팔을 켜면 엔진은 탭마다 독립 주문 하나뿐인 생성자로, 러너는 팔·목록·신호 장부로 선다."""
     captured: dict[str, object] = {}
 
     class _CaptureEngine:
         def __init__(self, **kwargs: object) -> None:
             captured.update(kwargs)
 
-        book = SimpleNamespace(open_orders=[])
-
-    class _NoRunRunner:
-        def __init__(self, **kwargs: object) -> None:
-            pass
-
-        def restore_state(self, *, now_ms: int) -> set[int]:
-            return set()  # WAN-306: 진입점이 기동 시 상태 복원을 부른다.
-
-        def run(self, *, max_polls: int | None = None) -> None:
-            pass
-
-        def close(self) -> None:
-            pass  # WAN-451: 진입점이 끝날 때 틱 피드 등 러너 자원을 닫는다.
-
     monkeypatch.setattr(zlr, "ZoneLimitLiveEngine", _CaptureEngine)
     monkeypatch.setattr(zlr, "ZoneLimitPaperRunner", _NoRunRunner)
-
-    db = tmp_path / "ohlcv.db"
-    OhlcvStore(db).close()  # 빈 DB 파일 생성(러너가 열 수 있게).
-    base = dict(
-        db_path=str(db),
-        live_signal_symbols=[_SYMBOL],
-        live_signal_timeframes=[_TF],
-        paper_trade_notify_enabled=False,
-        live_tick_feed_enabled=False,
+    settings = _entry_settings(
+        tmp_path,
+        live_arm_enabled=True,
+        universe_enabled=True,
+        confluence={"retap_mode": "once", "fill_penetration_bps": zlr.ARM_FILL_PENETRATION_BPS},
+        risk_sizing={"risk_per_trade": zlr.ARM_RISK_PER_TRADE},
     )
-
-    zlr.run_zone_limit_runner(Settings(**base), once=True)  # type: ignore[arg-type]
-    assert captured["reentry_entry_rule"] == "band"  # 채택 기본값.
-
-    captured.clear()
-    zlr.run_zone_limit_runner(Settings(live_reentry_entry_rule="off", **base), once=True)  # type: ignore[arg-type]
-    assert captured["reentry_entry_rule"] is None  # 옵트아웃.
+    zlr.run_zone_limit_runner(settings, once=True)
+    assert set(captured) == {"params", "journal", "session_id", "skip_listener"}
+    got = _NoRunRunner.captured
+    assert isinstance(got["arm"], ArmParams)
+    assert got["universe"] is not None and got["signals"] is not None
+    assert got["series"] == []  # 목록이 아직 없다 — 첫 폴링의 sync가 채운다
 
 
 def test_pending_order_exposed_in_runtime_state(
@@ -447,8 +463,8 @@ def test_runner_forwards_events_to_notifier(rig: dict[str, object]) -> None:
     runner.poll_once()
     assert len(fills) == 1
 
-    # 익절 관통 → handle_exit 한 번.
-    store.upsert_candles([_m1(_FORMING + 2 * _M, 95.0, 103.5, 103.0)])
+    # 2배 손절 관통 → handle_exit 한 번.
+    store.upsert_candles([_m1(_FORMING + 2 * _M, _BELOW_STOP, 95.5, 85.0)])
     runner.poll_once()
     assert len(exits) == 1
 
@@ -474,16 +490,16 @@ def test_default_settings_dispatch_to_zone_limit_runner(
 
 
 def _install_narrow_zone(monkeypatch: pytest.MonkeyPatch) -> None:
-    """손절폭 가드(0.3%)에 걸릴 만큼 좁은 존을 물린다 — WAN-194 증상의 재현 장치.
+    """팔의 손절폭 하한(4%)에 걸릴 만큼 좁은 존을 물린다 — WAN-194 증상의 재현 장치.
 
-    존 하단이 진입가에 너무 가까워 `position_size`가 0을 낸다(WAN-79 가드). 백테스트도
-    같은 자로 이 후보를 버리므로 거부 자체는 정상이다 — 이 테스트가 고정하는 것은 그
-    거부가 **기록되는지**다.
+    존 하단이 진입가에 너무 가까워 팔 규칙이 진입을 거부한다. 백테스트(정본 팔)도 같은 자로
+    이 후보를 버리므로 거부 자체는 정상이다 — 이 테스트가 고정하는 것은 그 거부가
+    **기록되는지**다.
     """
     narrow = OrderBlock(
         direction=OrderBlockDirection.BULLISH,
         top=95.0,
-        bottom=94.8,  # 진입가(≈95.019) 대비 손절 거리 0.23% < 가드 0.3%.
+        bottom=94.8,  # 진입가(≈95.019) 대비 손절 거리 0.23% < 팔 하한 4%.
         start_time=0,
         confirmed_time=_H,
         ob_volume=1.0,
@@ -535,17 +551,16 @@ def test_rejected_entry_is_recorded_not_silent(
     reason = journal._conn.execute(  # noqa: SLF001 — 사유가 실제로 찍혔는지 보는 회귀 테스트.
         "SELECT entry_reject_reason FROM live_limit_orders WHERE status = 'filled'"
     ).fetchone()[0]
-    # WAN-275: 좁은 존은 손절폭 하한 미달로 거부되고, 사유가 구체 가드로 찍힌다
-    # (옛 "사이징 수량 0" 뭉치가 아니라 실제 손절폭 %와 하한이 병기된다).
-    assert reason and "손절 0.3% 하한 미달" in reason and "WAN-" not in reason
+    # 좁은 존은 팔 손절폭 하한 미달로 거부되고, 실제 손절폭 %와 하한이 병기된다.
+    assert reason and "하한 4%" in reason and "WAN-" not in reason
 
 
 def test_rejected_entry_stores_reject_code(
     rig: dict[str, object], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """거부의 **코드**(WAN-221)가 자유 텍스트와 함께 남는다 — 손절폭 가드(0.3%)는 `sizing`.
+    """거부의 **코드**(WAN-221)가 자유 텍스트와 함께 남는다 — 팔 손절폭 하한은 `arm_stop_floor`.
 
-    일일 요약의 사유 카운트가 이 코드로 명목/사이징/슬롯참을 가른다(자유 텍스트 파싱 금지)."""
+    일일 요약의 사유 카운트가 이 코드로 거부를 가른다(자유 텍스트 파싱 금지)."""
     store: OhlcvStore = rig["store"]  # type: ignore[assignment]
     runner: ZoneLimitPaperRunner = rig["runner"]  # type: ignore[assignment]
     journal: OrderJournal = rig["journal"]  # type: ignore[assignment]
@@ -557,11 +572,11 @@ def test_rejected_entry_stores_reject_code(
     code = journal._conn.execute(  # noqa: SLF001 — 코드가 실제로 찍혔는지 보는 회귀 테스트.
         "SELECT entry_reject_code FROM live_limit_orders WHERE status = 'filled'"
     ).fetchone()[0]
-    assert code == "sizing"
+    assert code == REJECT_CODE_ARM_STOP_FLOOR
 
-    # 그 코드로 요약 깔때기가 사이징 거부를 센다(전 구간 창).
+    # 그 코드로 요약 깔때기가 팔 규칙 거부를 센다(전 구간 창).
     funnel = journal.funnel_counts(start_ms=0, end_ms=_FORMING + 10 * _M)
-    assert funnel.sizing == 1
+    assert funnel.arm == ((REJECT_CODE_ARM_STOP_FLOOR, 1),)
     assert funnel.filled == 1  # 체결 자체는 났다(거부는 하류 처분).
 
 
@@ -821,64 +836,8 @@ def test_rejected_entry_notifies(rig: dict[str, object], monkeypatch: pytest.Mon
 
     assert len(sent) == 1
     assert "진입 거부" in sent[0]
-    # WAN-275: 알림도 구체 가드 사유를 담는다(손절 하한 미달) — 옛 "사이징" 뭉치 대신.
-    # 표시 문구엔 WAN-xxx 코드가 없다(사용자 결정).
-    assert "손절 0.3% 하한 미달" in sent[0] and "WAN-" not in sent[0]
-
-
-def _losing_record(exit_time: int) -> object:
-    """오늘 창에 −800 손실을 남기는 청산 기록(WAN-38 서킷브레이커 발동용)."""
-    trade = ClosedTrade(
-        position=PaperPosition(
-            symbol=_SYMBOL,
-            timeframe=_TF,
-            direction=OrderBlockDirection.BULLISH,
-            entry_time=exit_time - 1_000,
-            entry_price=100.0,
-            stop_price=95.0,
-            take_profit_price=110.0,
-        ),
-        exit_time=exit_time,
-        exit_price=60.0,
-        reason=SignalExitReason.STOP_LOSS,
-    )
-    return build_record(
-        trade, fee_rate=0.0, dollars=TradeDollars(realized_pnl=-800.0, equity_after=9_200.0)
-    )
-
-
-def test_circuit_breaker_alerts_once_and_clears_once(rig: dict[str, object]) -> None:
-    """발동 알림 1회 + 해제 알림 1회, 반복 폴링·재시작(원장 상태)에도 중복 없음(WAN-38)."""
-    runner: ZoneLimitPaperRunner = rig["runner"]  # type: ignore[assignment]
-    paper_store: PaperTradeStore = rig["paper_store"]  # type: ignore[assignment]
-
-    events: list[str] = []
-
-    class _Spy:
-        def handle_circuit_breaker_tripped(self, status: object, *, now_ms: int) -> None:
-            events.append("tripped")
-
-        def handle_circuit_breaker_cleared(self, status: object, *, now_ms: int) -> None:
-            events.append("cleared")
-
-    runner._notifier = _Spy()  # type: ignore[assignment]
-
-    day0 = 1_700_000_000_000
-    paper_store.upsert_record(_losing_record(day0))  # type: ignore[arg-type]
-
-    # 발동: 같은 KST일에 여러 번 폴링해도 알림은 1회.
-    runner._check_circuit_breaker(day0)
-    runner._check_circuit_breaker(day0 + 60_000)
-    assert events == ["tripped"]
-
-    # 원장에 발동 상태가 남았다 → 재시작(새 조회)해도 재알림 없음.
-    assert paper_store.get_circuit_breaker_notice()[1] is True
-
-    # 다음 KST일: 오늘 창이 비어 자동 해제, 알림 1회.
-    next_day = day0 + 86_400_000
-    runner._check_circuit_breaker(next_day)
-    runner._check_circuit_breaker(next_day + 60_000)
-    assert events == ["tripped", "cleared"]
+    # 알림도 구체 사유를 담는다(손절폭 하한 미달). 표시 문구엔 WAN-xxx 코드가 없다(사용자 결정).
+    assert "하한 4%" in sent[0] and "WAN-" not in sent[0]
 
 
 # -- 지정가 만료의 결정적 집행 (WAN-298) --------------------------------------
@@ -925,13 +884,13 @@ def test_poll_once_expires_overdue_order_when_data_stalls(
         # 탭(저가 99.4 ≤ 존 상단 99.5)하되 지정가(≈98.8)에는 닿지 않는 1분봉 → 예약만.
         store.upsert_candles([_m1(_FORMING, low=99.4, high=101.5, close=100.0)])
         runner.poll_once()
-        assert engine.book.pending(_SYMBOL, _TF) is not None
+        assert len(engine.open_orders()) == 1
 
         # 이후 새 1분봉이 전혀 없음(수집 정지) + 벽시계가 기한(24봉) + 유예를 지남.
         deadline = _FORMING + 24 * _H
         now["ms"] = deadline + 6 * 60_000
         runner.poll_once()
-        assert engine.book.pending(_SYMBOL, _TF) is None
+        assert engine.open_orders() == []
         stats = journal.fill_stats()[0]
         assert stats.cancelled_expired == 1
         assert stats.pending == 0
@@ -943,7 +902,7 @@ def test_poll_once_expires_overdue_order_when_data_stalls(
 
 def test_expire_stale_pending_reevaluates_overdue_on_restart(tmp_path: Path) -> None:
     """WAN-298 재시작 재평가: 기한 초과 대기 주문은 `cancelled_expired`(종결 = 기한 시각),
-    기한 전·무기한(재진입)·기한 불명은 기존대로 `discarded_restart`로 마감한다."""
+    기한 전·무기한·기한 불명은 기존대로 `discarded_restart`로 마감한다."""
     from live.limit_orders import PendingLimitOrder
     from strategy.realtime_rsi import RealtimeRsi
 
@@ -967,7 +926,7 @@ def test_expire_stale_pending_reevaluates_overdue_on_restart(tmp_path: Path) -> 
 
     place("15m", 10 * 60_000, 24)  # 기한 = 예약 봉 시작(0h) + 24봉 = 6h — 초과.
     place("1h", 46 * _H, 24)  # 기한 = 46h + 24h = 70h — 아직 전.
-    place("1h", 0, None)  # 무기한(재진입 재무장) — 기한 없음.
+    place("1h", 0, None)  # 무기한 — 기한 없음.
 
     now = 47 * _H  # 이슈 실측(DOGE 15m ~47시간)과 같은 자리의 재시작.
     assert zlr.expire_stale_pending(journal, now_ms=now) == 1
@@ -1018,14 +977,7 @@ def _make_long_history_rig(
         recorder=recorder,
         sizing=settings.risk_sizing,
     )
-    engine = ZoneLimitLiveEngine(
-        params=params,
-        journal=journal,
-        session_id=session,
-        has_position=lambda s, t: any(
-            p.symbol == s and p.timeframe == t for p in executor.open_positions
-        ),
-    )
+    engine = ZoneLimitLiveEngine(params=params, journal=journal, session_id=session)
     runner = ZoneLimitPaperRunner(
         store=store,
         engine=engine,
@@ -1036,6 +988,7 @@ def _make_long_history_rig(
         series=[(_SYMBOL, _TF)],
         lookback_bars=500,
         poll_interval_seconds=1.0,
+        arm=ArmParams(),
         now_ms=lambda: 999_999_999,
     )
     return {

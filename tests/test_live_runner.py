@@ -1,9 +1,10 @@
-"""live.runner 테스트 — 시리즈 조립 + 진입점 위임.
+"""live.runner 테스트 — 진입점 위임.
 
 옛 A안(종가 시그널) 러너(`SignalRunner`·`WatermarkStore`·`Notifier`)는 WAN-208에서
 제거됐다. 진입점(`run_signal_runner`)은 남아 존-지정가 페이퍼 러너로 위임하고,
 그 위임은 `test_zone_limit_runner.test_default_settings_dispatch_to_zone_limit_runner`가
-동작으로 고정한다. 이 파일은 진입점에 남은 표면(시리즈 조립·테스트 메시지·위임)을 본다.
+동작으로 고정한다. 이 파일은 진입점에 남은 표면(테스트 메시지·위임)을 본다. 옛 고정 시리즈
+조립(`build_series`)은 WAN-451 옛 규칙 정리로 없어졌다 — 팔은 매주 종목 목록으로 감시한다.
 """
 
 from __future__ import annotations
@@ -12,25 +13,6 @@ import pytest
 
 from config.settings import Settings
 from live import runner as runner_mod
-from live.runner import build_series
-
-
-def test_build_series_is_cartesian_product() -> None:
-    settings = Settings(
-        live_signal_symbols=["BTC/USDT:USDT", "ETH/USDT:USDT"],
-        live_signal_timeframes=["15m", "1h"],
-    )
-    assert build_series(settings) == [
-        ("BTC/USDT:USDT", "15m"),
-        ("BTC/USDT:USDT", "1h"),
-        ("ETH/USDT:USDT", "15m"),
-        ("ETH/USDT:USDT", "1h"),
-    ]
-
-
-def test_empty_series_when_no_symbols() -> None:
-    settings = Settings(live_signal_symbols=[], live_signal_timeframes=["1h"])
-    assert build_series(settings) == []
 
 
 def test_run_delegates_to_zone_limit_runner(monkeypatch: pytest.MonkeyPatch) -> None:

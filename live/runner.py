@@ -26,22 +26,6 @@ from config.settings import Settings, get_settings
 
 _logger = logging.getLogger(__name__)
 
-#: (symbol, timeframe) 시리즈 키.
-Series = tuple[str, str]
-
-
-def build_series(settings: Settings) -> list[Series]:
-    """설정의 심볼×타임프레임 조합을 시리즈 목록으로 만든다.
-
-    존-지정가 러너(`live.zone_limit_runner.build_series`)와 **같은 결과**를 내야
-    한다(WAN-191 — 두 진입점이 같은 조합을 봐야 한다). 테스트가 동작으로 고정한다.
-    """
-    return [
-        (symbol, timeframe)
-        for symbol in settings.live_signal_symbols
-        for timeframe in settings.live_signal_timeframes
-    ]
-
 
 def run_signal_runner(
     settings: Settings | None = None,

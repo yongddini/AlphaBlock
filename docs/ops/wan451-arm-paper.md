@@ -66,15 +66,16 @@ ALPHABLOCK_LIVE_ZONE_LIMIT_ENABLED=true
 ALPHABLOCK_LIVE_TSMOM_ENABLED=true
 ALPHABLOCK_UNIVERSE_ENABLED=true
 ALPHABLOCK_CONFLUENCE__RETAP_MODE=once
-ALPHABLOCK_LIVE_REENTRY_ENTRY_RULE=off
 ALPHABLOCK_CONFLUENCE__FILL_PENETRATION_BPS=5
 ALPHABLOCK_RISK_SIZING__RISK_PER_TRADE=0.025523832
-ALPHABLOCK_LIVE_TICK_FEED_ENABLED=false
 ```
 
-- 마지막 줄(틱 피드 끄기)은 선택이다. 팔은 1분봉으로만 판정해 틱을 안 쓴다 — 꺼도 결과가 같고
-  웹소켓 하나를 아낀다.
 - 러너는 위 값 중 하나라도 어긋나면 **기동을 거부한다**(조용히 덮어쓰지 않는다).
+- 옛 오더블록 페이퍼의 키(`ALPHABLOCK_LIVE_REENTRY_ENTRY_RULE` · `ALPHABLOCK_LIVE_TICK_FEED_ENABLED` ·
+  `ALPHABLOCK_LIVE_TICK_FEED_EXCHANGE`)는 옛 규칙 정리로 설정에서 없어졌다 — `.env`에 남아 있어도
+  **무시된다**(지워도 된다). 러너는 웹소켓 틱 피드 없이 확정 1분봉만 소비하고 재진입도 없다.
+- 🚨 **이 배포부터 「오더블록 켬 · 팔 끔」(옛 오더블록 페이퍼) 조합은 러너가 기동을 거부한다.**
+  그래서 이 코드는 팔을 켜는 날(이 리셋 이음매)에 함께 배포한다.
 
 다시 점검한다 — 이번에는 전부 ✅여야 한다(§4 장부 경고는 다음 단계가 지운다):
 

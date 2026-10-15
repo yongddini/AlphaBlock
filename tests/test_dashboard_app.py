@@ -595,7 +595,7 @@ def test_status_pill_reflects_the_real_runner_state_not_a_decoration(
     pill = next(c.value for c in at.caption if "페이퍼 러너" in c.value)
     assert "폴링 기록 없음" in pill  # 러너를 안 돌린 환경
     assert not pill.startswith("🟢")  # 죽은/모르는 러너를 초록으로 칠하지 않는다
-    assert "틱 피드" in pill  # WAN-256 기본값(live_tick_feed_enabled=True)
+    assert "1분봉 폴링" in pill  # 틱 피드는 WAN-451 옛 규칙 정리로 없어졌다
 
 
 def test_tab_labels_follow_the_mockup(seeded_db_path: str) -> None:

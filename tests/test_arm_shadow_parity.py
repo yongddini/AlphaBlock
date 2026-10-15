@@ -1,13 +1,14 @@
-"""그림자 주문 체결 ≡ 백테스트 팔 후보 체결 — 실데이터 고정 창(WAN-451 ③ 몰림 규칙의 모집단).
+"""탭별 주문 체결 ≡ 백테스트 팔 후보 체결 — 실데이터 고정 창(WAN-451 ③ 몰림 규칙의 모집단).
 
 몰림 규칙은 「팔 후보 전부의 가상 체결」을 센다. 백테스트는 그 모집단을
-`build_zone_limit_candidates`(탭마다 독립 시뮬레이션)로 만들고, 라이브는 엔진의 그림자 주문으로
+`build_zone_limit_candidates`(탭마다 독립 시뮬레이션)로 만들고, 라이브는 엔진의 탭별 독립 주문으로
 만든다. 두 모집단이 **같은 체결
 시각·체결가·손절가**를 내야 같은 규칙이다 — 실데이터로 그 등식을 건다(라이브는 러너의 재생 경로 =
 연속 가동과 같다고 검증된 경로, WAN-306).
 
 두 번째 칸(BTC 15m)은 **탐지 창(1500봉)보다 오래된 존**의 체결이 든 구간이다 — 오래된 존 기억
-(`carry_zones` + 처음 2년치 탐지)을 켜야 일치한다(끄면 그 체결을 놓친다, 정본 팔 후보의 약 7%).
+(엔진의 존 기억 + 처음 2년치 탐지)이 있어야 일치한다(없으면 그 체결을 놓친다, 정본 팔 후보의 약
+7%). 첫 칸은 처음 2년치 탐지 없이(`bootstrap_days=0`) 돈다.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from backtest.wan424_stoch_ob_arm import arm_pool, base_cell_kwargs
 from config.settings import Settings
 from data.storage import OhlcvStore
 from execution.engine import build_execution_engine
+from live.arm_rules import ArmParams
 from live.executor import PaperExecutor
 from live.limit_engine import ZoneLimitLiveEngine
 from live.order_journal import OrderJournal
@@ -58,7 +60,7 @@ def _available(symbol: str, end: int) -> bool:
 
 
 @pytest.mark.parametrize(("symbol", "tf", "start", "end", "memory_days", "bt_start"), _CASES)
-def test_shadow_fills_equal_backtest_arm_candidates(
+def test_live_fills_equal_backtest_arm_candidates(
     tmp_path: Path,
     symbol: str,
     tf: str,
@@ -80,13 +82,7 @@ def test_shadow_fills_equal_backtest_arm_candidates(
     real = OhlcvStore(_REAL_DB)
     runner = ZoneLimitPaperRunner(
         store=real,
-        engine=ZoneLimitLiveEngine(
-            params=params,
-            journal=journal,
-            session_id=session,
-            track_shadows=True,
-            carry_zones=memory_days > 0,
-        ),
+        engine=ZoneLimitLiveEngine(params=params, journal=journal, session_id=session),
         journal=journal,
         session_id=session,
         executor=PaperExecutor(
@@ -99,6 +95,7 @@ def test_shadow_fills_equal_backtest_arm_candidates(
         series=[(symbol, tf)],
         lookback_bars=settings.live_signal_lookback_bars,
         poll_interval_seconds=0,
+        arm=ArmParams(),
         bootstrap_days=memory_days,
     )
     runner._last_substep[(symbol, tf)] = start - 60_000
@@ -106,7 +103,7 @@ def test_shadow_fills_equal_backtest_arm_candidates(
     live = sorted(
         (e.fill.time, round(e.fill.price, 8), round(float(e.fill.stop_price or 0), 8))
         for e in events
-        if e.kind == "shadow_filled" and e.fill is not None and e.fill.time < end
+        if e.kind == "filled" and e.fill is not None and e.fill.time < end
     )
     end_day = (end // _DAY) * _DAY
     import datetime as _dt

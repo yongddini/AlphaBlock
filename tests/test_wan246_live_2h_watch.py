@@ -2,7 +2,8 @@
 
 라벨이 아니라 **동작**으로 고정한다:
 
-- 감시 TF 기본값에 2h가 들어가고 러너가 9종목 × 4TF = 36 시리즈를 낸다.
+- 감시 TF 기본값에 2h가 들어간다(러너의 고정 시리즈 조립은 WAN-451 옛 규칙 정리로 없어졌다 —
+  팔은 매주 종목 목록 × 팔 TF로 감시하고 그 TF에도 2h가 있다).
 - 2h는 DB에 물리 적재하지 않고 `OhlcvStore.load`가 1h에서 파생한다(WAN-24) — 러너의
   상위TF 로딩이 그 파생 경로를 그대로 타 별도 수집이 필요 없다.
 - 봉 마감·만료 계수는 `timeframe_to_ms("2h")`(2시간 경계)를 TF 특수 분기 없이 일반
@@ -21,12 +22,14 @@ from backtest.sweep import timeframe_to_ms
 from config.settings import Settings, _default_live_signal_timeframes
 from data.models import Candle
 from data.storage import OhlcvStore
+from data.universe import ARM_TIMEFRAMES
 from execution.engine import build_execution_engine
 from live import limit_engine
+from live.arm_rules import ArmParams
 from live.executor import PaperExecutor
 from live.limit_engine import ZoneLimitLiveEngine
 from live.order_journal import OrderJournal
-from live.zone_limit_runner import ZoneLimitPaperRunner, build_series
+from live.zone_limit_runner import ZoneLimitPaperRunner
 from paper.store import PaperTradeRecorder, PaperTradeStore
 from strategy.models import (
     ConfluenceParams,
@@ -45,18 +48,10 @@ _FORMING = _N_CLOSED * _TWO_H
 
 
 def test_2h_is_in_default_watch_timeframes() -> None:
-    """감시 TF 기본값에 2h가 있다(15m·1h·2h·4h)."""
+    """감시 TF 기본값에 2h가 있다(15m·1h·2h·4h) — 팔 TF에도 있다."""
     assert "2h" in _default_live_signal_timeframes()
     assert _default_live_signal_timeframes() == ["15m", "1h", "2h", "4h"]
-
-
-def test_build_series_includes_2h_for_every_symbol() -> None:
-    """러너 시리즈에 각 심볼의 2h 조합이 정확히 한 번씩 들어간다."""
-    series = build_series(Settings())
-    symbols = {s for s, _ in series}
-    for sym in symbols:
-        assert (sym, "2h") in series
-    assert sum(1 for _, tf in series if tf == "2h") == len(symbols)
+    assert "2h" in ARM_TIMEFRAMES
 
 
 def test_2h_ohlcv_is_derived_not_stored(tmp_path: Path) -> None:
@@ -124,19 +119,21 @@ def rig_2h(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str
     _install_stub_detector(monkeypatch, zone)
     db = tmp_path / "ohlcv.db"
     store = OhlcvStore(db)
-    # 2h 파생의 소스인 1h 봉을 적재한다(2h는 한 줄도 안 넣는다). 각 2h가 1h 두 봉.
+    # 2h 파생의 소스인 1h 봉을 적재한다(2h는 한 줄도 안 넣는다). 각 2h가 1h 두 봉. 내리막이라
+    # 팔의 %K가 낮고(진입 조건 %K < 25), 밴드는 존 위에 있어 지정가가 존 근단이다.
     ones = []
     for i in range(_N_CLOSED * 2):
         t = i * _H
+        close = 140.0 - 0.5 * i
         ones.append(
             Candle(
                 symbol=_SYMBOL,
                 timeframe="1h",
                 open_time=t,
-                open=100.0,
-                high=100.5,
-                low=99.5,
-                close=100.0,
+                open=close,
+                high=close + 0.5,
+                low=close - 0.5,
+                close=close,
                 volume=1.0,
                 closed=True,
             )
@@ -155,14 +152,7 @@ def rig_2h(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str
         recorder=recorder,
         sizing=settings.risk_sizing,
     )
-    engine = ZoneLimitLiveEngine(
-        params=params,
-        journal=journal,
-        session_id=session,
-        has_position=lambda s, t: any(
-            p.symbol == s and p.timeframe == t for p in executor.open_positions
-        ),
-    )
+    engine = ZoneLimitLiveEngine(params=params, journal=journal, session_id=session)
     runner = ZoneLimitPaperRunner(
         store=store,
         engine=engine,
@@ -173,6 +163,7 @@ def rig_2h(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[dict[str
         series=[(_SYMBOL, _TF)],
         lookback_bars=500,
         poll_interval_seconds=1.0,
+        arm=ArmParams(),
         now_ms=lambda: 999_999,
     )
     yield {"store": store, "runner": runner, "executor": executor, "journal": journal}
@@ -196,7 +187,7 @@ def _m1(t: int, low: float, high: float, close: float) -> Candle:
 
 
 def test_runner_arms_and_fills_on_2h_series(rig_2h: dict[str, object]) -> None:
-    """러너가 2h 시리즈(파생 상위TF)에서 지정가를 예약·체결해 페이퍼 진입을 낸다.
+    """러너가 2h 시리즈(파생 상위TF)에서 지정가를 예약·체결해 팔 규칙으로 페이퍼 진입을 낸다.
 
     2h 봉 마감·만료 계수가 `timeframe_to_ms("2h")`로 일반 처리됨을 왕복으로 고정한다.
     """

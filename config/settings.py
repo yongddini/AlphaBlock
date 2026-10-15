@@ -233,44 +233,31 @@ class Settings(BaseSettings):
     # 예: ALPHABLOCK_TELEGRAM_BOT_TOKEN=123:abc, ALPHABLOCK_TELEGRAM_CHAT_ID=123456
     telegram_bot_token: str = Field(default="")
     telegram_chat_id: str = Field(default="")
-    # 러너가 감시할 심볼·타임프레임(수집 대상의 부분집합). 기본은 BTC 1h 하나.
+    # 옛 오더블록 페이퍼의 고정 감시 좌표(수집 대상의 부분집합). ⚠️ 러너는 더 이상 이 값으로
+    # 시리즈를 만들지 않는다 — 팔은 매주 종목 목록 × 팔 TF로 감시한다(WAN-451 옛 규칙 정리).
+    # 대시보드 표시 범위·좌표 드리프트 점검·러너 주기 예산(Health)이 아직 읽는다.
     live_signal_symbols: list[str] = Field(default_factory=_default_live_signal_symbols)
     live_signal_timeframes: list[str] = Field(default_factory=_default_live_signal_timeframes)
     # 폴링 간격(초). 새 확정봉이 저장됐는지 이 주기로 확인한다.
     live_poll_interval_seconds: int = Field(default=60, ge=1)
-    # 웹소켓 틱 피드로 대기 지정가 체결을 감지한다(WAN-246 배선 · WAN-256 기본값 승격).
-    # 기본 **켜짐**(WAN-256, 사용자 재-베이스라인 2026-08-05) — "그게 이 시스템이 돌아야 할
-    # 방식이면 기본값이어야 한다." 러너가 ccxt.pro `watch_trades`로 심볼별 실시간 체결가를
-    # 받아 대기 주문의 `on_price`를 매 틱 호출해 **체결 감지 지연**(1분봉 확정 + 폴링 간격)을
-    # 줄인다. ⚠️ 그 대가로 **아무 설정 없이도 라이브(페이퍼)가 백테스트(1분봉)보다 미세**해진다
-    # (WAN-246 §2/§3 판정 (b) — 알고 받는 차이). 백테스트는 1분봉을 유지한다(백테스트 틱 승격은
-    # 별도 재-베이스라인 + WAN-98 선행). ⚠️ 틱이라고 "닿으면 체결" 낙관(WAN-96)이 사라지지
-    # 않는다 — 큐 우선순위·부분 체결은 호가·체결 데이터(WAN-98, Canceled) 소관이라 틱 가격만으로는
-    # 여전히 상한이다. 틱은 체결을 더 빨리 **감지**할 뿐 더 정확히 **판정**하지 않는다.
-    # 옵트아웃: `ALPHABLOCK_LIVE_TICK_FEED_ENABLED=false`면 옛 1분봉 폴링(비트 동일)으로 되돌아간다.
-    # 아래 `live_tick_feed_exchange`가 ccxt 거래소 id(기본 binanceusdm).
-    live_tick_feed_enabled: bool = Field(default=True)
-    live_tick_feed_exchange: str = Field(default="binanceusdm")
-    # 익절 후 존 내 재진입(WAN-273 채택 = band). 페이퍼 러너가 익절 청산 뒤 같은 존에
-    # 봉내 라이브 밴드로 재산정한 지정가를 다시 걸어, 백테스트 채택 북(`reentry=True,
-    # reentry_entry_rule="band"`)과 같은 규칙을 물려받는다(파리티). 채택 기본값은 "band".
-    # "off"면 재진입 없음(WAN-273 이전 동작 — 익절로 존이 끝난다). ⚠️ 재진입은 알파가 아니라
-    # 위험의 모양만 바꾼다(WAN-90) · MDD·최대 동시 리스크가 오른다(WAN-273 알고 받는 손해).
-    # 페이퍼 한정 — 실거래 배선은 별도(WAN-241/235 넷팅 선행), `ALPHABLOCK_LIVE_TRADING=false` 유지.
-    live_reentry_entry_rule: Literal["off", "band"] = Field(default="band")
+    # 📌 옛 오더블록 페이퍼의 설정(`live_tick_feed_enabled`·`live_tick_feed_exchange`·
+    # `live_reentry_entry_rule`)은 WAN-451 옛 규칙 정리로 없어졌다. 서버 `.env`에 남아 있어도
+    # 아무 일도 안 한다(`extra="ignore"` — 모르는 키는 무시된다, 회귀 테스트가 고정).
     # 「팔 + 추세추종」 페이퍼 단계 스위치(WAN-451 · 사용자 결정 2026-10-14 범위 B 단계적).
     # ② 단계 = 옛 오더블록 페이퍼를 끄고(⑦ 병행 없음) 엔진 C만 돌린다:
     #   ALPHABLOCK_LIVE_ZONE_LIMIT_ENABLED=false + ALPHABLOCK_LIVE_TSMOM_ENABLED=true
-    # 🚨 기본값은 **지금 동작 그대로**(옛 러너 켬 · 엔진 C 끔)다 — 이 스위치를 넘기는 순간이
+    # 🚨 기본값은 손대지 않았다(오더블록 켬 · 엔진 C 끔 · 팔 끔) — 이 스위치를 넘기는 순간이
     # 규칙이 바뀌는 리셋 이음매(`scripts/paper-reset.sh`, WAN-392/399)라 배포만으로 조용히
-    # 바뀌면 안 된다. 엔진 C를 켜면 일 손실 서킷브레이커는 **꺼진다**(⑧ — 정본에 없는 규칙).
+    # 바뀌면 안 된다. ⚠️ 옛 오더블록 페이퍼는 없어졌으므로(WAN-451 옛 규칙 정리) **오더블록을
+    # 켜고 팔을 끈 조합은 러너가 기동을 거부한다** — 팔을 켜거나(③) 오더블록을 끈다(②).
+    # 엔진 C·팔을 켜면 일 손실 서킷브레이커는 **꺼진다**(⑧ — 정본에 없는 규칙).
     live_zone_limit_enabled: bool = Field(default=True)
     live_tsmom_enabled: bool = Field(default=False)
     # ③ 단계 = 스토캐스틱 팔 진입·청산 규칙(WAN-451). 켜면 러너가 함께 맞아야 하는 설정
-    # (첫 탭만 · 재진입 끔 · 5bp 관통 · 거래당 리스크 2.525%)을 기동 때 검사하고 어긋나면
+    # (첫 탭만 · 5bp 관통 · 거래당 리스크 2.552%)을 기동 때 검사하고 어긋나면
     # **기동을 거부**한다(조용히 덮어쓰지 않는다 — 라벨만 붙는 사고 방지). 서킷브레이커도 끈다(⑧).
     # 종목 목록 스위치(UNIVERSE_ENABLED)도 켜야 기동한다(매주 목록 · 목록 밖은 새 진입 거부).
-    # 몰림 규칙(직전 24h 신호 수 · BTC 4h −2.5% · 예산 10)도 함께 돈다(그림자 주문으로 신호를 센다).
+    # 몰림 규칙(직전 24h 신호 수 · BTC 4h −2.5% · 예산 10)도 함께 돈다(탭별 주문의 체결을 센다).
     live_arm_enabled: bool = Field(default=False)
     # 오래된 존 기억(WAN-451): 팔은 시리즈를 처음 볼 때 이 일수만큼의 확정봉으로 오더블록을 찾고
     # (정본 팔 후보의 98.4%가 존 나이 730일 이내), 그 뒤로는 창 밖으로 밀린 살아 있는 존을 엔진이
@@ -284,7 +271,7 @@ class Settings(BaseSettings):
     # 읽는 파일 경로. 러너가 매 폴링마다 갱신한다.
     live_runtime_state_path: str = Field(default="data/live_runtime_state.json")
     # 재시작 공백 따라잡기 재생 한도(시간, WAN-306). 러너가 죽어 있던 구간이 이 한도
-    # 이내면 저장된 1분봉으로 그 사이의 체결·청산·만료·재무장을 페이퍼 집행해 「끊긴 적
+    # 이내면 저장된 1분봉으로 그 사이의 체결·청산·만료를 페이퍼 집행해 「끊긴 적
     # 없는 것처럼」 잇고, 넘으면 명시적으로 초기화한다(대기 주문은 `discarded_restart`,
     # 조용한 재구성 금지).
     live_catchup_max_hours: float = Field(default=48.0, gt=0)

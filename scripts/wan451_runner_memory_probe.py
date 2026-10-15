@@ -23,7 +23,7 @@
 
 ## 알고 받는 한계
 
-* **하한이다** — 팔에만 있는 부품(몰림 규칙의 그림자 후보 추적 · %K · 주간 교체)은 아직 없어서
+* **하한이다** — 팔에만 있는 부품(몰림 규칙의 신호 장부 · %K · 주간 교체)은 아직 없어서
   안 잰다. 그 몫은 시리즈 수에 비례해 더 붙는다.
 * 3h는 아직 TF 표에 없어(WAN-451 §2-1) 9 TF로 재고 10/9배로 환산한다.
 * 합성 봉이라 오더블록 수가 실제와 다를 수 있다 — 자릿수를 보는 측정이다.
@@ -179,6 +179,7 @@ def run_probe(
     from data.storage import OhlcvStore
     from execution.engine import build_execution_engine
     from execution.leverage import book_per_trade_sizing
+    from live.arm_rules import ArmParams
     from live.engine_state import EngineStateStore
     from live.executor import PaperExecutor
     from live.limit_engine import ZoneLimitLiveEngine
@@ -214,12 +215,7 @@ def run_probe(
         )
         session = journal.start_session(now_ms=end_ms)
         engine = ZoneLimitLiveEngine(
-            params=settings.confluence,
-            journal=journal,
-            session_id=session,
-            has_position=lambda s, t: any(
-                p.symbol == s and p.timeframe == t for p in executor.open_positions
-            ),
+            params=settings.confluence, journal=journal, session_id=session
         )
         clock = [end_ms]
         runner = ZoneLimitPaperRunner(
@@ -233,6 +229,7 @@ def run_probe(
             lookback_bars=lookback,
             poll_interval_seconds=0,
             engine_state=EngineStateStore(db),
+            arm=ArmParams(),
             now_ms=lambda: clock[0],
         )
         t0 = time.perf_counter()
@@ -351,7 +348,7 @@ def render(now: ProbeResult, arm: ProbeResult, mem: dict[str, float]) -> str:
             " 그 몫만큼 실제 여유는 더 크다."
         )
     lines.append(
-        "⚠️ 하한이다 — 그림자 후보 추적·%K·주간 교체는 아직 없어 안 쟀다. 합성 봉이라 자릿수만 본다."
+        "⚠️ 하한이다 — 몰림 신호 장부·%K·주간 교체는 아직 없어 안 쟀다. 합성 봉이라 자릿수만 본다."
     )
     return "\n".join(lines)
 

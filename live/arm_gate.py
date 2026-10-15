@@ -274,7 +274,6 @@ def replay_symbol(args: tuple[str, str, Sequence[str], int, str | None]) -> Repl
         settings = Settings(
             db_path=str(ledger),
             confluence={"retap_mode": "once", "fill_penetration_bps": ARM_FILL_PENETRATION_BPS},
-            live_reentry_entry_rule="off",
             risk_sizing={"risk_per_trade": ARM_RISK_PER_TRADE},
         )
         signals = ArmSignalStore(ledger)
@@ -322,12 +321,7 @@ def replay_symbol(args: tuple[str, str, Sequence[str], int, str | None]) -> Repl
         runner = ZoneLimitPaperRunner(
             store=store,
             engine=ZoneLimitLiveEngine(
-                params=settings.confluence,
-                journal=journal,
-                session_id=session,
-                track_shadows=True,
-                carry_zones=True,
-                independent_orders=True,
+                params=settings.confluence, journal=journal, session_id=session
             ),
             journal=journal,
             session_id=session,

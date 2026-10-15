@@ -158,11 +158,6 @@ def run_check(settings: Settings, db_path: str | Path, *, now_ms: int) -> ArmChe
         check.notes.append(
             "엔진 C가 꺼져 있다(ALPHABLOCK_LIVE_TSMOM_ENABLED=false) — 정본은 팔 + 엔진 C 합성이다"
         )
-    if settings.live_tick_feed_enabled:
-        check.notes.append(
-            "틱 피드가 켜져 있다 — 팔은 1분봉으로만 판정해 틱을 안 쓴다(꺼도 결과가 같다 ·"
-            " 31종목 웹소켓 하나를 아낀다: ALPHABLOCK_LIVE_TICK_FEED_ENABLED=false)"
-        )
     return check
 
 

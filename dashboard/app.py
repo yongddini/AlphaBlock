@@ -373,7 +373,7 @@ def _cached_runner_status(
 
 
 def _render_status_pill(settings: Settings) -> None:
-    """목업 상단 오른쪽의 상태 pill — `● 페이퍼 러너 · 틱 피드 · KST hh:mm`.
+    """목업 상단 오른쪽의 상태 pill — `● 페이퍼 러너 · 1분봉 폴링 · KST hh:mm`.
 
     ⚠️ 점 색은 **실제 판정**에서 온다(Health 탭과 같은 함수) — 늘 초록인 장식 배지를
     달면 러너가 죽어도 화면이 멀쩡해 보인다.
@@ -385,7 +385,8 @@ def _render_status_pill(settings: Settings) -> None:
         runner_cycle_budget_ms(settings.live_signal_timeframes),
     )
     dot = {HealthLevel.OK: "🟢", HealthLevel.UNKNOWN: "⚪"}.get(status.level, "🔴")
-    feed = "틱 피드" if settings.live_tick_feed_enabled else "1분봉 폴링"
+    # 러너는 확정 1분봉만 소비한다 — 웹소켓 틱 피드는 WAN-451 옛 규칙 정리로 없어졌다.
+    feed = "1분봉 폴링"
     last = "폴링 기록 없음" if status.last_poll_ms is None else format_kst(status.last_poll_ms)
     st.caption(f"{dot} 페이퍼 러너 · {feed} · 마지막 폴링 {last} KST")
 
