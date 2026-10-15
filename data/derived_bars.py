@@ -22,19 +22,37 @@ from data.universe import BUILT_TIMEFRAMES
 logger = logging.getLogger(__name__)
 
 
-def build_derived(store: OhlcvStore, symbol: str, target: str) -> int:
-    """`target`(예 3h)을 원천 TF에서 접어 저장된 마지막 봉 다음부터 채운다. 넣은 봉 수."""
+def build_derived(
+    store: OhlcvStore, symbol: str, target: str, *, backfill_older: bool = False
+) -> int:
+    """`target`(예 3h)을 원천 TF에서 접어 저장된 마지막 봉 다음부터 채운다. 넣은 봉 수.
+
+    `backfill_older`면 원천 이력이 저장된 첫 봉보다 앞으로 늘어난 구간도 채운다(이력 확장 뒤 ·
+    매 봉 훅에서는 끈다 — 원천 첫 버킷이 불완전하면 매번 전 이력을 다시 읽게 된다).
+    """
     source = BUILT_TIMEFRAMES[target]
     tgt_ms = timeframe_to_ms(target)
+    first_src = store.first_open_time(symbol, source)
+    if first_src is None:
+        return 0
+    lowest = -(-first_src // tgt_ms) * tgt_ms  # 첫 원천 봉 이후의 첫 온전한 버킷
+    first = store.first_open_time(symbol, target)
     last = store.last_open_time(symbol, target)
-    if last is not None:
-        start = last + tgt_ms
-    else:
-        first = store.first_open_time(symbol, source)
-        if first is None:
-            return 0
-        start = -(-first // tgt_ms) * tgt_ms  # 첫 원천 봉 이후의 첫 온전한 버킷
+    inserted = 0
+    if backfill_older and first is not None and lowest < first:
+        # 원천 이력이 뒤로 늘었다(팔 종목 이력 확장, WAN-451) — 그 앞 구간도 채운다.
+        inserted += _build_range(store, symbol, target, source, lowest, first)
+    start = lowest if last is None else last + tgt_ms
+    return inserted + _build_range(store, symbol, target, source, start, None)
+
+
+def _build_range(
+    store: OhlcvStore, symbol: str, target: str, source: str, start: int, end: int | None
+) -> int:
+    """`[start, end)`(end=None이면 끝까지) 구간의 온전한 버킷을 접어 넣는다."""
     src = store.load(symbol, source, start_ms=start)
+    if end is not None and not src.empty:
+        src = src[src["open_time"].astype("int64") < end]
     if src.empty:
         return 0
     if "closed" in src.columns:
@@ -43,6 +61,8 @@ def build_derived(store: OhlcvStore, symbol: str, target: str) -> int:
     if out.empty:
         return 0
     out = out[out["open_time"].astype("int64") >= start]
+    if end is not None:
+        out = out[out["open_time"].astype("int64") < end]
     inserted = store.insert_candles_ignore(
         Candle(
             symbol=symbol,
@@ -67,7 +87,7 @@ def build_all_derived(store: OhlcvStore, symbols: list[str]) -> int:
     for sym in symbols:
         for target in BUILT_TIMEFRAMES:
             try:
-                total += build_derived(store, sym, target)
+                total += build_derived(store, sym, target, backfill_older=True)
             except Exception:  # noqa: BLE001 — 한 종목이 수집기를 멈추면 안 된다
                 logger.exception("%s %s 생성 실패(다음 기회에 다시 시도)", sym, target)
     return total

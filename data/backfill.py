@@ -98,8 +98,12 @@ def backfill_symbol(
     sleeper: Callable[[float], None] = time.sleep,
     now_ms: Callable[[], int] = lambda: int(time.time() * 1000),
     progress: Callable[[int, int, int], None] | None = None,
+    page_pause_seconds: float = 0.0,
 ) -> int:
     """`since_ms`부터 `until_ms`(기본 현재)까지 페이징 백필한다.
+
+    `page_pause_seconds`(기본 0 = 예전 그대로)는 쪽 사이 쉬는 시간이다 — 수년치를 한 번에 받는
+    경로(팔 종목 이력, WAN-451)가 바이낸스 가중치 한도(분당 2400 · 1000봉 쪽당 5)를 넘지 않게 한다.
 
     저장한 봉 수를 반환한다. 진행이 없으면(빈 응답/커서 정체) 루프를 종료한다.
 
@@ -154,6 +158,8 @@ def backfill_symbol(
         # 마지막 페이지(가득 차지 않음)면 종료.
         if len(batch) < limit:
             break
+        if page_pause_seconds > 0 and since < end:
+            sleeper(page_pause_seconds)  # 다음 쪽이 있을 때만 쉰다
 
     logger.info("백필 완료 %s %s: %d 봉", symbol, timeframe, total)
     return total

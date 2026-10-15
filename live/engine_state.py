@@ -35,6 +35,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field, ValidationError
 
 from data.sqlite_util import configure_connection
+from strategy.models import OrderBlock
 
 _logger = logging.getLogger(__name__)
 
@@ -64,6 +65,12 @@ class PersistedZoneWatch(BaseModel):
     was_inside: bool
     armed_forming_bar: int | None = None
     skip_recorded_forming_bar: int | None = None
+    shadow_bar: int | None = None
+    #: 탐지 창 밖으로 밀려나 엔진이 직접 따라가는 존(WAN-451) — 다시 탐지할 수 없으므로 존 자체를
+    #: 담는다. 탐지로 다시 세워지는 존은 None이다(옛 스냅샷도 None — 호환).
+    carried_ob: OrderBlock | None = None
+    bar_inside: bool = False
+    checked_through: int | None = None
 
 
 class PersistedPendingOrder(BaseModel):

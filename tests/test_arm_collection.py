@@ -267,6 +267,9 @@ class _FakeArm:
         self.plan = plan
         return ["N"], []
 
+    def extend_history(self) -> int:
+        return 0
+
     def on_candle(self, candle: Candle) -> None:
         return None
 
@@ -297,3 +300,95 @@ def test_plan_change_fills_new_pairs_then_reconnects(monkeypatch: pytest.MonkeyP
     assert ("N", "1w") in streams[1] and len(streams[1]) == 1 + len(ARM_STREAM_TIMEFRAMES)
     new_pairs, symbols = arm.filled[0]
     assert ("A", "1m") not in new_pairs and symbols == {"N"}
+
+
+# ------------------------------------------------------------------ 이력 깊이(오래된 존 기억)
+
+
+class _History:
+    """요청한 `since`부터 `until`(없으면 지금)까지 1시간 간격 봉을 주는 가짜 거래소."""
+
+    def __init__(self, listed: int) -> None:
+        self.listed = listed
+        self.calls: list[tuple[str, str, int]] = []
+
+    def fetch_ohlcv(
+        self,
+        symbol: str,
+        timeframe: str = "1h",
+        since: int | None = None,
+        limit: int | None = None,
+        params: dict[str, object] | None = None,
+    ) -> list[list[float]]:
+        from data.models import timeframe_to_ms
+
+        assert since is not None and limit is not None
+        self.calls.append((symbol, timeframe, since))
+        tf = timeframe_to_ms(timeframe)
+        start = max(since, self.listed)
+        start = -(-start // tf) * tf
+        return [[t, 1.0, 2.0, 0.5, 1.5, 1.0] for t in range(start, start + limit * tf, tf)]
+
+
+def test_backfill_pauses_between_full_pages(tmp_path: Path) -> None:
+    from data.backfill import backfill_symbol
+
+    sleeps: list[float] = []
+    with OhlcvStore(tmp_path / "p.db") as store:
+        backfill_symbol(
+            _History(0),
+            store,
+            "A",
+            "1h",
+            0,
+            until_ms=5 * 1000 * H,
+            limit=1000,
+            sleeper=sleeps.append,
+            now_ms=lambda: 10**13,
+            page_pause_seconds=0.2,
+        )
+    assert sleeps.count(0.2) == 4  # 5쪽 사이 4번
+
+
+def test_extend_history_reaches_back_once_and_rebuilds_3h(tmp_path: Path) -> None:
+    arm, store, universe = _arm(tmp_path, ["X"])
+    now = arm._now_ms()
+    ex = _History(listed=now - 100 * DAY)
+    arm._exchange = ex
+    arm._history_days = 60
+    arm._now_ms = lambda: now
+    arm.adopt(arm.compute())
+    _hours(store, "X", now - 10 * DAY, 24 * 9)  # 최근 9일치만 있는 1h
+    build_derived(store, "X", "3h")
+    first_3h = store.first_open_time("X", "3h")
+    assert first_3h is not None and first_3h >= now - 10 * DAY
+    arm.extend_history()
+    assert store.first_open_time("X", "1h") == now - 60 * DAY
+    assert store.first_open_time("X", "3h") == now - 60 * DAY  # 3h도 앞 구간까지 다시 접었다
+    one_hour = [c for c in ex.calls if c[:2] == ("X", "1h")]
+    assert one_hour and all(c[2] == now - 60 * DAY for c in one_hour[:1])
+    assert not any(c[1] == "1m" for c in ex.calls)  # 1분봉은 늘리지 않는다
+    ex.calls.clear()
+    arm.extend_history()
+    assert ex.calls == []  # 한 번만 시도한다
+    store.close()
+    universe.close()
+
+
+def test_new_pairs_start_at_the_history_depth(tmp_path: Path) -> None:
+    arm, store, universe = _arm(tmp_path, ["X"])
+    now = arm._now_ms()
+    ex = _History(listed=0)
+    arm._exchange = ex
+    arm._history_days = 60
+    arm._now_ms = lambda: now
+    plan = arm.compute()
+    arm.adopt(plan)
+    arm.fill([("X", "4h"), ("X", "1m")], plan.arm_symbols)
+    since: dict[str, int] = {}
+    for _, tf, at in ex.calls:
+        since.setdefault(tf, at)  # 첫 쪽의 시작
+    assert since["4h"] == now - 60 * DAY  # 룩백(1일)보다 이력 깊이가 길다
+    assert since["1m"] == now - 1 * DAY  # 1분봉은 룩백 그대로
+    store.close()
+    universe.close()

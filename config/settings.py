@@ -272,6 +272,10 @@ class Settings(BaseSettings):
     # 종목 목록 스위치(UNIVERSE_ENABLED)도 켜야 기동한다(매주 목록 · 목록 밖은 새 진입 거부).
     # 몰림 규칙(직전 24h 신호 수 · BTC 4h −2.5% · 예산 10)도 함께 돈다(그림자 주문으로 신호를 센다).
     live_arm_enabled: bool = Field(default=False)
+    # 오래된 존 기억(WAN-451): 팔은 시리즈를 처음 볼 때 이 일수만큼의 확정봉으로 오더블록을 찾고
+    # (정본 팔 후보의 98.4%가 존 나이 730일 이내), 그 뒤로는 창 밖으로 밀린 살아 있는 존을 엔진이
+    # 기억한다. 수집기는 팔 종목의 이 일수만큼 상위TF 이력을 갖춘다.
+    live_zone_memory_days: int = Field(default=730, ge=0)
     # 전략 재평가 시 각 시리즈에서 사용할 최근 봉 수(최장 EMA 365봉 워밍업 여유 포함).
     live_signal_lookback_bars: int = Field(default=1500, ge=1)
     # 이미 보낸 신호를 기록해 재시작 시 중복 발송을 막는 상태 파일 경로.

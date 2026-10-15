@@ -203,6 +203,7 @@ def _build_arm_collection(settings: Settings, store: OhlcvStore) -> ArmCollectio
         base_timeframes=settings.timeframes,
         lookback_days=settings.lookback_days_for,
         pause_seconds=settings.universe_request_interval_seconds,
+        history_days=settings.live_zone_memory_days,
     )
 
 
@@ -242,6 +243,9 @@ async def _stream_arm_plan(
         new_pairs = new_plan.new_pairs(arm.plan)
         filled = await asyncio.to_thread(arm.fill, new_pairs, new_plan.arm_symbols)
         added, removed = arm.adopt(new_plan)
+        # 원래 기본 격자로 모으던 종목이 팔로 들어오면 이력이 얕을 수 있다 — 새로 든 쌍만 늘린다
+        # (이미 시도한 쌍은 건너뛴다, WAN-451 오래된 존 기억).
+        filled += await asyncio.to_thread(arm.extend_history)
         logger.info(
             "팔 수집 종목 교체: 들어옴 %s · 빠짐 %s · 새 쌍 %d개 백필 %d봉 — 웹소켓 재접속",
             ",".join(added) or "없음",
@@ -423,10 +427,14 @@ async def run_collector(
             # 팔 종목 수집(WAN-451 ③): 그 주 목록 + 보유 종목을 1분봉·전 TF로. 목록 기능이
             # 꺼져 있으면 None이고 아래는 예전 경로 그대로다.
             arm = _build_arm_collection(settings, store) if settings.universe_enabled else None
+            history_task: asyncio.Task[int] | None = None
             if arm is not None:
                 plan = arm.compute()
                 arm.adopt(plan)
                 filled = await asyncio.to_thread(arm.catch_up)
+                # 이미 모으던 팔 종목의 이력을 뒤로 늘리는 일(오래된 존 기억, WAN-451)은 수 분~십수
+                # 분이라 스트림 접속을 막지 않게 백그라운드로 돈다(WAN-314 기동 지연 사고).
+                history_task = asyncio.create_task(asyncio.to_thread(arm.extend_history))
                 logger.info(
                     "팔 종목 수집 계획: 팔 %d종목 · 스트림 %d개 · 기동 백필 %d봉",
                     len(plan.arm_symbols),
@@ -473,6 +481,8 @@ async def run_collector(
                     funding_task.cancel()
                 if universe_task is not None:
                     universe_task.cancel()
+                if history_task is not None:
+                    history_task.cancel()
                 if watchdog is not None:
                     watchdog.stop()
     finally:
