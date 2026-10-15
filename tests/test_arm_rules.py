@@ -120,6 +120,7 @@ def test_settings_check_lists_what_to_set() -> None:
         "REENTRY_ENTRY_RULE=off",
         "FILL_PENETRATION_BPS=5",
         "RISK_PER_TRADE=",
+        "UNIVERSE_ENABLED=true",
     ):
         assert key in joined
     ok = Settings(
@@ -127,6 +128,7 @@ def test_settings_check_lists_what_to_set() -> None:
         live_reentry_entry_rule="off",
         confluence={"retap_mode": "once", "fill_penetration_bps": 5.0},
         risk_sizing={"risk_per_trade": ARM_RISK_PER_TRADE},
+        universe_enabled=True,
     )
     assert arm_settings_problems(ok) == []
     assert engine_settings_for(ok).risk_limits.daily_loss_limit_fraction is None
