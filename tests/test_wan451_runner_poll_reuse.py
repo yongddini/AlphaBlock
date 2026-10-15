@@ -157,3 +157,32 @@ def test_window_fingerprint_tracks_rows_and_derived_source(tmp_path: Path) -> No
         store.upsert_candles([Candle("X", "1h", 10 * h, 1, 1, 1, 1, 1.0, closed=False)])
         assert store.window_fingerprint("X", "1h", start_ms=4 * h) == (10 * h, 7, 6)
         assert store.window_fingerprint("Y", "1h", start_ms=None) == (None, 0, 0)
+
+
+def test_engine_state_writes_only_when_content_changes(
+    seeded: tuple[Path, list[str], int], tmp_path: Path
+) -> None:
+    """WAL 증식 사고(WAN-451 ③): 폴링 끝 저장은 서브스텝 저장과 같은 내용이면 DB를 안 건드린다.
+
+    새 1분봉이 하나 든 폴링 = 시리즈마다 서브스텝 저장 1번(커서 전진 → 반드시 씀) + 폴링 끝 저장
+    1번(내용 같음 → 건너뜀). 새 봉이 없는 폴링은 쓰기 0. 옛 코드는 둘 다 시리즈 수만큼 썼다.
+    """
+    db = tmp_path / "w.db"
+    shutil.copy(seeded[0], db)
+    syms, end_ms = seeded[1], seeded[2]
+    clock = [end_ms]
+    runner = _runner(db, syms, end_ms, clock, reuse=True)
+    store = runner._engine_state  # noqa: SLF001
+    assert store is not None
+    runner.poll_once()
+    n_series = len(syms) * len(TFS)
+    probe._append_minute(db, syms, end_ms)
+    clock[0] = end_ms + M
+    w0, s0 = store.writes, store.skipped
+    runner.poll_once()
+    assert store.writes - w0 == n_series  # 커서가 나아간 시리즈는 매 분 쓴다(크래시 안전성).
+    assert store.skipped - s0 == n_series  # 폴링 끝 저장은 전부 건너뛴다.
+    w1 = store.writes
+    clock[0] += 10_000
+    runner.poll_once()  # 새 1분봉 없음
+    assert store.writes == w1
