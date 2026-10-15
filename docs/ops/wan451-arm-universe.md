@@ -72,8 +72,11 @@ uv run alphablock universe
 수집 로그에서 진행을 본다.
 
 ```bash
-journalctl -u alphablock-collector --since "15 min ago" | grep -E "후보 풀|종목 목록|팔 종목|팔 수집|웹소켓 접속"
+grep -E "후보 풀|종목 목록|팔 종목|팔 수집|웹소켓 접속" ~/AlphaBlock/logs/collector.log | tail -20
 ```
+
+- 로그는 journald가 아니라 파일(`logs/collector.log`)이다.
+- `팔 종목 수집 계획` 줄은 그 주 종목의 과거를 **다 받은 뒤에** 찍힌다(그동안은 아무 줄도 없다 — 서버에서 수 분 이상). `후보 풀 일봉 갱신`은 별도 작업이라 먼저 나온다.
 
 `팔 종목 수집 계획: 팔 31종목 · 스트림 279개`와 `웹소켓 접속: … 연결 2개`가 보이면 정상이다.
 
