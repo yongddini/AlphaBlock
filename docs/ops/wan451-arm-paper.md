@@ -23,10 +23,17 @@
 
 ## 순서
 
-### 0. 배포
+### 0. 배포 (러너는 멈춘 채로)
+
+옛 규칙 정리(#375) 이후 코드는 「오더블록 켬 · 팔 끔」 설정이면 러너가 기동을 거부한다. 그래서 러너를 먼저
+멈추고 수집기·대시보드만 배포한다 — 러너는 4단계 리셋이 다시 띄운다.
 
 ```bash
-cd ~/AlphaBlock && ./scripts/deploy.sh
+sudo systemctl stop alphablock-live
+```
+
+```bash
+cd ~/AlphaBlock && ./scripts/deploy.sh collector dashboard
 ```
 
 ### 1. 수집기에 종목 목록·팔 데이터를 켠다 (켜기 며칠 전에 해 둔다)
@@ -99,8 +106,10 @@ cd ~/AlphaBlock && sudo scripts/paper-reset.sh --yes
 ### 5. 첫 기동을 지켜본다
 
 ```bash
-journalctl -u alphablock-live -f
+tail -f ~/AlphaBlock/logs/live.log
 ```
+
+- 서비스 로그는 journald가 아니라 **파일**이다(`scripts/install-systemd.sh`가 `StandardOutput=append:<저장소>/logs/<서비스>.log`로 설치 · `ALPHABLOCK_LOG_DIR`로 바꿀 수 있다). `journalctl -u …`에는 안 나온다.
 
 - 처음 한 번은 310 시리즈마다 **2년치로 오더블록을 찾는다** — 서버에서 **약 10분**(로컬 1분).
   그동안 폴링이 늦다. 그 뒤로는 매분 몇 초다.
