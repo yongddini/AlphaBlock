@@ -214,3 +214,21 @@ def test_real_runner_ledger_matches_the_canon(tmp_path: Path) -> None:
     print(lp.render(report))
     assert report.checks, lp.render(report)
     assert report.ok, lp.render(report)
+
+
+def test_orders_tapped_before_the_window_are_left_out(tmp_path: Path) -> None:
+    """러너 첫 기동은 형성 중인 상위TF 봉부터 소비해 기간 시작 전 탭에도 주문을 건다 — 그 체결은
+    정본(기간 뒤 탭만)에 없으니 양쪽에서 뺀다(안 빼면 「장부만」 어긋남으로 둔갑한다)."""
+    db = _ledger_db(tmp_path)
+    conn = sqlite3.connect(db)
+    with conn:
+        conn.execute(
+            "INSERT INTO live_limit_orders (session_id, symbol, timeframe, direction, placed_ms,"
+            " status, fill_ms) VALUES (1, 'A', '1h', 'bull', ?, 'filled', ?)",
+            (MON - H, MON + H),
+        )
+    conn.close()
+    led = lp.read_ledger(db, since=None, until=None)
+    assert led.signals == set() and led.pre_session == 1
+    rep = lp.Report(led, {MON: frozenset({"A"})})
+    assert "기간 시작 전에 탭된 주문의 체결 1건" in lp.render(rep)

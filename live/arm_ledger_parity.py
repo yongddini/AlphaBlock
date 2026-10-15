@@ -50,6 +50,8 @@ class Ledger:
     dispositions: dict[g.Key, str]
     gaps: list[tuple[int, int]]
     """러너가 안 돈 구간(따라잡기 한도를 넘는 것만)."""
+    pre_session: int = 0
+    """기간 시작 **전에 탭된** 주문이 기간 안에 체결된 것 — 양쪽에서 뺀 개수(아래 `read_ledger`)."""
 
 
 def _connect(db: Path) -> sqlite3.Connection:
@@ -76,6 +78,18 @@ def read_ledger(db: Path, *, since: int | None, until: int | None) -> Ledger:
             for a, b in zip(sessions, sessions[1:], strict=False)
             if int(b[0]) - int(a[1]) > CATCHUP_HOURS * 3_600_000
         ]
+        # 러너는 처음 뜰 때 **지금 형성 중인 상위TF 봉의 시작부터** 1분봉을 소비한다(첫 탭 상태를
+        # 알아야 한다 — 1w면 최대 일주일 전부터). 그 사이 탭으로 건 주문은 기간 시작 뒤에 체결될 수
+        # 있는데, 정본은 기간 시작 뒤에 탭된 후보만 쓴다(`arm_gate.canon`). 그런 체결은 양쪽에서
+        # 뺀다 — 안 빼면 「장부만」 어긋남으로 둔갑한다(2026-10-16 첫 기동: 22:09 탭 → 00:43 체결).
+        pre_session = {
+            (str(r[0]), str(r[1]), int(r[2]))
+            for r in conn.execute(
+                "SELECT symbol, timeframe, fill_ms FROM live_limit_orders"
+                " WHERE status = 'filled' AND placed_ms < ? AND fill_ms >= ?",
+                (start, start),
+            )
+        }
         signals = {
             (str(r[0]), str(r[1]), int(r[2]), float(r[3]), float(r[4]))
             for r in conn.execute(
@@ -83,6 +97,7 @@ def read_ledger(db: Path, *, since: int | None, until: int | None) -> Ledger:
                 " WHERE counted = 1 AND fill_ms >= ? AND fill_ms < ?",
                 (start, end),
             )
+            if (str(r[0]), str(r[1]), int(r[2])) not in pre_session
         }
         scales: dict[g.Key, float] = {}
         dispositions: dict[g.Key, str] = {}
@@ -131,7 +146,8 @@ def read_ledger(db: Path, *, since: int | None, until: int | None) -> Ledger:
             )
     finally:
         conn.close()
-    return Ledger(start, end, signals, trades, dispositions, gaps)
+    trades = [t for t in trades if (t.symbol, t.timeframe, t.entry_time) not in pre_session]
+    return Ledger(start, end, signals, trades, dispositions, gaps, len(pre_session))
 
 
 def weekly_members(db: Path, since: int, until: int) -> dict[int, frozenset[str]]:
@@ -234,6 +250,11 @@ def render(report: Report) -> str:
         f" · 목록 있는 주 {len(report.members)}개"
         f" · 측정 {report.seconds:.0f}초",
     ]
+    if led.pre_session:
+        lines.append(
+            f"- 기간 시작 전에 탭된 주문의 체결 {led.pre_session}건은 양쪽에서 뺐다"
+            "(러너 첫 기동이 형성 중인 상위TF 봉부터 소비한다 — 정본은 기간 뒤 탭만 쓴다)"
+        )
     if led.gaps:
         lines.append(f"- ⚠️ 따라잡기 한도({CATCHUP_HOURS}시간)를 넘는 러너 공백 {len(led.gaps)}개")
     if not report.members:
