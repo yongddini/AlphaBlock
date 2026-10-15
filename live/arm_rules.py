@@ -25,8 +25,9 @@
 0. **종목 목록**(`rotation_decision`) — 진입 시각이 속한 주의 31종목 안에 있어야 한다(WAN-444 ·
    `force_close=False`: 빠져도 보유 포지션은 그대로 두고 새 진입만 막는다). 위 넷보다 먼저 본다.
 
-⚠️ **아직 없는 것**(다음 단계): 몰림 규칙(직전 24h 신호 수 · BTC 4h 게이트 · 예산 배율 — 「진입 안 한
-신호까지 세는」 추적기가 필요하다). 이 모듈만 켜면 **정본보다 덜 거르는** 팔이다.
+5. **몰림 규칙**(`crowd_decision`) — 직전 24h 팔 신호 수(그림자 주문의 가상 체결,
+   `live.arm_signals`)와 BTC 4h 수익률로 건너뛰기·크기 배율을 정한다(WAN-436 · 게이트 −2.5%
+   WAN-438). 위 1~4를 통과한 뒤에 본다.
 """
 
 from __future__ import annotations
@@ -45,9 +46,13 @@ REJECT_CODE_ARM_STOCH_UNKNOWN = "arm_stoch_unknown"
 REJECT_CODE_ARM_STOP_BELOW_ZERO = "arm_stop_below_zero"
 REJECT_CODE_ARM_ROTATION = "arm_rotation"
 REJECT_CODE_ARM_ROTATION_UNKNOWN = "arm_rotation_unknown"
+REJECT_CODE_ARM_CROWD_SKIP = "arm_crowd_skip"
+REJECT_CODE_ARM_CROWD_BTC = "arm_crowd_btc"
 ARM_REJECT_CODES: tuple[str, ...] = (
     REJECT_CODE_ARM_ROTATION,
     REJECT_CODE_ARM_ROTATION_UNKNOWN,
+    REJECT_CODE_ARM_CROWD_SKIP,
+    REJECT_CODE_ARM_CROWD_BTC,
     REJECT_CODE_ARM_STOP_FLOOR,
     REJECT_CODE_ARM_STOCH,
     REJECT_CODE_ARM_STOCH_UNKNOWN,
@@ -66,6 +71,13 @@ class ArmParams:
     crash_lookback_minutes: int = 1440
     crash_threshold: float = -0.05
     crash_multiplier: float = 0.5
+    # 몰림 규칙(WAN-436 · 게이트 WAN-438 −2.5%) — `wan439.RULES`(= `wan438.GATED`)와 같은 값.
+    crowd_window_ms: int = 24 * 3_600_000
+    crowd_skip_low: int = 1
+    crowd_skip_high: int = 10
+    crowd_btc_gate: float = -0.025
+    crowd_btc_lookback_minutes: int = 240
+    crowd_budget: float = 10.0
 
 
 @dataclass(frozen=True)
@@ -194,6 +206,44 @@ def rotation_decision(
     if symbol not in members:
         return ArmDecision(False, REJECT_CODE_ARM_ROTATION, "이번 주 종목 목록 밖(새 진입만 막음)")
     return None
+
+
+@dataclass(frozen=True)
+class CrowdDecision:
+    """몰림 규칙 판정 — `size == 0`이면 건너뛴다(그때 `reason_code`가 있다)."""
+
+    size: float
+    count: int
+    btc_4h: float | None
+    reason_code: str = ""
+    reason: str = ""
+
+
+def crowd_decision(params: ArmParams, count: int, btc_4h: float | None) -> CrowdDecision:
+    """직전 24h 신호 수 `count`와 BTC 4h 수익률로 크기 배율을 낸다(`wan436.rule_decision` 그대로).
+
+    1. 신호 1~10개 = 급락 초반 → 건너뛴다.
+    2. 11개 이상 = 몰림 중 → BTC 직전 4h 수익률이 −2.5% 이하일 때만 들어간다(값을 모르면 건너뛴다).
+    3. 들어가면 크기 배율 `min(1, 10 / (count + 1))`.
+    """
+    if params.crowd_skip_low <= count <= params.crowd_skip_high:
+        return CrowdDecision(
+            0.0,
+            count,
+            btc_4h,
+            REJECT_CODE_ARM_CROWD_SKIP,
+            f"직전 24h 신호 {count}개(1~{params.crowd_skip_high}개 = 급락 초반 건너뛰기)",
+        )
+    if count > params.crowd_skip_high and (btc_4h is None or btc_4h > params.crowd_btc_gate):
+        shown = "모름" if btc_4h is None else f"{btc_4h * 100:+.2f}%"
+        return CrowdDecision(
+            0.0,
+            count,
+            btc_4h,
+            REJECT_CODE_ARM_CROWD_BTC,
+            f"몰림 중(신호 {count}개)인데 BTC 4h {shown} > {params.crowd_btc_gate * 100:+.1f}%",
+        )
+    return CrowdDecision(min(1.0, params.crowd_budget / (count + 1)), count, btc_4h)
 
 
 def time_exit_boundary(entry_ms: int, tf_ms: int, hold_bars: int) -> int:

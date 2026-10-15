@@ -270,7 +270,7 @@ class Settings(BaseSettings):
     # (첫 탭만 · 재진입 끔 · 5bp 관통 · 거래당 리스크 2.525%)을 기동 때 검사하고 어긋나면
     # **기동을 거부**한다(조용히 덮어쓰지 않는다 — 라벨만 붙는 사고 방지). 서킷브레이커도 끈다(⑧).
     # 종목 목록 스위치(UNIVERSE_ENABLED)도 켜야 기동한다(매주 목록 · 목록 밖은 새 진입 거부).
-    # ⚠️ 몰림 규칙은 아직 없다 — 이것만 켜면 정본보다 덜 거르는 팔이다.
+    # 몰림 규칙(직전 24h 신호 수 · BTC 4h −2.5% · 예산 10)도 함께 돈다(그림자 주문으로 신호를 센다).
     live_arm_enabled: bool = Field(default=False)
     # 전략 재평가 시 각 시리즈에서 사용할 최근 봉 수(최장 EMA 365봉 워밍업 여유 포함).
     live_signal_lookback_bars: int = Field(default=1500, ge=1)

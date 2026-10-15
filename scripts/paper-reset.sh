@@ -97,9 +97,10 @@ count() { sqlite3 "$DB" "SELECT COUNT(*) FROM $1;" 2>/dev/null || echo "N/A"; }
 
 # 있을 때만 함께 비우는 페이퍼 상태 테이블(WAN-451). 엔진 C 원장 둘은 엔진 C가 한 번이라도
 # 돌아야 생기고, 엔진 스냅샷·서킷브레이커 알림 상태는 규칙이 바뀌는 리셋에서 옛 규칙의 것이
-# 새 장부에 섞이면 안 된다(옛 스냅샷이 48h 안 재기동에 복원되는 구멍 — WAN-451 §2-4).
+# 새 장부에 섞이면 안 된다(옛 스냅샷이 48h 안 재기동에 복원되는 구멍 — WAN-451 §2-4). 팔 신호
+# 장부(arm_signals)는 몰림 규칙이 직전 24h를 세는 원장이라 함께 비운다.
 # 없는 테이블을 목록에 넣으면 내보내기·DELETE가 실패해 리셋 전체가 멈추므로 **있는 것만** 넣는다.
-OPTIONAL_PAPER_TABLES=(tsmom_rebalances paper_equity_marks live_engine_state circuit_breaker_notice)
+OPTIONAL_PAPER_TABLES=(tsmom_rebalances paper_equity_marks live_engine_state circuit_breaker_notice arm_signals)
 table_exists() {
     [[ "$(sqlite3 "$DB" "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='$1';" 2>/dev/null)" == "1" ]]
 }

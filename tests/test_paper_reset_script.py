@@ -437,6 +437,7 @@ OPTIONAL_PAPER_TABLES = (
     "paper_equity_marks",
     "live_engine_state",
     "circuit_breaker_notice",
+    "arm_signals",
 )
 
 

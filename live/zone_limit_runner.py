@@ -62,6 +62,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import time
 from collections.abc import Callable
@@ -80,12 +81,19 @@ from data.universe import ARM_TIMEFRAMES
 from data.universe_pool import UniverseStore
 from execution.engine import EntryIntent, ExecutionOutcome
 from live.arm_rules import (
+    ARM_REJECT_CODES,
+    REJECT_CODE_ARM_STOCH,
+    REJECT_CODE_ARM_STOCH_UNKNOWN,
+    REJECT_CODE_ARM_STOP_FLOOR,
     ArmDecision,
     ArmParams,
+    btc_lookback_return,
+    crowd_decision,
     evaluate_arm_fill,
     is_time_exit_minute,
     rotation_decision,
 )
+from live.arm_signals import ArmSignal, ArmSignalStore
 from live.engine_state import EngineStateStore, SeriesStateSnapshot
 from live.executor import PaperExecutor, TradeReport
 from live.limit_engine import EngineEvent, ReentryEntryRule, ZoneLimitLiveEngine
@@ -143,6 +151,7 @@ class ZoneLimitPaperRunner:
         tsmom: TsmomRebalancer | None = None,
         arm: ArmParams | None = None,
         universe: UniverseStore | None = None,
+        signals: ArmSignalStore | None = None,
         price_feed_factory: Callable[[list[str]], PriceFeed] | None = None,
         reuse_loads: bool = True,
         sleep: Callable[[float], None] = time.sleep,
@@ -168,6 +177,9 @@ class ZoneLimitPaperRunner:
         #: 팔의 주간 종목 목록(WAN-451 ③). 주어지면 감시 시리즈를 매 폴링 그 주 목록 × 팔 TF로
         #: 맞추고, 체결 순간 목록 밖 종목은 진입을 거부한다. None이면 시리즈 고정(예전 그대로).
         self._universe = universe
+        #: 팔 신호 장부(WAN-451 몰림 규칙). 주어지면 그림자 체결을 기록하고, 실제 체결 때 직전
+        #: 24h 신호 수로 몰림 규칙을 건다. None이면 몰림 규칙 없음(예전 그대로).
+        self._signals = signals
         #: 감시 종목이 바뀌면 틱 피드를 새 종목으로 다시 만든다(주어졌을 때만).
         self._price_feed_factory = price_feed_factory
         self._feed_symbols: tuple[str, ...] = ()
@@ -238,12 +250,13 @@ class ZoneLimitPaperRunner:
             strict=True,
         ):
             t = int(t_raw)
-            # 이 1분봉이 닫힌 시각(t+1분)까지 확정된 상위TF 봉만 창에 담는다 — 연속
-            # 가동에서 폴링이 봤을 창과 같다(그보다 미래의 봉을 먹이면 재생이 존
-            # 대장/전이 상태를 미리 알게 돼 연속 실행과 갈라진다).
-            fed = self._feed_htf_window(
-                symbol, timeframe, closed_all, cutoff_open_time=t + _MINUTE_MS - htf_ms
-            )
+            # 이 1분봉이 **시작하기 전에**(t) 닫힌 상위TF 봉만 창에 담는다(WAN-451). 예전에는
+            # 「이 1분봉이 닫힌 시각(t+1분)까지」였는데, 그러면 상위TF 봉의 **마지막 1분**을
+            # 판정하기 전에 그 봉을 이미 닫힌 봉으로 먹여 — 그 봉에서 존이 깨지면 마지막 1분의
+            # 체결 기회를 지웠다(정본 `invalidation_cancel="bar_close"`는 그 봉 끝까지 주문을
+            # 살린다 · 실데이터 대조에서 백테스트에만 있는 체결로 드러났다). 그 봉은 폴링 끝의
+            # 「최신 창」 공급이나 다음 1분봉에서 먹는다 — 연속 가동 ≡ 재생은 그대로다.
+            fed = self._feed_htf_window(symbol, timeframe, closed_all, cutoff_open_time=t - htf_ms)
             if fed is None:
                 return events  # 창 불연속 — 이 시리즈 평가 중단(기존 거부와 같은 처리).
             if fed:
@@ -646,6 +659,8 @@ class ZoneLimitPaperRunner:
                 )
             elif event.kind == "filled" and event.fill is not None:
                 self._handle_fill(event)
+            elif event.kind == "shadow_filled":
+                self._record_signal(event)
             else:
                 if self._notifier is not None and event.kind == "cancelled_expired":
                     self._notifier.note_expired()  # 만료는 실시간 없음 — 일일 요약에만.
@@ -693,6 +708,8 @@ class ZoneLimitPaperRunner:
             decision = self._rotation_gate(fill.symbol, fill.time) or self._arm_decision(
                 fill.symbol, fill.timeframe, fill.price, fill.stop_price, fill.time
             )
+            if decision is not None and decision.accepted:
+                decision = self._crowd_gate(event, decision)
             if decision is not None and not decision.accepted:
                 # 팔 규칙 거부(WAN-451 ③) — 체결은 됐지만 진입하지 않는다. 다른 거부와 같은 길로
                 # 장부·알림에 남긴다(조용히 버리지 않는다, WAN-194).
@@ -765,6 +782,109 @@ class ZoneLimitPaperRunner:
                 except Exception:  # noqa: BLE001 — 폴백 처분마저 실패하면 로그만 남긴다.
                     _logger.exception("처분 기록 폴백 실패: journal_id=%d", journal_id)
 
+    def _record_signal(self, event: EngineEvent) -> None:
+        """그림자 체결 하나를 신호 장부에 남긴다 — 몰림 규칙이 세는 모집단인지 함께 적는다."""
+        if self._signals is None or event.fill is None or event.zone is None:
+            return
+        fill = event.fill
+        reason = self._population_reason(
+            fill.symbol, fill.timeframe, fill.price, fill.stop_price, fill.time
+        )
+        self._signals.record(
+            ArmSignal(
+                symbol=fill.symbol,
+                timeframe=fill.timeframe,
+                zone_start=int(event.zone[1]),
+                zone_confirmed=int(event.zone[2]),
+                fill_ms=fill.time,
+                price=fill.price,
+                ob_stop=float(fill.stop_price) if fill.stop_price is not None else 0.0,
+                counted=reason == "",
+                reason_code=reason,
+            )
+        )
+
+    def _population_reason(
+        self, symbol: str, timeframe: str, price: float, ob_stop: float | None, fill_ms: int
+    ) -> str:
+        """신호 모집단에서 빠지는 이유(들면 빈 문자열) — 목록 안 · 손절폭 ≥ 하한 · %K < 문턱.
+
+        정본 모집단(`wan436.build_entries` + `wan442.apply_rotation`)과 같은 셋이다. 손절 2배 ≤ 0
+        거부와 폭락 크기는 모집단을 바꾸지 않는다(백테스트도 세는 쪽에서 안 뺐다).
+        """
+        assert self._arm is not None
+        gate = self._rotation_gate(symbol, fill_ms)
+        if gate is not None:
+            return gate.reason_code
+        if ob_stop is None or (price - ob_stop) / price < self._arm.min_stop_width:
+            return REJECT_CODE_ARM_STOP_FLOOR
+        times, ks = self._closed_k(symbol, timeframe, fill_ms)
+        k = stoch.k_before_live(times, ks, fill_ms, timeframe_to_ms(timeframe))
+        if k is None:
+            return REJECT_CODE_ARM_STOCH_UNKNOWN
+        if not k < self._arm.k_threshold:
+            return REJECT_CODE_ARM_STOCH
+        return ""
+
+    def _crowd_gate(self, event: EngineEvent, decision: ArmDecision) -> ArmDecision:
+        """몰림 규칙(WAN-436/438) — 건너뛰면 거부 판정, 아니면 크기 배율을 곱한 판정."""
+        if self._signals is None or self._arm is None or event.fill is None:
+            return decision
+        fill = event.fill
+        t = fill.time - fill.time % _MINUTE_MS  # 백테스트 후보 시각과 같은 자(그 1분봉 시작)
+        exclude = (
+            (fill.symbol, fill.timeframe, int(event.zone[1]), int(event.zone[2]))
+            if event.zone is not None
+            else None
+        )
+        count = self._signals.count(t - self._arm.crowd_window_ms, t, exclude=exclude)
+        lookback = self._arm.crowd_btc_lookback_minutes
+        btc = self._store.load(
+            _ARM_BTC_SYMBOL, "1m", start_ms=t - (lookback + 10) * _MINUTE_MS, end_ms=t
+        )
+        if not btc.empty and "closed" in btc.columns:
+            btc = btc[btc["closed"].astype(bool)]
+        btc_4h = btc_lookback_return(
+            [int(x) for x in btc["open_time"]], [float(c) for c in btc["close"]], t, lookback
+        )
+        crowd = crowd_decision(self._arm, count, btc_4h)
+        if crowd.size == 0.0:
+            return ArmDecision(
+                False,
+                crowd.reason_code,
+                crowd.reason,
+                stop_width=decision.stop_width,
+                k_value=decision.k_value,
+                btc_24h=decision.btc_24h,
+            )
+        _logger.info(
+            "몰림 규칙 통과: %s %s 직전 24h 신호 %d개 · 크기 ×%.3f (폭락 ×%.1f)",
+            fill.symbol,
+            fill.timeframe,
+            count,
+            crowd.size,
+            decision.size_scale,
+        )
+        return dataclasses.replace(decision, size_scale=decision.size_scale * crowd.size)
+
+    def _closed_k(
+        self, symbol: str, timeframe: str, entry_ms: int
+    ) -> tuple[list[int], list[float | None]]:
+        """그 칸 TF의 확정봉 꼬리 → (시각, %K 선). %K 선은 최근 29봉에만 의존한다."""
+        tf_ms = timeframe_to_ms(timeframe)
+        bars = self._store.load(
+            symbol, timeframe, start_ms=entry_ms - _ARM_K_BARS * tf_ms, end_ms=entry_ms
+        )
+        if not bars.empty and "closed" in bars.columns:
+            bars = bars[bars["closed"].astype(bool)]
+        bars = bars[bars["open_time"].astype("int64") + tf_ms <= entry_ms]
+        k = stoch.stoch_k_line(
+            [float(v) for v in bars["high"]],
+            [float(v) for v in bars["low"]],
+            [float(v) for v in bars["close"]],
+        )
+        return [int(t) for t in bars["open_time"]], k
+
     def _arm_decision(
         self,
         symbol: str,
@@ -783,17 +903,7 @@ class ZoneLimitPaperRunner:
         if ob_stop is None:
             return ArmDecision(False, "sizing", "손절 참조가 없음")
         tf_ms = timeframe_to_ms(timeframe)
-        bars = self._store.load(
-            symbol, timeframe, start_ms=entry_ms - _ARM_K_BARS * tf_ms, end_ms=entry_ms
-        )
-        if not bars.empty and "closed" in bars.columns:
-            bars = bars[bars["closed"].astype(bool)]
-        bars = bars[bars["open_time"].astype("int64") + tf_ms <= entry_ms]
-        k = stoch.stoch_k_line(
-            [float(v) for v in bars["high"]],
-            [float(v) for v in bars["low"]],
-            [float(v) for v in bars["close"]],
-        )
+        k_times, k = self._closed_k(symbol, timeframe, entry_ms)
         lookback = self._arm.crash_lookback_minutes
         btc = self._store.load(
             _ARM_BTC_SYMBOL, "1m", start_ms=entry_ms - (lookback + 10) * _MINUTE_MS, end_ms=entry_ms
@@ -806,7 +916,7 @@ class ZoneLimitPaperRunner:
             ob_stop=ob_stop,
             entry_ms=entry_ms,
             tf_ms=tf_ms,
-            htf_closed_times=[int(t) for t in bars["open_time"]],
+            htf_closed_times=k_times,
             htf_closed_k=k,
             btc_minute_times=[int(t) for t in btc["open_time"]],
             btc_minute_closes=[float(c) for c in btc["close"]],
@@ -1214,6 +1324,7 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
     # 기동 시 복원 + 공백 따라잡기 재생한다(모듈 독스트링 §재시작 정책).
     engine_state = EngineStateStore(settings.db_path)
     universe: UniverseStore | None = None
+    signals: ArmSignalStore | None = None
     try:
         now = int(time.time() * 1000)
         session_id = journal.start_session(now_ms=now)
@@ -1223,6 +1334,7 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
             # 팔(WAN-451 ③): 고정 격자 대신 그 주 목록 × 팔 TF. 기동 때는 스냅샷이 남은 칸도 넣어
             # 목록 밖 칸의 대기 주문까지 복원한다 — 첫 폴링의 `sync_series`가 정리한다.
             universe = UniverseStore(settings.db_path)
+            signals = ArmSignalStore(settings.db_path)
             snap = universe.at(now)
             members = sorted(snap.members) if snap is not None else []
             series = sorted(
@@ -1247,6 +1359,10 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
                 events=frozenset(settings.paper_trade_notify_events),
                 # 일일 요약의 체결률·사유 카운트는 DB 장부 창 조회로 낸다(재계산 아님, WAN-221).
                 funnel_provider=lambda s, e: journal.funnel_counts(start_ms=s, end_ms=e),
+                # 팔 규칙 거부는 체결마다 생길 수 있어 건별로 안 보낸다(WAN-451 ⑩ — 일일 요약).
+                quiet_reject_codes=(
+                    frozenset(ARM_REJECT_CODES) if settings.live_arm_enabled else frozenset()
+                ),
             )
 
         # 존폭 필터 기각의 건별 알림(옵트인, WAN-221). deviation은 만료 이벤트에서 따로 넘기고,
@@ -1278,6 +1394,8 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
             ),
             skip_listener=skip_listener,
             reentry_entry_rule=reentry_rule,
+            # 몰림 규칙의 모집단(WAN-451): 슬롯과 무관한 탭별 그림자 주문을 따라간다.
+            track_shadows=settings.live_arm_enabled,
         )
         # 옵트인 웹소켓 틱 피드(WAN-246, 페이퍼 한정 · 공개 체결 스트림만). 기본 꺼짐이면
         # None → 러너는 확정 1분봉만 소비(예전과 비트 동일). 켜면 심볼별 실시간 체결가로
@@ -1339,7 +1457,7 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
             arm_params = ArmParams()
             _logger.info(
                 "스토캐스틱 팔 켜짐(WAN-451): 하한 %.0f%% · %%K < %.0f · 손절 ×%.0f · ts%d · "
-                "폭락 ×%.1f · 서킷브레이커 꺼짐 · 매주 종목 목록 (⚠️ 몰림 규칙은 아직 없음)",
+                "폭락 ×%.1f · 서킷브레이커 꺼짐 · 매주 종목 목록 · 몰림 규칙(그림자 주문)",
                 arm_params.min_stop_width * 100,
                 arm_params.k_threshold,
                 arm_params.stop_multiple,
@@ -1365,6 +1483,7 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
             tsmom=tsmom_rebalancer,
             arm=arm_params,
             universe=universe,
+            signals=signals,
             price_feed_factory=feed_factory,
         )
         # 재시작 복원(WAN-306): 이전 세션의 엔진 상태(전이 맥락·탭 표식·대기 주문·재진입
@@ -1411,6 +1530,8 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
             price_feed.close()
         if universe is not None:
             universe.close()
+        if signals is not None:
+            signals.close()
         engine_state.close()
         store.close()
         journal.close()

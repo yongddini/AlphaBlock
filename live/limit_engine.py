@@ -98,6 +98,7 @@ EventKind = Literal[
     "cancelled_invalidated",
     "cancelled_condition_failed",
     "discarded",
+    "shadow_filled",
 ]
 
 
@@ -131,6 +132,8 @@ class EngineEvent:
     time_ms: int
     order: PendingLimitOrder
     fill: LimitFill | None = None
+    zone: ZoneId | None = None
+    """주문의 존(체결·그림자 체결만 채운다) — 몰림 규칙이 「같은 탭의 쌍둥이」를 빼는 데 쓴다."""
 
 
 @dataclass
@@ -143,6 +146,8 @@ class _ZoneWatch:
     (탐지기 `_invalidate`의 `_inside` 상태와 같은 규칙)."""
     armed_forming_bar: int | None = None
     """이번 형성 중 봉에서 이미 예약을 시도한 봉 시각(중복 예약 시도 방지)."""
+    shadow_bar: int | None = None
+    """이번 형성 중 봉에서 이미 그림자 주문을 만든 봉 시각(WAN-451 몰림 규칙 — 탭 하나에 하나)."""
     skip_recorded_forming_bar: int | None = None
     """이번 형성 중 봉에서 이미 미진입 사유를 장부에 남긴 봉 시각(WAN-217). `_maybe_arm`이
     매 서브스텝 재평가하므로 같은 봉·같은 존의 사유가 여러 번 찍히지 않게 한다. `armed`와
@@ -177,6 +182,8 @@ class _SeriesState:
     occupied_zone: ZoneId | None = None
     refreshed: bool = False
     """`on_htf_bars`가 최소 한 번 존 대장을 세웠는지 — 그 전에는 예약하지 않는다."""
+    #: 그림자 주문(WAN-451 ③ 몰림 규칙) — (존, 주문). 슬롯과 무관하게 탭마다 하나씩 따라간다.
+    shadows: list[tuple[ZoneId, PendingLimitOrder]] = field(default_factory=list)
 
 
 class ZoneLimitLiveEngine:
@@ -198,6 +205,7 @@ class ZoneLimitLiveEngine:
         has_position: Callable[[str, str], bool] | None = None,
         skip_listener: Callable[[str, str, str, int], None] | None = None,
         reentry_entry_rule: ReentryEntryRule | None = None,
+        track_shadows: bool = False,
     ) -> None:
         _validate_live_params(params)
         _validate_reentry_rule(params, reentry_entry_rule)
@@ -219,6 +227,12 @@ class ZoneLimitLiveEngine:
         #: 장부에 사유가 실제로 남을 때만(봉당 1회) 호출돼 텔레그램 카운트와 저널이 어긋나지
         #: 않는다. ⚠️ 이벤트를 추가로 내지 **않는다** — 스킵의 `events == []` 파리티 보존.
         self._skip_listener = skip_listener
+        #: 그림자 주문(WAN-451 ③). 팔의 몰림 규칙은 「우리가 들어갔는지와 무관하게」 팔 후보
+        #: **전부**의 가상 체결을 센다(백테스트 `build_zone_limit_candidates`는 탭마다 주문을
+        #: 독립으로 시뮬레이션한다). 이 엔진은 칸마다 주문 하나뿐이라(슬롯) 칸이 차 있을 때의
+        #: 탭·겹친 탭을 못 본다. 켜면 첫 탭마다 **같은 `_build_order`·같은 판정**의 독립 주문을
+        #: 하나씩 더 따라가 체결되면 `shadow_filled`를 낸다(장부·슬롯과 무관). 끄면 비트 동일.
+        self._track_shadows = track_shadows
         self._series: dict[SeriesKey, _SeriesState] = {}
 
     # -- 상위TF 확정봉: 존 대장 갱신 -----------------------------------------
@@ -265,7 +279,12 @@ class ZoneLimitLiveEngine:
             if not is_long and not self._params.short_enabled:
                 continue  # WAN-87: 숏 비활성(기본).
             zid = _zone_id(ob)
-            was_inside = last_low <= ob.top and last_high >= ob.bottom
+            # 탐지기는 존이 확정되는 봉을 탭 판정에 쓰지 않는다(그 봉에서 `_inside`를 세우지
+            # 않으므로 다음 봉의 겹침이 첫 탭이다). 방금 확정된 존(확정 봉 = 마지막 확정봉)을
+            # 「이미 안」으로 시작하면 첫 탭을 놓친다 — 실데이터 대조에서 드러났다(WAN-451).
+            was_inside = (
+                times[-1] > ob.confirmed_time and last_low <= ob.top and last_high >= ob.bottom
+            )
             watch = state.zones.get(zid)
             if watch is None:
                 fresh[zid] = _ZoneWatch(ob=ob, was_inside=was_inside)
@@ -295,6 +314,9 @@ class ZoneLimitLiveEngine:
                 )
             state.pending_zone = None
             state.pending_journal_id = None
+        if state.shadows:
+            # 그림자도 같은 규칙으로 무효화 취소한다(존이 대장에서 사라지면 끝).
+            state.shadows = [(z, o) for z, o in state.shadows if z in state.zones]
         return events
 
     # -- 1분봉 서브스텝: 커밋·예약·체결 --------------------------------------
@@ -322,7 +344,11 @@ class ZoneLimitLiveEngine:
                     # 지표 상태를 지어낼 수 없으므로 대기 주문을 폐기한다(측정 오염 방지,
                     # 재시작 폐기와 같은 부류). 존 대장·시딩은 다음 `on_htf_bars`가 맞춘다.
                     events.extend(self._discard_pending(state, symbol, timeframe, time_ms))
+                    state.shadows = []  # 그림자도 같은 이유로 버린다
                 else:
+                    for _zone, shadow in state.shadows:
+                        shadow.on_bar_close(state.running_close)  # 만료 계수(진짜 주문과 같은 규칙)
+                    state.shadows = [(z, o) for z, o in state.shadows if not o.status.is_terminal]
                     pending = self.book.pending(symbol, timeframe)
                     status = self.book.on_bar_close(symbol, timeframe, state.running_close)
                     self._append_seed(state, state.forming_bar, state.running_close)
@@ -349,7 +375,12 @@ class ZoneLimitLiveEngine:
             if state.forming_low is not None and state.forming_high is not None:
                 low_done, high_done = state.forming_low, state.forming_high
                 for watch in state.zones.values():
-                    watch.was_inside = low_done <= watch.ob.top and high_done >= watch.ob.bottom
+                    # 확정 봉 자신은 탭 판정에 안 쓴다(`on_htf_bars`와 같은 규칙, WAN-451).
+                    watch.was_inside = (
+                        state.forming_bar > watch.ob.confirmed_time
+                        and low_done <= watch.ob.top
+                        and high_done >= watch.ob.bottom
+                    )
             for watch in state.zones.values():
                 watch.armed_forming_bar = None
             state.forming_bar = htf_bar
@@ -363,6 +394,8 @@ class ZoneLimitLiveEngine:
 
         # 2) 탭 감지 → 예약. 체결 판정보다 먼저다 — 백테스트는 탭 봉의 첫 서브스텝부터
         # 주문이 걸려 있으므로, 전이 서브스텝에서 예약과 체결이 같은 스텝에 일어날 수 있다.
+        if self._track_shadows:
+            self._arm_shadows(state, symbol, timeframe, time_ms)
         events.extend(self._maybe_arm(state, symbol, timeframe, time_ms))
 
         # 3) 대기 주문 체결/취소 판정(틱 경로와 공용 — 로직 이중화 금지).
@@ -371,6 +404,12 @@ class ZoneLimitLiveEngine:
                 state, symbol, timeframe, low=low, high=high, close=close, time_ms=time_ms
             )
         )
+        if state.shadows:
+            events.extend(
+                self._apply_shadow_price(
+                    state, symbol, timeframe, low=low, high=high, close=close, time_ms=time_ms
+                )
+            )
 
         state.running_close = close
         state.last_substep_time = time_ms
@@ -491,6 +530,7 @@ class ZoneLimitLiveEngine:
                     time_ms=time_ms,
                     order=order,
                     fill=fill,
+                    zone=state.occupied_zone,
                 )
             )
         elif order.status.is_terminal:
@@ -508,6 +548,69 @@ class ZoneLimitLiveEngine:
                     order=order,
                 )
             )
+        return events
+
+    def _arm_shadows(self, state: _SeriesState, symbol: str, timeframe: str, time_ms: int) -> None:
+        """새 탭(바깥→안 전이)마다 그림자 주문을 하나 만든다 — 슬롯·포지션과 무관(WAN-451).
+
+        탭 판정·첫 탭·존폭 조건은 `_maybe_arm`과 같다(같은 존·같은 봉에서 한 번만). 주문은 같은
+        `_build_order`로 만든다 — 진짜 주문과 가격 사슬이 갈라질 수 없다.
+        """
+        if not state.refreshed or state.forming_bar is None:
+            return
+        low, high = state.forming_low, state.forming_high
+        if low is None or high is None:
+            return
+        params = self._params
+        for zid, watch in state.zones.items():
+            ob = watch.ob
+            if watch.was_inside or watch.shadow_bar == state.forming_bar:
+                continue
+            if state.forming_bar <= ob.confirmed_time:
+                continue
+            if not (low <= ob.top and high >= ob.bottom):
+                continue
+            watch.shadow_bar = state.forming_bar
+            tap_index = len(ob.tapped_times)
+            if params.retap_mode == "once" and tap_index > 0:
+                continue
+            if not params.zone_width_filter_passes(ob, state.last_closed_atr):
+                continue
+            order = self._build_order(state, symbol, timeframe, ob, tap_index, time_ms)
+            if order is not None:
+                state.shadows.append((zid, order))
+
+    def _apply_shadow_price(
+        self,
+        state: _SeriesState,
+        symbol: str,
+        timeframe: str,
+        *,
+        low: float,
+        high: float,
+        close: float,
+        time_ms: int,
+    ) -> list[EngineEvent]:
+        """그림자 주문에 1분봉을 반영한다 — 체결되면 `shadow_filled`(장부·슬롯과 무관)."""
+        events: list[EngineEvent] = []
+        alive: list[tuple[ZoneId, PendingLimitOrder]] = []
+        for zid, order in state.shadows:
+            fill = order.on_price(low, high, close, now_ms=time_ms)
+            if fill is not None:
+                events.append(
+                    EngineEvent(
+                        kind="shadow_filled",
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        time_ms=time_ms,
+                        order=order,
+                        fill=fill,
+                        zone=zid,
+                    )
+                )
+            elif not order.status.is_terminal:
+                alive.append((zid, order))
+        state.shadows = alive
         return events
 
     def drop_series(self, symbol: str, timeframe: str) -> bool:
@@ -766,7 +869,44 @@ class ZoneLimitLiveEngine:
             ],
             pending=persisted_pending,
             occupied_zone=state.occupied_zone,
+            shadows=[
+                PersistedPendingOrder(
+                    journal_id=None,
+                    zone=zid,
+                    tap_index=order.tap_index,
+                    placed_ms=order.placed_ms,
+                    limit_valid_bars=order.limit_valid_bars,
+                    bars_elapsed=order.bars_elapsed,
+                    first_rested_ms=order.first_rested_ms,
+                    last_limit_price=order.last_limit_price,
+                )
+                for zid, order in state.shadows
+                if order.placed_ms is not None
+            ],
         )
+
+    def _rebuild(
+        self, state: _SeriesState, symbol: str, timeframe: str, persisted: PersistedPendingOrder
+    ) -> PendingLimitOrder | None:
+        """저장된 주문 생애로 주문을 다시 만든다(그림자 복원 — 존이 사라졌으면 None)."""
+        watch = state.zones.get(persisted.zone)
+        if watch is None:
+            return None
+        order = self._build_order(
+            state,
+            symbol,
+            timeframe,
+            watch.ob,
+            persisted.tap_index,
+            persisted.placed_ms,
+            limit_valid_bars=persisted.limit_valid_bars,
+        )
+        if order is None:
+            return None
+        order.bars_elapsed = persisted.bars_elapsed
+        order.first_rested_ms = persisted.first_rested_ms
+        order.last_limit_price = persisted.last_limit_price
+        return order
 
     def restore_series(
         self, symbol: str, timeframe: str, snapshot: SeriesStateSnapshot
@@ -796,6 +936,11 @@ class ZoneLimitLiveEngine:
             watch.armed_forming_bar = persisted.armed_forming_bar
             watch.skip_recorded_forming_bar = persisted.skip_recorded_forming_bar
         state.occupied_zone = snapshot.occupied_zone
+        state.shadows = []
+        for saved in snapshot.shadows:
+            restored = self._rebuild(state, symbol, timeframe, saved)
+            if restored is not None:
+                state.shadows.append((saved.zone, restored))
         pending = snapshot.pending
         if pending is None:
             return None
