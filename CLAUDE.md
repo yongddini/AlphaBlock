@@ -6211,6 +6211,8 @@ backtest.wan447_funding_carry --part run` · 2,336초).
   2.8172% × 0.906**(`reports/wan451_same_minute_order_summary.md`).
   ✅ **켜기 전 관문**: 실제 러너 재생 거래 ≡ 정본 거래(2026-04-01 ~ 07-10 · 31종목 × 10TF) — 몰림 신호 38 = 38 ·
   거래 13 = 13 · 어긋남 0(`live/arm_gate.py` · 표본 작음).
+  📌 **켜는 법**: 런북 `docs/ops/wan451-arm-paper.md` · 점검 `alphablock arm-check`(읽기 전용 · 막히면 종료 코드 1) ·
+  켜는 순간이 리셋 이음매(엔진 C 원장도 함께 비운다).
 ## 실험 도구 — 새 리포트 스크립트를 짜기 전에 읽을 것 (WAN-101)
 
 **"파라미터 바꿔서 다시 돌려보기"에는 새 스크립트를 만들지 않는다.** 범용 CLI가 있다:
