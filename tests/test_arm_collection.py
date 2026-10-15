@@ -417,3 +417,23 @@ def test_collector_passes_watchdog_progress_to_startup_catch_up() -> None:
 
     src = inspect.getsource(collector)
     assert "asyncio.to_thread(arm.catch_up, tracker.mark)" in src
+
+
+def test_backfill_older_reads_only_the_missing_front(tmp_path: Path) -> None:
+    """앞 구간을 메울 때 원천을 그 구간까지만 읽는다(끝까지 읽으면 2년치를 매번 메모리에 올린다)."""
+    with OhlcvStore(tmp_path / "d.db") as store:
+        base = 1000 * DAY
+        _hours(store, "X", base, 24 * 30)
+        build_derived(store, "X", "3h")
+        _hours(store, "X", base - 3 * DAY, 24 * 3)  # 앞으로 3일 늘었다
+        calls: list[tuple[int | None, int | None]] = []
+        real = store.load
+
+        def spy(symbol: str, timeframe: str, **kw: Any) -> Any:
+            calls.append((kw.get("start_ms"), kw.get("end_ms")))
+            return real(symbol, timeframe, **kw)
+
+        store.load = spy  # type: ignore[method-assign]
+        build_derived(store, "X", "3h", backfill_older=True)
+        assert store.first_open_time("X", "3h") == base - 3 * DAY
+        assert (base - 3 * DAY, base) in calls  # 앞 구간은 [첫 원천, 저장된 첫 3h)만

@@ -51,9 +51,10 @@ def _build_range(
     store: OhlcvStore, symbol: str, target: str, source: str, start: int, end: int | None
 ) -> int:
     """`[start, end)`(end=None이면 끝까지) 구간의 온전한 버킷을 접어 넣는다."""
-    src = store.load(symbol, source, start_ms=start)
-    if end is not None and not src.empty:
-        src = src[src["open_time"].astype("int64") < end]
+    # 끝을 SQL에 건다 — 안 걸면 앞 구간 하나를 메우려고 원천 이력을 **끝까지** 읽는다. 원천의 첫
+    # 버킷이 불완전하면 매 따라잡기마다 이 경로를 타서, 31종목 × 2년치 1h를 매번 통째로 메모리에
+    # 올렸다(서버 램 765MB · 2026-10-15 수집기 기동이 15분+ · RSS 450MB).
+    src = store.load(symbol, source, start_ms=start, end_ms=end)
     if src.empty:
         return 0
     if "closed" in src.columns:
