@@ -42,6 +42,7 @@ from common.telegram import TelegramClient
 from common.timefmt import KST, kst_day_bounds_for_date
 from execution.models import Position
 from execution.risk import CircuitBreakerStatus
+from live import arm_rules as ar
 from live.executor import TradeReport
 from live.limit_orders import LimitFill
 from live.message_format import (
@@ -197,6 +198,19 @@ def _fmt_rate(value: float | None) -> str:
 _REASON_PHRASES = REASON_PHRASES
 
 
+#: 팔 규칙 거부 사유의 사람말(WAN-451 · 일일 요약).
+ARM_REJECT_PHRASES: dict[str, str] = {
+    ar.REJECT_CODE_ARM_ROTATION: "이번 주 종목 목록 밖",
+    ar.REJECT_CODE_ARM_ROTATION_UNKNOWN: "이번 주 목록 계산 전",
+    ar.REJECT_CODE_ARM_CROWD_SKIP: "몰림 규칙 · 급락 초반(신호 1~10개)",
+    ar.REJECT_CODE_ARM_CROWD_BTC: "몰림 규칙 · BTC 4h 게이트",
+    ar.REJECT_CODE_ARM_STOP_FLOOR: "손절폭 4% 미만",
+    ar.REJECT_CODE_ARM_STOCH: "%K 25 이상",
+    ar.REJECT_CODE_ARM_STOCH_UNKNOWN: "%K를 알 수 없음",
+    ar.REJECT_CODE_ARM_STOP_BELOW_ZERO: "2배 손절가 0 이하",
+}
+
+
 def format_daily_summary(
     day: date,
     *,
@@ -235,6 +249,12 @@ def format_daily_summary(
             lines.append(f"· {_REASON_PHRASES['retap']} …… {funnel.retap}")
         if funnel.other:
             lines.append(f"· 기타 …… {funnel.other}")
+        # 스토캐스틱 팔 규칙 거부(WAN-451 ⑩) — 건별로 안 보내고 여기 모은다.
+        if funnel.arm:
+            lines.append("")
+            lines.append("*팔 규칙으로 건너뜀*")
+            for code, count in funnel.arm:
+                lines.append(f"· {ARM_REJECT_PHRASES.get(code, code)} …… {count}")
     return "\n".join(lines)
 
 
@@ -294,9 +314,12 @@ class ZoneLimitNotifier:
         *,
         events: frozenset[str] | None = None,
         funnel_provider: Callable[[int, int], FunnelCounts] | None = None,
+        quiet_reject_codes: frozenset[str] = frozenset(),
         now_ms: Callable[[], int] = lambda: int(time.time() * 1000),
     ) -> None:
         self._telegram = telegram
+        #: 건별 거부 알림을 보내지 않을 사유 코드(WAN-451 ⑩ — 팔 규칙은 일일 요약에만 모은다).
+        self._quiet_reject_codes = quiet_reject_codes
         self._events = frozenset(events) if events is not None else frozenset(DEFAULT_EVENTS)
         #: 일일 요약의 체결률·사유 카운트를 내는 창 조회(러너가 `OrderJournal.funnel_counts`로
         #: 배선, WAN-221). None이면 요약은 예약/체결/만료 한 줄만 낸다(재계산 금지 — 없으면 뺀다).
@@ -369,6 +392,8 @@ class ZoneLimitNotifier:
             return
         position = report.outcome.position
         if not report.accepted or position is None:
+            if report.outcome.reason_code in self._quiet_reject_codes:
+                return  # 일일 요약의 「팔 규칙으로 건너뜀」에 DB 장부로 모인다(WAN-451 ⑩).
             self._send(format_entry_rejected(fill, reason=report.outcome.reason or "사유 미기록"))
             return
         fee = report.outcome.fill.fee if report.outcome.fill is not None else 0.0

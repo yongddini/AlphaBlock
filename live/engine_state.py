@@ -100,6 +100,8 @@ class SeriesStateSnapshot(BaseModel):
     pending: PersistedPendingOrder | None = None
     #: 오픈 포지션이 어느 존의 것인지 — 익절 후 재진입(WAN-274)이 재무장할 존.
     occupied_zone: ZoneRef | None = None
+    #: 그림자 주문(WAN-451 몰림 규칙) — 슬롯과 무관한 탭별 독립 주문. 옛 스냅샷엔 없다(빈 목록).
+    shadows: list[PersistedPendingOrder] = Field(default_factory=list)
 
 
 class EngineStateStore:

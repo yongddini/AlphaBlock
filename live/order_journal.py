@@ -73,6 +73,7 @@ from execution.engine import (
     REJECT_CODE_NOTIONAL,
     REJECT_CODE_SIZING,
 )
+from live.arm_rules import ARM_REJECT_CODES
 from live.limit_orders import LimitFill, LimitOrderStatus, PendingLimitOrder
 
 #: 주문 출처(`origin`, WAN-305): 이 지정가가 **탭 예약**에서 왔는지 **익절 후 재진입
@@ -339,6 +340,8 @@ class FunnelCounts:
     """체결됐으나 사이징 수량 0으로 거부된 수(대부분 손절폭 가드 0.3%, WAN-79)."""
     other: int = 0
     """그 밖의 체결 후 거부(리스크 한도 등) · 코드 미기록 거부."""
+    arm: tuple[tuple[str, int], ...] = ()
+    """스토캐스틱 팔 규칙으로 거부된 체결 — (사유 코드, 수)(WAN-451). `other`에는 안 든다."""
 
     @property
     def fill_rate(self) -> float | None:
@@ -993,6 +996,7 @@ class OrderJournal:
         filled = no_fill = deviation = 0
         skip_zone = skip_cell = skip_retap = 0
         rej_cell = rej_notional = rej_sizing = rej_other = 0
+        rej_arm: dict[str, int] = {}
         for row in rows:
             status = str(row[0])
             rested, entry_status, reject_code, skip = row[1], row[2], row[3], row[4]
@@ -1013,6 +1017,8 @@ class OrderJournal:
                         rej_notional += 1
                     elif reject_code == REJECT_CODE_SIZING:
                         rej_sizing += 1
+                    elif reject_code in ARM_REJECT_CODES:
+                        rej_arm[str(reject_code)] = rej_arm.get(str(reject_code), 0) + 1
                     else:
                         rej_other += 1  # 리스크 한도·코드 미기록(WAN-221 이전 행) 등.
             elif status == LimitOrderStatus.CANCELLED_EXPIRED.value:
@@ -1043,6 +1049,7 @@ class OrderJournal:
             notional=rej_notional,
             sizing=rej_sizing,
             other=rej_other,
+            arm=tuple((code, rej_arm[code]) for code in ARM_REJECT_CODES if code in rej_arm),
         )
 
     def ledger_entries(self, *, start_ms: int, end_ms: int) -> list[LedgerEntry]:
