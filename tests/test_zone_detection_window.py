@@ -16,7 +16,7 @@ WAN-342가 관찰한 「짝 없는 셋업의 76.5%가 `(a) 존 없음`」의 후
 창이 되살아나고, 나아가 「라이브와 백테가 같은 엔진」이라는 파리티 전제 자체가 흔들린다.
 
 ⚠️ **검사하지 않는 것**: 창 밖(오래된) 존은 당연히 한쪽에만 있다 — 그건 창 길이의 정의이지
-탐지 차이가 아니다. 그 갈래는 `live.zone_audit`의 `창 밖` 사유가 따로 센다.
+탐지 차이가 아니다(옛 `live.zone_audit`의 `창 밖` 사유가 따로 셌다 — WAN-451 ②에서 은퇴).
 """
 
 from __future__ import annotations
@@ -33,9 +33,10 @@ from strategy.order_blocks import OrderBlockDetector
 
 _REAL_DB = Path("data/ohlcv.db")
 _DAY_MS = 86_400_000
-#: 라이브 러너의 창(`Settings.live_signal_lookback_bars` 기본값)과 대조 백테의 워밍업
-#: (`live.live_vs_backtest.DEFAULT_WARMUP_DAYS`) — 두 기본값에서 읽는다(리터럴 재기입 금지).
-#: 값이 바뀌면 이 검사가 조용히 옛 창을 재는 것을 막는다.
+#: 대조 백테의 워밍업(옛 `live.live_vs_backtest.DEFAULT_WARMUP_DAYS` = 120일). 그 모듈은 옛
+#: 규칙 비교 도구와 함께 은퇴했고(WAN-451 ②) 이 검사가 재는 탐지기 성질(창 길이 불변)은
+#: 그대로라 값을 여기 고정한다. 라이브 창은 여전히 `Settings` 기본값에서 읽는다.
+_BACKTEST_WARMUP_DAYS = 120
 _BOUNDARY_BARS = 50
 """창 시작에서 이 봉 수 이내의 존은 **워밍업 경계 효과**로 갈릴 수 있다. 로컬 실측(6종목 ×
 15m·1h·4h · 공통구간 존 666개)에서 불일치 6개가 전부 경계+5~25봉이었다 — 넉넉히 잡되 창
@@ -73,7 +74,6 @@ def _zones(df: pd.DataFrame) -> dict[tuple[bool, int, int], tuple[object, ...]]:
 @pytest.mark.parametrize(("symbol", "timeframe"), _CELLS)
 def test_detection_agrees_where_both_windows_look(symbol: str, timeframe: str) -> None:
     from config.settings import Settings
-    from live.live_vs_backtest import DEFAULT_WARMUP_DAYS
 
     if not _REAL_DB.exists():
         pytest.skip("실데이터(data/ohlcv.db) 없음")
@@ -89,7 +89,7 @@ def test_detection_agrees_where_both_windows_look(symbol: str, timeframe: str) -
             pytest.skip(f"{symbol} {timeframe} 실데이터 없음")
         now = int(row[0])
         live_df = _load(conn, symbol, timeframe, now - (lookback + 50) * tf_ms, now).tail(lookback)
-        backtest_df = _load(conn, symbol, timeframe, now - DEFAULT_WARMUP_DAYS * _DAY_MS, now)
+        backtest_df = _load(conn, symbol, timeframe, now - _BACKTEST_WARMUP_DAYS * _DAY_MS, now)
     finally:
         conn.close()
     if len(live_df) < lookback // 2 or backtest_df.empty:

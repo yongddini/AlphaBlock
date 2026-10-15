@@ -758,9 +758,6 @@ uv run python scripts/walkforward_report.py --synthetic --timeframes 1h
 ```bash
 # 상시 페이퍼 러너(수집 데몬이 함께 돌아야 1분봉 틱이 들어온다)
 uv run python -m live.runner
-
-# 체결률 실측 요약 표(백테스트 baseline 가정과 나란히 읽는 표)
-uv run python -m live.fill_report
 ```
 
 러너 세션(가동 시간)도 장부에 남는다 — 로컬 맥 운영이라 생기는 중단 구간을 체결률
@@ -771,8 +768,9 @@ uv run python -m live.fill_report
 (손절 거리 < 0.3% 가드 · 명목 상한 · 이미 오픈 포지션 · 리스크 한도). 백테스트도 같은 자로
 후보를 버리므로 **거부 자체는 정상**이지만, 그 처분이 장부에 남지 않던 동안에는 정상 거부가
 **DB 손상과 같은 모양**이었다. 이제 `live_limit_orders.entry_status`
-(`entered`/`rejected` + 사유)가 남고, `fill_report`가 `진입%`(= 체결이 거래가 된 비율)와
-**처분 미기록** 건수를 병기한다 — 후자가 곧 "러너가 두 쓰기 사이에서 죽었다"의 서명이다.
+(`entered`/`rejected` + 사유)가 남고, 대시보드 「진입/미진입 장부」 탭과 `alphablock doctor`가
+그것을 읽는다(옛 `live.fill_report`는 WAN-451 ②에서 은퇴). **처분 미기록** 건수가 곧 "러너가
+두 쓰기 사이에서 죽었다"의 서명이다.
 **거래가 되는 비율 = 체결률 × 진입%**이니 두 값을 같이 읽을 것.
 
 ## 실시간 시그널 러너 + 텔레그램 알림 (WAN-25, 페이퍼 · A안 경로)

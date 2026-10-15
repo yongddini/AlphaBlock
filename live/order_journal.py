@@ -54,7 +54,8 @@ INFO 로그 한 줄이 전부였고 DB에는 `status='filled'`만 남아 포지�
 수집 DB(`data/ohlcv.db`)를 같이 쓰며 `data.sqlite_util.configure_connection`(WAL +
 busy_timeout)으로 동시 프로세스(수집기·대시보드)와의 락 경합을 견딘다.
 
-요약 표는 `python -m live.fill_report`(같은 패키지 `fill_report` 모듈)가 찍는다.
+요약 표를 찍던 `live.fill_report`(`alphablock fills`)는 옛 규칙 페이퍼와 함께 은퇴했다
+(WAN-451 ②) — 장부는 대시보드 「진입/미진입 장부」 탭이 조회한다.
 """
 
 from __future__ import annotations
@@ -387,7 +388,7 @@ class LedgerEntry:
 
 @dataclass(frozen=True)
 class PlacedOrder:
-    """당일 조회의 주문 한 건(WAN-232 `live.fill_report --day`).
+    """당일 조회의 주문 한 건(WAN-232 · 옛 `live.fill_report --day`, WAN-451 ②에서 은퇴).
 
     창 귀속이 `placed_ms`(예약 시각)인 것이 `LedgerEntry`(사건 시각 귀속)와 다르다 —
     이 화면의 질문은 "**오늘 예약한** 지정가가 어떻게 됐나"라 코호트를 예약 시각으로 잡는다.
@@ -432,7 +433,8 @@ class PlacedOrder:
     `live_limit_orders.tap_index`(NOT NULL DEFAULT 0)에서 온다.
     ⚠️ **재진입 재무장 주문(`origin == "reentry"`)의 이 값은 재무장 시점의 탭 카운트**라
     (`len(ob.tapped_times)`) 백테 재진입 후보의 `tap_index`(0)와 맞지 않는다 — 재진입 행의
-    조인은 존 정체성으로만 한다(`live.setup_compare`의 같은 존 구제 조인, WAN-305)."""
+    조인은 존 정체성으로만 한다(옛 `live.setup_compare`의 같은 존 구제 조인, WAN-305 ·
+    WAN-451 ②에서 은퇴)."""
     origin: str | None = None
     """이 주문의 출처(WAN-305): `"tap"` = 탭 예약 · `"reentry"` = 익절 후 재진입 재무장 ·
     `None` = 열 도입 전 행(판별 불가 — WAN-194 규약)."""

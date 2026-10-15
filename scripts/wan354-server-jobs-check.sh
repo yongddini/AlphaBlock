@@ -157,13 +157,8 @@ else
 fi
 emit '```'
 emit ""
-emit "📌 CLI 경로도 같은 값을 쓴다(WAN-354): \`alphablock trades|compare|stop-width|parity\` 는"
-emit "\`--jobs\` 를 안 주면 이 설정값으로 fan-out 하고, **그 값을 stderr 첫 줄에**"
-emit "찍는다. 야간 크론 로그(\`persist.log\`)에서 그 줄로 확인할 수 있다:"
-emit ""
-emit '```bash'
-emit "grep -m1 '^병렬 설정:' ~/persist.log"
-emit '```'
+emit "📌 \`backtest.run\`·리포트 모듈이 \`--jobs\` 를 안 주면 이 설정값으로 fan-out 한다(WAN-354)."
+emit "(옛 \`alphablock trades|compare|stop-width|parity\` 경로와 야간 크론은 WAN-451 ②에서 은퇴했다.)"
 emit ""
 emit "---"
 emit ""

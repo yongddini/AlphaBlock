@@ -6218,8 +6218,11 @@ backtest.wan447_funding_carry --part run` · 2,336초).
   익절 후 재진입 · 웹소켓 틱 피드 · 고정 R 익절 · 서킷브레이커 알림 · 고정 시리즈 목록(`build_series`)을 지웠다.
   엔진은 탭별 독립 주문(옛 「그림자」)이 유일한 주문 경로이고 체결은 `filled`, 존 기억은 항상 켬이다. 설정
   `live_reentry_entry_rule`·`live_tick_feed_*`는 없어졌다(`.env`에 남아도 무시). 🚨 **배포는 팔 켜는 날(리셋
-  이음매)과 같이** — 옛 오더블록 설정(오더블록 켬 · 팔 끔)이면 러너가 기동을 거부한다. `backtest/` 불변 ·
-  `live/`의 옛 비교·분석 도구 정리는 다음 PR.
+  이음매)과 같이** — 옛 오더블록 설정(오더블록 켬 · 팔 끔)이면 러너가 기동을 거부한다. `backtest/` 불변.
+  🧹 **옛 비교 도구 정리 ②**: `alphablock trades|compare|stop-width|parity|cascade|same-minute|fills|
+  timeline-profile`과 그 `live/` 모듈 · 대시보드 「거래 타임라인」 탭(3열 대조) · 야간 타임라인 크론이 은퇴했다
+  (서버 crontab의 `--persist-cache` 줄은 사람이 지운다 — `docs/ops/wan239-nightly-timeline-cache.md`). 위 문단들의
+  그 도구 실행법은 **당시 기록**이다.
 ## 실험 도구 — 새 리포트 스크립트를 짜기 전에 읽을 것 (WAN-101)
 
 **"파라미터 바꿔서 다시 돌려보기"에는 새 스크립트를 만들지 않는다.** 범용 CLI가 있다:

@@ -2,8 +2,9 @@
 
 **차트-우선 배치(WAN-245, 사용자 결정 2026-08-04 · 목업 승인 2026-08-11)**: 첫 화면이
 **라이브 차트**다 — 트레이딩뷰처럼 차트가 앞에 오고 그 아래 지금 상태(오픈 포지션)가
-보인다. 그 뒤로 지갑(잔고·거래내역) → 진입/미진입 장부(체결률, WAN-217/219) → 거래
-타임라인 → 운영 상태(Health) 순이고, **백테스트는 「분석·거래」 한 탭으로 합쳐 맨 뒤로
+보인다. 그 뒤로 지갑(잔고·거래내역) → 진입/미진입 장부(체결률, WAN-217/219) → 운영
+상태(Health) 순이고(옛 「거래 타임라인」 탭 · 3열 대조는 옛 규칙 페이퍼와 함께 은퇴했다,
+WAN-451 ②), **백테스트는 「분석·거래」 한 탭으로 합쳐 맨 뒤로
 강등**되고 **지연 로딩**된다(WAN-220 원칙 유지 — 제거가 아니라 강등. 지우지 않은 이유는
 백테스트가 라이브 실측과 대조하는 **잣대**이기 때문이다: 약속·기대수익이 아니라 대조용).
 
@@ -39,8 +40,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 
 import pandas as pd
 import streamlit as st
@@ -107,42 +107,17 @@ from dashboard.saved_trades import (
     setups_display_frame,
     zone_limit_runs,
 )
-from dashboard.setup_compare_view import setup_compare_html
 from dashboard.trade_table import (
     engine_label_caption,
     parse_selected_rows,
     selected_trade_window,
     style_trade_frame,
 )
-from dashboard.trade_timeline_view import (
-    backtest_day_summary,
-    backtest_only_note,
-    chart_window,
-    selected_row,
-    timeline_frame,
-)
 from data.integrity import IntegrityReport
 from data.integrity import inspect as inspect_db_integrity
 from data.storage import OhlcvStore, source_timeframe
 from live.order_journal import LedgerEntry, OrderJournal
 from live.runtime_state import EventRecord, RuntimeStateStore
-from live.setup_compare import build_setup_comparisons
-from live.timeline_cache import (
-    CachedEngine,
-    TimelineCacheStore,
-    compute_and_persist_day,
-    current_engine_label,
-    load_cached_day,
-    load_full_universe_day,
-)
-from live.trade_timeline import (
-    STATUS_BACKTEST_CLOSED,
-    DayTimeline,
-    TimelineRow,
-    backtest_setup_rows,
-    live_timeline_rows,
-    resolve_day_window,
-)
 from paper.engine_c_report import (
     EngineCView,
     holdings_frame,
@@ -1091,541 +1066,6 @@ def _cached_saved_run(db_path: str, run_id: str) -> tuple[BacktestResult, pd.Dat
         return store.load_result(run_id), store.setups_frame(run_id)
 
 
-# --- 거래 타임라인 탭 (WAN-234) ---------------------------------------------
-
-_TIMELINE_TABLE_KEY = "trade_timeline_selection"
-_TIMELINE_CHART_HEIGHT = 520
-#: 선택한 거래 구간의 좌우로 이만큼 더 캔들을 실어 문맥을 준다(차트 여백).
-_TIMELINE_CHART_PAD_MS = 12 * 3_600_000
-
-#: 백테스트 대조 대상 라디오(WAN-290). 「라이브 칸만」은 WAN-234 그대로, 「전부」는 임의
-#: 날짜 × 채택 좌표 전부(종목 × TF) 온디맨드 실행이다.
-_TARGET_LIVE_CELLS = "라이브 칸만 (WAN-234)"
-#: 임의 날짜 × 채택 좌표 전부 실행 결과의 세션 캐시(날짜별) — **디스크 캐시 위의 즉시 히트
-#: 계층**이다(WAN-297 §1-1). 진짜 저장소는 `TimelineCacheStore`이고, 이 dict는 같은 세션 안의
-#: 필터·선택 재실행에서 SQLite를 다시 읽지 않기 위한 것뿐이다(옛 판은 이것만 있어서 앱
-#: 재시작·새 브라우저 세션이면 결과가 통째로 날아갔다 — 이 이슈가 고친 자리).
-_TIMELINE_FULL_RESULT_KEY = "timeline_full_backtest_by_day"
-
-
-def full_universe_shape() -> tuple[int, int, int]:
-    """채택 좌표의 (종목 수, TF 수, 셀 수)를 코드 기본값에서 읽는다(WAN-318 §6).
-
-    화면 라벨을 **하드코딩하지 않기 위한** 한 곳이다. 예전엔 「9종목」이 문자열 상수였는데
-    셀 수는 `len(DEFAULT_SYMBOLS) * len(DEFAULT_TIMEFRAMES)`로 계산돼, 유니버스가 12종목이
-    된 뒤(WAN-307) 화면에 **「9종목 × 4TF = 48셀」이라는 자기모순**이 떴다. 이 저장소가
-    가장 경계하는 「라벨과 동작이 어긋남」(WAN-91/95/112/123/159 계열)이 사용자 화면에
-    그대로 노출된 것이라, 라벨도 좌표에서 파생시킨다.
-    """
-    from backtest.harness import DEFAULT_SYMBOLS, DEFAULT_TIMEFRAMES
-
-    return (
-        len(DEFAULT_SYMBOLS),
-        len(DEFAULT_TIMEFRAMES),
-        len(DEFAULT_SYMBOLS) * len(DEFAULT_TIMEFRAMES),
-    )
-
-
-def full_universe_label() -> str:
-    """대조 대상 라디오의 「전부」 선택지 라벨 — 좌표에서 파생된다(WAN-318 §6)."""
-    n_symbols, n_timeframes, _ = full_universe_shape()
-    return f"채택 {n_symbols}종목×{n_timeframes}TF 전부 (WAN-290)"
-
-
-def default_timeline_day() -> date:
-    """타임라인 탭의 기본 날짜 = **어제(KST)** (WAN-326 §5, 사용자 결정 2026-08-20).
-
-    옛 기본값은 **오늘**이었는데, 캐시를 채우는 야간 크론은 **전일(KST)** 을 KST 00:30에
-    적재한다(`docs/ops/wan239-nightly-timeline-cache.md`). 즉 화면을 열면 **정의상 항상
-    캐시 미스**였다 — 첫인상이 늘 「아직 계산 안 됨」이었던 진짜 원인이 이 날짜 축이다.
-    어제가 맞는 이유가 둘이다: (1) 크론이 채워 둔 날짜라 **버튼 없이 즉시** 뜬다,
-    (2) 오늘은 **진행 중이라 불완전**하다(WAN-334 실측: 당일 08-19가 27셋업으로 전날
-    60건보다 훨씬 적게 잡혔는데 데이터가 아니라 **시각** 때문이었다).
-
-    🚨 **「캐시에 있는 가장 최근 날짜를 찾아서 연다」로 똑똑하게 만들지 않는다**(이슈 명시)
-    — DB 조회가 첫 렌더에 붙고 「왜 어제가 아니라 그저께가 떴지」를 설명할 수 없게 된다.
-    **어제 고정**이고, 크론 전(자정~00:30 KST)의 30분은 WAN-325 폴백(옛 엔진 판)이나 계산
-    버튼이 덮는다. 날짜 위젯 자체는 그대로라 사용자는 오늘·과거 아무 날이나 계속 고른다.
-    """
-    return (datetime.now(tz=KST) - timedelta(days=1)).date()
-
-
-@dataclass(frozen=True)
-class _FullRunResult:
-    """임의 날짜 × 채택 좌표 전부 한 판의 세션 캐시 값(WAN-290 · WAN-297).
-
-    행은 튜플(불변)로 담아 세션에 안전히 보관하고, 엔진 배지를 함께 둔다 — 필터·선택
-    재실행에서 다시 계산하지 않고 이 값을 그대로 다시 그린다. `elapsed`는 **이번 세션에서
-    직접 계산했을 때만** 값이 있다(디스크 캐시에서 읽었으면 `None` — 안 잰 시간을 지어내지
-    않는다). `from_cache`가 그 출처를 화면에 밝힌다.
-    """
-
-    rows: tuple[TimelineRow, ...]
-    elapsed: float | None
-    engine: str
-    from_cache: bool
-    #: `None`이 아니면 이 행들이 **지금 엔진이 아닌** 옛 판에서 왔다(WAN-325) — 배너를
-    #: 띄우고 3열 대조를 끄는 근거다(엔진이 다른 두 판을 빼면 「차이」가 집행 차이가 아니다).
-    stale: CachedEngine | None = None
-
-
-def _render_stale_engine_banner(stale: CachedEngine) -> None:
-    """「이건 옛 엔진 결과입니다」 배너 — 출처를 밝히고 내준다 (WAN-325).
-
-    배포로 엔진 소스가 바뀌면 과거 날짜가 통째로 캐시 미스가 되지만(설계대로 — WAN-106/253/
-    318) 그 행은 **지워지지 않고 DB에 그대로 있다**. 하루치 재계산이 서버 6분 23초(WAN-322)라
-    옛 날짜를 훑어보는 것만으로 그 비용을 치르지 않게, 보관 중인 판을 **라벨을 달아** 보여
-    준다. 금지된 것은 옛 결과를 **조용히** 새 결과인 척 내주는 것이지 출처를 밝히고 내주는
-    것이 아니다(CLAUDE.md 「옛 엔진 수치는 시점 표시를 붙여 쓴다」의 화면 구현).
-    """
-    st.warning(
-        f"⚠️ **옛 엔진 결과입니다({stale.num_cells}칸)** — 이 표는 지금 엔진이 아니라 "
-        f"**{stale.display_label()}** 판으로 **{stale.created_label()}**에 계산해 둔 캐시입니다. "
-        f"지금 엔진은 **{current_engine_label()}** 입니다. 배포로 엔진이 바뀌면 과거 날짜가 "
-        "미스가 되는데(설계대로 — WAN-106/253) 옛 행은 지우지 않고 그대로 두므로 그것을 "
-        "보여 주는 것입니다. **값이 지금 엔진과 다를 수 있습니다** — 최신 엔진 수치가 필요하면 "
-        "위 **실행** 버튼이나 `alphablock trades --day … --persist-cache`로 다시 계산하세요."
-    )
-
-
-def _timeline_live_cell_backtest(
-    db_path: str,
-    day_key: str,
-    start_ms: int,
-    end_ms: int,
-    live_rows: list[TimelineRow],
-) -> tuple[list[TimelineRow], CachedEngine | None]:
-    """「라이브 칸만」 대조 — 그날 라이브가 있던 (심볼, TF)만 재산출한다(WAN-234 그대로).
-
-    기본은 야간 크론 캐시만 읽고(WAN-239), 체크박스로만 즉시 재계산한다(무겁다). 라이브
-    예약이 없던 날은 대조 대상 셀이 없다.
-
-    🚨 **이 좁히기는 「표시 필터」다 — 「재구성」이 아니다**(WAN-326 · WAN-340 대비).
-    지금은 대조 백테가 **per-cell 단일 포지션**이라 두 읽는 법이 같은 값을 내서 구분이
-    보이지 않는다:
-
-    * **(a) 표시 필터** — 계산은 채택 좌표 그대로 두고 **화면에 보이는 칸만** 좁힌다.
-    * (b) 재구성 — 그 칸들만으로 회계를 **새로 구성**한다.
-
-    WAN-340이 대조 백테를 **레버리지 북**(칸=(종목,TF)이 한 지갑을 공유 — WAN-213/316)으로
-    옮기는 순간 둘이 갈린다: (b)로 구현하면 **자본 경합이 달라져 다른 지갑이 되어**, 라디오를
-    옮길 때마다 같은 날의 같은 셋업이 다른 숫자로 보인다. 이 저장소가 반복해 겪은 「라벨과
-    동작이 어긋남」(WAN-91/95/112/123/159) 부류다. **(a)를 유지할 것** — 좁히기 인자가
-    계산 범위로 흘러가면 안 된다(WAN-335 §2가 `stop-width`에서 고친 것과 같은 축).
-    """
-    include_bt = st.checkbox(
-        "백테스트 대조 병기 (야간 크론이 미리 계산한 캐시를 읽습니다 — WAN-239)",
-        value=False,
-        key="timeline_include_bt",
-    )
-    recompute = st.checkbox(
-        "캐시 무시하고 즉시 재계산 (그날 라이브 셀만 · 워밍업 연속 — 무겁습니다)",
-        value=False,
-        key="timeline_recompute",
-    )
-    if not include_bt:
-        return [], None
-
-    symbols = sorted({r.symbol for r in live_rows})
-    timeframes = sorted({r.timeframe for r in live_rows})
-    if not symbols or not timeframes:
-        n_symbols, n_timeframes, _ = full_universe_shape()
-        st.info(
-            "이 날 라이브 예약이 없어 백테스트 대조 대상 셀이 없습니다. 라이브와 무관하게 "
-            f"그날 하루치 백테를 보려면 위에서 **채택 {n_symbols}종목×{n_timeframes}TF "
-            "전부**를 고르세요(WAN-290)."
-        )
-        return [], None
-
-    if recompute:
-        # 명시적 온디맨드 재계산(캐시 무시, 무겁다) — 사용자가 골랐을 때만(WAN-239).
-        # 캐시가 담는 것과 **같은 셋업 행**을 낸다(WAN-297) — 캐시 경로와 재계산 경로가
-        # 다른 모양을 내면 체크박스 하나로 3열 대조의 행 수가 달라진다.
-        st.caption(f"백테 대조 엔진: **{current_engine_label()}** · 즉시 재계산(캐시 무시)")
-        with st.spinner("백테스트 대조 재산출 중… (그날 라이브 셀만)"):
-            rows = backtest_setup_rows(
-                day_start_ms=start_ms,
-                day_end_ms=end_ms,
-                symbols=symbols,
-                timeframes=timeframes,
-            )
-        return rows, None
-
-    # 기본: 캐시만 읽는다. 미스는 폴백하지 않고 명시한다(WAN-239 §3). 지금 엔진 셀이 없으면
-    # 보관 중인 옛 엔진 판을 **라벨 달아** 보여 준다(WAN-325 — 자동 재계산은 여전히 없다).
-    cache = TimelineCacheStore(db_path)
-    try:
-        cached = load_cached_day(
-            cache,
-            day_key=day_key,
-            symbols=symbols,
-            timeframes=timeframes,
-            allow_stale=True,
-        )
-    finally:
-        cache.close()
-    st.caption(f"백테 대조 엔진: **{cached.label}**")
-    if cached.stale is not None:
-        _render_stale_engine_banner(cached.stale)
-    if cached.misses:
-        st.warning(
-            f"🚨 백테 대조 **아직 계산 안 됨** — {len(cached.misses)}/"
-            f"{len(symbols) * len(timeframes)}칸 캐시 미스입니다. 야간 크론이 적재하거나 "
-            "`alphablock trades --day … --persist-cache`로 미리 계산하세요. 위 "
-            "체크박스로 즉시 재계산할 수 있습니다(무겁습니다). 조회 시 자동 재계산은 "
-            "하지 않습니다."
-        )
-    return list(cached.rows), cached.stale
-
-
-def _timeline_full_universe_backtest(
-    db_path: str, day_key: str, start_ms: int, end_ms: int
-) -> tuple[list[TimelineRow], CachedEngine | None]:
-    """「채택 좌표 전부」 대조 — 디스크 캐시를 먼저 읽고, 미스면 버튼으로 계산·적재한다.
-
-    ⚠️ 화면 라벨의 종목 수·TF 수는 **하드코딩하지 않는다** — `full_universe_shape()`가
-    `DEFAULT_SYMBOLS`·`DEFAULT_TIMEFRAMES`에서 뽑는다(WAN-318 §6: 좌표가 9→12종목이 된 뒤
-    라벨만 안 따라가 「9종목 × 4TF = 48셀」이 떴다).
-
-    📌 **읽는 계층이 세 겹이다(WAN-297 §1)** — (1) 세션 캐시(같은 세션 안 즉시 히트) →
-    (2) **디스크 캐시**(`TimelineCacheStore`, 야간 크론이 채운다) → (3) 미스면 버튼 안내.
-    옛 판은 (1)뿐이라 야간 크론이 디스크에 48셀을 잘 넣어 두어도 이 모드는 **쳐다보지도
-    않았고**, 앱 재시작·새 브라우저 세션이면 무조건 버튼을 다시 눌러야 했다(사용자가
-    2026-08-15 날짜에서 겪은 화면). 미스여도 **자동 재계산은 하지 않는다**(WAN-239 §3).
-
-    📌 **(2)와 (3) 사이에 한 겹이 더 있다(WAN-325)** — 지금 엔진 셀이 없으면 그 날짜에
-    **보관 중인 옛 엔진 판**을 찾아 **경고 라벨과 함께** 보여 준다(배포로 엔진이 바뀌면
-    과거 날짜가 통째로 미스가 되는데 하루치 재계산이 서버 6분 23초다 — WAN-322). 옛 판을
-    보여 주는 것이 재계산을 막지 않는다: 버튼은 그대로 있고 누르면 최신 엔진으로 돈다.
-
-    무거우므로(전 셀 × 워밍업 연속, 12종목 48셀 cold ~55초 실측 — 아래 ⚠️) **버튼을 눌렀을
-    때만** 돈다. 버튼 경로는 `compute_and_persist_day`를 타므로 **계산 결과가 곧 디스크에
-    담기고**, 화면은 그 담긴 행을 다시 읽어 그린다 — "화면에는 떴는데 캐시에는 없다"가
-    구조적으로 불가능하다. 적재는 야간 크론과 **같은 `persist_day`**다(완료 기준 4).
-
-    ⚠️ **직렬(jobs=1)로 돈다** — 워커마다 120일치 1분봉 사본을 들어 메모리 압박으로 워커가
-    죽을 수 있다(M1 실측 `BrokenProcessPool`). 화면 버튼은 크래시 없이 도는 게 우선이라
-    직렬을 쓴다. 대량 격자·야간 되채우기는 CLI가 담당한다(`alphablock trades
-    --persist-cache --days N`). 📌 WAN-324가 1분봉 로드를 **셀 단위에서 종목 단위로** 올려
-    (같은 종목의 4개 TF가 한 번 읽은 것을 나눠 쓴다) 그 중복이 줄었지만, 직렬 유지 판단은
-    바꾸지 않았다 — 여기서 재는 것은 속도가 아니라 크래시 없이 도는 것이다.
-    """
-    from backtest.harness import DEFAULT_TIMEFRAMES
-
-    n_symbols, n_timeframes, n_cells = full_universe_shape()
-    st.caption(
-        f"채택 좌표 **{n_symbols}종목 × {n_timeframes}TF({', '.join(DEFAULT_TIMEFRAMES)}) = "
-        f"{n_cells}셀** · 인자 없는 "
-        "`backtest.run`과 같은 엔진·기본값 · 워밍업 연속(warm)으로 **탭이 그날인 셋업만** "
-        "평가합니다."
-    )
-    st.caption(
-        "⚠️ 백테 수익률은 기대수익이 아닙니다 — 전부 `baseline`(닿으면 체결) 낙관 렌즈 위 값이고 "
-        "이 엔진에 통계적 엣지는 확인되지 않았습니다. 페이퍼와 정확히 안 맞을 수 있습니다"
-        "(페이퍼=틱 · 백테=1분봉, 큐 우선순위 미모델 — 둘 다 상한)."
-    )
-
-    results: dict[str, _FullRunResult] = st.session_state.setdefault(_TIMELINE_FULL_RESULT_KEY, {})
-    if st.button(
-        f"▶ {day_key} 백테 실행 ({n_symbols}종목×{n_timeframes}TF · 무겁습니다)",
-        key="timeline_full_run",
-        help=(
-            "누른 날짜만 계산하고 그 결과를 디스크 캐시에 적재합니다(다음 접속엔 버튼 없이 "
-            "바로 뜹니다). 날짜를 바꿔도 자동 실행하지 않습니다(WAN-239)."
-        ),
-    ):
-        started = time.time()
-        with st.spinner(f"{day_key} 백테스트 실행 중… ({n_cells}셀 · 워밍업 연속)"):
-            # WAN-295: 셋업 전부(청산·미진입·미체결·건너뜀)를 낸다 — 라이브와 셋업 단위로
-            # 대칭인 대조가 가능하게. 표·요약은 「청산」 행만 추려 WAN-290과 같게 본다.
-            # WAN-297: 계산과 적재가 한 함수라 화면이 그리는 행 == 디스크에 담긴 행이다.
-            cache = TimelineCacheStore(db_path)
-            try:
-                _report, computed = compute_and_persist_day(
-                    cache,
-                    day_start_ms=start_ms,
-                    day_end_ms=end_ms,
-                    day_key=day_key,
-                    jobs=1,
-                )
-            finally:
-                cache.close()
-        results[day_key] = _FullRunResult(
-            rows=computed.rows,
-            elapsed=time.time() - started,
-            engine=computed.label,
-            from_cache=False,
-        )
-
-    result = results.get(day_key)
-    if result is None:
-        # 세션에 없으면 **디스크 캐시**를 읽는다(야간 크론이 채워 뒀을 수 있다, WAN-297 §1-2).
-        # 지금 엔진이 미스면 보관 중인 옛 엔진 판을 찾는다(WAN-325 — 자동 재계산은 없다).
-        cache = TimelineCacheStore(db_path)
-        try:
-            cached = load_full_universe_day(cache, day_key=day_key, allow_stale=True)
-        finally:
-            cache.close()
-        if cached.all_hit or (cached.stale is not None and cached.hits):
-            result = _FullRunResult(
-                rows=cached.rows,
-                elapsed=None,
-                engine=cached.label,
-                from_cache=True,
-                stale=cached.stale,
-            )
-            results[day_key] = result
-        else:
-            # WAN-326 §3: 기본이 넓은 쪽이 된 뒤로 이 안내가 **첫인상**이 될 수 있다 —
-            # 막다른 길처럼 읽히지 않게 나갈 길을 함께 준다(버튼 · 다른 날짜 · 좁혀 보기).
-            st.info(
-                f"**아직 계산 안 됨** — {len(cached.misses)}/{n_cells}칸 캐시 미스입니다. "
-                "여기서 할 수 있는 것이 셋입니다: **①** 위 **실행** 버튼을 누르면 이 날짜를 "
-                "계산하고 디스크에 적재합니다(다음 접속엔 버튼 없이 바로 뜹니다). "
-                f"**②** 날짜를 **어제(KST, 기본값)** 나 그 이전으로 바꾸면 야간 크론이 미리 "
-                "채워 둔 날짜라 즉시 뜹니다. **③** 위 **라이브 칸만**을 고르면 그날 라이브가 "
-                "있던 칸으로 좁혀 볼 수 있습니다(대조 대상이 훨씬 적습니다). "
-                "미리 채우기는 `alphablock trades --day … --persist-cache`이고, 조회 시 "
-                "자동 재계산은 하지 않습니다(WAN-239). 라이브가 없던 날도 백테만으로 대조할 "
-                "수 있습니다(WAN-290)."
-            )
-            return [], None
-
-    if result.stale is not None:
-        _render_stale_engine_banner(result.stale)
-    rows = list(result.rows)
-    # 요약은 「청산」 거래만 센다(WAN-290 의미 유지) — 미진입·미체결·건너뜀 셋업은 제외.
-    summary = backtest_day_summary([r for r in rows if r.status == STATUS_BACKTEST_CLOSED])
-    if not result.from_cache:
-        origin = f"이번 실행 {result.elapsed:.1f}초 · 캐시 적재됨"
-    elif result.stale is not None:
-        origin = f"디스크 캐시(**옛 엔진 판** · {result.stale.created_label()})"
-    else:
-        origin = "디스크 캐시"
-    st.caption(
-        f"백테 대조 엔진: **{result.engine}** · {origin} · "
-        f"거래 {summary.trades}건({summary.cells_with_trades}셀 · 승 {summary.wins} · "
-        f"패 {summary.losses})"
-    )
-    return rows, result.stale
-
-
-def _render_trade_timeline(settings: Settings) -> None:
-    """당일(KST) 거래별 타임라인 — 예약→체결가→청산가→손익, 라이브|백테스트(WAN-234/290).
-
-    라이브(주문 장부 + 페이퍼 라운드트립)를 주인공으로 그리고, 백테스트 대조 대상을 두
-    가지로 고른다(WAN-290): 「채택 좌표 전부」(라이브 유무와 무관하게 그 날짜의 하루치
-    백테)와 「라이브 칸만」(그날 라이브가 있던 셀로 좁혀 보기 — WAN-234 그대로). 행을
-    누르면 그 거래 지점으로 차트가 이동한다(저장된 거래 탭 패턴). 라디오 라벨의 종목 수는
-    `full_universe_label()`이 채택 좌표에서 뽑는다(WAN-318 §6 — 하드코딩 금지).
-
-    📌 **기본 선택 = 「채택 좌표 전부」 · 기본 날짜 = 어제(KST)**(WAN-326, 사용자 결정).
-    둘은 서로를 돕는다 — 넓은 좌표를 기본으로 두면서 날짜가 오늘이면 첫 화면이 가장 비어
-    보이는데(넓은 좌표 × 정의상 미스), 어제로 옮기면 그 조합이 **캐시 적중 × 넓은 좌표**가
-    된다. 「라이브 칸만」은 **지우지 않고 옵션으로 존치**한다(사용자 결정).
-    """
-    db_path = settings.db_path
-    st.subheader("당일 거래별 타임라인")
-    st.caption(
-        "들어간 셋업이 **언제 예약 → 얼마에 체결 → 어디서 청산 → 손익 얼마**였는지 거래 한 "
-        "줄로 봅니다. 라이브가 주인공, 백테스트는 대조입니다. 시각은 **한국시간(KST)** 입니다."
-    )
-
-    day = st.date_input("날짜(KST)", value=default_timeline_day(), key="timeline_day")
-    full_universe = full_universe_label()
-    # WAN-326 §1: 기본 선택은 **넓은 쪽**(채택 좌표 전부)이다. 좁은 쪽이 기본이던 이유는
-    # 「무거워서」였는데(48셀 온디맨드 · 세션 끊기면 날아감) WAN-297이 두 모드를 같은 디스크
-    # 캐시에 물려 **조회 비용이 사실상 같아졌다** — 그 전제가 사라졌다.
-    # 📌 `index=`를 **명시**한다(순서에 기대지 않는다) — 옛 기본값은 리스트 0번이라는
-    # 사실만으로 정해져 있었고, 그래서 선택지를 재배열하는 것만으로 조용히 뒤집혔다.
-    target_options = [full_universe, _TARGET_LIVE_CELLS]
-    target = st.radio(
-        "백테스트 대조 대상",
-        target_options,
-        index=target_options.index(full_universe),
-        horizontal=True,
-        key="timeline_target",
-        help=(
-            f"{full_universe}: 라이브 유무와 무관하게 그 날짜의 하루치 백테를 대조합니다"
-            "(야간 크론 캐시를 읽고, 없으면 버튼으로 온디맨드 실행 — WAN-290).  "
-            "라이브 칸만: 그날 라이브 예약이 있던 (심볼, TF)로 **보는 범위를 좁히는 표시 "
-            "필터**입니다(WAN-234). 계산(지갑)을 좁히는 것이 아닙니다 — 아래 주석 참고."
-        ),
-    )
-
-    start_ms, end_ms, day_key = resolve_day_window(day.isoformat())
-    journal = OrderJournal(db_path)
-    store = PaperTradeStore(db_path)
-    try:
-        live_rows = live_timeline_rows(journal, store, start_ms=start_ms, end_ms=end_ms)
-    finally:
-        store.close()
-        journal.close()
-
-    if target == full_universe:
-        backtest_rows, stale = _timeline_full_universe_backtest(db_path, day_key, start_ms, end_ms)
-    else:
-        backtest_rows, stale = _timeline_live_cell_backtest(
-            db_path, day_key, start_ms, end_ms, live_rows
-        )
-
-    # WAN-295: 백테 셋업 행에는 미진입·미체결·건너뜀도 섞여 있다(라이브 대칭). 아래의 시각순
-    # 표·「백테만」 경고는 WAN-290 의미 그대로 **청산** 행만 본다(요약이 부풀지 않게).
-    closed_backtest = [r for r in backtest_rows if r.status == STATUS_BACKTEST_CLOSED]
-
-    # 셋업 단위 3열 대조(목업 정본) — 라이브·백테를 셋업으로 조인해 페이퍼|차이|백테로 본다.
-    # 🚨 백테가 옛 엔진 판이면 **대조 자체를 끈다**(WAN-325 §4) — 아래 함수가 그 판단을 한다.
-    _render_setup_compare(live_rows, backtest_rows, day_key, stale=stale)
-
-    timeline = DayTimeline(day_key=day_key, live=tuple(live_rows), backtest=tuple(closed_backtest))
-    # 「백테만 있는 줄」 신호는 라이브 진입이 하나라도 있어 대조가 성립할 때만 뜻이 있다.
-    # 라이브 러너가 아예 안 돌던 과거 날짜(전부 백테만)는 이 경고가 잡음이라 숨긴다(WAN-290).
-    # 백테가 옛 엔진 판일 때도 숨긴다 — 「라이브가 끊긴 자리」가 아니라 「엔진이 바뀐 몫」을
-    # 세게 되므로 그 숫자는 틀린 신호다(WAN-325 §4와 같은 이유).
-    live_entered = any(r.status in ("진입", "청산") for r in timeline.live)
-    note = backtest_only_note(timeline) if live_entered and stale is None else None
-    if note is not None:
-        st.warning(note)
-
-    frame = timeline_frame(timeline)
-    if frame.empty:
-        st.info(f"{day_key}: 라이브 예약·백테스트 진입이 모두 없습니다.")
-        return
-
-    row = selected_row(timeline, parse_selected_rows(st.session_state.get(_TIMELINE_TABLE_KEY)))
-    if row is not None:
-        _render_timeline_chart(db_path, row)
-
-    st.markdown("##### 시각순 거래 표 (라이브 | 백테스트 · 청산 거래)")
-    if stale is None:
-        st.caption(
-            "라이브 칸이 비고 **백테스트 줄만 있는 행**이 핵심 신호입니다 — 백테는 진입했는데 "
-            "라이브가 어느 단계에서 끊겼는지(상태 열)로 원인을 가릅니다. 행을 누르면 위 차트가 "
-            "그 거래 지점으로 이동합니다."
-        )
-    else:
-        st.caption(
-            f"⚠️ 백테 줄은 **옛 엔진 판**입니다({stale.display_label()} · "
-            f"{stale.created_label()}). 라이브와 나란히 놓였지만 **두 열의 차이를 집행 차이로 "
-            "읽지 마세요** — 엔진이 바뀐 몫이 섞입니다. 행을 누르면 위 차트가 그 거래 지점으로 "
-            "이동합니다."
-        )
-    st.dataframe(
-        frame,
-        use_container_width=True,
-        hide_index=True,
-        on_select="rerun",
-        selection_mode="single-row",
-        key=_TIMELINE_TABLE_KEY,
-    )
-
-
-#: 3열 대조 iframe 높이(px). 헤더(카드·칩·범례) + 행당 높이로 잡고, 넘치면 iframe 안에서
-#: 스크롤한다(전 행이 클라이언트 필터로 살아 있다).
-_COMPARE_HEADER_PX = 250
-_COMPARE_ROW_PX = 66
-_COMPARE_MAX_PX = 1600
-
-
-def _render_setup_compare(
-    live_rows: list[TimelineRow],
-    backtest_rows: list[TimelineRow],
-    day_key: str,
-    *,
-    stale: CachedEngine | None = None,
-) -> None:
-    """셋업 단위 페이퍼↔백테 3열 대조(목업 정본)를 그린다 (WAN-295).
-
-    백테 대조가 없으면(대상 셀 미계산) 그리지 않는다 — 라이브만으론 대조가 성립하지 않는다.
-    조인·집계는 순수 계층(`live.setup_compare`)이 하고, 여기서는 그 결과를 목업 HTML로
-    임베드하고 알려진 괴리(틱 vs 1분봉·낙관 렌즈)를 한 줄 경고로 얹는다.
-
-    🚨 **백테가 옛 엔진 판이면(`stale`) 대조를 통째로 끈다 — WAN-325 §4의 결정이다.**
-    이 카드가 재는 것은 **집행 차이**(같은 규칙을 페이퍼와 백테가 어떻게 다르게 집행했나)인데,
-    옛 엔진 백테 행에서 오늘 페이퍼 행을 빼면 그 차이는 집행이 아니라 **엔진이 바뀐 몫**이다.
-    그대로 두면 🔴 판정 갈림이 무더기로 뜨고 그건 **틀린 신호**다(WAN-295가 재려던 것과 다른
-    것을 재게 된다). 「차이 열만 비우기」가 아니라 카드를 안 그리는 쪽을 골랐다 — 좌·우 열이
-    나란히 서 있으면 눈이 알아서 빼기 때문이다(가운데 막대를 지운다고 대조가 사라지지 않는다).
-    옛 엔진 행 자체는 아래 시각순 표에 **라벨과 함께** 그대로 남으므로 볼 것은 다 볼 수 있고,
-    최신 엔진으로 다시 계산하면 이 카드가 그대로 돌아온다.
-    """
-    if not backtest_rows:
-        return
-    if stale is not None:
-        st.markdown("##### 셋업별 대조 (페이퍼 | 차이 | 백테)")
-        st.info(
-            "🚫 **엔진이 달라 대조하지 않습니다** — 백테 열이 옛 엔진 판"
-            f"({stale.display_label()} · {stale.created_label()})이라, 페이퍼와의 「차이」가 "
-            "집행 차이가 아니라 **엔진이 바뀐 몫**이 됩니다(그대로 빼면 🔴 판정 갈림이 무더기로 "
-            "뜨는데 그건 틀린 신호입니다 — WAN-295). 위 **실행** 버튼이나 `alphablock trades "
-            "--day … --persist-cache`로 최신 엔진 판을 만들면 이 대조가 돌아옵니다. 옛 엔진 "
-            "행 자체는 아래 시각순 표에 라벨과 함께 남아 있습니다."
-        )
-        return
-    result = build_setup_comparisons(live_rows, backtest_rows)
-    if result.summary.total == 0:
-        return
-
-    st.markdown("##### 셋업별 대조 (페이퍼 | 차이 | 백테)")
-    height = min(_COMPARE_HEADER_PX + _COMPARE_ROW_PX * result.summary.total, _COMPARE_MAX_PX)
-    st.iframe(setup_compare_html(result, day_key=day_key), height=height)
-    if result.summary.unpaired:
-        # 🚨 짝 없는 줄은 「일치」가 아니다(WAN-333) — 이 수가 크면 그 판의 파리티 수치
-        # 전체를 믿을 수 없다. 옛 화면은 이것을 조용히 「매칭」으로 세었다.
-        st.warning(
-            f"🟠 **짝 없음 {result.summary.unpaired}건** (페이퍼만 "
-            f"{result.summary.unpaired_live_only} · 백테만 "
-            f"{result.summary.unpaired_backtest_only}) — 한쪽에만 있는 셋업이라 **대조가 "
-            "성립하지 않습니다**. 「일치」로 세지 않습니다(WAN-333). 한쪽만 보는 이유는 "
-            "여럿입니다: 라이브가 데이터 결측으로 그 칸을 건너뛰었거나(Health 탭 카드), "
-            "무효화 봉 안에서 라이브만 체결했거나(탐지가 한 봉 늦는 알려진 근사), 슬롯 점유로 "
-            "라이브만 「건너뜀(슬롯참)」을 남겼을 수 있습니다."
-        )
-    st.caption(
-        "🔴 **판정 갈림**(한쪽만 진입)이 핵심 신호입니다. 🟠 **가격 벗어남**은 진입가차가 틱 "
-        f"오차(측정 임계 {result.price_delta_threshold_bps:.1f}bp)를 넘은 경우입니다 — 가격이 "
-        "몇 bp 다른 건 정상이라 표시하지 않습니다. 페이퍼↔백테 차이는 **설계상 알려진 것**"
-        "입니다(틱 vs 1분봉 WAN-256 · 신규 3종목 펀딩 대리 · 큐 우선순위 미모델 WAN-98). 전부 "
-        "`baseline`(닿으면 체결) 낙관 렌즈 위 값입니다. ⚠️ 대조 백테는 **per-cell 단일 "
-        "포지션**이라 북(칸을 가로지르는 공유 자본, WAN-213)의 용량 제약이 없습니다 — 페이퍼가 "
-        "「자리가 없어서」 못 들어간 셋업을 백테는 그냥 들어갑니다. 셀별 화면이 북을 표현할 수 "
-        "없어 생기는 **알려진 근사**이지 집행 차이가 아닙니다(WAN-234 규약)."
-    )
-
-
-def _render_timeline_chart(db_path: str, row: TimelineRow) -> None:
-    """선택한 타임라인 행의 (심볼, TF) 캔들 위에 그 거래 구간을 비춘다(존은 안 그린다)."""
-    window = chart_window(row)
-    if window is None:
-        st.caption("이 행은 기준 시각이 없어 차트를 띄울 수 없습니다(예약·체결 시각 미상).")
-        return
-    focus_start, focus_end = window
-    candles = _cached_ohlcv(
-        db_path,
-        row.symbol,
-        row.timeframe,
-        focus_start - _TIMELINE_CHART_PAD_MS,
-        focus_end + _TIMELINE_CHART_PAD_MS,
-    )
-    if candles.empty:
-        st.warning(
-            "이 구간의 캔들이 DB에 없어 차트를 그릴 수 없습니다(거래 표는 그대로 조회됩니다)."
-        )
-        return
-    st.iframe(
-        build_chart_html(
-            candles,
-            [],
-            None,
-            theme=_current_chart_theme(),
-            height=_TIMELINE_CHART_HEIGHT,
-            focus=window,
-        ),
-        height=_TIMELINE_CHART_HEIGHT,
-    )
-    st.caption(f"🔎 {row.source} · {row.symbol} · {row.timeframe} — 선택한 거래 구간")
-
-
 # --- 운영 상태(Health) 탭 ---------------------------------------------------
 
 
@@ -2385,7 +1825,6 @@ def main() -> None:
         chart_tab,
         balance_tab,
         ledger_tab,
-        timeline_tab,
         health_tab,
         reference_tab,
     ) = st.tabs(
@@ -2393,7 +1832,6 @@ def main() -> None:
             "차트",
             "잔고 · 거래내역",
             "진입/미진입 장부",
-            "거래 타임라인",
             "Health",
             "분석 · 거래 (참고·대조)",
         ]
@@ -2404,8 +1842,6 @@ def main() -> None:
         _render_balance(settings)
     with ledger_tab:
         _render_funnel_ledger(settings)
-    with timeline_tab:
-        _render_trade_timeline(settings)
     with health_tab:
         _render_health(settings, run_every=run_every)
     # 백테스트 탭은 지연 로딩한다 — cold start에서 무거운 분석(~10초)을 자동 로드하지

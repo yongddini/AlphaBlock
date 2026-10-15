@@ -121,6 +121,21 @@ journalctl -u alphablock-live -f
 팔 진입은 드물다(손절폭 ≥ 4% · %K < 25 · 몰림 규칙) — 정본 기준 31종목 × 10TF에서 100일에 십수 건이다.
 며칠 동안 진입이 없어도 이상이 아니다.
 
+## 켠 뒤 정리 — 야간 타임라인 크론 지우기 (WAN-451 ②)
+
+옛 비교 도구가 은퇴하면서 `alphablock trades`가 없어졌다 — 서버 crontab의 야간 적재 줄
+(`... trades ... --persist-cache`)은 이제 매일 밤 실패하니 **사람이 1회 지운다**:
+
+```bash
+crontab -l | grep -n -- '--persist-cache'                    # 대상 확인
+crontab -l > ~/crontab.before-wan451.txt                     # 백업
+crontab -l | grep -v -- '--persist-cache' | crontab -        # 그 줄만 지움 (또는 `crontab -e`로 손으로)
+crontab -l | grep -n -- '--persist-cache' || echo "없음 ✅"   # 확인
+```
+
+DB의 `timeline_cache_*` 테이블은 아무도 안 읽는다(무해 · 지울지는 사람이 정한다 —
+[`wan239-nightly-timeline-cache.md`](wan239-nightly-timeline-cache.md)).
+
 ## 되돌리기
 
 리셋 이음매에서 한다 — `.env`의 `ALPHABLOCK_LIVE_ARM_ENABLED=false`(그리고 바꾼 값들을 원래대로) +
