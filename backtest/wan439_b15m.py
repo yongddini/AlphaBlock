@@ -129,8 +129,12 @@ def run(jobs: int, payload_dir: Path, root: Path) -> tuple[list[c.Row], list[str
         for arm in ARMS:
             for fill in c.FILLS:
                 placed[(v, arm, fill)] = (
-                    c.place_arm(sp_mk, arm, fill, in_book=True),
-                    c.place_arm(fu_mk, arm, fill, in_book=True),
+                    c.place_arm(
+                        sp_mk, arm, fill, in_book=True, same_minute=w.SAME_MINUTE_EXIT_FIRST
+                    ),
+                    c.place_arm(
+                        fu_mk, arm, fill, in_book=True, same_minute=w.SAME_MINUTE_EXIT_FIRST
+                    ),
                 )
     notes += c.checksum(*placed[(V9, c.ARM_A, "stop")])
 

@@ -417,7 +417,7 @@ class Outcome:
 
 
 def run(built: u.Markets) -> Outcome:
-    sp, fu, risk = e.arm_trades(built)
+    sp, fu, risk = e.arm_trades(built, same_minute=w.SAME_MINUTE_EXIT_FIRST)
     arm = e.arm_daily_from(sp, fu, risk)
     frame, ref, _notes449, _nums = e.run(built, arm)
     idx = pd.DatetimeIndex(frame.index)

@@ -79,7 +79,7 @@ from data.gaps import Gap, find_gaps
 from data.storage import OhlcvStore
 from data.universe import ARM_TIMEFRAMES
 from data.universe_pool import UniverseStore
-from execution.engine import EntryIntent, ExecutionOutcome
+from execution.engine import REJECT_CODE_CELL_BUSY, EntryIntent, ExecutionOutcome
 from live.arm_rules import (
     ARM_REJECT_CODES,
     REJECT_CODE_ARM_STOCH,
@@ -97,7 +97,7 @@ from live.arm_signals import ArmSignal, ArmSignalStore
 from live.engine_state import EngineStateStore, SeriesStateSnapshot
 from live.executor import PaperExecutor, TradeReport
 from live.limit_engine import EngineEvent, ReentryEntryRule, ZoneLimitLiveEngine
-from live.limit_orders import LimitOrderStatus, expiry_deadline_ms
+from live.limit_orders import LimitFill, LimitOrderStatus, expiry_deadline_ms
 from live.order_journal import SKIP_REASON_ZONE_WIDTH, OrderJournal
 from live.paper import PaperPosition
 from live.price_feed import PriceFeed
@@ -211,6 +211,8 @@ class ZoneLimitPaperRunner:
         #: 보존한다(해소된 기록도 남는다: 나중에 성적을 읽을 때 그 구간의 빈칸이
         #: 「기회 없음」이 아니라 「데이터 결측」이었음을 알 수 있어야 한다).
         self._gap_skips: dict[Series, DataGapSkip] = {}
+        #: 시리즈별 지금 소비 중인 1분봉 (open_time, 저가, 고가) — 같은 1분 가격 순서 판정용.
+        self._minute_bar: dict[Series, tuple[int, float, float]] = {}
         if runtime_state is not None:
             for skip in runtime_state.load().data_gap_skips:
                 self._gap_skips[(skip.symbol, skip.timeframe)] = skip
@@ -267,6 +269,8 @@ class ZoneLimitPaperRunner:
                 self._handle_events(fed)
                 events += fed
             low, high, close = float(low_raw), float(high_raw), float(close_raw)
+            # 같은 1분 가격 순서(WAN-451)가 이 1분의 범위를 읽는다(`_stop_first`).
+            self._minute_bar[key] = (t, low, high)
             step_events = self._engine.on_substep(
                 symbol, timeframe, time_ms=t, low=low, high=high, close=close
             )
@@ -527,7 +531,7 @@ class ZoneLimitPaperRunner:
         members = sorted(snap.members) if snap is not None else []
         keep: set[Series] = {(s, tf) for s in members for tf in ARM_TIMEFRAMES}
         keep |= {(p.symbol, p.timeframe) for p in self._executor.open_positions}
-        keep |= {(o.symbol, o.timeframe) for o in self._engine.book.open_orders}
+        keep |= {(o.symbol, o.timeframe) for o in self._engine.open_orders()}
         return sorted(keep)
 
     def sync_series(self, now_ms: int) -> tuple[list[Series], list[Series]]:
@@ -677,6 +681,11 @@ class ZoneLimitPaperRunner:
                 self._handle_fill(event)
             elif event.kind == "shadow_filled":
                 self._record_signal(event)
+                if self._engine.independent_orders and event.fill is not None:
+                    # 팔: 탭마다 독립 주문이 곧 진짜 주문이다 — 칸에 포지션이 없으면 진입
+                    # 판정을 탄다(정본 북과 같은 규칙, WAN-451).
+                    self._stop_first(event.fill)
+                    self._handle_fill(event)
             else:
                 if self._notifier is not None and event.kind == "cancelled_expired":
                     self._notifier.note_expired()  # 만료는 실시간 없음 — 일일 요약에만.
@@ -797,6 +806,36 @@ class ZoneLimitPaperRunner:
                     )
                 except Exception:  # noqa: BLE001 — 폴백 처분마저 실패하면 로그만 남긴다.
                     _logger.exception("처분 기록 폴백 실패: journal_id=%d", journal_id)
+
+    def _stop_first(self, fill: LimitFill) -> None:
+        """같은 1분 가격 순서(WAN-451 · 정본 `w436.ADOPTED_SAME_MINUTE`).
+
+        칸의 포지션이 이 1분에 손절되고 새 체결가가 그 손절가 **이하**(숏은 이상)면 — 가격이
+        손절가를 먼저 지나 더 가서 체결된 것이라 손절이 먼저다. 그때만 손절을 먼저 정산해 칸을
+        비운다. 그 밖에는 체결이 먼저라 포지션이 열린 채로 판정한다(`cell_busy`). 시간 청산은 그
+        1분 종가라 언제나 체결보다 뒤다(아래 `_check_exits`가 그대로 처리한다).
+        """
+        bar = self._minute_bar.get((fill.symbol, fill.timeframe))
+        if bar is None or bar[0] != fill.time:
+            return
+        position = next(
+            (
+                p
+                for p in self._executor.open_positions
+                if p.symbol == fill.symbol and p.timeframe == fill.timeframe
+            ),
+            None,
+        )
+        if position is None or position.stop_price is None:
+            return
+        stop = position.stop_price
+        _t, low, high = bar
+        if position.direction is OrderBlockDirection.BULLISH:
+            first = low <= stop and fill.price <= stop
+        else:
+            first = high >= stop and fill.price >= stop
+        if first:
+            self._exit(fill.symbol, fill.timeframe, stop, fill.time, SignalExitReason.STOP_LOSS)
 
     def _record_signal(self, event: EngineEvent) -> None:
         """그림자 체결 하나를 신호 장부에 남긴다 — 몰림 규칙이 세는 모집단인지 함께 적는다."""
@@ -1086,6 +1125,7 @@ class ZoneLimitPaperRunner:
             self._last_substep[key] = snap.last_substep_time
             if order is not None and order.journal_id is not None:
                 restored.add(order.journal_id)
+            restored |= self._engine.shadow_journal_ids(symbol, timeframe)
             _logger.info(
                 "%s %s: 엔진 상태 복원 — 공백 %.1f분 따라잡기 재생 예정 (대기 주문 %s, WAN-306)",
                 symbol,
@@ -1106,6 +1146,23 @@ class ZoneLimitPaperRunner:
         이어지게 하고(포지션 자체는 `PaperExecutor`가 저장소에서 복구한다), 취소면 그냥
         버린다.
         """
+        if any(s.journal_id is not None for s in snap.shadows):
+            # 독립 주문(팔): 장부가 이미 종결한 주문은 되걸지 않는다 — 체결이면 진입 판정까지
+            # 끝난 주문이라 다시 걸면 같은 체결을 두 번 집행한다.
+            kept = [
+                s
+                for s in snap.shadows
+                if s.journal_id is None
+                or self._journal.order_status(s.journal_id) == LimitOrderStatus.PENDING.value
+            ]
+            if len(kept) != len(snap.shadows):
+                _logger.warning(
+                    "%s %s: 스냅샷의 독립 주문 %d개가 장부에서 이미 종결돼 되걸지 않습니다",
+                    symbol,
+                    timeframe,
+                    len(snap.shadows) - len(kept),
+                )
+                snap = snap.model_copy(update={"shadows": kept})
         pending = snap.pending
         if pending is None or pending.journal_id is None:
             return snap
@@ -1166,7 +1223,7 @@ class ZoneLimitPaperRunner:
                 limit_valid_bars=o.limit_valid_bars,
                 tap_index=o.tap_index,
             )
-            for o in self._engine.book.open_orders
+            for o in self._engine.open_orders()
         ]
 
     @staticmethod
@@ -1230,8 +1287,9 @@ def engine_settings_for(settings: Settings) -> Settings:
     return settings.model_copy(update={"risk_limits": limits})
 
 
-#: 팔 거래당 리스크 = 맞춤 크기 2.8533% × λ 0.885(WAN-449 · `reports/wan452_notes.txt`).
-ARM_RISK_PER_TRADE = 0.028533 * 0.885
+#: 팔 거래당 리스크 = 맞춤 크기 2.8172% × λ 0.906(WAN-449 재산출 2026-10-15 — 같은 1분 가격 순서
+#: 규약 · 옛 값 2.8533% × 0.885).
+ARM_RISK_PER_TRADE = 0.028172 * 0.906
 #: 팔이 요구하는 관통 체결(bp, 정본 `pen_5bp`).
 ARM_FILL_PENETRATION_BPS = 5.0
 
@@ -1376,8 +1434,11 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
                 # 일일 요약의 체결률·사유 카운트는 DB 장부 창 조회로 낸다(재계산 아님, WAN-221).
                 funnel_provider=lambda s, e: journal.funnel_counts(start_ms=s, end_ms=e),
                 # 팔 규칙 거부는 체결마다 생길 수 있어 건별로 안 보낸다(WAN-451 ⑩ — 일일 요약).
+                # 팔은 탭마다 독립 주문이라 「칸에 이미 포지션」도 흔하다 — 같이 요약으로 모은다.
                 quiet_reject_codes=(
-                    frozenset(ARM_REJECT_CODES) if settings.live_arm_enabled else frozenset()
+                    frozenset({*ARM_REJECT_CODES, REJECT_CODE_CELL_BUSY})
+                    if settings.live_arm_enabled
+                    else frozenset()
                 ),
             )
 
@@ -1412,6 +1473,7 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
             reentry_entry_rule=reentry_rule,
             # 몰림 규칙의 모집단(WAN-451): 슬롯과 무관한 탭별 그림자 주문을 따라간다.
             track_shadows=settings.live_arm_enabled,
+            independent_orders=settings.live_arm_enabled,
             # 창 밖으로 밀린 살아 있는 존을 기억한다(WAN-451 — 정본은 몇 년 된 존에도 들어간다).
             carry_zones=settings.live_arm_enabled,
         )

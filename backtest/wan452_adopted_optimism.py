@@ -127,7 +127,10 @@ def arm_from(
 ) -> tuple[list[w.PlacedTrade], list[w.PlacedTrade]]:
     """두 시장 → WAN-448 측정 α를 얹은 (현물 구간, 선물 구간) 팔 거래."""
     pl = {
-        f: (c.place_arm(smk, c.ARM_B, f, in_book=True), c.place_arm(fmk, c.ARM_B, f, in_book=True))
+        f: (
+            c.place_arm(smk, c.ARM_B, f, in_book=True, same_minute=w.SAME_MINUTE_EXIT_FIRST),
+            c.place_arm(fmk, c.ARM_B, f, in_book=True, same_minute=w.SAME_MINUTE_EXIT_FIRST),
+        )
         for f in c.FILLS
     }
     sp, fu = (
@@ -332,9 +335,12 @@ def engine_c(built: u.Markets, ad: Adopted) -> tuple[Engine, pd.DataFrame, list[
     main = variants[0]
     eng = Engine(frame["c_ret"], frame["c_low"], main.k, main.lam)
     notes: list[str] = []
-    pub = pd.read_csv(e449.DAILY_CSV, index_col=0, parse_dates=True)
+    # 옛 같은 1분 규약으로 고정한 표라 옛 공개 곡선과 맞댄다(WAN-451 재산출 전 기록).
+    pub = pd.read_csv(e449.LEGACY_DAILY_CSV, index_col=0, parse_dates=True)
     gap = float((pub["combo_eq"] - frame["combo_eq"].reindex(pub.index)).abs().max())
-    notes.append(f"검산 — 정본 재구성 ≡ 공개 `wan449_daily.csv` 합성 곡선(최대 차 {gap:.1e})")
+    notes.append(
+        f"검산 — 정본 재구성 ≡ 공개 `wan449_daily_exit_first.csv` 합성 곡선(최대 차 {gap:.1e})"
+    )
     if gap > CHECK_TOL:
         raise AssertionError(f"WAN-449 정본 재현 실패: {gap:.2e}")
     return eng, frame, notes

@@ -47,6 +47,9 @@ from strategy import tsmom
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REPORT_DIR = REPO_ROOT / "backtest" / "reports"
 DAILY_CSV = REPORT_DIR / "wan449_daily.csv"
+#: 옛 같은 1분 규약(청산 먼저)의 공개 일별 곡선 — WAN-451 재산출(2026-10-15) 전 기록.
+#: 옛 규약으로 고정한 모듈(wan450 · wan452)이 이 곡선과 비트 대조한다.
+LEGACY_DAILY_CSV = REPORT_DIR / "wan449_daily_exit_first.csv"
 SUMMARY_PATH = REPORT_DIR / "wan449_tsmom_summary.md"
 
 # 엔진 C 정본 상수·목표 계산의 단일 소스는 `strategy.tsmom`이다
@@ -199,14 +202,22 @@ class ArmDaily:
     risk: float
 
 
-def arm_trades(built: u.Markets) -> tuple[list[w.PlacedTrade], list[w.PlacedTrade], float]:
-    """팔의 (현물 구간 거래, 선물 구간 거래, MDD 35% 맞춤 크기) — WAN-448 측정 α · 상위 31."""
+def arm_trades(
+    built: u.Markets, *, same_minute: w.SameMinute = w.ADOPTED_SAME_MINUTE
+) -> tuple[list[w.PlacedTrade], list[w.PlacedTrade], float]:
+    """팔의 (현물 구간 거래, 선물 구간 거래, MDD 35% 맞춤 크기) — WAN-448 측정 α · 상위 31.
+
+    `same_minute`(WAN-451)은 같은 1분 순서 규약 — 기본은 채택(가격 순서) · 옛 리포트는 명시 고정.
+    """
     s = m.setting(built)
     top = s.rotations(lambda d, t: liq.select_liquidity(d, t, top=True))
     smk, _ = m.apply_rotation(s.spot_pool, top[0], force_close=False)
     fmk, _ = m.apply_rotation(s.fut_pool, top[1], force_close=False)
     pl = {
-        f: (c.place_arm(smk, c.ARM_B, f, in_book=True), c.place_arm(fmk, c.ARM_B, f, in_book=True))
+        f: (
+            c.place_arm(smk, c.ARM_B, f, in_book=True, same_minute=same_minute),
+            c.place_arm(fmk, c.ARM_B, f, in_book=True, same_minute=same_minute),
+        )
         for f in c.FILLS
     }
     tk = pd.read_csv(st.TICKS_CSV)

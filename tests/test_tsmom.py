@@ -40,10 +40,10 @@ def test_backtest_module_uses_the_single_source() -> None:
 
 
 def test_canonical_sizing_constants() -> None:
-    """이슈가 못 박은 정본 k·λ — 자산당 명목 = 0.7036 × w × 총자본."""
-    assert (tsmom.K, tsmom.LAMBDA, tsmom.ASSET_SHARE) == (1.590, 0.885, 0.5)
-    assert tsmom.notional_fraction(1.0) == pytest.approx(0.703575)
-    assert tsmom.notional_fraction(-2.0) == pytest.approx(-1.40715)
+    """정본 k·λ(WAN-449 · 2026-10-15 재산출) — 자산당 명목 = 0.7108 × w × 총자본."""
+    assert (tsmom.K, tsmom.LAMBDA, tsmom.ASSET_SHARE) == (1.569, 0.906, 0.5)
+    assert tsmom.notional_fraction(1.0) == pytest.approx(0.710757)
+    assert tsmom.notional_fraction(-2.0) == pytest.approx(-1.421514)
 
 
 def test_target_is_bit_identical_to_backtest_last_weight() -> None:

@@ -259,7 +259,15 @@ def spot_market(jobs: int, root: Path, timeframes: Sequence[str] = m.TIMEFRAMES)
     return Market("현물", payloads, entries, counts, b24, vr)
 
 
-def place_arm(mk: Market, arm: str, fill: str, *, in_book: bool) -> list[w.PlacedTrade]:
+def place_arm(
+    mk: Market,
+    arm: str,
+    fill: str,
+    *,
+    in_book: bool,
+    same_minute: w.SameMinute = w.ADOPTED_SAME_MINUTE,
+) -> list[w.PlacedTrade]:
+    """`same_minute`(WAN-451)은 같은 1분 순서 규약 — 기본은 채택(가격 순서) · 옛 리포트는 고정."""
     layer = None if arm == ARM_A else mk.layer(arm)
     return w.place(
         mk.payloads,
@@ -269,6 +277,7 @@ def place_arm(mk: Market, arm: str, fill: str, *, in_book: bool) -> list[w.Place
         stop_fill=fill,
         size_layer=layer,
         layer_in_book=in_book,
+        same_minute=same_minute,
     )
 
 
@@ -557,8 +566,8 @@ def run(jobs: int, payload_dir: Path, root: Path) -> tuple[list[Row], list[str]]
     for arm, ib in combos:
         for fill in FILLS:
             placed[(arm, ib, fill)] = (
-                place_arm(spot_mk, arm, fill, in_book=ib),
-                place_arm(fut_mk, arm, fill, in_book=ib),
+                place_arm(spot_mk, arm, fill, in_book=ib, same_minute=w.SAME_MINUTE_EXIT_FIRST),
+                place_arm(fut_mk, arm, fill, in_book=ib, same_minute=w.SAME_MINUTE_EXIT_FIRST),
             )
     notes += checksum(*placed[(ARM_A, True, "stop")])
     # 층을 북에 넣으면 배치가 달라지는가(거래 집합 비교)

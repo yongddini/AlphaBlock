@@ -60,6 +60,7 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import pandas as pd
@@ -401,7 +402,114 @@ class PlacedTrade:
     """체결 분부터 청산 **직전** 분까지 — 평가손 경로."""
 
 
+#: 같은 칸 · 같은 1분에 「앞 포지션 청산」과 「다음 체결」이 겹칠 때의 순서
+#: (WAN-451 사용자 결정 2026-10-15).
+#: `"exit_first"` = 옛 규약(채택 북의 반개구간 — 청산을 먼저 정산해 다음 체결을 받는다).
+#: `"price_order"` = 가격 순서(롱): 앞 포지션이 손절이고 다음 체결가가 그 손절가 **위**면 내려오는
+#: 가격이 지정가에 먼저 닿았으니 체결이 먼저다 → 칸에 포지션이 있어 못 들어간다. 시간 청산은 그 1분
+#: 종가에 나가므로 그 1분의 체결은 언제나 먼저다. 체결가가 손절가 이하면 청산이 먼저다
+#: (옛 규약과 같다).
+SameMinute = Literal["exit_first", "price_order"]
+SAME_MINUTE_EXIT_FIRST: SameMinute = "exit_first"
+SAME_MINUTE_PRICE_ORDER: SameMinute = "price_order"
+#: 채택 규칙 — 페이퍼 러너(`live.zone_limit_runner`)도 같은 규칙으로 판정한다(WAN-305).
+ADOPTED_SAME_MINUTE: SameMinute = SAME_MINUTE_PRICE_ORDER
+_MAX_SAME_MINUTE_ROUNDS = 50
+
+
+def fill_before_exit(prev: PlacedTrade, nxt: PlacedTrade) -> bool:
+    """같은 칸 · `nxt.entry_time == prev.exit_time`에서 체결이 청산보다 먼저인가(롱 · 가격 순서)."""
+    if not prev.stopped:
+        return True
+    return nxt.entry_price > prev.stop_price
+
+
+def same_minute_conflicts(
+    trades: Sequence[PlacedTrade],
+) -> set[tuple[str, str, int, float]]:
+    """가격 순서로는 못 들어가는 진입의 키(`ArmEntry.key`와 같은 꼴)."""
+    by_cell: dict[tuple[str, str], list[PlacedTrade]] = {}
+    for t in trades:
+        by_cell.setdefault((t.symbol, t.timeframe), []).append(t)
+    bad: set[tuple[str, str, int, float]] = set()
+    for cell in by_cell.values():
+        cell.sort(key=lambda t: (t.entry_time, t.exit_time))
+        for prev, nxt in zip(cell, cell[1:], strict=False):
+            if nxt.entry_time == prev.exit_time and fill_before_exit(prev, nxt):
+                bad.add((nxt.symbol, nxt.timeframe, nxt.entry_time, nxt.entry_price))
+    return bad
+
+
 def place(
+    payloads: Sequence[CellPayload],
+    entries: Sequence[ArmEntry],
+    rules: RuleSet,
+    *,
+    counts: Sequence[int] | None = None,
+    stop_fill: str = "stop",
+    size_layer: Sequence[float] | None = None,
+    layer_in_book: bool = True,
+    same_minute: SameMinute = ADOPTED_SAME_MINUTE,
+) -> list[PlacedTrade]:
+    """규칙 적용 → 채택 북 배치. `same_minute`(WAN-451)가 같은 1분 순서 규약이다.
+
+    `"price_order"`(채택)면 가격 순서로 못 들어가는 진입을 빼고 다시 배치한다 — 빠지면 그 칸이 비어
+    다른 후보가 들어갈 수 있으므로 새 충돌이 없을 때까지 되풀이한다. 몰림 신호 수(`counts`)는 다시
+    세지 않는다(못 들어간 체결도 신호다 — 정본 정의). `"exit_first"`는 옛 규약 그대로(비트 동일)다.
+    """
+    counts = (
+        list(counts)
+        if counts is not None
+        else signal_counts([int(e.cand.entry_time) for e in entries])
+    )
+    if same_minute == SAME_MINUTE_EXIT_FIRST:
+        return _place(
+            payloads,
+            entries,
+            rules,
+            counts=counts,
+            stop_fill=stop_fill,
+            size_layer=size_layer,
+            layer_in_book=layer_in_book,
+        )
+    if same_minute != SAME_MINUTE_PRICE_ORDER:
+        raise ValueError(f"same_minute은 exit_first·price_order 중 하나여야 한다: {same_minute!r}")
+    if size_layer is not None and len(size_layer) != len(entries):
+        raise ValueError(f"size_layer 길이 {len(size_layer)} ≠ entries {len(entries)} (WAN-439).")
+    dropped: set[tuple[str, str, int, float]] = set()
+    for _ in range(_MAX_SAME_MINUTE_ROUNDS):
+        keep = [i for i, e in enumerate(entries) if e.key not in dropped]
+        trades = _place(
+            payloads,
+            [entries[i] for i in keep],
+            rules,
+            counts=[counts[i] for i in keep],
+            stop_fill=stop_fill,
+            size_layer=None if size_layer is None else [size_layer[i] for i in keep],
+            layer_in_book=layer_in_book,
+        )
+        # 충돌은 손절가 체결(`"stop"`) 배치로 판정한다 — 체결 변형은 청산가만 바꾸고 시각은 같다.
+        probe = (
+            trades
+            if stop_fill == "stop"
+            else _place(
+                payloads,
+                [entries[i] for i in keep],
+                rules,
+                counts=[counts[i] for i in keep],
+                stop_fill="stop",
+                size_layer=None if size_layer is None else [size_layer[i] for i in keep],
+                layer_in_book=layer_in_book,
+            )
+        )
+        bad = same_minute_conflicts(probe)
+        if not bad:
+            return trades
+        dropped |= bad
+    raise RuntimeError(f"같은 1분 충돌이 {_MAX_SAME_MINUTE_ROUNDS}회 안에 사라지지 않았다(WAN-451)")
+
+
+def _place(
     payloads: Sequence[CellPayload],
     entries: Sequence[ArmEntry],
     rules: RuleSet,
@@ -1200,7 +1308,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     counts = signal_counts([int(e.cand.entry_time) for e in entries])
     print(f"팔 후보 {len(entries)}건 {time.monotonic() - started:.0f}s", flush=True)
 
-    off_trades = place(payloads, entries, OFF, counts=counts)
+    off_trades = place(payloads, entries, OFF, counts=counts, same_minute=SAME_MINUTE_EXIT_FIRST)
     if args.fill == "pen_5bp":
         check_line, ok = checksum_wan434(off_trades)
     else:
@@ -1226,7 +1334,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     for name, rules, risk in arms:
         trades = placed.get(rules)
         if trades is None:
-            trades = placed[rules] = place(payloads, entries, rules, counts=counts)
+            trades = placed[rules] = place(
+                payloads, entries, rules, counts=counts, same_minute=SAME_MINUTE_EXIT_FIRST
+            )
         rows.extend(make_rows(name, rules, risk, trades))
         if name in ("기준 팔", "제안 팔"):
             months.append(monthly(name, trades))
@@ -1242,7 +1352,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         rules = BASE if gate is None else dataclasses.replace(PROPOSED, btc_gate=gate)
         trades = placed.get(rules)
         if trades is None:
-            trades = placed[rules] = place(payloads, entries, rules, counts=counts)
+            trades = placed[rules] = place(
+                payloads, entries, rules, counts=counts, same_minute=SAME_MINUTE_EXIT_FIRST
+            )
     for target in MATCHED_TARGETS:
         for gate in MATCHED_GATES:
             rules = BASE if gate is None else dataclasses.replace(PROPOSED, btc_gate=gate)
@@ -1261,12 +1373,30 @@ def main(argv: Sequence[str] | None = None) -> int:
     gate_rules = dataclasses.replace(PROPOSED, btc_gate=STRESS_GATE)
     stress_arms = [
         ("기준 팔", "stop", placed[BASE]),
-        ("기준 팔", "bar_low", place(payloads, entries, BASE, counts=counts, stop_fill="bar_low")),
+        (
+            "기준 팔",
+            "bar_low",
+            place(
+                payloads,
+                entries,
+                BASE,
+                counts=counts,
+                stop_fill="bar_low",
+                same_minute=SAME_MINUTE_EXIT_FIRST,
+            ),
+        ),
         (f"≤ {STRESS_GATE:+.1%}", "stop", placed[gate_rules]),
         (
             f"≤ {STRESS_GATE:+.1%}",
             "bar_low",
-            place(payloads, entries, gate_rules, counts=counts, stop_fill="bar_low"),
+            place(
+                payloads,
+                entries,
+                gate_rules,
+                counts=counts,
+                stop_fill="bar_low",
+                same_minute=SAME_MINUTE_EXIT_FIRST,
+            ),
         ),
     ]
     stress = stress_rows(stress_arms)

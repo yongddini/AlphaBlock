@@ -220,6 +220,7 @@ class ZoneLimitLiveEngine:
         reentry_entry_rule: ReentryEntryRule | None = None,
         track_shadows: bool = False,
         carry_zones: bool = False,
+        independent_orders: bool = False,
     ) -> None:
         _validate_live_params(params)
         _validate_reentry_rule(params, reentry_entry_rule)
@@ -246,7 +247,15 @@ class ZoneLimitLiveEngine:
         #: 독립으로 시뮬레이션한다). 이 엔진은 칸마다 주문 하나뿐이라(슬롯) 칸이 차 있을 때의
         #: 탭·겹친 탭을 못 본다. 켜면 첫 탭마다 **같은 `_build_order`·같은 판정**의 독립 주문을
         #: 하나씩 더 따라가 체결되면 `shadow_filled`를 낸다(장부·슬롯과 무관). 끄면 비트 동일.
-        self._track_shadows = track_shadows
+        self._track_shadows = track_shadows or independent_orders
+        #: 탭마다 독립 주문(WAN-451 팔). 정본 팔은 탭마다 지정가를 **독립으로** 시뮬레이션하고 칸에
+        #: **포지션**이 없으면 먼저 체결된 것을 잡는다(`wan436.place` → 채택 북). 이 엔진의 진짜
+        #: 주문은 칸당 하나(슬롯)라, 존 A의 주문이 걸려 있는 동안 탭된 존 B에는 주문을 안 건다 —
+        #: B가 먼저 닿으면 정본은 B로 들어가는데 라이브는 놓친다. 켜면 칸당 단일 주문을 쓰지 않고
+        #: **그림자 주문을 진짜 주문으로 쓴다**: 장부에 남기고(예약·진행·체결·만료·무효화·폐기),
+        #: 체결은 `shadow_filled`로 낸다. 진입 여부(칸에 포지션이 있나)는 러너가 정한다.
+        #: 끄면 비트 동일.
+        self._independent = independent_orders
         #: 오래된 존 기억(WAN-451). 탐지 창(`live_signal_lookback_bars`)이 미끄러져 존의 시작이 창
         #: 밖으로 나가면 탐지기는 그 존을 다시 못 만든다 — 정본(전 이력 탐지)은 몇 년 된 존에도
         #: 들어가는데(팔 후보의 약 7%가 1500봉보다 오래된 존) 라이브는 잊어버렸다. 켜면 창 밖으로
@@ -342,7 +351,26 @@ class ZoneLimitLiveEngine:
             state.pending_journal_id = None
         if state.shadows:
             # 그림자도 같은 규칙으로 무효화 취소한다(존이 대장에서 사라지면 끝).
-            state.shadows = [(z, o) for z, o in state.shadows if z in state.zones]
+            alive: list[tuple[ZoneId, PendingLimitOrder]] = []
+            for zid, order in state.shadows:
+                if zid in state.zones:
+                    alive.append((zid, order))
+                    continue
+                order.cancel_invalidated()
+                if self._journal is not None and order.journal_id is not None:
+                    self._journal.record_cancelled(order.journal_id, order.status, now_ms=now_ms)
+                if self._independent:
+                    events.append(
+                        EngineEvent(
+                            kind="cancelled_invalidated",
+                            symbol=symbol,
+                            timeframe=timeframe,
+                            time_ms=now_ms,
+                            order=order,
+                            zone=zid,
+                        )
+                    )
+            state.shadows = alive
         return events
 
     # -- 1분봉 서브스텝: 커밋·예약·체결 --------------------------------------
@@ -370,11 +398,11 @@ class ZoneLimitLiveEngine:
                     # 지표 상태를 지어낼 수 없으므로 대기 주문을 폐기한다(측정 오염 방지,
                     # 재시작 폐기와 같은 부류). 존 대장·시딩은 다음 `on_htf_bars`가 맞춘다.
                     events.extend(self._discard_pending(state, symbol, timeframe, time_ms))
-                    state.shadows = []  # 그림자도 같은 이유로 버린다
+                    events.extend(self._discard_shadows(state, symbol, timeframe, time_ms))
                 else:
-                    for _zone, shadow in state.shadows:
-                        shadow.on_bar_close(state.running_close)  # 만료 계수(진짜 주문과 같은 규칙)
-                    state.shadows = [(z, o) for z, o in state.shadows if not o.status.is_terminal]
+                    events.extend(
+                        self._commit_shadows(state, symbol, timeframe, state.running_close, time_ms)
+                    )
                     pending = self.book.pending(symbol, timeframe)
                     status = self.book.on_bar_close(symbol, timeframe, state.running_close)
                     self._append_seed(state, state.forming_bar, state.running_close)
@@ -421,7 +449,7 @@ class ZoneLimitLiveEngine:
         # 2) 탭 감지 → 예약. 체결 판정보다 먼저다 — 백테스트는 탭 봉의 첫 서브스텝부터
         # 주문이 걸려 있으므로, 전이 서브스텝에서 예약과 체결이 같은 스텝에 일어날 수 있다.
         if self._track_shadows:
-            self._arm_shadows(state, symbol, timeframe, time_ms)
+            events.extend(self._arm_shadows(state, symbol, timeframe, time_ms))
         events.extend(self._maybe_arm(state, symbol, timeframe, time_ms))
 
         # 3) 대기 주문 체결/취소 판정(틱 경로와 공용 — 로직 이중화 금지).
@@ -515,6 +543,46 @@ class ZoneLimitLiveEngine:
                     order=cancelled,
                 )
             )
+        if self._independent:
+            events.extend(self._expire_overdue_shadows(now_ms=now_ms))
+        return events
+
+    def _expire_overdue_shadows(self, *, now_ms: int) -> list[EngineEvent]:
+        """독립 주문(팔 모드)의 벽시계 만료 백스톱 — `expire_overdue`와 같은 기한·같은 유예."""
+        events: list[EngineEvent] = []
+        for (symbol, timeframe), state in self._series.items():
+            alive: list[tuple[ZoneId, PendingLimitOrder]] = []
+            for zid, order in state.shadows:
+                deadline = order.expiry_deadline_ms(state.htf_ms)
+                if (
+                    order.journal_id is None
+                    or deadline is None
+                    or now_ms < deadline + _EXPIRY_GRACE_MS
+                ):
+                    alive.append((zid, order))
+                    continue
+                order.cancel_expired()
+                if self._journal is not None:
+                    self._journal.record_progress(order.journal_id, order)
+                    self._journal.record_cancelled(
+                        order.journal_id, LimitOrderStatus.CANCELLED_EXPIRED, now_ms=deadline
+                    )
+                _logger.warning(
+                    "%s %s: 독립 지정가가 만료 기한을 넘겨 벽시계로 만료합니다(WAN-298)",
+                    symbol,
+                    timeframe,
+                )
+                events.append(
+                    EngineEvent(
+                        kind="cancelled_expired",
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        time_ms=deadline,
+                        order=order,
+                        zone=zid,
+                    )
+                )
+            state.shadows = alive
         return events
 
     def _apply_pending_price(
@@ -639,18 +707,23 @@ class ZoneLimitLiveEngine:
             watch.checked_through = times[-1]
             fresh[zid] = watch
 
-    def _arm_shadows(self, state: _SeriesState, symbol: str, timeframe: str, time_ms: int) -> None:
+    def _arm_shadows(
+        self, state: _SeriesState, symbol: str, timeframe: str, time_ms: int
+    ) -> list[EngineEvent]:
         """새 탭(바깥→안 전이)마다 그림자 주문을 하나 만든다 — 슬롯·포지션과 무관(WAN-451).
 
         탭 판정·첫 탭·존폭 조건은 `_maybe_arm`과 같다(같은 존·같은 봉에서 한 번만). 주문은 같은
-        `_build_order`로 만든다 — 진짜 주문과 가격 사슬이 갈라질 수 없다.
+        `_build_order`로 만든다 — 진짜 주문과 가격 사슬이 갈라질 수 없다. 탭마다 독립 주문
+        모드(`independent_orders`)면 이 주문이 곧 진짜 주문이라 장부에 예약을 남기고 `placed`를
+        낸다(재탭·존폭 미진입 사유도 `_maybe_arm`처럼 남긴다).
         """
         if not state.refreshed or state.forming_bar is None:
-            return
+            return []
         low, high = state.forming_low, state.forming_high
         if low is None or high is None:
-            return
+            return []
         params = self._params
+        events: list[EngineEvent] = []
         for zid, watch in state.zones.items():
             ob = watch.ob
             if watch.was_inside or watch.shadow_bar == state.forming_bar:
@@ -662,12 +735,49 @@ class ZoneLimitLiveEngine:
             watch.shadow_bar = state.forming_bar
             tap_index = len(ob.tapped_times)
             if params.retap_mode == "once" and tap_index > 0:
+                if self._independent:
+                    self._record_skip(
+                        state, watch, symbol, timeframe, ob, tap_index, time_ms, SKIP_REASON_RETAP
+                    )
                 continue
             if not params.zone_width_filter_passes(ob, state.last_closed_atr):
+                if self._independent:
+                    self._record_skip(
+                        state,
+                        watch,
+                        symbol,
+                        timeframe,
+                        ob,
+                        tap_index,
+                        time_ms,
+                        SKIP_REASON_ZONE_WIDTH,
+                    )
                 continue
             order = self._build_order(state, symbol, timeframe, ob, tap_index, time_ms)
-            if order is not None:
-                state.shadows.append((zid, order))
+            if order is None:
+                continue
+            state.shadows.append((zid, order))
+            if not self._independent:
+                continue
+            if self._journal is not None and self._session_id is not None:
+                order.journal_id = self._journal.record_placed(
+                    order,
+                    session_id=self._session_id,
+                    zone_start_time=ob.start_time,
+                    zone_confirmed_time=ob.confirmed_time,
+                    origin=ORDER_ORIGIN_TAP,
+                )
+            events.append(
+                EngineEvent(
+                    kind="placed",
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    time_ms=time_ms,
+                    order=order,
+                    zone=zid,
+                )
+            )
+        return events
 
     def _apply_shadow_price(
         self,
@@ -680,12 +790,17 @@ class ZoneLimitLiveEngine:
         close: float,
         time_ms: int,
     ) -> list[EngineEvent]:
-        """그림자 주문에 1분봉을 반영한다 — 체결되면 `shadow_filled`(장부·슬롯과 무관)."""
+        """그림자 주문에 1분봉을 반영한다 — 체결되면 `shadow_filled`(장부·슬롯과 무관).
+
+        장부에 남은 주문(탭마다 독립 주문 모드)이면 체결·조건취소도 장부에 적는다.
+        """
         events: list[EngineEvent] = []
         alive: list[tuple[ZoneId, PendingLimitOrder]] = []
         for zid, order in state.shadows:
             fill = order.on_price(low, high, close, now_ms=time_ms)
             if fill is not None:
+                if self._journal is not None and order.journal_id is not None:
+                    self._journal.record_filled(order.journal_id, fill)
                 events.append(
                     EngineEvent(
                         kind="shadow_filled",
@@ -699,8 +814,94 @@ class ZoneLimitLiveEngine:
                 )
             elif not order.status.is_terminal:
                 alive.append((zid, order))
+            elif order.journal_id is not None:
+                if self._journal is not None:
+                    self._journal.record_cancelled(order.journal_id, order.status, now_ms=time_ms)
+                events.append(
+                    EngineEvent(
+                        kind="cancelled_condition_failed",
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        time_ms=time_ms,
+                        order=order,
+                        zone=zid,
+                    )
+                )
         state.shadows = alive
         return events
+
+    def _commit_shadows(
+        self, state: _SeriesState, symbol: str, timeframe: str, close: float, time_ms: int
+    ) -> list[EngineEvent]:
+        """상위TF 봉 경계 — 그림자 주문의 만료 계수(진짜 주문과 같은 규칙 · 같은 시각에 기록)."""
+        events: list[EngineEvent] = []
+        alive: list[tuple[ZoneId, PendingLimitOrder]] = []
+        for zid, order in state.shadows:
+            order.on_bar_close(close)
+            if not order.status.is_terminal:
+                alive.append((zid, order))
+                if self._journal is not None and order.journal_id is not None:
+                    self._journal.record_progress(order.journal_id, order)
+                continue
+            if order.journal_id is None:
+                continue
+            if self._journal is not None:
+                self._journal.record_cancelled(order.journal_id, order.status, now_ms=time_ms)
+            events.append(
+                EngineEvent(
+                    kind="cancelled_expired",
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    time_ms=time_ms,
+                    order=order,
+                    zone=zid,
+                )
+            )
+        state.shadows = alive
+        return events
+
+    def _discard_shadows(
+        self, state: _SeriesState, symbol: str, timeframe: str, time_ms: int
+    ) -> list[EngineEvent]:
+        """1분봉 공백 — 그림자 주문을 버린다(진짜 주문의 `_discard_pending`과 같은 이유·상태)."""
+        events: list[EngineEvent] = []
+        for zid, order in state.shadows:
+            if order.journal_id is None:
+                continue
+            if self._journal is not None:
+                self._journal.record_discarded(order.journal_id, now_ms=time_ms)
+            events.append(
+                EngineEvent(
+                    kind="discarded",
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    time_ms=time_ms,
+                    order=order,
+                    zone=zid,
+                )
+            )
+        state.shadows = []
+        return events
+
+    @property
+    def independent_orders(self) -> bool:
+        """탭마다 독립 주문 모드인가(팔 — 진입 판정은 `shadow_filled`에서)."""
+        return self._independent
+
+    def open_orders(self) -> list[PendingLimitOrder]:
+        """걸려 있는 주문 전부 — 칸당 단일 주문 + 장부에 남은 독립 주문(팔 모드)."""
+        out = list(self.book.open_orders)
+        if self._independent:
+            for state in self._series.values():
+                out.extend(o for _z, o in state.shadows if o.journal_id is not None)
+        return out
+
+    def shadow_journal_ids(self, symbol: str, timeframe: str) -> set[int]:
+        """이 시리즈에 걸려 있는 독립 주문의 장부 행(재시작 복원에서 기동 폐기를 막을 때)."""
+        state = self._series.get((symbol, timeframe))
+        if state is None:
+            return set()
+        return {o.journal_id for _z, o in state.shadows if o.journal_id is not None}
 
     def drop_series(self, symbol: str, timeframe: str) -> bool:
         """감시에서 빠진 시리즈의 상태를 버린다 — 대기 주문이 걸려 있으면 버리지 않는다(False).
@@ -710,6 +911,8 @@ class ZoneLimitLiveEngine:
         """
         if self.book.pending(symbol, timeframe) is not None:
             return False
+        if self.shadow_journal_ids(symbol, timeframe):
+            return False  # 독립 주문이 남아 있다 — 끝날 때까지 폴링한다.
         self._series.pop((symbol, timeframe), None)
         return True
 
@@ -777,6 +980,8 @@ class ZoneLimitLiveEngine:
         경로(`intrabar_live`)는 밴드가 봉 안에서 움직여 예약 시점에 규칙 3을 판정하지 않고,
         주문이 걸린 뒤 밴드가 한 번도 유리하지 않은 채 만료되는 형태(`first_rested_ms
         IS NULL`)로 나타난다(`SeriesFillStats.unfilled_no_band`가 실측)."""
+        if self._independent:
+            return []  # 탭마다 독립 주문(`_arm_shadows`)이 대신한다.
         if not state.refreshed or state.forming_bar is None:
             return []
         low = state.forming_low
@@ -964,7 +1169,7 @@ class ZoneLimitLiveEngine:
             occupied_zone=state.occupied_zone,
             shadows=[
                 PersistedPendingOrder(
-                    journal_id=None,
+                    journal_id=order.journal_id,
                     zone=zid,
                     tap_index=order.tap_index,
                     placed_ms=order.placed_ms,
@@ -999,6 +1204,7 @@ class ZoneLimitLiveEngine:
         order.bars_elapsed = persisted.bars_elapsed
         order.first_rested_ms = persisted.first_rested_ms
         order.last_limit_price = persisted.last_limit_price
+        order.journal_id = persisted.journal_id
         return order
 
     def restore_series(
