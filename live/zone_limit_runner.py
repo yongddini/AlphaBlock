@@ -764,6 +764,7 @@ class ZoneLimitPaperRunner:
                     entered=report.accepted,
                     reason=report.outcome.reason,
                     reason_code=report.outcome.reason_code,
+                    size_scale=decision.size_scale if decision is not None else None,
                 )
             disposition_done = True
             # 거부는 WARNING이다 — 체결이 거래가 되지 않은 것이라 조용히 흘리면

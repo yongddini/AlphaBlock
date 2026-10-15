@@ -125,7 +125,24 @@ journalctl -u alphablock-live -f
 리셋 이음매에서 한다 — `.env`의 `ALPHABLOCK_LIVE_ARM_ENABLED=false`(그리고 바꾼 값들을 원래대로) +
 `sudo scripts/paper-reset.sh --yes`. 리셋 없이 끄면 팔 포지션이 옛 규칙 러너에 남아 섞인다.
 
-## 아직 없는 것
+## 실제 장부가 정본과 같은가 — 주기적으로(예: 매주)
 
-- 서버 장부(실제 페이퍼 거래)를 같은 기간 정본 백테스트와 맞대는 명령 — 켜기 전 관문(`live/arm_gate.py`)은
-  저장 데이터로 러너를 **재생**한 것이고, 실제 장부를 맞대는 도구는 다음 단계다.
+서버에서 돌리지 않는다(정본 후보 생성이 2년치 탐지라 2코어 서버에서는 몇 시간 · 러너와 코어를 다툰다).
+서버 DB를 내려받아 로컬에서 돌린다:
+
+```bash
+scp rocky@<서버>:~/AlphaBlock/data/ohlcv.db ~/Downloads/server-ohlcv.db
+```
+
+```bash
+cd ~/AlphaBlock && uv run alphablock arm-parity --db ~/Downloads/server-ohlcv.db
+```
+
+- 첫 가동 세션부터 BTC 1분봉 끝까지, **실제 주간 목록**으로 정본 팔을 돌려 장부와 맞댄다 —
+  몰림 신호(장부 `arm_signals`) · 거래(진입 시각·가격 · 2배 손절가 · 크기 배율 · 청산 시각·사유).
+  로컬 M1 약 30분(31종목 × 10TF).
+- 어긋나면 종료 코드 1이고 거래마다 원인 후보를 붙인다 — **러너 공백**(따라잡기 한도 48시간을 넘는
+  틈) · 그 밖은 **데이터 또는 로직**이다. 후자는 같은 기간을 재생 대조(`uv run python -m
+  live.arm_gate`)로 돌려 「러너가 그 데이터로 다시 돌면 정본과 같나」를 보면 가른다.
+- ⚠️ 서버 DB 파일이 크다(수 GB) — 러너가 쓰는 중에 복사하면 깨질 수 있으니
+  `scripts/db-backup.sh`(검증하는 백업)로 뜬 파일을 내려받는다.

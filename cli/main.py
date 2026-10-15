@@ -1712,6 +1712,30 @@ def cmd_arm_check(args: argparse.Namespace, settings: Settings) -> int:
     return 0 if check.ready else 1
 
 
+def cmd_arm_parity(args: argparse.Namespace, settings: Settings) -> int:
+    """`alphablock arm-parity --db PATH` — 팔 페이퍼 장부 ↔ 정본 백테스트(WAN-451 ③).
+
+    서버 DB를 내려받아 **로컬에서** 돌린다(정본 후보 생성이 2년치 탐지라 서버에서는 몇 시간 ·
+    러너와 코어를 다툰다). 읽기 전용이고 어긋나면 종료 코드 1이다.
+    """
+    from datetime import UTC, datetime
+    from pathlib import Path
+
+    from backtest import harness
+    from live.arm_ledger_parity import render, run
+
+    def _ms(text: str | None) -> int | None:
+        if text is None:
+            return None
+        return int(datetime.fromisoformat(text).replace(tzinfo=UTC).timestamp() * 1000)
+
+    db = Path(args.db if args.db is not None else settings.db_path)
+    jobs = args.jobs if args.jobs is not None else harness.default_jobs()
+    report = run(db, since=_ms(args.since), until=_ms(args.until), jobs=jobs)
+    print(render(report))
+    return 0 if report.ok else 1
+
+
 def cmd_doctor(args: argparse.Namespace, settings: Settings) -> int:
     """`alphablock doctor` — DB 무결성·위생 점검(WAN-194 §2·§4·§5).
 
@@ -2276,6 +2300,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_arm_check.add_argument("--db", default=None, help="DB 경로(기본: 설정의 db_path)")
     p_arm_check.set_defaults(func=cmd_arm_check)
+
+    p_arm_parity = sub.add_parser(
+        "arm-parity",
+        help="팔 페이퍼 장부 ↔ 정본 백테스트 거래 대조(WAN-451 · 로컬에서 서버 DB 복사본으로)",
+    )
+    p_arm_parity.add_argument("--db", default=None, help="DB 경로(서버 DB 복사본)")
+    p_arm_parity.add_argument("--since", default=None, help="UTC 시각(기본: 첫 가동 세션)")
+    p_arm_parity.add_argument("--until", default=None, help="UTC 시각(기본: BTC 1분봉 끝)")
+    p_arm_parity.add_argument("--jobs", type=int, default=None, help="병렬 워커 수")
+    p_arm_parity.set_defaults(func=cmd_arm_parity)
 
     p_trades = sub.add_parser(
         "trades",
