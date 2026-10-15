@@ -2,8 +2,8 @@
 
 `ExecutionEngine.on_entry`가 사이징 수량 0을 낼 때, 예전의 "사이징 수량 0 — 진입 스킵"
 한 뭉치 대신 **어느 가드에 걸렸는지**를 `entry_reject_reason`(= `ExecutionOutcome.reason`)에
-담는지를 동작으로 고정한다. 이 문자열이 곧 `live/trade_timeline.py`·`live/fill_report.py`가
-그대로 렌더하는 값이다(WAN-194 배선).
+담는지를 동작으로 고정한다. 이 문자열이 곧 장부(`live_limit_orders.entry_reject_reason`)에
+그대로 남는 값이다(WAN-194 배선 · 그것을 렌더하던 옛 비교 도구는 WAN-451 ②에서 은퇴).
 
 ⚠️ 라벨만 세분화한다 — 거부 동작·수량·`reason_code`(집계용, `REJECT_CODE_SIZING`)는 불변.
 """

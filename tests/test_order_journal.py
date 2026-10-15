@@ -1,7 +1,8 @@
 """체결률 실측 장부·요약 리포트 테스트 (WAN-45의 1급 산출물).
 
 체결률의 분모·분자 규칙(대기·재시작 폐기는 분모 제외), 스침(관통 < 5bp) 분류,
-재시작 폐기 흐름, 가동 세션 기록, 그리고 `live.fill_report` 렌더를 검증한다.
+재시작 폐기 흐름, 가동 세션 기록을 검증한다(`live.fill_report` 렌더 테스트는 그 도구와
+함께 지웠다 — WAN-451 ②).
 """
 
 from __future__ import annotations
@@ -15,7 +16,6 @@ from execution.engine import (
     REJECT_CODE_RISK,
     REJECT_CODE_SIZING,
 )
-from live.fill_report import render_day_report, render_report, resolve_day_window
 from live.limit_orders import LimitFill, LimitOrderStatus, PendingLimitOrder
 from live.order_journal import (
     LEDGER_REASON_DEVIATION,
@@ -183,31 +183,6 @@ def test_sessions_track_uptime_spans(tmp_path: Path) -> None:
     journal.close()
 
 
-def test_render_report_contains_series_and_uptime(tmp_path: Path) -> None:
-    journal = OrderJournal(tmp_path / "j.db")
-    session = journal.start_session(now_ms=0)
-    journal.heartbeat(session, now_ms=3_600_000)
-    row = journal.record_placed(
-        _order(), session_id=session, zone_start_time=0, zone_confirmed_time=1
-    )
-    journal.record_filled(row, _fill(penetration_bps=2.0))
-
-    text = render_report(journal)
-    assert "BTC/USDT:USDT" in text
-    assert "100.0%" in text  # 체결률 1/1.
-    assert "가동" in text
-    # 스침 체결(관통 2bp < 5bp)이 표시된다 — `pen_5bp` 렌즈가 부정할 체결.
-    assert "| 100.0% |" in text
-    journal.close()
-
-
-def test_render_report_empty_journal(tmp_path: Path) -> None:
-    journal = OrderJournal(tmp_path / "j.db")
-    text = render_report(journal)
-    assert "아직 기록된 주문이 없습니다" in text
-    journal.close()
-
-
 # -- 체결의 하류 처분 (WAN-194) ------------------------------------------------
 
 
@@ -336,25 +311,6 @@ def test_journal_migrates_legacy_schema_without_entry_columns(tmp_path: Path) ->
     again = OrderJournal(path)
     assert len(again.orphan_fills()) == 1
     again.close()
-
-
-def test_render_report_flags_orphan_fills(tmp_path: Path) -> None:
-    """리포트가 처분 미기록 체결을 별도 섹션으로 드러낸다(조용한 통과 금지)."""
-    journal = OrderJournal(tmp_path / "j.db")
-    session = journal.start_session(now_ms=0)
-    row = journal.record_placed(
-        _order(), session_id=session, zone_start_time=0, zone_confirmed_time=1
-    )
-    journal.record_filled(row, _fill())
-
-    text = render_report(journal)
-    assert "처분 미기록" in text
-    assert "**1건**" in text
-
-    journal.record_entry_result(row, entered=True)
-    clean = render_report(journal)
-    assert "없음 — 모든 체결에 진입/거부 처분이 남아 있습니다." in clean
-    journal.close()
 
 
 class _NeverRestsProvider:
@@ -777,27 +733,6 @@ def test_ledger_entries_empty_ledger_is_safe(tmp_path: Path) -> None:
     journal.close()
 
 
-def test_render_report_shows_skip_funnel(tmp_path: Path) -> None:
-    """리포트가 주문 걸기 전 미진입 사유를 별도 섹션으로 드러낸다(WAN-217)."""
-    journal = OrderJournal(tmp_path / "j.db")
-    session = journal.start_session(now_ms=0)
-    journal.record_skipped(
-        session_id=session,
-        symbol="BTC/USDT:USDT",
-        timeframe="1h",
-        direction=OrderBlockDirection.BULLISH.value,
-        tap_index=0,
-        placed_ms=1_000,
-        reason="zone_width",
-        zone_start_time=0,
-        zone_confirmed_time=1,
-    )
-    text = render_report(journal)
-    assert "주문 걸기 전 미진입 사유" in text
-    assert "존폭기각" in text
-    journal.close()
-
-
 # -- 당일(KST) 주문별 조회 (WAN-232) --------------------------------------------
 
 
@@ -930,48 +865,6 @@ def test_day_summary_matches_funnel_when_events_share_window(tmp_path: Path) -> 
     )
     assert day.fill_rate == funnel.fill_rate
     journal.close()
-
-
-def test_render_day_report_has_summary_table_and_questions(tmp_path: Path) -> None:
-    """당일 렌더가 한 줄 요약 · 주문별 표 · 두 진단 질문을 담는다(WAN-232 완료 기준 1)."""
-    journal = OrderJournal(tmp_path / "j.db")
-    session = journal.start_session(now_ms=0)
-    entered = _place_at(journal, session, 1100)
-    journal.record_filled(entered, _fill_at(1400))
-    journal.record_entry_result(entered, entered=True)
-    rejected = _place_at(journal, session, 1150)
-    journal.record_filled(rejected, _fill_at(1450))
-    journal.record_entry_result(rejected, entered=False, reason="손절 너무 짧음")
-
-    out = render_day_report(journal, start_ms=1000, end_ms=2000, day_key="2026-08-02")
-    assert "2026-08-02" in out
-    assert "예약 2 · 체결 2" in out
-    assert "예약→체결(닿음) 100.0%" in out and "체결→진입 50.0%" in out
-    assert "| 심볼 | TF |" in out  # 주문별 표 헤더.
-    assert "진입" in out and "거부(손절 너무 짧음)" in out
-    assert "예약이 체결로 가는가" in out and "체결이 진입으로 가는가" in out
-    journal.close()
-
-
-def test_render_day_report_empty_window(tmp_path: Path) -> None:
-    """예약이 없는 날은 요약 0 + '예약된 주문이 없습니다'만 낸다(빈 창 안전)."""
-    journal = OrderJournal(tmp_path / "j.db")
-    out = render_day_report(journal, start_ms=1000, end_ms=2000, day_key="2026-08-02")
-    assert "예약 0 · 체결 0" in out
-    assert "이 날 예약된 주문이 없습니다." in out
-    journal.close()
-
-
-def test_resolve_day_window_matches_shared_kst_helper() -> None:
-    """CTA #2: `--day` 창이 일일 요약 funnel과 같은 자정 경계(kst_day_bounds_for_date)를 쓴다."""
-    from datetime import date
-
-    from common.timefmt import kst_day_bounds_for_date
-
-    start_ms, end_ms, key = resolve_day_window("2026-08-02")
-    assert (start_ms, end_ms) == kst_day_bounds_for_date(date(2026, 8, 2))
-    assert key == "2026-08-02"
-    assert end_ms - start_ms == 24 * 3_600_000  # KST는 서머타임 없어 정확히 24h.
 
 
 def test_reason_phrases_single_source_covers_funnel_codes() -> None:

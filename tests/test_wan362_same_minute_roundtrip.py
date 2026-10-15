@@ -8,8 +8,8 @@
   (`stop_before_tp`) 기하의 `can_tp`에서 그만큼 빼야 기록과 같아진다.
 * **`can_stop`은 체결가와 무관하고 `can_tp`는 강하게 의존한다** — 이 비대칭이 §2-C의
   근거이고, 뒤집히면 결론 문장이 통째로 틀린다.
-* **같은 분은 같은 1분 칸이다** — 라이브 장부는 틱 시각(ms)이라 분으로 내림해야 백테스트의
-  1분봉과 같은 자가 된다.
+* ~~같은 분은 같은 1분 칸이다~~ — 라이브 장부 쪽 인구조사(`live.same_minute_census` ·
+  `alphablock same-minute`)는 옛 규칙 페이퍼와 함께 은퇴해 그 테스트도 지웠다(WAN-451 ②).
 * **판정은 Wilson 구간이 기준을 포함하는지로 낸다** — 표본이 7건일 때 정규근사는 성립하지 않는다.
 """
 
@@ -34,14 +34,6 @@ from backtest.wan362_same_minute_roundtrip import (
     required_sample,
     take_profit_checksum,
 )
-from live.same_minute_census import (
-    census,
-    is_same_minute,
-    leave_one_day_out,
-    minute_bucket,
-)
-from paper.store import PaperTradeRecord
-from strategy.models import OrderBlockDirection, SignalExitReason
 
 MINUTE = 60_000
 
@@ -204,64 +196,6 @@ def test_position_table_keeps_the_missing_bars_out_but_reports_them() -> None:
 # --------------------------------------------------------------------------- #
 # §1 인구조사 — 같은 자로 세는가
 # --------------------------------------------------------------------------- #
-
-
-def _record(
-    *, entry_ms: int, exit_ms: int, reason: SignalExitReason, symbol: str = "BTC/USDT:USDT"
-) -> PaperTradeRecord:
-    return PaperTradeRecord(
-        symbol=symbol,
-        timeframe="15m",
-        direction=OrderBlockDirection.BULLISH,
-        entry_time=entry_ms,
-        entry_price=100.0,
-        exit_time=exit_ms,
-        exit_price=101.0,
-        reason=reason,
-        gross_pct=1.0,
-        fee_pct=0.04,
-        funding_pct=0.0,
-        net_pct=0.96,
-        realized_pnl=10.0,
-    )
-
-
-def test_same_minute_uses_the_minute_bucket_not_equality() -> None:
-    """라이브 장부는 틱 시각(ms)이다 — 분으로 내림해야 백테스트의 1분봉과 같은 자다."""
-    base = 1_735_689_600_000
-    assert minute_bucket(base + 59_999) == base
-    assert is_same_minute(
-        _record(entry_ms=base + 2_000, exit_ms=base + 58_000, reason=SignalExitReason.STOP_LOSS)
-    )
-    assert not is_same_minute(
-        _record(
-            entry_ms=base + 59_000, exit_ms=base + MINUTE + 1_000, reason=SignalExitReason.STOP_LOSS
-        )
-    )
-
-
-def test_census_splits_by_day_symbol_and_timeframe() -> None:
-    base = 1_735_689_600_000  # 2025-01-01 00:00 UTC = 09:00 KST
-    records = [
-        _record(entry_ms=base, exit_ms=base + 10_000, reason=SignalExitReason.STOP_LOSS),
-        _record(
-            entry_ms=base + MINUTE, exit_ms=base + 3 * MINUTE, reason=SignalExitReason.TAKE_PROFIT
-        ),
-        _record(
-            entry_ms=base + 86_400_000,
-            exit_ms=base + 86_400_000 + 20_000,
-            reason=SignalExitReason.TAKE_PROFIT,
-            symbol="ETH/USDT:USDT",
-        ),
-    ]
-    rows = census(records)
-    total = next(row for row in rows if row.group == "전체")
-    assert (total.trades, total.same_minute, total.same_tp, total.same_sl) == (3, 2, 1, 1)
-    assert {row.label for row in rows if row.group == "종목"} == {"BTC/USDT:USDT", "ETH/USDT:USDT"}
-    assert len({row.label for row in rows if row.group == "날짜(KST)"}) == 2
-    dropped = dict(leave_one_day_out(records))
-    assert len(dropped) == 2
-    assert all(row.trades < total.trades for row in dropped.values())
 
 
 def test_verdict_uses_wilson_coverage_not_a_normal_approximation() -> None:

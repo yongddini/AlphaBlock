@@ -11,101 +11,27 @@ WAN-407은 그 실패의 펀딩 축 두 겹을 고친다:
   종합 배지에까지 들어가는데 CLI가 OHLCV만 그려서, 펀딩이 멈추면 **배지만 노랗게 변하고
   이유는 어디에도 없었다**.
 
+⚠️ §1 테스트는 `alphablock parity`가 옛 규칙 페이퍼와 함께 은퇴하며 지웠다(WAN-451 ②).
+
 테스트는 **라벨이 아니라 동작으로** 건다 — 로그가 실제로 나오는지/안 나오는지, 화면 문자열에
 그 심볼이 실제로 뜨는지. 돌연변이 확인(옛 코드로 되돌리면 실패)도 함께 건다.
 """
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 
 import pandas as pd
-import pytest
 
-from backtest.harness import MarketData, build_config, detect_order_blocks
 from cli.main import _funding_census_lines, format_status
 from dashboard.health import FundingFreshness, HealthLevel
 from dashboard.health_data import HealthView, build_health_view
 from data.funding import FundingRateStore
 from data.models import FundingRate
-from live.paper_parity import _cell_from_market
-from strategy.models import OrderBlockParams
 
 _NOW = 1_700_000_000_000
 _HOUR_MS = 3_600_000
 _SYMBOL = "BTC/USDT:USDT"
-
-
-# ---------------------------------------------------------------------------
-# §1 — 파리티 대조 셀은 「펀딩을 안 쓴다」고 정직하게 말한다
-# ---------------------------------------------------------------------------
-
-
-def _synthetic_market(timeframe: str = "1h", bars: int = 40) -> MarketData:
-    """상위TF·1분봉이 서로 정합적인 최소 합성 시장(체결 여부는 이 테스트의 관심이 아니다)."""
-    start = _NOW - bars * _HOUR_MS
-    htf = pd.DataFrame(
-        {
-            "open_time": [start + i * _HOUR_MS for i in range(bars)],
-            "open": [100.0 + i for i in range(bars)],
-            "high": [101.0 + i for i in range(bars)],
-            "low": [99.0 + i for i in range(bars)],
-            "close": [100.5 + i for i in range(bars)],
-            "volume": [10.0] * bars,
-        }
-    )
-    minutes = bars * 60
-    df_1m = pd.DataFrame(
-        {
-            "open_time": [start + i * 60_000 for i in range(minutes)],
-            "open": [100.0 + i / 60 for i in range(minutes)],
-            "high": [101.0 + i / 60 for i in range(minutes)],
-            "low": [99.0 + i / 60 for i in range(minutes)],
-            "close": [100.5 + i / 60 for i in range(minutes)],
-            "volume": [1.0] * minutes,
-        }
-    )
-    return MarketData(_SYMBOL, timeframe, htf, df_1m, [])
-
-
-def test_parity_cell_does_not_warn_about_funding_coverage(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """대조 셀은 펀딩을 안 읽으므로 커버리지 경고를 내지 않는다(WAN-407 §1).
-
-    🚨 이 경고가 「펀딩 수집이 멈췄다」는 의심의 근거였다 — 실제로는 **펀딩이 꽉 찬 창에서도**
-    떴다. 커버리지가 0.0%인 게 아니라 **애초에 재면 안 되는 값**이었다.
-    """
-    market = _synthetic_market()
-    ob_result = detect_order_blocks(market, OrderBlockParams())
-    with caplog.at_level(logging.WARNING):
-        _cell_from_market(
-            market,
-            ob_result,
-            start_ms=int(market.htf_df["open_time"].iloc[0]),
-            end_ms=int(market.htf_df["open_time"].iloc[-1]) + _HOUR_MS,
-        )
-    assert not [r for r in caplog.records if "커버리지" in r.getMessage()], (
-        "펀딩을 읽지도 않는 경로가 커버리지를 경고했다 — 라벨과 동작이 어긋난다"
-    )
-
-
-def test_engine_would_warn_if_the_label_were_left_default() -> None:
-    """돌연변이 확인 — cfg를 옛날처럼 두면 **빈 시계열에서 0.0%가 나온다**(WAN-407 §1).
-
-    이 테스트가 증명하는 것은 *경고가 데이터가 아니라 라벨에서 나왔다*는 것이다: 같은 빈
-    시계열인데 `funding_enabled`만 뒤집으면 커버리지가 `0.0` ↔ `None`으로 갈린다.
-    """
-    from backtest.zone_limit_backtest import _check_funding_coverage
-
-    market = _synthetic_market()
-    legacy = build_config("1h")  # 채택 기본값 = 펀딩 켬 (옛 파리티 배선)
-    assert legacy.funding_enabled is True
-    assert _check_funding_coverage(market.htf_df, [], legacy) == 0.0
-
-    fixed = build_config("1h", funding_enabled=False)
-    assert _check_funding_coverage(market.htf_df, [], fixed) is None
 
 
 # ---------------------------------------------------------------------------

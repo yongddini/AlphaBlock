@@ -61,9 +61,9 @@ grep -n ALPHABLOCK_BACKTEST_JOBS ~/AlphaBlock/.env   # 없으면 아래 줄을 �
 echo 'ALPHABLOCK_BACKTEST_JOBS=2' >> ~/AlphaBlock/.env
 ```
 
-**이 한 줄이 세 경로를 전부 덮는다** — 야간 크론(`alphablock trades --persist-cache`,
-크론 줄이 `cd <저장소>`를 한다) · systemd 유닛(`WorkingDirectory=<저장소>`) · 손으로 치는
-CLI. `Settings`가 `.env`를 **CWD 기준으로, 없으면 저장소 루트 기준으로** 읽기 때문이다
+**이 한 줄이 모든 경로를 덮는다** — systemd 유닛(`WorkingDirectory=<저장소>`) · 손으로 치는
+`backtest.run`·리포트 모듈(옛 야간 크론 `alphablock trades --persist-cache`는 WAN-451 ②에서
+은퇴했다 — §4d). `Settings`가 `.env`를 **CWD 기준으로, 없으면 저장소 루트 기준으로** 읽기 때문이다
 (WAN-354 §1). 그래서 유닛 템플릿에 `EnvironmentFile=`을 **일부러 넣지 않았다**: 같은 값을
 두 자리에 두면 갈라지고, `.env`에는 API 키·텔레그램 토큰이 있어 `systemctl show`로 새어
 나온다.
@@ -76,16 +76,13 @@ CLI. `Settings`가 `.env`를 **CWD 기준으로, 없으면 저장소 루트 기�
 ```bash
 cd ~/AlphaBlock && ./scripts/wan354-server-jobs-check.sh -o /tmp/wan354.md   # 전체 점검
 uv run python -m scripts.wan354_jobs_probe   # 워커가 정말 그 수만큼 뜨는가
-grep -m1 '^병렬 설정:' ~/persist.log              # 야간 크론이 무슨 값으로 돌았나
 ```
 
-- ⚠️ **대시보드 화면 버튼은 이 값을 안 읽는다** — 의도적으로 직렬이다(워커마다 1분봉
-  사본을 들어 `BrokenProcessPool`이 났다, WAN-324). 대량 적재는 CLI가 담당한다.
 - ⚠️ **명시적 `--jobs N`이 이긴다** — 무거운 격자 하나만 더 조이고 싶으면 그 실행에만 준다.
 - ⚠️ **측정값은 하나도 안 움직인다** — `--jobs`는 순수 성능 노브다(WAN-121: 직렬 = 병렬
   비트 동일). 옛 표 재산출도 캐시 되채우기도 **불필요**하다.
 - 📌 **다음 서버로 옮길 때도 이 절을 다시 본다** — 코어 수가 바뀌면 값도 바뀐다.
-- 🚨 **이 배선 전에는 야간 크론이 「4-way 오버서브」가 아니라 「직렬」이었다**(WAN-354 §1:
+- (옛 기록 — 그 야간 크론은 WAN-451 ②에서 은퇴했다) 🚨 **이 배선 전에는 야간 크론이 「4-way 오버서브」가 아니라 「직렬」이었다**(WAN-354 §1:
   `alphablock` CLI가 `--jobs` 기본값을 리터럴 1로 박아 두어 설정이 그 경로에 닿지 않았다).
   즉 `=2`로 두면 크론은 **1 → 2로 오히려 늘어난다**(코어 수와 같으니 오버서브는 아니다).
   1GB 박스에서 메모리가 빠듯하면 `ALPHABLOCK_BACKTEST_JOBS=1`로 두면 **옛 동작과 정확히
@@ -267,6 +264,21 @@ sudo systemctl start alphablock-live alphablock-collector \
 - 더 깊게 보려면 `--quick-check`(수 GB 면 수 분~수십 분).
 - 러너·수집기·doctor 가 돌고 있으면 **거부**한다(경합이 사고 원인이었다) — 정말 필요하면
   `--allow-running`.
+
+## 4d. 🚨 야간 타임라인 크론 지우기 (WAN-451 ②)
+
+옛 규칙 비교 도구(`alphablock trades|compare|stop-width|parity|cascade|same-minute|fills|
+timeline-profile`)가 은퇴하면서 **야간 크론이 부르던 `alphablock trades --persist-cache`가
+없어졌다.** 서버 crontab에 남은 줄은 매일 밤 실패하니 지운다(사람이 1회):
+
+```bash
+crontab -l | grep -n -- '--persist-cache'                    # 대상 확인
+crontab -l > ~/crontab.before-wan451.txt                     # 백업
+crontab -l | grep -v -- '--persist-cache' | crontab -        # 그 줄만 지움 (또는 `crontab -e`)
+crontab -l | grep -n -- '--persist-cache' || echo "없음 ✅"   # 확인
+```
+
+자세한 사정은 [`wan239-nightly-timeline-cache.md`](wan239-nightly-timeline-cache.md).
 
 ## 5. 검증 — WAN-174 완료 기준
 

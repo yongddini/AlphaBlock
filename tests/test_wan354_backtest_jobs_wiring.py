@@ -10,6 +10,9 @@
    즉 야간 크론은 오버서브가 아니라 **직렬**로 돌았고, 서버 `.env`에 값을 넣어도
    아무 일도 일어나지 않았을 것이다.
 
+⚠️ 2.의 CLI 하위 명령 넷은 옛 규칙 페이퍼 비교 도구라 WAN-451 ②에서 은퇴했고, 그 배선
+테스트(§2)도 함께 지웠다. `.env` 자리(§1)와 워커 수 프로브(§3)는 `backtest.run`이 그대로 쓴다.
+
 그래서 여기 테스트는 전부 **라벨이 아니라 동작**을 건다: 파서 기본값이 무엇인지,
 실제로 푼 값이 무엇인지, 그리고 워커 프로세스가 정말 그 수만큼 뜨는지.
 
@@ -19,8 +22,6 @@
 
 from __future__ import annotations
 
-import argparse
-import importlib
 import os
 import subprocess
 import sys
@@ -31,19 +32,9 @@ from pathlib import Path
 import pytest
 
 from backtest import harness
-from cli.main import build_parser, resolve_jobs_arg
 from config.settings import Settings
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-
-#: 백테를 부르는 `alphablock` 하위 명령 — 넷 다 같은 설정을 읽어야 한다. 하나만 리터럴로
-#: 박혀 있어도 「고쳤다고 믿으면서 그 경로만 다른 값으로 도는」 상태가 된다.
-_BACKTEST_SUBCOMMANDS = {
-    "trades": ["trades", "--day", "2026-08-17"],
-    "compare": ["compare", "--day", "2026-08-17"],
-    "stop-width": ["stop-width", "--day", "2026-08-17"],
-    "parity": ["parity"],
-}
 
 
 # --------------------------------------------------------------------------- #
@@ -144,114 +135,6 @@ def test_code_default_stays_four(repo_env_file: _RepoEnvFile, tmp_path: Path) ->
     """완료 기준 4: 코드 기본값은 **안 바꾼다**(M1 성능 코어 수). 서버는 설정으로 덮는다."""
     assert Settings.model_validate({}).backtest_jobs == 4
     assert _resolved_jobs_in(tmp_path) == 4  # .env 가 하나도 없으면 코드 기본값
-
-
-# --------------------------------------------------------------------------- #
-# §2 CLI 가 그 설정을 실제로 읽는가
-# --------------------------------------------------------------------------- #
-
-
-@pytest.mark.parametrize("name", sorted(_BACKTEST_SUBCOMMANDS))
-def test_cli_jobs_default_is_unset_not_a_literal(name: str) -> None:
-    """네 하위 명령 전부 `--jobs` 기본값이 **미지정**이어야 한다 (WAN-354 §2).
-
-    리터럴(옛 `default=1`)이면 설정이 그 경로에 **닿지 않는다** — 값을 아무리 덮어도
-    바뀌지 않는 「자리만 있고 배선은 없는」 상태다.
-    """
-    args = build_parser().parse_args(_BACKTEST_SUBCOMMANDS[name])
-    assert args.jobs is None
-
-
-def test_resolve_jobs_arg_follows_settings(monkeypatch: pytest.MonkeyPatch) -> None:
-    """미지정이면 설정 기본값으로 풀고, **출처를 함께** 돌려준다."""
-    monkeypatch.setattr(harness, "get_settings", lambda: Settings(backtest_jobs=2))
-    workers, origin = resolve_jobs_arg(None)
-    assert workers == 2
-    assert "ALPHABLOCK_BACKTEST_JOBS=2" in origin
-
-
-def test_resolve_jobs_arg_explicit_beats_settings(monkeypatch: pytest.MonkeyPatch) -> None:
-    """명시적 `--jobs N`은 설정과 무관하게 이긴다(`backtest.run`과 같은 규약)."""
-    monkeypatch.setattr(harness, "get_settings", lambda: Settings(backtest_jobs=2))
-    workers, origin = resolve_jobs_arg(6)
-    assert workers == 6
-    assert "명시" in origin
-
-
-def test_cli_main_resolves_jobs_and_reports_it(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """`main()`이 **한 곳에서** 풀어 하위 명령에 정수를 넘기고, 쓴 값을 stderr에 남긴다.
-
-    하위 명령마다 각자 풀면 「하나는 설정을 읽고 하나는 리터럴」인 지금 상태가 다시
-    만들어진다. 로그 줄은 서버에서 「설정이 진짜 먹었나」를 사후에 확인하는 근거다
-    (완료 기준 2) — stdout은 표/CSV 전용이라 stderr로 간다.
-    """
-    cli_main = importlib.import_module("cli.main")  # `from cli import main`은 함수를 집는다
-
-    monkeypatch.setattr(harness, "get_settings", lambda: Settings(backtest_jobs=2))
-    seen: list[int] = []
-
-    def _fake(args: argparse.Namespace, settings: object) -> int:
-        seen.append(args.jobs)
-        return 0
-
-    parser = build_parser()
-    real_parse = parser.parse_args
-
-    def _build() -> object:
-        namespace = real_parse(["trades", "--day", "2026-08-17"])
-        namespace.func = _fake
-
-        class _P:
-            def parse_args(self, argv: object = None) -> object:
-                return namespace
-
-        return _P()
-
-    monkeypatch.setattr(cli_main, "build_parser", _build)
-    assert cli_main.main([]) == 0
-    assert seen == [2]
-    assert "병렬 설정: 워커 2개" in capsys.readouterr().err
-
-
-def test_cli_main_leaves_explicit_jobs_alone(monkeypatch: pytest.MonkeyPatch) -> None:
-    """명시적으로 준 값은 `main()`이 덮어쓰지 않는다."""
-    cli_main = importlib.import_module("cli.main")  # `from cli import main`은 함수를 집는다
-
-    monkeypatch.setattr(harness, "get_settings", lambda: Settings(backtest_jobs=2))
-    seen: list[int] = []
-
-    def _record(args: argparse.Namespace, settings: object) -> int:
-        seen.append(args.jobs)
-        return 0
-
-    namespace = build_parser().parse_args(["trades", "--day", "2026-08-17", "--jobs", "5"])
-    namespace.func = _record
-
-    class _P:
-        def parse_args(self, argv: object = None) -> object:
-            return namespace
-
-    monkeypatch.setattr(cli_main, "build_parser", lambda: _P())
-    assert cli_main.main([]) == 0
-    assert seen == [5]
-
-
-def test_commands_without_jobs_are_untouched(monkeypatch: pytest.MonkeyPatch) -> None:
-    """`--jobs`가 없는 하위 명령(`status` 등)에는 아무 속성도 만들지 않는다."""
-    cli_main = importlib.import_module("cli.main")  # `from cli import main`은 함수를 집는다
-
-    namespace = build_parser().parse_args(["status"])
-    namespace.func = lambda args, settings: 0
-
-    class _P:
-        def parse_args(self, argv: object = None) -> object:
-            return namespace
-
-    monkeypatch.setattr(cli_main, "build_parser", lambda: _P())
-    assert cli_main.main([]) == 0
-    assert not hasattr(namespace, "jobs")
 
 
 # --------------------------------------------------------------------------- #
