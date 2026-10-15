@@ -121,6 +121,27 @@ class EngineStateStore:
     매 서브스텝 소비 직후 저장한다 — 저장 주기가 성기면 크래시 후 따라잡기 재생이 이미
     집행한 구간을 다시 집행해 장부·페이퍼 거래가 중복된다(저장은 행 하나 교체라 싸다).
     손상·구버전 스냅샷은 조용히 버리고 None을 반환한다(복원 불가 = 기존 재시작 폐기 경로).
+
+    📌 **내용이 안 바뀐 저장은 건너뛴다(WAN-451 ③)** — 「행 하나 교체라 싸다」는 한 번의
+    값이고 러너는 그걸 시리즈 ~310개 × (서브스텝 + 폴링 끝)마다 커밋했다(분당 600회+, 대부분
+    방금 쓴 것과 같은 내용). 그 쓰기가 WAL 쓰기량의 대부분이었고 2026-10-16 WAL 2.46GB 사고의
+    주원인이다. 그래서 시리즈마다 **마지막으로 쓴 스냅샷을 `saved_ms`를 뺀 직렬화로** 기억하고,
+    같으면 DB를 건드리지 않는다. `saved_ms`는 저장 때마다 바뀌는 벽시계라 비교에 넣으면
+    아무것도 안 건너뛴다.
+
+    * **크래시 안전성은 그대로다** — 건너뛴 저장은 DB에 이미 같은 내용이 있을 때뿐이라 크래시
+      시점에 DB가 담은 복원 상태는 매번 썼을 때와 비트 단위로 같다(`saved_ms` 하나만 다르다 —
+      그 값은 복원에 쓰이지 않는다). 커서(`last_substep_time`)가 나아가면 내용이 바뀌므로 서브스텝
+      저장은 여전히 매 분 쓴다.
+    * ⚠️ **그래서 `saved_ms`의 뜻이 「마지막 저장 호출 시각」에서 「내용이 마지막으로 바뀐 시각」
+      으로 바뀐다.** 지금 이 열을 읽는 코드는 없다.
+    * 기억은 **쓰기가 커밋된 뒤에만** 갱신한다(실패한 쓰기를 「썼다」로 기억하면 다음 같은 내용
+      저장이 건너뛰어져 DB가 영영 옛 상태로 남는다). `delete()`는 기억도 지운다(삭제 뒤 같은
+      내용을 다시 저장하면 반드시 써야 한다). `load()`는 기억을 채우지 않는다 — 복원 뒤 첫 저장은
+      항상 쓴다(안전한 쪽).
+    * ⚠️ 전제: 이 테이블의 작성자는 이 인스턴스 하나다(단일 작성자 = 러너). 러너가 도는 중에
+      밖에서 행을 지우면(예: 러너를 안 멈추고 `paper-reset.sh`) 기억과 DB가 어긋난다 — 그 스크립트는
+      러너 정지를 확인한다.
     """
 
     def __init__(self, db_path: str | Path) -> None:
@@ -130,19 +151,35 @@ class EngineStateStore:
         self._conn = sqlite3.connect(str(path), check_same_thread=False)
         configure_connection(self._conn)
         self._lock = threading.Lock()
+        #: (심볼, TF) → 마지막으로 커밋한 스냅샷의 `saved_ms` 제외 직렬화(내용 비교 키).
+        self._last_written: dict[tuple[str, str], str] = {}
+        #: 실제로 DB에 쓴 횟수 · 내용이 같아 건너뛴 횟수(관측용 — 테스트·진단이 읽는다).
+        self.writes = 0
+        self.skipped = 0
         with self._lock, self._conn:
             self._conn.executescript(_SCHEMA)
 
     def close(self) -> None:
         self._conn.close()
 
-    def save(self, symbol: str, timeframe: str, snapshot: SeriesStateSnapshot) -> None:
-        with self._lock, self._conn:
-            self._conn.execute(
-                "INSERT OR REPLACE INTO live_engine_state (symbol, timeframe, saved_ms,"
-                " state_json) VALUES (?, ?, ?, ?)",
-                (symbol, timeframe, snapshot.saved_ms, snapshot.model_dump_json()),
-            )
+    def save(self, symbol: str, timeframe: str, snapshot: SeriesStateSnapshot) -> bool:
+        """스냅샷을 저장한다 → 실제로 DB에 썼으면 True, 내용이 같아 건너뛰었으면 False."""
+        key = (symbol, timeframe)
+        content = snapshot.model_dump_json(exclude={"saved_ms"})
+        with self._lock:
+            if self._last_written.get(key) == content:
+                self.skipped += 1
+                return False
+            with self._conn:
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO live_engine_state (symbol, timeframe, saved_ms,"
+                    " state_json) VALUES (?, ?, ?, ?)",
+                    (symbol, timeframe, snapshot.saved_ms, snapshot.model_dump_json()),
+                )
+            # 커밋이 끝난 뒤에만 기억한다 — 위에서 예외가 나면 여기까지 오지 않는다.
+            self._last_written[key] = content
+            self.writes += 1
+            return True
 
     def load(self, symbol: str, timeframe: str) -> SeriesStateSnapshot | None:
         row = self._conn.execute(
@@ -167,8 +204,11 @@ class EngineStateStore:
         return [(str(r[0]), str(r[1])) for r in rows]
 
     def delete(self, symbol: str, timeframe: str) -> None:
-        with self._lock, self._conn:
-            self._conn.execute(
-                "DELETE FROM live_engine_state WHERE symbol = ? AND timeframe = ?",
-                (symbol, timeframe),
-            )
+        with self._lock:
+            # 기억을 먼저 지운다 — 삭제가 실패해도 다음 저장은 반드시 쓴다(안전한 쪽).
+            self._last_written.pop((symbol, timeframe), None)
+            with self._conn:
+                self._conn.execute(
+                    "DELETE FROM live_engine_state WHERE symbol = ? AND timeframe = ?",
+                    (symbol, timeframe),
+                )

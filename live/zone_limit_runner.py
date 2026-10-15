@@ -487,7 +487,8 @@ class ZoneLimitPaperRunner:
             self._handle_events(overdue)
             emitted += overdue
         # 벽시계 만료는 서브스텝 밖에서 상태를 바꾼다 — 폴링 끝에 한 번 더
-        # 저장해 스냅샷이 그 변화를 놓치지 않게 한다(WAN-306).
+        # 저장해 스냅샷이 그 변화를 놓치지 않게 한다(WAN-306). 바뀐 게 없는 시리즈는
+        # 저장소가 내용 비교로 DB 쓰기를 건너뛴다(WAN-451 ③ — WAL 쓰기량의 대부분이었다).
         if self._engine_state is not None:
             for symbol, timeframe in self._series:
                 self._save_state(symbol, timeframe)
