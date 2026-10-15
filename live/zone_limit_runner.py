@@ -76,8 +76,16 @@ from config.settings import Settings
 from data.freshness import format_window_gaps, window_gap_summary
 from data.gaps import Gap, find_gaps
 from data.storage import OhlcvStore
+from data.universe import ARM_TIMEFRAMES
+from data.universe_pool import UniverseStore
 from execution.engine import EntryIntent, ExecutionOutcome
-from live.arm_rules import ArmDecision, ArmParams, evaluate_arm_fill, is_time_exit_minute
+from live.arm_rules import (
+    ArmDecision,
+    ArmParams,
+    evaluate_arm_fill,
+    is_time_exit_minute,
+    rotation_decision,
+)
 from live.engine_state import EngineStateStore, SeriesStateSnapshot
 from live.executor import PaperExecutor, TradeReport
 from live.limit_engine import EngineEvent, ReentryEntryRule, ZoneLimitLiveEngine
@@ -134,6 +142,8 @@ class ZoneLimitPaperRunner:
         catchup_max_ms: int = DEFAULT_CATCHUP_MAX_MS,
         tsmom: TsmomRebalancer | None = None,
         arm: ArmParams | None = None,
+        universe: UniverseStore | None = None,
+        price_feed_factory: Callable[[list[str]], PriceFeed] | None = None,
         reuse_loads: bool = True,
         sleep: Callable[[float], None] = time.sleep,
         now_ms: Callable[[], int] = lambda: int(time.time() * 1000),
@@ -155,6 +165,12 @@ class ZoneLimitPaperRunner:
         self._tsmom = tsmom
         #: 스토캐스틱 팔 진입·청산 규칙(WAN-451 ③). None이면 예전과 비트 동일하다.
         self._arm = arm
+        #: 팔의 주간 종목 목록(WAN-451 ③). 주어지면 감시 시리즈를 매 폴링 그 주 목록 × 팔 TF로
+        #: 맞추고, 체결 순간 목록 밖 종목은 진입을 거부한다. None이면 시리즈 고정(예전 그대로).
+        self._universe = universe
+        #: 감시 종목이 바뀌면 틱 피드를 새 종목으로 다시 만든다(주어졌을 때만).
+        self._price_feed_factory = price_feed_factory
+        self._feed_symbols: tuple[str, ...] = ()
         self._notifier = notifier
         #: 옵트인 웹소켓 틱 피드(WAN-246). None이면 확정 1분봉만 소비(예전과 비트 동일).
         self._price_feed = price_feed
@@ -411,6 +427,8 @@ class ZoneLimitPaperRunner:
         """모든 시리즈를 한 번씩 폴링하고 하트비트·상태 스냅샷을 남긴다."""
         cycle_started = self._now_ms()
         emitted: list[EngineEvent] = []
+        if self._universe is not None:
+            self.sync_series(cycle_started)
         self._minute_cache.clear()  # 1분봉 재사용은 한 폴링 안에서만(WAN-451 ④)
         for symbol, timeframe in self._series:
             try:
@@ -465,6 +483,85 @@ class ZoneLimitPaperRunner:
                 ),
             )
         return emitted
+
+    # -- 감시 시리즈 교체 (WAN-451 ③) -----------------------------------------
+
+    def desired_series(self, now_ms: int) -> list[Series]:
+        """지금 감시해야 할 시리즈 = 그 주 목록 × 팔 TF + 포지션·대기 주문이 남은 칸.
+
+        목록에서 빠진 종목도 포지션(손절·시간 청산)이나 대기 주문(체결되면 목록 게이트가 거부한다)이
+        끝날 때까지는 계속 본다 — 정본 `force_close=False`. 그 주 목록이 아직 저장 전이면 가장 최근
+        목록으로 감시한다(진입은 `rotation_decision`이 막는다 — 감시와 진입 판정을 섞지 않는다).
+        """
+        assert self._universe is not None
+        snap = self._universe.at(now_ms)
+        members = sorted(snap.members) if snap is not None else []
+        keep: set[Series] = {(s, tf) for s in members for tf in ARM_TIMEFRAMES}
+        keep |= {(p.symbol, p.timeframe) for p in self._executor.open_positions}
+        keep |= {(o.symbol, o.timeframe) for o in self._engine.book.open_orders}
+        return sorted(keep)
+
+    def sync_series(self, now_ms: int) -> tuple[list[Series], list[Series]]:
+        """감시 시리즈를 `desired_series`로 맞춘다 → (추가, 제거). 바뀐 게 없으면 둘 다 빈 목록."""
+        want = self.desired_series(now_ms)
+        current = set(self._series)
+        added = [k for k in want if k not in current]
+        removed = [k for k in self._series if k not in set(want)]
+        if not added and not removed:
+            return [], []
+        kept_removed: list[Series] = []
+        for key in removed:
+            if not self._engine.drop_series(*key):
+                kept_removed.append(key)  # 대기 주문이 걸려 있다 — 다음 폴링에 다시 본다
+                continue
+            self._last_htf.pop(key, None)
+            self._last_substep.pop(key, None)
+            self._htf_tail_cache.pop(key, None)
+            if self._engine_state is not None:
+                self._engine_state.delete(*key)
+        removed = [k for k in removed if k not in kept_removed]
+        self._series = sorted((set(self._series) - set(removed)) | set(added))
+        self._series_by_symbol = {}
+        for sym, tf in self._series:
+            self._series_by_symbol.setdefault(sym, []).append((sym, tf))
+        _logger.info(
+            "감시 시리즈 교체(WAN-451): +%d · −%d → %d개 (%d종목)",
+            len(added),
+            len(removed),
+            len(self._series),
+            len(self._series_by_symbol),
+        )
+        self.refresh_price_feed()
+        return added, removed
+
+    def refresh_price_feed(self) -> None:
+        """감시 종목이 바뀌었으면 틱 피드를 새 종목으로 다시 만든다(팩토리가 있을 때만)."""
+        if self._price_feed_factory is None:
+            return
+        symbols = tuple(sorted(self._series_by_symbol))
+        if symbols == self._feed_symbols:
+            return
+        if self._price_feed is not None:
+            self._price_feed.close()
+            self._price_feed = None
+        self._feed_symbols = symbols
+        if symbols:
+            self._price_feed = self._price_feed_factory(list(symbols))
+
+    def close(self) -> None:
+        """러너가 만든 자원(틱 피드)을 닫는다."""
+        if self._price_feed is not None and self._price_feed_factory is not None:
+            self._price_feed.close()
+            self._price_feed = None
+
+    def _rotation_gate(self, symbol: str, entry_ms: int) -> ArmDecision | None:
+        """체결 순간 목록 게이트 — 목록이 없으면(팔 꺼짐·고정 시리즈) None."""
+        if self._universe is None or self._arm is None:
+            return None
+        snap = self._universe.at(entry_ms)
+        if snap is None:
+            return rotation_decision(None, frozenset(), symbol, entry_ms)
+        return rotation_decision(snap.rebalance_ms, snap.members, symbol, entry_ms)
 
     def _drain_ticks(self) -> list[EngineEvent]:
         """옵트인 틱 피드에 쌓인 실시간 체결가를 대기 주문에 반영한다(WAN-246).
@@ -592,7 +689,8 @@ class ZoneLimitPaperRunner:
         report = None
         disposition_done = False
         try:
-            decision = self._arm_decision(
+            # 목록 게이트가 먼저다(정본은 목록 밖 후보를 처음부터 없는 것으로 친다, WAN-444).
+            decision = self._rotation_gate(fill.symbol, fill.time) or self._arm_decision(
                 fill.symbol, fill.timeframe, fill.price, fill.stop_price, fill.time
             )
             if decision is not None and not decision.accepted:
@@ -1043,6 +1141,11 @@ def arm_settings_problems(settings: Settings) -> list[str]:
         )
     if not settings.live_zone_limit_enabled:
         problems.append("팔은 오더블록 시리즈 위에서 돈다: ALPHABLOCK_LIVE_ZONE_LIMIT_ENABLED=true")
+    if not settings.universe_enabled:
+        problems.append(
+            "팔은 매주 종목 목록으로 감시한다: ALPHABLOCK_UNIVERSE_ENABLED=true"
+            " (수집기가 목록을 만들고 그 종목을 모은다)"
+        )
     return problems
 
 
@@ -1110,11 +1213,28 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
     # 재시작 영속화 저장소(WAN-306) — 장부와 같은 DB. 러너가 매 서브스텝 저장하고
     # 기동 시 복원 + 공백 따라잡기 재생한다(모듈 독스트링 §재시작 정책).
     engine_state = EngineStateStore(settings.db_path)
+    universe: UniverseStore | None = None
     try:
         now = int(time.time() * 1000)
         session_id = journal.start_session(now_ms=now)
 
         series = build_series(settings) if settings.live_zone_limit_enabled else []
+        if settings.live_arm_enabled:
+            # 팔(WAN-451 ③): 고정 격자 대신 그 주 목록 × 팔 TF. 기동 때는 스냅샷이 남은 칸도 넣어
+            # 목록 밖 칸의 대기 주문까지 복원한다 — 첫 폴링의 `sync_series`가 정리한다.
+            universe = UniverseStore(settings.db_path)
+            snap = universe.at(now)
+            members = sorted(snap.members) if snap is not None else []
+            series = sorted(
+                {(sym, tf) for sym in members for tf in ARM_TIMEFRAMES}
+                | set(engine_state.series_keys())
+                | {(p.symbol, p.timeframe) for p in executor.open_positions}
+            )
+            if snap is None:
+                _logger.warning(
+                    "팔 종목 목록이 아직 없습니다 — 수집기(ALPHABLOCK_UNIVERSE_ENABLED)가 목록을"
+                    " 만들면 다음 폴링부터 감시합니다"
+                )
         if not settings.live_zone_limit_enabled:
             _logger.info("옛 오더블록 페이퍼 꺼짐(WAN-451 ⑦) — 시리즈 0개, 대기 주문 없음")
         # 매매 이벤트 알림(WAN-189, 페이퍼 한정). 텔레그램 미설정이면 build_telegram_client가
@@ -1162,7 +1282,18 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
         # 옵트인 웹소켓 틱 피드(WAN-246, 페이퍼 한정 · 공개 체결 스트림만). 기본 꺼짐이면
         # None → 러너는 확정 1분봉만 소비(예전과 비트 동일). 켜면 심볼별 실시간 체결가로
         # 대기 주문 체결을 앞당긴다.
-        if settings.live_tick_feed_enabled and series:
+        feed_factory: Callable[[list[str]], PriceFeed] | None = None
+        if settings.live_tick_feed_enabled and universe is not None:
+            from live.price_feed import CcxtProTickFeed
+
+            def _start_feed(symbols: list[str]) -> PriceFeed:
+                feed = CcxtProTickFeed(symbols, exchange_id=settings.live_tick_feed_exchange)
+                feed.start()
+                _logger.info("웹소켓 틱 피드(WAN-246): %d 심볼로 (다시) 시작", len(symbols))
+                return feed
+
+            feed_factory = _start_feed
+        elif settings.live_tick_feed_enabled and series:
             from live.price_feed import CcxtProTickFeed
 
             symbols = sorted({sym for sym, _ in series})
@@ -1208,7 +1339,7 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
             arm_params = ArmParams()
             _logger.info(
                 "스토캐스틱 팔 켜짐(WAN-451): 하한 %.0f%% · %%K < %.0f · 손절 ×%.0f · ts%d · "
-                "폭락 ×%.1f · 서킷브레이커 꺼짐 (⚠️ 몰림 규칙·종목 교체는 아직 없음)",
+                "폭락 ×%.1f · 서킷브레이커 꺼짐 · 매주 종목 목록 (⚠️ 몰림 규칙은 아직 없음)",
                 arm_params.min_stop_width * 100,
                 arm_params.k_threshold,
                 arm_params.stop_multiple,
@@ -1233,6 +1364,8 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
             catchup_max_ms=int(settings.live_catchup_max_hours * 3_600_000),
             tsmom=tsmom_rebalancer,
             arm=arm_params,
+            universe=universe,
+            price_feed_factory=feed_factory,
         )
         # 재시작 복원(WAN-306): 이전 세션의 엔진 상태(전이 맥락·탭 표식·대기 주문·재진입
         # 재무장)를 되살린다 — 복원된 주문은 아래 재평가/폐기에서 제외한다(따라잡기 재생이
@@ -1266,10 +1399,18 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
             book.leverage_multiple,
             settings.live_trading,
         )
-        runner.run(max_polls=1 if once else None)
+        if universe is not None:
+            runner.sync_series(now)  # 복원 뒤 목록 밖 칸 정리
+            runner.refresh_price_feed()
+        try:
+            runner.run(max_polls=1 if once else None)
+        finally:
+            runner.close()
     finally:
         if price_feed is not None:
             price_feed.close()
+        if universe is not None:
+            universe.close()
         engine_state.close()
         store.close()
         journal.close()

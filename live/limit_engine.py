@@ -510,6 +510,17 @@ class ZoneLimitLiveEngine:
             )
         return events
 
+    def drop_series(self, symbol: str, timeframe: str) -> bool:
+        """감시에서 빠진 시리즈의 상태를 버린다 — 대기 주문이 걸려 있으면 버리지 않는다(False).
+
+        스토캐스틱 팔(WAN-451 ③)은 매주 종목이 바뀐다. 빠진 칸을 계속 들고 있으면 존 대장·시딩이
+        쌓이기만 한다. 대기 주문이 있는 칸은 그 주문이 끝날 때까지 러너가 계속 폴링한다.
+        """
+        if self.book.pending(symbol, timeframe) is not None:
+            return False
+        self._series.pop((symbol, timeframe), None)
+        return True
+
     # -- 내부 ----------------------------------------------------------------
 
     def _state(self, symbol: str, timeframe: str) -> _SeriesState:

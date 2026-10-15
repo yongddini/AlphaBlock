@@ -146,6 +146,13 @@ class EngineStateStore:
             )
             return None
 
+    def series_keys(self) -> list[tuple[str, str]]:
+        """스냅샷이 남아 있는 (심볼, TF) — 재시작 때 감시 목록 밖 시리즈도 복원하려고 쓴다."""
+        rows = self._conn.execute(
+            "SELECT symbol, timeframe FROM live_engine_state ORDER BY symbol, timeframe"
+        ).fetchall()
+        return [(str(r[0]), str(r[1])) for r in rows]
+
     def delete(self, symbol: str, timeframe: str) -> None:
         with self._lock, self._conn:
             self._conn.execute(

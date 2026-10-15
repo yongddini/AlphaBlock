@@ -22,8 +22,11 @@
   종가**에 나간다(테이커, WAN-436 `hold_end`). 봉 경계는 `floor(t / tf)` — **epoch 정렬**이라 1w는
   목요일 경계다(정본 그대로 · 결정 ③ 가). 손절이 먼저다.
 
+0. **종목 목록**(`rotation_decision`) — 진입 시각이 속한 주의 31종목 안에 있어야 한다(WAN-444 ·
+   `force_close=False`: 빠져도 보유 포지션은 그대로 두고 새 진입만 막는다). 위 넷보다 먼저 본다.
+
 ⚠️ **아직 없는 것**(다음 단계): 몰림 규칙(직전 24h 신호 수 · BTC 4h 게이트 · 예산 배율 — 「진입 안 한
-신호까지 세는」 추적기가 필요하다) · 매주 종목 교체. 이 모듈만 켜면 **정본보다 덜 거르는** 팔이다.
+신호까지 세는」 추적기가 필요하다). 이 모듈만 켜면 **정본보다 덜 거르는** 팔이다.
 """
 
 from __future__ import annotations
@@ -40,7 +43,11 @@ REJECT_CODE_ARM_STOP_FLOOR = "arm_stop_floor"
 REJECT_CODE_ARM_STOCH = "arm_stoch"
 REJECT_CODE_ARM_STOCH_UNKNOWN = "arm_stoch_unknown"
 REJECT_CODE_ARM_STOP_BELOW_ZERO = "arm_stop_below_zero"
+REJECT_CODE_ARM_ROTATION = "arm_rotation"
+REJECT_CODE_ARM_ROTATION_UNKNOWN = "arm_rotation_unknown"
 ARM_REJECT_CODES: tuple[str, ...] = (
+    REJECT_CODE_ARM_ROTATION,
+    REJECT_CODE_ARM_ROTATION_UNKNOWN,
     REJECT_CODE_ARM_STOP_FLOOR,
     REJECT_CODE_ARM_STOCH,
     REJECT_CODE_ARM_STOCH_UNKNOWN,
@@ -163,6 +170,30 @@ def evaluate_arm_fill(
         k_value=k,
         btc_24h=btc,
     )
+
+
+def rotation_decision(
+    rebalance_ms: int | None, members: frozenset[str], symbol: str, entry_ms: int
+) -> ArmDecision | None:
+    """종목 목록 게이트(정본 `apply_rotation` · `force_close=False`) — 통과면 None.
+
+    진입 시각이 속한 주의 목록(`rebalance_at(entry_ms)`에 저장된 목록)에 그 종목이 있어야 한다.
+    백테스트는 이 걸러내기를 **다른 규칙보다 먼저** 한다(목록 밖 후보는 처음부터 없는 것으로 친다).
+
+    그 주 목록이 아직 저장되지 않았으면(월요일 00:00 UTC 직후 몇 분 · 수집기 정지) 지난주 목록으로
+    대신 판정하지 않고 거부한다 — 정본은 그 시각에 새 목록을 쓴다(지어내지 않는다).
+    """
+    from data.universe import rebalance_at
+
+    if rebalance_ms is None or rebalance_ms != rebalance_at(entry_ms):
+        return ArmDecision(
+            False,
+            REJECT_CODE_ARM_ROTATION_UNKNOWN,
+            "이번 주 종목 목록이 아직 없음(월요일 계산 전 · 수집기 확인)",
+        )
+    if symbol not in members:
+        return ArmDecision(False, REJECT_CODE_ARM_ROTATION, "이번 주 종목 목록 밖(새 진입만 막음)")
+    return None
 
 
 def time_exit_boundary(entry_ms: int, tf_ms: int, hold_bars: int) -> int:

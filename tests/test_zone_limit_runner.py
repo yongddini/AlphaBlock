@@ -334,6 +334,9 @@ def test_run_zone_limit_runner_wires_reentry_rule_from_settings(
         def run(self, *, max_polls: int | None = None) -> None:
             pass
 
+        def close(self) -> None:
+            pass  # WAN-451: 진입점이 끝날 때 틱 피드 등 러너 자원을 닫는다.
+
     monkeypatch.setattr(zlr, "ZoneLimitLiveEngine", _CaptureEngine)
     monkeypatch.setattr(zlr, "ZoneLimitPaperRunner", _NoRunRunner)
 
