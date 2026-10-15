@@ -1696,6 +1696,22 @@ def cmd_universe(args: argparse.Namespace, settings: Settings) -> int:
     return 0 if snap is not None and snap.rebalance_ms == want else 1
 
 
+def cmd_arm_check(args: argparse.Namespace, settings: Settings) -> int:
+    """`alphablock arm-check` — 팔을 켜기 전 점검(WAN-451 ③ · 읽기 전용).
+
+    설정 · 이번 주 목록 · 그 주 종목 데이터(최신 · 2년 이력) · 남은 장부를 본다. 하나라도 막히면
+    종료 코드 1이다. 런북: docs/ops/wan451-arm-paper.md.
+    """
+    import time as _time
+
+    from live.arm_check import render, run_check
+
+    db_path = args.db if args.db is not None else settings.db_path
+    check = run_check(settings, db_path, now_ms=int(_time.time() * 1000))
+    print(render(check))
+    return 0 if check.ready else 1
+
+
 def cmd_doctor(args: argparse.Namespace, settings: Settings) -> int:
     """`alphablock doctor` — DB 무결성·위생 점검(WAN-194 §2·§4·§5).
 
@@ -2253,6 +2269,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--extra", type=int, default=5, help="목록 밖 다음 순위를 몇 개 더 보일지(기본 5)"
     )
     p_universe.set_defaults(func=cmd_universe)
+
+    p_arm_check = sub.add_parser(
+        "arm-check",
+        help="팔을 켜기 전 점검 — 설정 · 이번 주 목록 · 데이터 · 장부(WAN-451)",
+    )
+    p_arm_check.add_argument("--db", default=None, help="DB 경로(기본: 설정의 db_path)")
+    p_arm_check.set_defaults(func=cmd_arm_check)
 
     p_trades = sub.add_parser(
         "trades",
