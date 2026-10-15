@@ -392,3 +392,48 @@ def test_new_pairs_start_at_the_history_depth(tmp_path: Path) -> None:
     assert since["1m"] == now - 1 * DAY  # 1분봉은 룩백 그대로
     store.close()
     universe.close()
+
+
+def test_catch_up_marks_progress_per_pair_and_symbol(tmp_path: Path) -> None:
+    """기동 따라잡기는 웹소켓 접속 전이라 메시지가 없다 — 쌍·종목마다 진행을 찍어야 워치독이
+    「멎었다」고 죽이지 않는다(2026-10-15 서버: 279쌍 × 0.5초 > 300초 → 재시작 루프)."""
+    arm, store, universe = _arm(tmp_path, ["X", "Y"])
+    now = arm._now_ms()
+    arm._exchange = _Ex()
+    arm._now_ms = lambda: now
+    arm._pause = 0
+    arm.adopt(arm.compute())
+    pairs = arm.arm_pairs()
+    marks: list[int] = []
+    arm.catch_up(lambda: marks.append(1))
+    # 쌍 하나마다 + 생성 TF를 접는 종목 하나마다(요청을 건너뛴 쌍도 센다)
+    assert len(marks) == len(pairs) + len(arm.plan.arm_symbols)
+    store.close()
+    universe.close()
+
+
+def test_collector_passes_watchdog_progress_to_startup_catch_up() -> None:
+    import inspect
+
+    src = inspect.getsource(collector)
+    assert "asyncio.to_thread(arm.catch_up, tracker.mark)" in src
+
+
+def test_backfill_older_reads_only_the_missing_front(tmp_path: Path) -> None:
+    """앞 구간을 메울 때 원천을 그 구간까지만 읽는다(끝까지 읽으면 2년치를 매번 메모리에 올린다)."""
+    with OhlcvStore(tmp_path / "d.db") as store:
+        base = 1000 * DAY
+        _hours(store, "X", base, 24 * 30)
+        build_derived(store, "X", "3h")
+        _hours(store, "X", base - 3 * DAY, 24 * 3)  # 앞으로 3일 늘었다
+        calls: list[tuple[int | None, int | None]] = []
+        real = store.load
+
+        def spy(symbol: str, timeframe: str, **kw: Any) -> Any:
+            calls.append((kw.get("start_ms"), kw.get("end_ms")))
+            return real(symbol, timeframe, **kw)
+
+        store.load = spy  # type: ignore[method-assign]
+        build_derived(store, "X", "3h", backfill_older=True)
+        assert store.first_open_time("X", "3h") == base - 3 * DAY
+        assert (base - 3 * DAY, base) in calls  # 앞 구간은 [첫 원천, 저장된 첫 3h)만

@@ -105,8 +105,12 @@ def backfill_pairs(
     page_pause_seconds: float = 0.0,
     sleeper: Callable[[float], None] = time.sleep,
     now_ms: Callable[[], int] = lambda: int(time.time() * 1000),
+    progress: Callable[[], None] | None = None,
 ) -> int:
     """(심볼, TF)마다 저장된 마지막 봉 다음부터(없으면 룩백부터) 받는다 — 요청 사이에 간격을 둔다.
+
+    `progress`는 쌍 하나를 시작할 때마다 부른다 — 수집기 워치독의 진행 표시(WAN-451 · 아래
+    `ArmCollection.catch_up` 참고). 안 주면 예전과 같다.
 
     팔 종목은 처음 들어오면 TF 9개 × 몇 쪽이라 한꺼번에 쏘면 바이낸스 가중치 한도(분당 2400)를
     넘는다. 기본 격자(`backfill_all`)는 예전 그대로 두고, 팔 쪽만 이 경로로 천천히 받는다.
@@ -114,6 +118,8 @@ def backfill_pairs(
     """
     total = 0
     for i, (symbol, timeframe) in enumerate(pairs):
+        if progress is not None:
+            progress()
         tf_ms = timeframe_to_ms(timeframe)
         last = store.last_open_time(symbol, timeframe)
         since = (
@@ -193,7 +199,13 @@ class ArmCollection:
         base = self._lookback_days(timeframe)
         return base if timeframe == "1m" else max(base, self._history_days)
 
-    def fill(self, pairs: Sequence[Pair], arm_symbols: Iterable[str]) -> int:
+    def fill(
+        self,
+        pairs: Sequence[Pair],
+        arm_symbols: Iterable[str],
+        *,
+        progress: Callable[[], None] | None = None,
+    ) -> int:
         """주어진 쌍을 천천히 채우고 팔 종목의 생성 TF(3h)를 이어 만든다(동기 · 스레드에서 돈다).
 
         저장분이 없는 쌍은 처음부터 이력 깊이(`history_days`)만큼 받는다 — 새로 들어온 종목도
@@ -207,8 +219,9 @@ class ArmCollection:
             pause_seconds=self._pause,
             page_pause_seconds=self._page_pause,
             now_ms=self._now_ms,
+            progress=progress,
         )
-        n += build_all_derived(self._store, sorted(set(arm_symbols)))
+        n += build_all_derived(self._store, sorted(set(arm_symbols)), progress=progress)
         return n
 
     def extend_history(self) -> int:
@@ -250,9 +263,15 @@ class ArmCollection:
             logger.info("팔 종목 이력 확장: %d봉(목표 %d일)", total, self._history_days)
         return total
 
-    def catch_up(self) -> int:
-        """지금 계획의 팔 쪽 전부를 따라잡는다(접속 직후 · 기동 직후)."""
-        return self.fill(self.arm_pairs(), self.plan.arm_symbols)
+    def catch_up(self, progress: Callable[[], None] | None = None) -> int:
+        """지금 계획의 팔 쪽 전부를 따라잡는다(접속 직후 · 기동 직후).
+
+        🚨 기동 때는 **웹소켓 접속 전**에 돌아 그동안 메시지가 없다 — 279쌍 × 0.5초 간격이라
+        서버에서 5분이 넘는다. `progress`(수집기 워치독의 진행 표시)를 쌍마다 부르지 않으면
+        워치독이 300초에 「멎었다」고 프로세스를 죽이고, 재시작하면 같은 자리에서 또 죽는다
+        (2026-10-15 서버 실측: 21:31부터 5~6분 간격 재시작 루프 · 스트림이 한 번도 안 붙음).
+        """
+        return self.fill(self.arm_pairs(), self.plan.arm_symbols, progress=progress)
 
     def adopt(self, plan: CollectionPlan) -> tuple[list[str], list[str]]:
         """새 계획으로 바꾼다 — (들어온 종목, 빠진 종목). 새 쌍 채우기는 호출부가 먼저 한다."""
