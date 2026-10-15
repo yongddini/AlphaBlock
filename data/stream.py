@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator, Callable, Iterable, Sequence
@@ -46,13 +47,19 @@ def build_symbol_map(symbols: Iterable[str]) -> dict[str, str]:
     return {to_ws_symbol(s).upper(): s for s in symbols}
 
 
+#: 연결 하나에 싣는 스트림 수 상한(WAN-451 ③). 바이낸스 선물 문서상 상한은 1024지만 결합 경로가
+#: URL 쿼리에 실리므로 넉넉히 낮춘다 — 팔 종목이 붙으면 300개 안팎이라 연결 2개로 나뉜다.
+MAX_STREAMS_PER_CONNECTION = 200
+
+
 def build_stream_path(symbols: Sequence[str], timeframes: Sequence[str]) -> str:
     """결합 스트림 경로(`/stream?streams=...`)를 만든다."""
-    streams = [
-        f"{to_ws_symbol(symbol)}@kline_{timeframe}"
-        for symbol in symbols
-        for timeframe in timeframes
-    ]
+    return build_pair_stream_path([(s, tf) for s in symbols for tf in timeframes])
+
+
+def build_pair_stream_path(pairs: Sequence[tuple[str, str]]) -> str:
+    """(심볼, TF) 목록의 결합 스트림 경로 — 종목마다 TF가 다를 때(WAN-451 ③)."""
+    streams = [f"{to_ws_symbol(symbol)}@kline_{timeframe}" for symbol, timeframe in pairs]
     return "/stream?streams=" + "/".join(streams)
 
 
@@ -167,10 +174,87 @@ async def stream_klines(
     「접속 이후 확정 = 스트림」 + 「호출 시각 이전 확정 = 따라잡기」의 합집합이 전
     구간을 덮는다(접속 전에 돌리면 그 사이에 닫힌 봉이 다시 빠진다).
     """
-    url = ws_base + build_stream_path(symbols, timeframes)
-    symbol_map = build_symbol_map(symbols)
-    logger.info("웹소켓 접속: %d 심볼 × %d 타임프레임", len(symbols), len(timeframes))
+    await stream_kline_pairs(
+        store,
+        [(s, tf) for s in symbols for tf in timeframes],
+        ws_base=ws_base,
+        only_closed=only_closed,
+        on_candle=on_candle,
+        heartbeat=heartbeat,
+        idle_timeout_seconds=idle_timeout_seconds,
+        on_connect=on_connect,
+    )
 
+
+async def stream_kline_pairs(
+    store: OhlcvStore,
+    pairs: Sequence[tuple[str, str]],
+    *,
+    ws_base: str = FUTURES_WS_BASE,
+    only_closed: bool = True,
+    on_candle: Callable[[Candle], None] | None = None,
+    heartbeat: Callable[[], None] | None = None,
+    idle_timeout_seconds: float | None = None,
+    on_connect: Callable[[], None] | None = None,
+    max_streams_per_connection: int = MAX_STREAMS_PER_CONNECTION,
+) -> None:
+    """(심볼, TF) 목록을 연결 여러 개로 나눠 구독한다(WAN-451 ③ — 종목마다 TF가 다르다).
+
+    연결마다 `stream_klines`와 같은 소비 규약이다. 한 연결이 끊기거나 멎으면 **나머지도 함께
+    취소**하고 예외를 올린다(`TaskGroup`) — 상위 재접속 루프가 전부 다시 붙인다(반쪽만 살아 있는
+    상태를 남기지 않는다). `on_connect`는 연결마다 불린다(따라잡기 예약은 중복을 스스로 거른다).
+    """
+    chunks = [
+        list(pairs[i : i + max_streams_per_connection])
+        for i in range(0, len(pairs), max_streams_per_connection)
+    ]
+    logger.info(
+        "웹소켓 접속: %d 심볼 · 스트림 %d개 · 연결 %d개",
+        len({s for s, _ in pairs}),
+        len(pairs),
+        len(chunks),
+    )
+    if len(chunks) == 1:
+        await _stream_connection(
+            store,
+            chunks[0],
+            ws_base=ws_base,
+            only_closed=only_closed,
+            on_candle=on_candle,
+            heartbeat=heartbeat,
+            idle_timeout_seconds=idle_timeout_seconds,
+            on_connect=on_connect,
+        )
+        return
+    async with asyncio.TaskGroup() as group:
+        for chunk in chunks:
+            group.create_task(
+                _stream_connection(
+                    store,
+                    chunk,
+                    ws_base=ws_base,
+                    only_closed=only_closed,
+                    on_candle=on_candle,
+                    heartbeat=heartbeat,
+                    idle_timeout_seconds=idle_timeout_seconds,
+                    on_connect=on_connect,
+                )
+            )
+
+
+async def _stream_connection(
+    store: OhlcvStore,
+    pairs: Sequence[tuple[str, str]],
+    *,
+    ws_base: str,
+    only_closed: bool,
+    on_candle: Callable[[Candle], None] | None,
+    heartbeat: Callable[[], None] | None,
+    idle_timeout_seconds: float | None,
+    on_connect: Callable[[], None] | None,
+) -> None:
+    url = ws_base + build_pair_stream_path(pairs)
+    symbol_map = build_symbol_map(sorted({s for s, _ in pairs}))
     async with connect(url) as ws:
         if on_connect is not None:
             on_connect()

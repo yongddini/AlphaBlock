@@ -16,6 +16,7 @@ from common.telegram import build_telegram_client
 from common.timefmt import kst_log_format, use_kst_logging
 from config.settings import Settings, get_settings
 from data.backfill import FetchOHLCV, backfill_all
+from data.collection_plan import ArmCollection, CollectionPlan
 from data.exchange import create_exchange
 from data.funding import (
     FundingRateSource,
@@ -25,7 +26,8 @@ from data.funding import (
 )
 from data.repair import RepairStateStore, alert_on_failure, repair_all
 from data.storage import OhlcvStore
-from data.stream import stream_klines
+from data.stream import stream_kline_pairs, stream_klines
+from data.universe_pool import UniverseStore
 from data.watchdog import (
     HeartbeatWatchdog,
     ProgressTracker,
@@ -82,10 +84,15 @@ class TailCatchup:
         exchange: FetchOHLCV,
         store: OhlcvStore,
         settings: Settings,
+        *,
+        extra: Callable[[], int] | None = None,
     ) -> None:
         self._exchange = exchange
         self._store = store
         self._settings = settings
+        #: 기본 격자 뒤에 이어 도는 따라잡기(WAN-451 ③ — 팔 종목 쌍 · 3h 생성).
+        #: None이면 예전 그대로.
+        self._extra = extra
         self._tasks: set[asyncio.Task[None]] = set()
 
     def schedule(self) -> None:
@@ -113,6 +120,8 @@ class TailCatchup:
                 settings=self._settings,
             )
             filled = sum(results.values())
+            if self._extra is not None:
+                filled += await asyncio.to_thread(self._extra)
             if filled:
                 logger.info(
                     "접속 직후 꼬리 따라잡기: %d봉 채움(스트림이 주지 않는 접속 전 확정봉)",
@@ -160,7 +169,7 @@ def report_universe_task_exit(task: asyncio.Task[None]) -> None:
 
 async def _run_universe(settings: Settings, store: OhlcvStore) -> None:
     """후보 풀 일봉 + 매주 목록 루프(WAN-451 ③). 거래소 인스턴스는 따로 만든다(스레드 공유 회피)."""
-    from data.universe_pool import UniverseStore, run_universe_loop
+    from data.universe_pool import run_universe_loop
 
     telegram = build_telegram_client(settings)
 
@@ -181,6 +190,80 @@ async def _run_universe(settings: Settings, store: OhlcvStore) -> None:
         )
     finally:
         universe.close()
+
+
+def _build_arm_collection(settings: Settings, store: OhlcvStore) -> ArmCollection:
+    """팔 수집 관리 객체 — 거래소 인스턴스는 따로 만든다(스레드에서 기본 격자와 겹쳐 돈다)."""
+    return ArmCollection(
+        exchange=create_exchange(settings),
+        store=store,
+        universe=UniverseStore(settings.db_path),
+        db_path=settings.db_path,
+        base_symbols=settings.symbols,
+        base_timeframes=settings.timeframes,
+        lookback_days=settings.lookback_days_for,
+        pause_seconds=settings.universe_request_interval_seconds,
+    )
+
+
+async def _stream_arm_plan(
+    store: OhlcvStore,
+    arm: ArmCollection,
+    *,
+    heartbeat: Callable[[], None],
+    idle_timeout_seconds: float | None,
+    on_connect: Callable[[], None],
+    check_seconds: float,
+) -> None:
+    """지금 계획으로 스트림을 돌리다 계획이 바뀌면 새 쌍을 채우고 다시 붙는다(WAN-451 ③).
+
+    계획 교체는 오류가 아니다 — 복구 루프(`run_with_recovery`)로 돌려보내지 않고 여기서 다시
+    붙는다(복구 알림이 매주 울리지 않게). 스트림이 끊기거나 멎으면 예외를 그대로 올린다.
+    """
+    while True:
+        stream = asyncio.create_task(
+            stream_kline_pairs(
+                store,
+                arm.plan.pairs(),
+                heartbeat=heartbeat,
+                idle_timeout_seconds=idle_timeout_seconds,
+                on_connect=on_connect,
+                on_candle=arm.on_candle,
+            )
+        )
+        watch = asyncio.create_task(_wait_plan_change(arm, check_seconds))
+        done, _ = await asyncio.wait({stream, watch}, return_when=asyncio.FIRST_COMPLETED)
+        if stream in done:
+            watch.cancel()
+            await asyncio.gather(watch, return_exceptions=True)
+            stream.result()  # 예외면 그대로 올린다(복구 루프가 다시 붙인다)
+            return
+        new_plan = watch.result()
+        new_pairs = new_plan.new_pairs(arm.plan)
+        filled = await asyncio.to_thread(arm.fill, new_pairs, new_plan.arm_symbols)
+        added, removed = arm.adopt(new_plan)
+        logger.info(
+            "팔 수집 종목 교체: 들어옴 %s · 빠짐 %s · 새 쌍 %d개 백필 %d봉 — 웹소켓 재접속",
+            ",".join(added) or "없음",
+            ",".join(removed) or "없음",
+            len(new_pairs),
+            filled,
+        )
+        stream.cancel()
+        await asyncio.gather(stream, return_exceptions=True)
+
+
+async def _wait_plan_change(arm: ArmCollection, check_seconds: float) -> CollectionPlan:
+    """계획이 바뀔 때까지 주기적으로 다시 계산한다(바뀐 계획을 돌려준다)."""
+    while True:
+        await asyncio.sleep(check_seconds)
+        try:
+            plan = await asyncio.to_thread(arm.compute)
+        except Exception:  # noqa: BLE001 — 다음 주기에 다시 본다
+            logger.exception("팔 수집 계획 계산 실패(다음 주기에 다시)")
+            continue
+        if plan.pairs() != arm.plan.pairs():
+            return plan
 
 
 async def _backfill_funding(settings: Settings, exchange: FundingRateSource) -> None:
@@ -337,13 +420,39 @@ async def run_collector(
                 )
                 watchdog.start()
 
+            # 팔 종목 수집(WAN-451 ③): 그 주 목록 + 보유 종목을 1분봉·전 TF로. 목록 기능이
+            # 꺼져 있으면 None이고 아래는 예전 경로 그대로다.
+            arm = _build_arm_collection(settings, store) if settings.universe_enabled else None
+            if arm is not None:
+                plan = arm.compute()
+                arm.adopt(plan)
+                filled = await asyncio.to_thread(arm.catch_up)
+                logger.info(
+                    "팔 종목 수집 계획: 팔 %d종목 · 스트림 %d개 · 기동 백필 %d봉",
+                    len(plan.arm_symbols),
+                    len(plan.pairs()),
+                    filled,
+                )
+
             # 접속 직후 꼬리 따라잡기(WAN-314) — 기동 백필~접속 사이·재접속 공백에
             # 닫힌 봉은 스트림이 다시 주지 않으므로 매 접속마다 REST로 메운다.
-            catchup = TailCatchup(exchange, store, settings)
+            catchup = TailCatchup(
+                exchange, store, settings, extra=arm.catch_up if arm is not None else None
+            )
 
             async def _stream_once() -> None:
                 # 한 번의 접속·소비. 유휴 타임아웃을 걸어(WAN-173 (1)) half-open stall을
                 # StreamStalled 예외로 바꾼다 — run_with_recovery가 잡아 재접속한다.
+                if arm is not None:
+                    await _stream_arm_plan(
+                        store,
+                        arm,
+                        heartbeat=_beat,
+                        idle_timeout_seconds=settings.collector_stream_idle_timeout_seconds,
+                        on_connect=catchup.schedule,
+                        check_seconds=settings.universe_plan_check_seconds,
+                    )
+                    return
                 await stream_klines(
                     store,
                     settings.symbols,
