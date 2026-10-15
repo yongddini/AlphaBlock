@@ -1,4 +1,4 @@
-"""팔 몰림 규칙(WAN-451 ③) — 그림자 주문 · 신호 장부 · 정본 판정 함수와 같은 값."""
+"""팔 몰림 규칙(WAN-451 ③) — 탭별 주문의 체결 · 신호 장부 · 정본 판정 함수와 같은 값."""
 
 from __future__ import annotations
 
@@ -90,7 +90,7 @@ def test_store_is_idempotent_and_excludes_twin_and_uncounted() -> None:
     assert len(store.rows(0, 10 * _M)) == 3
 
 
-# ------------------------------------------------------------------ 그림자 주문
+# ------------------------------------------------------------------ 탭별 주문의 체결 = 신호
 
 
 def _zone(start: int, top: float = 99.5, bottom: float = 90.0) -> OrderBlock:
@@ -106,84 +106,78 @@ def _zone(start: int, top: float = 99.5, bottom: float = 90.0) -> OrderBlock:
     )
 
 
-def _shadow_engine(
-    monkeypatch: pytest.MonkeyPatch, zones: list[OrderBlock], *, shadows: bool = True
-) -> ZoneLimitLiveEngine:
+def _arm_engine(monkeypatch: pytest.MonkeyPatch, zones: list[OrderBlock]) -> ZoneLimitLiveEngine:
     _install_stub_detector(monkeypatch, zones)
-    engine = ZoneLimitLiveEngine(params=_params(), track_shadows=shadows)
+    engine = ZoneLimitLiveEngine(params=_params())
     engine.on_htf_bars(_SYMBOL, _TF, _htf_df(closes=_DESC_CLOSES))
     return engine
 
 
-def test_every_tap_gets_a_shadow_even_when_the_slot_is_busy(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """두 존을 같이 탭 — 진짜 주문은 슬롯이 하나라 하나뿐, 그림자는 둘."""
-    engine = _shadow_engine(monkeypatch, [_zone(0), _zone(-_H, top=99.6)])
+def test_every_tap_fill_carries_its_zone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """두 존을 같이 탭 — 주문 둘, 둘 다 닿으면 체결 둘이고 각 체결에 제 존이 실린다.
+
+    몰림 규칙은 「우리가 들어갔는지와 무관하게」 팔 후보 **전부**의 체결을 세고, 진입하려는
+    체결과 같은 존(쌍둥이)은 「다른 신호」에서 뺀다 — 그래서 체결 이벤트마다 존이 있어야 한다.
+    """
+    engine = _arm_engine(monkeypatch, [_zone(0), _zone(-_H, top=99.6)])
     events = engine.on_substep(_SYMBOL, _TF, time_ms=_FORMING, low=99.4, high=101.5, close=100.0)
-    assert [e.kind for e in events] == ["placed"]
+    assert [e.kind for e in events] == ["placed", "placed"]
     state = engine._series[(_SYMBOL, _TF)]
-    assert len(state.shadows) == 2
-    # 둘 다 닿는 가격 → 진짜 체결 1 + 그림자 체결 2(쌍둥이 포함), 이벤트에 존이 실린다
+    assert len(state.orders) == 2
     events = engine.on_substep(
         _SYMBOL, _TF, time_ms=_FORMING + _M, low=95.0, high=100.0, close=96.0
     )
-    kinds = [e.kind for e in events]
-    assert kinds.count("filled") == 1 and kinds.count("shadow_filled") == 2
-    zones = {e.zone for e in events if e.kind == "shadow_filled"}
-    assert len(zones) == 2 and all(e.zone is not None for e in events)
-    real = next(e for e in events if e.kind == "filled")
-    twin = next(e for e in events if e.kind == "shadow_filled" and e.zone == real.zone)
-    assert twin.fill is not None and real.fill is not None
-    assert twin.fill.price == real.fill.price  # 같은 사슬 · 같은 입력 → 같은 체결가
-    assert state.shadows == []
+    assert [e.kind for e in events] == ["filled", "filled"]
+    zones = {e.zone for e in events}
+    assert len(zones) == 2 and None not in zones
+    assert state.orders == []
 
 
-def test_shadows_are_off_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    engine = _shadow_engine(monkeypatch, [_zone(0)], shadows=False)
-    engine.on_substep(_SYMBOL, _TF, time_ms=_FORMING, low=99.4, high=101.5, close=100.0)
-    assert engine._series[(_SYMBOL, _TF)].shadows == []
-
-
-def test_shadow_expires_and_invalidates_like_the_real_order(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    engine = _shadow_engine(monkeypatch, [_zone(0)])
-    engine.on_substep(_SYMBOL, _TF, time_ms=_FORMING, low=99.4, high=101.5, close=100.0)
-    state = engine._series[(_SYMBOL, _TF)]
-    shadow = state.shadows[0][1]
-    real = engine.book.pending(_SYMBOL, _TF)
-    assert real is not None
-    for k in range(1, 30):  # 닿지 않는 봉들 — 만료 계수
-        engine.on_substep(
-            _SYMBOL, _TF, time_ms=_FORMING + k * _H, low=100.2, high=101.0, close=100.5
-        )
-        assert (shadow.status, shadow.bars_elapsed) == (real.status, real.bars_elapsed)
-        if real.status.is_terminal:
-            break
-    assert real.status.is_terminal and state.shadows == []
-    # 무효화: 존이 대장에서 사라지면 그림자도 끝난다
-    engine2 = _shadow_engine(monkeypatch, [_zone(0)])
-    engine2.on_substep(_SYMBOL, _TF, time_ms=_FORMING, low=99.4, high=101.5, close=100.0)
-    _install_stub_detector(monkeypatch, [])
-    engine2.on_htf_bars(_SYMBOL, _TF, _htf_df(closes=_DESC_CLOSES))
-    assert engine2._series[(_SYMBOL, _TF)].shadows == []
-
-
-def test_shadows_survive_snapshot_and_restore(monkeypatch: pytest.MonkeyPatch) -> None:
-    engine = _shadow_engine(monkeypatch, [_zone(0), _zone(-_H, top=99.6)])
+def test_orders_survive_snapshot_and_restore(monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = _arm_engine(monkeypatch, [_zone(0), _zone(-_H, top=99.6)])
     engine.on_substep(_SYMBOL, _TF, time_ms=_FORMING, low=99.4, high=101.5, close=100.0)
     snap = engine.snapshot_series(_SYMBOL, _TF, last_htf_time=_FORMING - _H, saved_ms=0)
     assert snap is not None and len(snap.shadows) == 2
     snap = SeriesStateSnapshot.model_validate_json(snap.model_dump_json())  # 왕복
-    fresh = _shadow_engine(monkeypatch, [_zone(0), _zone(-_H, top=99.6)])
+    fresh = _arm_engine(monkeypatch, [_zone(0), _zone(-_H, top=99.6)])
     fresh.restore_series(_SYMBOL, _TF, snap)
-    restored = fresh._series[(_SYMBOL, _TF)].shadows
+    restored = fresh._series[(_SYMBOL, _TF)].orders
     assert sorted(z for z, _ in restored) == sorted(tuple(s.zone) for s in snap.shadows)
-    # 옛 스냅샷(그림자 필드 없음)도 읽힌다
+    # 옛 스냅샷(주문 필드 없음)도 읽힌다
     legacy = snap.model_dump()
     legacy.pop("shadows")
     assert SeriesStateSnapshot.model_validate(legacy).shadows == []
+
+
+def test_old_single_slot_snapshot_still_validates(monkeypatch: pytest.MonkeyPatch) -> None:
+    """옛 오더블록 페이퍼의 스냅샷(`pending`·`occupied_zone`·`armed_forming_bar`)도 읽힌다.
+
+    모르는 키는 무시된다(pydantic 기본 `extra="ignore"`) — 배포 뒤 첫 기동이 옛 스냅샷에서
+    죽으면 안 된다. 옛 칸당 대기 주문은 복원되지 않는다(기존 재시작 폐기 경로로 남는다).
+    """
+    engine = _arm_engine(monkeypatch, [_zone(0)])
+    engine.on_substep(_SYMBOL, _TF, time_ms=_FORMING, low=99.4, high=101.5, close=100.0)
+    snap = engine.snapshot_series(_SYMBOL, _TF, last_htf_time=_FORMING - _H, saved_ms=0)
+    assert snap is not None
+    legacy = snap.model_dump()
+    legacy["shadows"] = []
+    legacy["pending"] = {
+        "journal_id": 7,
+        "zone": ["bullish", 0, 3_600_000],
+        "tap_index": 0,
+        "placed_ms": _FORMING,
+        "limit_valid_bars": 24,
+        "bars_elapsed": 0,
+        "first_rested_ms": None,
+        "last_limit_price": None,
+    }
+    legacy["occupied_zone"] = ["bullish", 0, 3_600_000]
+    for z in legacy["zones"]:
+        z["armed_forming_bar"] = _FORMING
+    old = SeriesStateSnapshot.model_validate(legacy)
+    fresh = _arm_engine(monkeypatch, [_zone(0)])
+    assert fresh.restore_series(_SYMBOL, _TF, old) == []
+    assert fresh.open_orders() == []
 
 
 # ------------------------------------------------------------------ 일일 요약
@@ -259,7 +253,7 @@ def _decision(db: Path) -> tuple[str, str]:
     return str(row[0]), str(row[1])
 
 
-def test_shadow_fill_is_recorded_with_its_population_verdict(tmp_path: Path) -> None:
+def test_fill_is_recorded_with_its_population_verdict(tmp_path: Path) -> None:
     from live.limit_engine import EngineEvent
     from tests.test_arm_rules import _fill_event
 
@@ -268,7 +262,7 @@ def test_shadow_fill_is_recorded_with_its_population_verdict(tmp_path: Path) -> 
     real_fill = real.fill
     assert real_fill is not None
     shadow = EngineEvent(
-        kind="shadow_filled",
+        kind="filled",
         symbol=real.symbol,
         timeframe=real.timeframe,
         time_ms=real.time_ms,
@@ -281,7 +275,7 @@ def test_shadow_fill_is_recorded_with_its_population_verdict(tmp_path: Path) -> 
     (row,) = runner._signals.rows(0, 10**13)
     assert row.counted and (row.zone_start, row.zone_confirmed) == (7, 8)
     narrow = EngineEvent(  # 손절폭 1% — 모집단 밖
-        kind="shadow_filled",
+        kind="filled",
         symbol=real.symbol,
         timeframe=real.timeframe,
         time_ms=real.time_ms + _M,
@@ -338,8 +332,8 @@ def test_budget_scales_the_size(tmp_path: Path) -> None:
     assert qty[12] / qty[0] == pytest.approx(10 / 13)
 
 
-def test_twin_shadow_is_not_counted_against_its_own_fill(tmp_path: Path) -> None:
-    """진짜 주문의 쌍둥이 그림자(같은 칸·같은 존)는 「다른 신호」가 아니다."""
+def test_twin_signal_is_not_counted_against_its_own_fill(tmp_path: Path) -> None:
+    """진입하려는 체결과 같은 칸·같은 존의 신호(쌍둥이)는 「다른 신호」가 아니다."""
     from tests.test_arm_rules import _fill_event
 
     runner, journal, session, db = _crowd_runner(tmp_path, ["SYN/USDT:USDT"])

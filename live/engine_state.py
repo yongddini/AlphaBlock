@@ -16,9 +16,14 @@
   대기 주문의 RSI·밴드 상태도 마찬가지다: 확정봉 종가에서 재시딩하면 예약 시점 시딩 +
   경계 커밋의 결과와 같다(경계 커밋의 표본이 곧 확정봉 종가다).
 * **재파생 불가능한 것만 담는다** — 형성 중 봉의 누적 고저(재시작 전에 소비한 서브스텝의
-  몫), 존별 전이/시도 표식, 대기 주문의 생애 스칼라(예약 시각·탭 번호·경과 봉 수·유효
-  기간 — 특히 재진입 재무장의 무기한 `None`), 오픈 포지션의 존(`occupied_zone`, 익절 후
-  재진입이 읽는다), 마지막으로 소비한 1분봉 시각(따라잡기 재생의 시작점).
+  몫), 존별 전이/탭 표식, 탐지 창 밖으로 밀려나 엔진이 기억하는 존(WAN-451), 걸려 있던
+  주문들의 생애 스칼라(예약 시각·탭 번호·경과 봉 수·유효 기간), 마지막으로 소비한 1분봉
+  시각(따라잡기 재생의 시작점).
+
+📌 **옛 스냅샷도 읽힌다** — 칸당 대기 주문 하나(`pending`)·재진입 재무장 존(`occupied_zone`)·
+예약 시도 표식(`armed_forming_bar`)은 옛 오더블록 페이퍼(WAN-451에서 없어짐)의 필드다. 모델이
+모르는 키는 pydantic 기본값(`extra="ignore"`)대로 무시되므로 옛 JSON이 검증에서 떨어지지
+않는다 — 그 주문들은 복원되지 않고 기존 재시작 폐기 경로로 남는다.
 
 운영 상태 파일(`live.runtime_state`, WAN-30)과는 목적이 다르다 — 그쪽은 사람/대시보드가
 읽는 표시용 요약이고, 이쪽은 엔진이 자기 상태를 도로 삼키는 복원용 원본이다. 두 벌을
@@ -55,16 +60,17 @@ CREATE TABLE IF NOT EXISTS live_engine_state (
 
 
 class PersistedZoneWatch(BaseModel):
-    """감시 중인 존 하나의 전이/시도 표식 — 탭 판정의 「직전까지 안/바깥」 맥락.
+    """감시 중인 존 하나의 전이/탭 표식 — 탭 판정의 「직전까지 안/바깥」 맥락.
 
-    존 자체(`OrderBlock`)는 담지 않는다 — 복원 시 탐지를 다시 돌려 같은 `ZoneRef`로
-    맞춰 끼운다(탐지 결과가 정본, 표식은 세션 상태).
+    탐지로 다시 세워지는 존 자체(`OrderBlock`)는 담지 않는다 — 복원 시 탐지를 다시 돌려 같은
+    `ZoneRef`로 맞춰 끼운다(탐지 결과가 정본, 표식은 세션 상태).
     """
 
     zone: ZoneRef
     was_inside: bool
-    armed_forming_bar: int | None = None
     skip_recorded_forming_bar: int | None = None
+    #: 이번 형성 중 봉에서 이미 탭을 처리한 봉 시각(엔진 `_ZoneWatch.tap_bar`). 이름은 그
+    #: 주문이 「그림자 주문」이던 시절의 것이다 — 저장 형식을 바꾸지 않으려고 그대로 둔다.
     shadow_bar: int | None = None
     #: 탐지 창 밖으로 밀려나 엔진이 직접 따라가는 존(WAN-451) — 다시 탐지할 수 없으므로 존 자체를
     #: 담는다. 탐지로 다시 세워지는 존은 None이다(옛 스냅샷도 None — 호환).
@@ -76,8 +82,8 @@ class PersistedZoneWatch(BaseModel):
 class PersistedPendingOrder(BaseModel):
     """대기 지정가 주문의 생애 스칼라 — 지표 상태는 재시딩으로 복원되므로 담지 않는다.
 
-    `limit_valid_bars=None`은 **무기한**(재진입 재무장, WAN-274)이다 — 필드 부재가 아니라
-    명시적 null로 저장돼 24봉 기본값과 갈린다(WAN-159 「none ≠ 미지정」 규약과 같은 부류).
+    `limit_valid_bars=None`은 **무기한**이다 — 필드 부재가 아니라 명시적 null로 저장돼
+    24봉 기본값과 갈린다(WAN-159 「none ≠ 미지정」 규약과 같은 부류).
     """
 
     journal_id: int | None
@@ -104,10 +110,8 @@ class SeriesStateSnapshot(BaseModel):
     forming_high: float | None
     running_close: float | None
     zones: list[PersistedZoneWatch] = Field(default_factory=list)
-    pending: PersistedPendingOrder | None = None
-    #: 오픈 포지션이 어느 존의 것인지 — 익절 후 재진입(WAN-274)이 재무장할 존.
-    occupied_zone: ZoneRef | None = None
-    #: 그림자 주문(WAN-451 몰림 규칙) — 슬롯과 무관한 탭별 독립 주문. 옛 스냅샷엔 없다(빈 목록).
+    #: 걸려 있던 주문 — 탭마다 독립 주문(WAN-451). 이름은 그 주문이 「그림자 주문」이던 시절의
+    #: 것이다 — 저장 형식을 바꾸지 않으려고 그대로 둔다. 옛 스냅샷엔 없다(빈 목록).
     shadows: list[PersistedPendingOrder] = Field(default_factory=list)
 
 

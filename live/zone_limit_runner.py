@@ -1,6 +1,13 @@
-"""존-지정가 페이퍼 러너 — 채택 진입 경로(B안)의 실시간 배선 (WAN-45).
+"""존-지정가 페이퍼 러너 — 스토캐스틱 팔 + 엔진 C의 실시간 배선 (WAN-45 · WAN-451).
 
-채택 기본값(`entry_mode="zone_limit"`)에서 도는 러너다. 목적은 두 가지:
+📌 **이 러너가 돌리는 것은 둘뿐이다**(WAN-451 ⑦ · 옛 규칙 정리 2026-10-15): 오더블록 시리즈
+위의 **스토캐스틱 팔**(`live.arm_rules` — 탭마다 독립 지정가 · 팔 규칙 · 몰림 규칙 · 매주 종목
+목록 · 손절과 시간 청산)과 **엔진 C**(`live.tsmom_runner`, 하루 1회 리밸런싱). 옛 오더블록
+페이퍼(칸당 대기 주문 1개 · 익절 후 재진입 · 웹소켓 틱 피드 · 고정 R 익절 · 일 손실
+서킷브레이커 알림 · 고정 시리즈 목록)는 없어졌다 — 오더블록 시리즈를 켜면 팔이 반드시 켜져
+있어야 하고, 아니면 러너가 기동을 거부한다(`run_zone_limit_runner`).
+
+옛 오더블록 페이퍼가 세운 목적 두 가지는 팔 위에서 그대로 유효하다:
 
 1. **체결률 실측(1순위)** — 이 저장소의 모든 백테스트 판정은 `baseline`("닿으면 체결")
    낙관 가정 위에 서 있는데, 그 가정을 풀 예정이던 틱·호가 수집(WAN-98)이 Canceled라
@@ -34,11 +41,11 @@
 * **가동 시간 기록** — 러너 세션(시작·마지막 하트비트)을 장부에 남긴다. 체결률의 분모가
   "러너가 살아 있던 시간"임을 표에서 명시할 수 있다.
 * 🔁 **재시작 정책 = 복원 + 따라잡기 (WAN-306, 사용자 결정 2026-08-14)** — 옛 「버리고
-  새로 걸기」는 재시작마다 존 기억(전이 맥락·탭 이력·대기 주문·재진입 재무장·24봉 만료
+  새로 걸기」는 재시작마다 존 기억(전이 맥락·탭 이력·대기 주문·24봉 만료
   시계)을 리셋해 라이브↔백테 판단을 갈랐다(08-13 실사례: 재시작 직후 즉시 체결, WAN-305
   픽스처). 이제 러너는 매 서브스텝 엔진 상태를 영속화(`live.engine_state`)하고, 기동 시
   복원한 뒤 죽어 있던 구간의 확정 1분봉을 **순서대로 재생**해 그 사이 일어났어야 할
-  체결·청산·만료·재무장을 페이퍼로 집행한다(뒷북이 아니라 따라잡기 — 복원된 주문이 실제로
+  체결·청산·만료를 페이퍼로 집행한다(뒷북이 아니라 따라잡기 — 복원된 주문이 실제로
   걸려 있었으므로 그 구간 체결은 정당하다). 오픈 포지션은 예전처럼 `PaperExecutor`가
   저장소에서 복구한다(WAN-34).
   ⚠️ **`discarded_restart`는 이제 예외 경로다**: 공백이 따라잡기 한도
@@ -72,7 +79,7 @@ import numpy as np
 import pandas as pd
 
 from backtest.sweep import timeframe_to_ms
-from common.timefmt import format_kst_zoned, kst_day_key
+from common.timefmt import format_kst_zoned
 from config.settings import Settings
 from data.freshness import format_window_gaps, window_gap_summary
 from data.gaps import Gap, find_gaps
@@ -96,11 +103,10 @@ from live.arm_rules import (
 from live.arm_signals import ArmSignal, ArmSignalStore
 from live.engine_state import EngineStateStore, SeriesStateSnapshot
 from live.executor import PaperExecutor, TradeReport
-from live.limit_engine import EngineEvent, ReentryEntryRule, ZoneLimitLiveEngine
+from live.limit_engine import EngineEvent, ZoneLimitLiveEngine
 from live.limit_orders import LimitFill, LimitOrderStatus, expiry_deadline_ms
 from live.order_journal import SKIP_REASON_ZONE_WIDTH, OrderJournal
 from live.paper import PaperPosition
-from live.price_feed import PriceFeed
 from live.runtime_state import DataGapSkip, PendingOrderSnapshot, RuntimeStateStore
 from live.tsmom_runner import TsmomRebalancer
 from live.zone_limit_notifier import ZoneLimitNotifier
@@ -145,19 +151,24 @@ class ZoneLimitPaperRunner:
         poll_interval_seconds: float,
         runtime_state: RuntimeStateStore | None = None,
         notifier: ZoneLimitNotifier | None = None,
-        price_feed: PriceFeed | None = None,
         engine_state: EngineStateStore | None = None,
         catchup_max_ms: int = DEFAULT_CATCHUP_MAX_MS,
         tsmom: TsmomRebalancer | None = None,
         arm: ArmParams | None = None,
         universe: UniverseStore | None = None,
         signals: ArmSignalStore | None = None,
-        price_feed_factory: Callable[[list[str]], PriceFeed] | None = None,
         bootstrap_days: int = 0,
         reuse_loads: bool = True,
         sleep: Callable[[float], None] = time.sleep,
         now_ms: Callable[[], int] = lambda: int(time.time() * 1000),
     ) -> None:
+        if arm is None and (series or universe is not None):
+            # 옛 오더블록 페이퍼(칸당 대기 주문 · 고정 R 익절 · 재진입)는 WAN-451에서 없어졌다 —
+            # 팔 규칙 없이 체결을 진입으로 바꾸는 경로가 이제 없다.
+            raise ValueError(
+                "오더블록 시리즈는 스토캐스틱 팔 규칙(arm)이 있어야 돈다 — 옛 오더블록 페이퍼는"
+                " WAN-451에서 없어졌다"
+            )
         self._store = store
         self._engine = engine
         self._journal = journal
@@ -171,29 +182,23 @@ class ZoneLimitPaperRunner:
         #: 재시작 영속화 저장소(WAN-306). None이면 저장/복원 없음(옛 동작 그대로).
         self._engine_state = engine_state
         self._catchup_max_ms = catchup_max_ms
-        #: 엔진 C 일 리밸런싱(WAN-451 ⑥). None이면 예전과 비트 동일하다.
+        #: 엔진 C 일 리밸런싱(WAN-451 ⑥). None이면 엔진 C를 안 돌린다.
         self._tsmom = tsmom
-        #: 스토캐스틱 팔 진입·청산 규칙(WAN-451 ③). None이면 예전과 비트 동일하다.
+        #: 스토캐스틱 팔 진입·청산 규칙(WAN-451 ③). 오더블록 시리즈가 있으면 반드시 있다(위
+        #: 가드). None은 엔진 C 전용 러너(시리즈 0개)뿐이다.
         self._arm = arm
         #: 팔의 주간 종목 목록(WAN-451 ③). 주어지면 감시 시리즈를 매 폴링 그 주 목록 × 팔 TF로
-        #: 맞추고, 체결 순간 목록 밖 종목은 진입을 거부한다. None이면 시리즈 고정(예전 그대로).
+        #: 맞추고, 체결 순간 목록 밖 종목은 진입을 거부한다. 운영 진입점(`run_zone_limit_runner`)은
+        #: 언제나 준다 — None은 목록 게이트를 빼고 한 규칙만 재는 단위 테스트·재생 대조용이다.
         self._universe = universe
-        #: 팔 신호 장부(WAN-451 몰림 규칙). 주어지면 그림자 체결을 기록하고, 실제 체결 때 직전
-        #: 24h 신호 수로 몰림 규칙을 건다. None이면 몰림 규칙 없음(예전 그대로).
+        #: 팔 신호 장부(WAN-451 몰림 규칙). 주어지면 체결마다 신호를 기록하고, 진입 판정 때 직전
+        #: 24h 신호 수로 몰림 규칙을 건다. 운영 진입점은 언제나 준다 — None은 몰림 규칙을 빼는
+        #: 단위 테스트·재생 대조용이다.
         self._signals = signals
         #: 오래된 존 기억의 시작(WAN-451): 시리즈를 **처음** 먹일 때만 이 일수만큼의 확정봉으로
         #: 탐지해 몇 년 된 존까지 세운다(그 뒤는 `lookback_bars` 창 + 엔진 기억). 0이면 예전 그대로.
         self._bootstrap_days = bootstrap_days
-        #: 감시 종목이 바뀌면 틱 피드를 새 종목으로 다시 만든다(주어졌을 때만).
-        self._price_feed_factory = price_feed_factory
-        self._feed_symbols: tuple[str, ...] = ()
         self._notifier = notifier
-        #: 옵트인 웹소켓 틱 피드(WAN-246). None이면 확정 1분봉만 소비(예전과 비트 동일).
-        self._price_feed = price_feed
-        #: 심볼 → 그 심볼을 감시하는 (symbol, timeframe) 시리즈들(틱 팬아웃용).
-        self._series_by_symbol: dict[str, list[Series]] = {}
-        for sym, tf in series:
-            self._series_by_symbol.setdefault(sym, []).append((sym, tf))
         self._sleep = sleep
         self._now_ms = now_ms
         #: 시리즈별 마지막으로 반영한 확정 상위TF 봉 시각.
@@ -473,18 +478,15 @@ class ZoneLimitPaperRunner:
             # 여부는 아래 record의 별도 지표(last_cycle_completed_at)가 담당한다.
             if self._runtime_state is not None:
                 self._runtime_state.touch(self._now_ms())
-        # 웹소켓 틱으로 대기 주문 체결을 앞당긴다(WAN-246, 옵트인). 예약은 위 1분봉
-        # 경로가 이미 끝냈으므로, 여기서는 걸려 있는 주문의 체결만 더 촘촘히 잡는다.
-        emitted += self._drain_ticks()
         now = self._now_ms()
         # 벽시계 만료 백스톱(WAN-298): 수집이 멈춰 서브스텝이 오지 않아도 지정가 만료
-        # (`limit_valid_bars`, 24봉 WAN-222)를 집행해 슬롯을 비운다 — 만료 이벤트는 1분봉
-        # 경로와 같은 `_handle_events`로 기록·알림한다.
+        # (`limit_valid_bars`, 24봉 WAN-222)를 집행한다 — 만료 이벤트는 1분봉 경로와 같은
+        # `_handle_events`로 기록·알림한다.
         overdue = self._engine.expire_overdue(now_ms=now)
         if overdue:
             self._handle_events(overdue)
             emitted += overdue
-        # 틱 체결·벽시계 만료는 서브스텝 밖에서 상태를 바꾼다 — 폴링 끝에 한 번 더
+        # 벽시계 만료는 서브스텝 밖에서 상태를 바꾼다 — 폴링 끝에 한 번 더
         # 저장해 스냅샷이 그 변화를 놓치지 않게 한다(WAN-306).
         if self._engine_state is not None:
             for symbol, timeframe in self._series:
@@ -492,10 +494,9 @@ class ZoneLimitPaperRunner:
         if self._tsmom is not None:
             try:
                 self._tsmom.tick(now)
-            except Exception:  # noqa: BLE001 — 엔진 C 오류가 오더블록 루프를 멈추지 않도록.
+            except Exception:  # noqa: BLE001 — 엔진 C 오류가 팔 루프를 멈추지 않도록.
                 _logger.exception("엔진 C 리밸런싱 실패(WAN-451)")
         self._journal.heartbeat(self._session_id, now_ms=now)
-        self._check_circuit_breaker(now)
         if self._notifier is not None:
             # KST 날짜가 바뀌면 전날 예약·체결·만료 일일 요약을 보낸다(만료 실시간 대체).
             self._notifier.tick(self._executor.equity, now_ms=now)
@@ -554,72 +555,23 @@ class ZoneLimitPaperRunner:
                 self._engine_state.delete(*key)
         removed = [k for k in removed if k not in kept_removed]
         self._series = sorted((set(self._series) - set(removed)) | set(added))
-        self._series_by_symbol = {}
-        for sym, tf in self._series:
-            self._series_by_symbol.setdefault(sym, []).append((sym, tf))
         _logger.info(
             "감시 시리즈 교체(WAN-451): +%d · −%d → %d개 (%d종목)",
             len(added),
             len(removed),
             len(self._series),
-            len(self._series_by_symbol),
+            len({sym for sym, _tf in self._series}),
         )
-        self.refresh_price_feed()
         return added, removed
 
-    def refresh_price_feed(self) -> None:
-        """감시 종목이 바뀌었으면 틱 피드를 새 종목으로 다시 만든다(팩토리가 있을 때만)."""
-        if self._price_feed_factory is None:
-            return
-        symbols = tuple(sorted(self._series_by_symbol))
-        if symbols == self._feed_symbols:
-            return
-        if self._price_feed is not None:
-            self._price_feed.close()
-            self._price_feed = None
-        self._feed_symbols = symbols
-        if symbols:
-            self._price_feed = self._price_feed_factory(list(symbols))
-
-    def close(self) -> None:
-        """러너가 만든 자원(틱 피드)을 닫는다."""
-        if self._price_feed is not None and self._price_feed_factory is not None:
-            self._price_feed.close()
-            self._price_feed = None
-
     def _rotation_gate(self, symbol: str, entry_ms: int) -> ArmDecision | None:
-        """체결 순간 목록 게이트 — 목록이 없으면(팔 꺼짐·고정 시리즈) None."""
+        """체결 순간 목록 게이트 — 목록이 없으면(목록 게이트를 뺀 테스트·재생 대조) None."""
         if self._universe is None or self._arm is None:
             return None
         snap = self._universe.at(entry_ms)
         if snap is None:
             return rotation_decision(None, frozenset(), symbol, entry_ms)
         return rotation_decision(snap.rebalance_ms, snap.members, symbol, entry_ms)
-
-    def _drain_ticks(self) -> list[EngineEvent]:
-        """옵트인 틱 피드에 쌓인 실시간 체결가를 대기 주문에 반영한다(WAN-246).
-
-        심볼 단위 체결가를 그 심볼을 감시하는 각 (symbol, timeframe) 시리즈의 대기 주문에
-        `on_tick`으로 넣는다(단일가라 low=high=close=price). 체결 이벤트는 1분봉 경로와
-        **같은** `_handle_events`로 집행·기록·알림한다. 청산 판정(`_check_exits`)은 1분봉
-        경로에 남긴다 — 진입 체결만 앞당기고 청산 해상도는 백테스트(1분봉)와 맞춘다.
-        """
-        feed = self._price_feed
-        if feed is None:
-            return []
-        ticks = feed.drain()
-        if not ticks:
-            return []
-        events: list[EngineEvent] = []
-        for tick in ticks:
-            for symbol, timeframe in self._series_by_symbol.get(tick.symbol, ()):
-                step = self._engine.on_tick(
-                    symbol, timeframe, price=tick.price, time_ms=tick.time_ms
-                )
-                if step:
-                    self._handle_events(step)
-                    events += step
-        return events
 
     def run(self, *, max_polls: int | None = None) -> None:
         """폴링 루프. `max_polls`가 None이면 무한 반복(테스트에서는 유한 지정)."""
@@ -630,32 +582,6 @@ class ZoneLimitPaperRunner:
             if max_polls is not None and poll >= max_polls:
                 break
             self._sleep(self._poll_interval)
-
-    # -- 서킷브레이커 알림 (WAN-38) ------------------------------------------
-
-    def _check_circuit_breaker(self, now_ms: int) -> None:
-        """일일 손실 서킷브레이커 상태 전환을 감지해 발동/해제 텔레그램을 각 1회 보낸다.
-
-        중복 방지 상태(마지막으로 알린 `(KST일, 발동여부)`)는 `paper_trades` 옆 원장에
-        영속되므로 러너 재시작 후에도 발동 알림이 재전송되지 않는다(WAN-38). 판정 자체는
-        `executor.circuit_breaker_status`가 DB 재계산으로 내므로 표시와 실제 차단이
-        어긋나지 않는다.
-        """
-        status = self._executor.circuit_breaker_status(now_ms)
-        if not status.enabled:
-            return
-        day = kst_day_key(now_ms)
-        notice_day, notice_tripped = self._executor.get_circuit_breaker_notice()
-        if status.tripped:
-            if not (notice_day == day and notice_tripped):
-                if self._notifier is not None:
-                    self._notifier.handle_circuit_breaker_tripped(status, now_ms=now_ms)
-                self._executor.set_circuit_breaker_notice(day, tripped=True)
-        elif notice_tripped:
-            # 발동 중이었다가 풀렸다(대개 KST 일자 전환) — 해제 알림 1회.
-            if self._notifier is not None:
-                self._notifier.handle_circuit_breaker_cleared(status, now_ms=now_ms)
-            self._executor.set_circuit_breaker_notice(day, tripped=False)
 
     # -- 집행·청산 -----------------------------------------------------------
 
@@ -678,14 +604,12 @@ class ZoneLimitPaperRunner:
                     order.tap_index,
                 )
             elif event.kind == "filled" and event.fill is not None:
-                self._handle_fill(event)
-            elif event.kind == "shadow_filled":
+                # 탭마다 독립 주문의 체결 — 몰림 규칙의 신호로 남기고, 같은 1분 가격 순서대로
+                # 앞 포지션 손절을 먼저 정산한 뒤, 칸에 포지션이 없으면 진입 판정을 탄다(정본
+                # 북과 같은 규칙, WAN-451).
                 self._record_signal(event)
-                if self._engine.independent_orders and event.fill is not None:
-                    # 팔: 탭마다 독립 주문이 곧 진짜 주문이다 — 칸에 포지션이 없으면 진입
-                    # 판정을 탄다(정본 북과 같은 규칙, WAN-451).
-                    self._stop_first(event.fill)
-                    self._handle_fill(event)
+                self._stop_first(event.fill)
+                self._handle_fill(event)
             else:
                 if self._notifier is not None and event.kind == "cancelled_expired":
                     self._notifier.note_expired()  # 만료는 실시간 없음 — 일일 요약에만.
@@ -733,9 +657,9 @@ class ZoneLimitPaperRunner:
             decision = self._rotation_gate(fill.symbol, fill.time) or self._arm_decision(
                 fill.symbol, fill.timeframe, fill.price, fill.stop_price, fill.time
             )
-            if decision is not None and decision.accepted:
+            if decision.accepted:
                 decision = self._crowd_gate(event, decision)
-            if decision is not None and not decision.accepted:
+            if not decision.accepted:
                 # 팔 규칙 거부(WAN-451 ③) — 체결은 됐지만 진입하지 않는다. 다른 거부와 같은 길로
                 # 장부·알림에 남긴다(조용히 버리지 않는다, WAN-194).
                 report = TradeReport(
@@ -751,10 +675,10 @@ class ZoneLimitPaperRunner:
                         direction=fill.direction,
                         entry_price=fill.price,
                         entry_time=fill.time,
-                        stop_price=fill.stop_price if decision is None else decision.stop_price,
+                        stop_price=decision.stop_price,
                         # 팔은 익절이 없다(시간 청산 · 손절만, WAN-436).
-                        take_profit_price=fill.take_profit_price if decision is None else None,
-                        risk_scale=1.0 if decision is None else decision.size_scale,
+                        take_profit_price=None,
+                        risk_scale=decision.size_scale,
                     ),
                     now_ms=fill.time,
                 )
@@ -839,7 +763,7 @@ class ZoneLimitPaperRunner:
             self._exit(fill.symbol, fill.timeframe, stop, fill.time, SignalExitReason.STOP_LOSS)
 
     def _record_signal(self, event: EngineEvent) -> None:
-        """그림자 체결 하나를 신호 장부에 남긴다 — 몰림 규칙이 세는 모집단인지 함께 적는다."""
+        """체결 하나를 신호 장부에 남긴다 — 몰림 규칙이 세는 모집단인지 함께 적는다."""
         if self._signals is None or event.fill is None or event.zone is None:
             return
         fill = event.fill
@@ -948,14 +872,13 @@ class ZoneLimitPaperRunner:
         entry_price: float,
         ob_stop: float | None,
         entry_ms: int,
-    ) -> ArmDecision | None:
-        """팔 규칙 판정(WAN-451 ③) — 팔이 꺼져 있으면 None(옛 동작 그대로).
+    ) -> ArmDecision:
+        """팔 규칙 판정(WAN-451 ③).
 
         %K는 그 칸 TF의 **확정봉**으로, BTC 24h는 확정 1분봉으로 낸다(둘 다 체결 시각 이전만 —
         인과). %K 선은 최근 29봉에만 의존하므로 짧은 꼬리(`_ARM_K_BARS`)로 계산해도 값이 같다.
         """
-        if self._arm is None:
-            return None
+        assert self._arm is not None  # 체결은 오더블록 시리즈에서만 오고 그 시리즈는 팔이 있다
         if ob_stop is None:
             return ArmDecision(False, "sizing", "손절 참조가 없음")
         tf_ms = timeframe_to_ms(timeframe)
@@ -988,8 +911,10 @@ class ZoneLimitPaperRunner:
         time_ms: int,
         close: float | None = None,
     ) -> None:
-        """오픈 페이퍼 포지션의 손절/익절을 이 1분봉 범위로 판정한다(백테스트와 같은 규칙:
-        손절 우선 `stop_before_take_profit`, 청산가는 참조가 그대로)."""
+        """오픈 페이퍼 포지션의 손절·시간 청산을 이 1분봉으로 판정한다(팔은 익절이 없다, WAN-436).
+
+        손절이 먼저다 — 손절가는 참조가 그대로 청산가다. 손절이 안 났고 이 1분이 보유 봉수의
+        경계 직전이면 그 1분 종가에 시간 청산한다(정본 ts4)."""
         position = next(
             (
                 p
@@ -1002,15 +927,10 @@ class ZoneLimitPaperRunner:
             return
         is_long = position.direction is OrderBlockDirection.BULLISH
         stop = position.stop_price
-        tp = position.take_profit_price
         stop_hit = stop is not None and (low <= stop if is_long else high >= stop)
-        tp_hit = tp is not None and (high >= tp if is_long else low <= tp)
-        if stop_hit and (not tp_hit or self._params.stop_before_take_profit):
+        if stop_hit:
             assert stop is not None
             self._exit(symbol, timeframe, stop, time_ms, SignalExitReason.STOP_LOSS)
-        elif tp_hit:
-            assert tp is not None
-            self._exit(symbol, timeframe, tp, time_ms, SignalExitReason.TAKE_PROFIT)
         elif (
             self._arm is not None
             and close is not None
@@ -1038,14 +958,6 @@ class ZoneLimitPaperRunner:
         )
         if self._notifier is not None:
             self._notifier.handle_exit(report, exit_price=price, reason=reason, exit_time=time_ms)
-        # 익절 후 존 내 재진입(WAN-273/274) — 청산이 실제로 성사됐을 때만. 익절이면 엔진이
-        # 같은 존에 band 지정가를 다시 걸고(재진입 켜짐일 때), 손절이면 그 존을 끝내 재무장
-        # 상태를 비운다. 재진입 규칙은 엔진이 설정에서 물려받은 채택 규약이다(러너가 자기
-        # 버전을 새로 만들지 않는다). placed 이벤트는 예약 로그·장부·알림을 태운다.
-        if report.accepted:
-            self._handle_events(
-                self._engine.on_position_exit(symbol, timeframe, reason=reason, time_ms=time_ms)
-            )
 
     # -- 재시작 영속화 (WAN-306) ----------------------------------------------
 
@@ -1122,65 +1034,43 @@ class ZoneLimitPaperRunner:
             self._engine.on_htf_bars(symbol, timeframe, window)
             self._last_htf[key] = snap.last_htf_time
             snap = self._reconcile_with_journal(symbol, timeframe, snap)
-            order = self._engine.restore_series(symbol, timeframe, snap)
+            orders = self._engine.restore_series(symbol, timeframe, snap)
             self._last_substep[key] = snap.last_substep_time
-            if order is not None and order.journal_id is not None:
-                restored.add(order.journal_id)
-            restored |= self._engine.shadow_journal_ids(symbol, timeframe)
+            restored |= self._engine.journal_ids(symbol, timeframe)
             _logger.info(
-                "%s %s: 엔진 상태 복원 — 공백 %.1f분 따라잡기 재생 예정 (대기 주문 %s, WAN-306)",
+                "%s %s: 엔진 상태 복원 — 공백 %.1f분 따라잡기 재생 예정 (대기 주문 %d개, WAN-306)",
                 symbol,
                 timeframe,
                 gap_ms / 60_000,
-                "복원" if order is not None else "없음",
+                len(orders),
             )
         return restored
 
     def _reconcile_with_journal(
         self, symbol: str, timeframe: str, snap: SeriesStateSnapshot
     ) -> SeriesStateSnapshot:
-        """마지막 저장과 종료 사이에 장부가 이미 종결한 대기 주문은 되걸지 않는다.
+        """마지막 저장과 종료 사이에 장부가 이미 종결한 주문은 되걸지 않는다.
 
         저장은 서브스텝마다지만 장부 쓰기와 원자적이지 않다 — 그 밀리초 창에서 크래시가
-        나면 스냅샷은 「대기 중」인데 장부는 이미 체결/취소다. 장부가 정본이다: 체결이면
-        그 존을 오픈 포지션의 존(`occupied_zone`)으로 넘겨 익절 후 재진입(WAN-274)이
-        이어지게 하고(포지션 자체는 `PaperExecutor`가 저장소에서 복구한다), 취소면 그냥
-        버린다.
+        나면 스냅샷은 「대기 중」인데 장부는 이미 체결/취소다. 장부가 정본이다: 체결이면 진입
+        판정까지 끝난 주문이라 다시 걸면 같은 체결을 두 번 집행한다(포지션 자체는
+        `PaperExecutor`가 저장소에서 복구한다). 취소면 그냥 버린다.
         """
-        if any(s.journal_id is not None for s in snap.shadows):
-            # 독립 주문(팔): 장부가 이미 종결한 주문은 되걸지 않는다 — 체결이면 진입 판정까지
-            # 끝난 주문이라 다시 걸면 같은 체결을 두 번 집행한다.
-            kept = [
-                s
-                for s in snap.shadows
-                if s.journal_id is None
-                or self._journal.order_status(s.journal_id) == LimitOrderStatus.PENDING.value
-            ]
-            if len(kept) != len(snap.shadows):
-                _logger.warning(
-                    "%s %s: 스냅샷의 독립 주문 %d개가 장부에서 이미 종결돼 되걸지 않습니다",
-                    symbol,
-                    timeframe,
-                    len(snap.shadows) - len(kept),
-                )
-                snap = snap.model_copy(update={"shadows": kept})
-        pending = snap.pending
-        if pending is None or pending.journal_id is None:
+        kept = [
+            s
+            for s in snap.shadows
+            if s.journal_id is None
+            or self._journal.order_status(s.journal_id) == LimitOrderStatus.PENDING.value
+        ]
+        if len(kept) == len(snap.shadows):
             return snap
-        status = self._journal.order_status(pending.journal_id)
-        if status == LimitOrderStatus.PENDING.value:
-            return snap
-        update: dict[str, object] = {"pending": None}
-        if status == LimitOrderStatus.FILLED.value:
-            update["occupied_zone"] = pending.zone
         _logger.warning(
-            "%s %s: 스냅샷의 대기 주문(장부 #%s)이 이미 %s로 종결돼 있어 되걸지 않습니다",
+            "%s %s: 스냅샷의 대기 주문 %d개가 장부에서 이미 종결돼 되걸지 않습니다",
             symbol,
             timeframe,
-            pending.journal_id,
-            status,
+            len(snap.shadows) - len(kept),
         )
-        return snap.model_copy(update=update)
+        return snap.model_copy(update={"shadows": kept})
 
     def _save_state(self, symbol: str, timeframe: str) -> None:
         """이 시리즈의 엔진 상태를 스냅샷으로 저장한다(복원 앵커인 확정 창이 서기 전엔 무시)."""
@@ -1232,15 +1122,6 @@ class ZoneLimitPaperRunner:
         return timeframe_to_ms(timeframe)
 
 
-def build_series(settings: Settings) -> list[Series]:
-    """설정의 심볼×타임프레임 조합을 시리즈 목록으로 만든다."""
-    return [
-        (symbol, timeframe)
-        for symbol in settings.live_signal_symbols
-        for timeframe in settings.live_signal_timeframes
-    ]
-
-
 def expire_stale_pending(
     journal: OrderJournal, *, now_ms: int, exclude_ids: frozenset[int] | set[int] = frozenset()
 ) -> int:
@@ -1252,7 +1133,7 @@ def expire_stale_pending(
     않는다(WAN-298 재현 쿼리의 🔴 조합). 이 함수는 `discard_stale_pending` **전에** 불려
     기한 초과분을 `cancelled_expired`로 먼저 정리한다. 종결 시각은 벽시계가 아니라 **기한
     시각**이다(서브스텝 경로가 기록했을 시각과 같다 — `live.limit_orders.expiry_deadline_ms`
-    단일 출처). 무기한(재진입 재무장) · 열 도입 전 행은 기한을 모르므로 건드리지 않는다
+    단일 출처). 무기한 · 열 도입 전 행은 기한을 모르므로 건드리지 않는다
     (이후 `discard_stale_pending`이 재시작 폐기로 마감한다).
 
     `exclude_ids`(WAN-306): 상태 복원으로 되살린 주문의 장부 행 — 따라잡기 재생이 봉
@@ -1263,7 +1144,7 @@ def expire_stale_pending(
         if row.journal_id in exclude_ids:
             continue  # 복원된 주문(WAN-306) — 따라잡기 재생이 봉 계수로 처리한다.
         if row.limit_valid_bars is None:
-            continue  # 무기한(재진입) 또는 열 도입 전 행 — 기한 불명.
+            continue  # 무기한 또는 열 도입 전 행 — 기한 불명.
         deadline = expiry_deadline_ms(
             row.placed_ms, row.limit_valid_bars, timeframe_to_ms(row.timeframe)
         )
@@ -1276,11 +1157,12 @@ def expire_stale_pending(
 
 
 def engine_settings_for(settings: Settings) -> Settings:
-    """실행 엔진에 넘길 설정 — 엔진 C를 켜면 일 손실 서킷브레이커를 끈다(WAN-451 ⑧).
+    """실행 엔진에 넘길 설정 — 팔이나 엔진 C를 켜면 일 손실 서킷브레이커를 끈다(WAN-451 ⑧).
 
     서킷브레이커는 정본(WAN-449 팔 · 엔진 C 백테스트)에 **없는 규칙**이다. 켜 두면 페이퍼만
     다른 규칙으로 돈다(WAN-305). 게다가 그 판정은 `paper_trades`만 합산해 엔진 C 손익을 못
-    본다. 엔진 C가 꺼져 있으면 설정을 그대로 돌려준다(옛 러너 동작 비트 동일).
+    본다. 둘 다 꺼져 있으면(러너가 아무것도 안 돈다) 설정을 그대로 돌려준다. 러너의
+    발동/해제 알림(옛 오더블록 페이퍼 시절)은 없어졌다 — 끈 규칙을 알릴 일이 없다.
     """
     if not (settings.live_tsmom_enabled or settings.live_arm_enabled):
         return settings
@@ -1307,11 +1189,6 @@ def arm_settings_problems(settings: Settings) -> list[str]:
         problems.append(
             f"첫 탭만이어야 한다: ALPHABLOCK_CONFLUENCE__RETAP_MODE=once"
             f" (지금 {settings.confluence.retap_mode})"
-        )
-    if settings.live_reentry_entry_rule != "off":
-        problems.append(
-            "재진입이 꺼져 있어야 한다: ALPHABLOCK_LIVE_REENTRY_ENTRY_RULE=off"
-            f" (지금 {settings.live_reentry_entry_rule})"
         )
     if settings.confluence.fill_penetration_bps != ARM_FILL_PENETRATION_BPS:
         problems.append(
@@ -1366,20 +1243,40 @@ def build_paper_recorder(
 
 
 def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
-    """존-지정가 페이퍼 러너를 실행한다(`live.runner`가 기본값에서 위임하는 진입점)."""
+    """페이퍼 러너를 실행한다 — 스토캐스틱 팔 + 엔진 C(`live.runner`가 위임하는 진입점).
+
+    오더블록 시리즈(`live_zone_limit_enabled`)는 팔(`live_arm_enabled`)이 켜져 있어야만 돈다.
+    옛 오더블록 페이퍼(칸당 대기 주문 · 고정 R 익절 · 재진입 · 틱 피드)는 WAN-451에서
+    없어졌으므로, 오더블록을 켜고 팔을 끈 설정은 기동을 거부한다 — 조용히 다른 규칙으로 돌면
+    라벨과 동작이 어긋난다(WAN-91/95/112/123/159). 엔진 C만 돌리려면 오더블록을 끈다.
+    """
     from common.telegram import build_telegram_client
     from data.funding import FundingRateStore
     from execution.engine import build_execution_engine
     from execution.leverage import book_per_trade_sizing
     from paper.store import PaperTradeStore
 
+    if settings.live_zone_limit_enabled and not settings.live_arm_enabled:
+        raise SystemExit(
+            "옛 오더블록 페이퍼는 WAN-451에서 없어졌다 — 스토캐스틱 팔을 켜거나"
+            " (ALPHABLOCK_LIVE_ARM_ENABLED=true, `docs/ops/wan451-arm-paper.md`)"
+            " 오더블록 시리즈를 끈다(ALPHABLOCK_LIVE_ZONE_LIMIT_ENABLED=false — 엔진 C만 돈다)."
+        )
+    arm_params: ArmParams | None = None
+    if settings.live_arm_enabled:
+        problems = arm_settings_problems(settings)
+        if problems:
+            raise SystemExit(
+                "스토캐스틱 팔(ALPHABLOCK_LIVE_ARM_ENABLED=true)을 켜려면 다음을 맞춰야 한다"
+                " (WAN-451 ③):\n- " + "\n- ".join(problems)
+            )
+        arm_params = ArmParams()
+
     store = OhlcvStore(settings.db_path)
     journal = OrderJournal(settings.db_path)
     paper_store = PaperTradeStore(settings.db_path)
     funding_store = FundingRateStore(settings.db_path) if settings.funding_enabled else None
     recorder = build_paper_recorder(paper_store, settings, funding_store=funding_store)
-    # try 이전에 정의한다 — try 안에서 예외가 나도 finally의 정리가 미정의를 참조하지 않게.
-    price_feed: PriceFeed | None = None
     # 레버리지 북(WAN-171 = WAN-45의 2단계): 칸=(종목,TF)마다 1포지션 · 여러 칸 동시 · 한
     # 지갑(공유 자본) · 배수 N. 기본값 = 채택 북(cap_only 5배, WAN-213). 엔진이 백테스트와
     # **같은** `resolve_book_sizing`으로 사이징하고, 거래당 리스크 금액(장부)은 북의 거래당
@@ -1404,10 +1301,10 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
         now = int(time.time() * 1000)
         session_id = journal.start_session(now_ms=now)
 
-        series = build_series(settings) if settings.live_zone_limit_enabled else []
-        if settings.live_arm_enabled:
-            # 팔(WAN-451 ③): 고정 격자 대신 그 주 목록 × 팔 TF. 기동 때는 스냅샷이 남은 칸도 넣어
-            # 목록 밖 칸의 대기 주문까지 복원한다 — 첫 폴링의 `sync_series`가 정리한다.
+        series: list[Series] = []
+        if arm_params is not None:
+            # 팔(WAN-451 ③): 그 주 목록 × 팔 TF. 기동 때는 스냅샷이 남은 칸도 넣어 목록 밖 칸의
+            # 대기 주문까지 복원한다 — 첫 폴링의 `sync_series`가 정리한다.
             universe = UniverseStore(settings.db_path)
             signals = ArmSignalStore(settings.db_path)
             snap = universe.at(now)
@@ -1422,8 +1319,17 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
                     "팔 종목 목록이 아직 없습니다 — 수집기(ALPHABLOCK_UNIVERSE_ENABLED)가 목록을"
                     " 만들면 다음 폴링부터 감시합니다"
                 )
-        if not settings.live_zone_limit_enabled:
-            _logger.info("옛 오더블록 페이퍼 꺼짐(WAN-451 ⑦) — 시리즈 0개, 대기 주문 없음")
+            _logger.info(
+                "스토캐스틱 팔 켜짐(WAN-451): 하한 %.0f%% · %%K < %.0f · 손절 ×%.0f · ts%d · "
+                "폭락 ×%.1f · 서킷브레이커 꺼짐 · 매주 종목 목록 · 몰림 규칙 · 탭마다 독립 주문",
+                arm_params.min_stop_width * 100,
+                arm_params.k_threshold,
+                arm_params.stop_multiple,
+                arm_params.hold_bars,
+                arm_params.crash_multiplier,
+            )
+        else:
+            _logger.info("오더블록 시리즈 꺼짐(WAN-451 ⑦) — 시리즈 0개, 대기 주문 없음")
         # 매매 이벤트 알림(WAN-189, 페이퍼 한정). 텔레그램 미설정이면 build_telegram_client가
         # None을 주고 알림기는 드라이런(로그만)으로 돈다 — `notifier`의 기존 관행 그대로다.
         # 엔진보다 **먼저** 만든다 — 엔진의 스킵 훅이 알림기를 참조하기 때문이다(WAN-221).
@@ -1436,15 +1342,11 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
                 funnel_provider=lambda s, e: journal.funnel_counts(start_ms=s, end_ms=e),
                 # 팔 규칙 거부는 체결마다 생길 수 있어 건별로 안 보낸다(WAN-451 ⑩ — 일일 요약).
                 # 팔은 탭마다 독립 주문이라 「칸에 이미 포지션」도 흔하다 — 같이 요약으로 모은다.
-                quiet_reject_codes=(
-                    frozenset({*ARM_REJECT_CODES, REJECT_CODE_CELL_BUSY})
-                    if settings.live_arm_enabled
-                    else frozenset()
-                ),
+                quiet_reject_codes=frozenset({*ARM_REJECT_CODES, REJECT_CODE_CELL_BUSY}),
             )
 
         # 존폭 필터 기각의 건별 알림(옵트인, WAN-221). deviation은 만료 이벤트에서 따로 넘기고,
-        # cell_busy·retap은 no_fill처럼 시끄러워 넘기지 않는다(존폭만 전달).
+        # retap은 no_fill처럼 시끄러워 넘기지 않는다(존폭만 전달).
         skip_listener: Callable[[str, str, str, int], None] | None = None
         if notifier is not None:
 
@@ -1457,53 +1359,12 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
 
             skip_listener = _forward_skip
 
-        # 재진입 규칙(WAN-273/274): 채택 값 "band"를 엔진이 물려받는다. "off"면 None(재진입
-        # 없음). 백테스트 채택 북과 같은 규칙이라 러너가 자기 버전을 새로 만들지 않는다.
-        reentry_rule: ReentryEntryRule | None = (
-            None if settings.live_reentry_entry_rule == "off" else "band"
-        )
         engine = ZoneLimitLiveEngine(
             params=settings.confluence,
-            book=None,
             journal=journal,
             session_id=session_id,
-            has_position=lambda s, t: any(
-                p.symbol == s and p.timeframe == t for p in executor.open_positions
-            ),
             skip_listener=skip_listener,
-            reentry_entry_rule=reentry_rule,
-            # 몰림 규칙의 모집단(WAN-451): 슬롯과 무관한 탭별 그림자 주문을 따라간다.
-            track_shadows=settings.live_arm_enabled,
-            independent_orders=settings.live_arm_enabled,
-            # 창 밖으로 밀린 살아 있는 존을 기억한다(WAN-451 — 정본은 몇 년 된 존에도 들어간다).
-            carry_zones=settings.live_arm_enabled,
         )
-        # 옵트인 웹소켓 틱 피드(WAN-246, 페이퍼 한정 · 공개 체결 스트림만). 기본 꺼짐이면
-        # None → 러너는 확정 1분봉만 소비(예전과 비트 동일). 켜면 심볼별 실시간 체결가로
-        # 대기 주문 체결을 앞당긴다.
-        feed_factory: Callable[[list[str]], PriceFeed] | None = None
-        if settings.live_tick_feed_enabled and universe is not None:
-            from live.price_feed import CcxtProTickFeed
-
-            def _start_feed(symbols: list[str]) -> PriceFeed:
-                feed = CcxtProTickFeed(symbols, exchange_id=settings.live_tick_feed_exchange)
-                feed.start()
-                _logger.info("웹소켓 틱 피드(WAN-246): %d 심볼로 (다시) 시작", len(symbols))
-                return feed
-
-            feed_factory = _start_feed
-        elif settings.live_tick_feed_enabled and series:
-            from live.price_feed import CcxtProTickFeed
-
-            symbols = sorted({sym for sym, _ in series})
-            feed = CcxtProTickFeed(symbols, exchange_id=settings.live_tick_feed_exchange)
-            feed.start()
-            price_feed = feed
-            _logger.info(
-                "웹소켓 틱 피드 켜짐(WAN-246): %d 심볼 · %s (페이퍼 한정, 공개 체결 스트림)",
-                len(symbols),
-                settings.live_tick_feed_exchange,
-            )
 
         tsmom_rebalancer: TsmomRebalancer | None = None
         if tsmom_ledger is not None:
@@ -1527,25 +1388,6 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
                 tsmom.LAMBDA,
             )
 
-        arm_params: ArmParams | None = None
-        if settings.live_arm_enabled:
-            problems = arm_settings_problems(settings)
-            if problems:
-                raise SystemExit(
-                    "스토캐스틱 팔(ALPHABLOCK_LIVE_ARM_ENABLED=true)을 켜려면 다음을 맞춰야 한다"
-                    " (WAN-451 ③):\n- " + "\n- ".join(problems)
-                )
-            arm_params = ArmParams()
-            _logger.info(
-                "스토캐스틱 팔 켜짐(WAN-451): 하한 %.0f%% · %%K < %.0f · 손절 ×%.0f · ts%d · "
-                "폭락 ×%.1f · 서킷브레이커 꺼짐 · 매주 종목 목록 · 몰림 규칙(그림자 주문)",
-                arm_params.min_stop_width * 100,
-                arm_params.k_threshold,
-                arm_params.stop_multiple,
-                arm_params.hold_bars,
-                arm_params.crash_multiplier,
-            )
-
         runner = ZoneLimitPaperRunner(
             store=store,
             engine=engine,
@@ -1558,19 +1400,17 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
             poll_interval_seconds=settings.live_poll_interval_seconds,
             runtime_state=RuntimeStateStore(settings.live_runtime_state_path),
             notifier=notifier,
-            price_feed=price_feed,
             engine_state=engine_state,
             catchup_max_ms=int(settings.live_catchup_max_hours * 3_600_000),
             tsmom=tsmom_rebalancer,
             arm=arm_params,
             universe=universe,
             signals=signals,
-            price_feed_factory=feed_factory,
-            bootstrap_days=settings.live_zone_memory_days if settings.live_arm_enabled else 0,
+            bootstrap_days=settings.live_zone_memory_days if arm_params is not None else 0,
         )
-        # 재시작 복원(WAN-306): 이전 세션의 엔진 상태(전이 맥락·탭 표식·대기 주문·재진입
-        # 재무장)를 되살린다 — 복원된 주문은 아래 재평가/폐기에서 제외한다(따라잡기 재생이
-        # 봉 계수로 정확한 봉에서 체결/만료를 낸다).
+        # 재시작 복원(WAN-306): 이전 세션의 엔진 상태(전이 맥락·탭 표식·기억하던 존·대기
+        # 주문)를 되살린다 — 복원된 주문은 아래 재평가/폐기에서 제외한다(따라잡기 재생이 봉
+        # 계수로 정확한 봉에서 체결/만료를 낸다).
         restored_ids = runner.restore_state(now_ms=now)
         if restored_ids:
             _logger.info(
@@ -1590,9 +1430,9 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
         if discarded:
             _logger.info("이전 세션 대기 주문 %d건 폐기(discarded_restart)", discarded)
         _logger.info(
-            "존-지정가 페이퍼 러너 시작(WAN-45): %d 시리즈, 폴링 %ds, 세션 #%d"
+            "페이퍼 러너 시작(WAN-45 · WAN-451): %d 시리즈, 폴링 %ds, 세션 #%d"
             " · 레버리지 북 %s×%.4g (WAN-171, 공유 자본)"
-            " (live_trading=%s — 페이퍼 한정, 체결률 실측이 목적)",
+            " (live_trading=%s — 페이퍼 한정)",
             len(series),
             settings.live_poll_interval_seconds,
             session_id,
@@ -1602,14 +1442,8 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
         )
         if universe is not None:
             runner.sync_series(now)  # 복원 뒤 목록 밖 칸 정리
-            runner.refresh_price_feed()
-        try:
-            runner.run(max_polls=1 if once else None)
-        finally:
-            runner.close()
+        runner.run(max_polls=1 if once else None)
     finally:
-        if price_feed is not None:
-            price_feed.close()
         if universe is not None:
             universe.close()
         if signals is not None:

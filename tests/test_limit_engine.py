@@ -27,13 +27,13 @@ from backtest.harness import LEGACY_ZONE_WIDTH_FILTER_ON
 from backtest.substep import SubStep, simulate_zone_limit_trade
 from live import limit_engine
 from live.limit_engine import ZoneLimitLiveEngine
+from live.limit_orders import PendingLimitOrder
 from live.order_journal import OrderJournal
 from strategy.models import (
     ConfluenceParams,
     OrderBlock,
     OrderBlockDirection,
     OrderBlockResult,
-    SignalExitReason,
 )
 from strategy.realtime_band import RealtimeBand
 from strategy.realtime_rsi import RealtimeRsi
@@ -120,7 +120,6 @@ def _engine(
     params: ConfluenceParams | None = None,
     journal: OrderJournal | None = None,
     session_id: int | None = None,
-    has_position: object = None,
     closes: list[float] | None = None,
     skip_listener: object = None,
 ) -> ZoneLimitLiveEngine:
@@ -129,11 +128,17 @@ def _engine(
         params=params if params is not None else _params(),
         journal=journal,
         session_id=session_id,
-        has_position=has_position,  # type: ignore[arg-type]
         skip_listener=skip_listener,  # type: ignore[arg-type]
     )
     engine.on_htf_bars(_SYMBOL, _TF, _htf_df(closes=closes))
     return engine
+
+
+def _pending(engine: ZoneLimitLiveEngine) -> PendingLimitOrder | None:
+    """걸린 주문 하나(없으면 None) — 이 파일의 시나리오는 존이 하나라 주문도 많아야 하나다."""
+    orders = engine.open_orders()
+    assert len(orders) <= 1
+    return orders[0] if orders else None
 
 
 def _rest_without_touch(
@@ -159,7 +164,7 @@ def _rest_without_touch(
     )
     events = engine.on_substep(_SYMBOL, _TF, time_ms=_FORMING, low=99.4, high=101.5, close=100.0)
     assert [e.kind for e in events] == ["placed"]
-    assert engine.book.pending(_SYMBOL, _TF) is not None
+    assert _pending(engine) is not None
     return engine
 
 
@@ -183,7 +188,7 @@ def test_tap_places_order_and_touch_fills_with_band_price(
     # 존 밖(저가 96 > 존 상단 95): 예약 없음.
     events = engine.on_substep(_SYMBOL, _TF, time_ms=_FORMING, low=96.0, high=100.0, close=99.0)
     assert events == []
-    assert engine.book.pending(_SYMBOL, _TF) is None
+    assert _pending(engine) is None
 
     # 존 진입(저가 94.9): 같은 서브스텝에서 예약 + 체결(백테스트도 탭 봉 안에서 체결한다).
     events = engine.on_substep(_SYMBOL, _TF, time_ms=_FORMING + _M, low=94.9, high=99.0, close=95.2)
@@ -197,7 +202,7 @@ def test_tap_places_order_and_touch_fills_with_band_price(
     # 고정 1.5R 익절(WAN-81/90): 진입가 + 1.5 × (진입가 − 손절가).
     expected_tp = fill.price + 1.5 * (fill.price - 90.0)
     assert fill.take_profit_price == pytest.approx(expected_tp)
-    assert engine.book.pending(_SYMBOL, _TF) is None
+    assert _pending(engine) is None
 
 
 def test_fill_parity_with_backtest_simulator(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -265,13 +270,13 @@ def test_expiry_after_limit_valid_bars(monkeypatch: pytest.MonkeyPatch) -> None:
         _SYMBOL, _TF, time_ms=_FORMING + 2 * _H, low=100.2, high=101.0, close=100.5
     )
     assert [e.kind for e in ev2] == ["cancelled_expired"]
-    assert engine.book.pending(_SYMBOL, _TF) is None
+    assert _pending(engine) is None
 
 
 def test_wall_clock_backstop_expires_overdue_and_frees_slot(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """WAN-298: 서브스텝이 오지 않아도(수집 정지) 벽시계 백스톱이 만료를 집행해 슬롯을 비운다.
+    """WAN-298: 서브스텝이 오지 않아도(수집 정지) 벽시계 백스톱이 만료를 집행한다.
 
     봉 계수(`bars_elapsed`)는 소비된 1분봉으로만 전진하므로 데이터가 멈추면 얼어붙는다 —
     그 상태에서 `expire_overdue`가 기한(예약 봉 시작 + 24봉) + 유예를 지난 주문을
@@ -286,19 +291,19 @@ def test_wall_clock_backstop_expires_overdue_and_frees_slot(
 
     # 기한 직후(유예 안)에는 발동하지 않는다 — 정상 서브스텝 경로와 경합하지 않기 위해서다.
     assert engine.expire_overdue(now_ms=deadline + 60_000) == []
-    assert engine.book.pending(_SYMBOL, _TF) is not None
+    assert _pending(engine) is not None
 
     # 유예를 지나면 만료 — 이벤트·장부 종결 시각은 벽시계가 아니라 **기한 시각**이다.
     events = engine.expire_overdue(now_ms=deadline + 6 * 60_000)
     assert [e.kind for e in events] == ["cancelled_expired"]
     assert events[0].time_ms == deadline
-    assert engine.book.pending(_SYMBOL, _TF) is None
+    assert _pending(engine) is None
     stats = journal.fill_stats()[0]
     assert stats.cancelled_expired == 1
     # terminal_ms == 기한 시각: 그 1ms 창의 funnel에 만료(no_fill)로 잡힌다.
     assert journal.funnel_counts(start_ms=deadline, end_ms=deadline + 1).no_fill == 1
 
-    # 슬롯이 실제로 비었다 — 존 밖으로 나갔다 재탭하면 새 주문이 걸린다(라벨이 아니라 동작).
+    # 주문이 실제로 빠졌다 — 존 밖으로 나갔다 재탭하면 새 주문이 걸린다(라벨이 아니라 동작).
     ev = engine.on_substep(_SYMBOL, _TF, time_ms=_FORMING + _H, low=100.2, high=101.0, close=100.5)
     assert ev == []
     ev = engine.on_substep(
@@ -309,10 +314,10 @@ def test_wall_clock_backstop_expires_overdue_and_frees_slot(
 
 
 def test_wall_clock_backstop_skips_indefinite_order(monkeypatch: pytest.MonkeyPatch) -> None:
-    """무기한 주문(`limit_valid_bars=None` — 재진입 재무장, WAN-274)은 백스톱이 건드리지 않는다."""
+    """무기한 주문(`limit_valid_bars=None`)은 백스톱이 건드리지 않는다."""
     engine = _rest_without_touch(monkeypatch, params=_params(limit_valid_bars=None))
     assert engine.expire_overdue(now_ms=_FORMING + 10_000 * _H) == []
-    assert engine.book.pending(_SYMBOL, _TF) is not None
+    assert _pending(engine) is not None
 
 
 def test_invalidated_zone_cancels_pending(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -325,7 +330,7 @@ def test_invalidated_zone_cancels_pending(monkeypatch: pytest.MonkeyPatch) -> No
     _install_stub_detector(monkeypatch, [broken])
     events = engine.on_htf_bars(_SYMBOL, _TF, _htf_df(_N_CLOSED + 1, closes=[*_DESC_CLOSES, 100.0]))
     assert [e.kind for e in events] == ["cancelled_invalidated"]
-    assert engine.book.pending(_SYMBOL, _TF) is None
+    assert _pending(engine) is None
 
 
 def test_optin_gate_condition_fail_cancel(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -342,7 +347,7 @@ def test_optin_gate_condition_fail_cancel(monkeypatch: pytest.MonkeyPatch) -> No
     events = engine.on_substep(_SYMBOL, _TF, time_ms=_FORMING, low=79.0, high=100.5, close=95.0)
     kinds = [e.kind for e in events]
     assert kinds == ["placed", "cancelled_condition_failed"]
-    assert engine.book.pending(_SYMBOL, _TF) is None
+    assert _pending(engine) is None
 
 
 def test_zone_width_filter_blocks_wide_zone(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -351,7 +356,7 @@ def test_zone_width_filter_blocks_wide_zone(monkeypatch: pytest.MonkeyPatch) -> 
     engine = _engine(monkeypatch, [wide], params=_filter_on())
     events = engine.on_substep(_SYMBOL, _TF, time_ms=_FORMING, low=94.9, high=99.0, close=95.2)
     assert events == []
-    assert engine.book.pending(_SYMBOL, _TF) is None
+    assert _pending(engine) is None
 
 
 def test_zone_width_skip_is_journaled(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -365,7 +370,7 @@ def test_zone_width_skip_is_journaled(monkeypatch: pytest.MonkeyPatch, tmp_path:
     engine = _engine(monkeypatch, [wide], params=_filter_on(), journal=journal, session_id=session)
     events = engine.on_substep(_SYMBOL, _TF, time_ms=_FORMING, low=94.9, high=99.0, close=95.2)
     assert events == []  # 이벤트 흐름은 옛 동작과 같다(부수효과만 추가).
-    assert engine.book.pending(_SYMBOL, _TF) is None
+    assert _pending(engine) is None
 
     s = journal.fill_stats()[0]
     assert s.skipped_zone_width == 1
@@ -400,29 +405,6 @@ def test_skip_listener_fires_once_per_bar_without_emitting_events(
     journal.close()
 
 
-def test_cell_busy_skip_is_journaled_once_per_bar(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """슬롯이 차 있으면(오픈 포지션) 새 탭이 `skip_reason='cell_busy'`로 남되, 같은 봉에서
-    매 서브스텝 재평가돼도 한 번만 찍힌다(WAN-217 · 중복 계수 방지)."""
-    journal = OrderJournal(tmp_path / "j.db")
-    session = journal.start_session(now_ms=0)
-    engine = _engine(
-        monkeypatch,
-        [_zone()],
-        journal=journal,
-        session_id=session,
-        has_position=lambda _s, _t: True,  # 슬롯 참.
-    )
-    engine.on_substep(_SYMBOL, _TF, time_ms=_FORMING, low=94.9, high=99.0, close=95.2)
-    engine.on_substep(_SYMBOL, _TF, time_ms=_FORMING + _M, low=94.8, high=99.0, close=95.1)
-
-    s = journal.fill_stats()[0]
-    assert s.skipped_cell_busy == 1  # 같은 봉 두 서브스텝이 한 행으로.
-    assert engine.book.pending(_SYMBOL, _TF) is None
-    journal.close()
-
-
 def test_fill_carries_zone_width_atr_when_filter_on(monkeypatch: pytest.MonkeyPatch) -> None:
     """필터가 켜져 있으면 체결이 통과한 존폭(÷ATR)을 실어 나른다(WAN-189 알림용).
 
@@ -449,9 +431,9 @@ def test_fill_zone_width_atr_none_when_filter_off(monkeypatch: pytest.MonkeyPatc
 def test_no_retap_arming_while_price_stays_inside(monkeypatch: pytest.MonkeyPatch) -> None:
     """탭은 바깥→안 전이만 센다 — 존 안에 머무는 연속 봉은 새 예약을 만들지 않는다."""
     engine = _rest_without_touch(monkeypatch)
-    order = engine.book.pending(_SYMBOL, _TF)
+    order = _pending(engine)
     assert order is not None
-    # 다음 봉에서 만료시켜 슬롯을 비운다. 탭 봉(저가 99.4)이 존 안이었으므로, 다음 봉이
+    # 다음 봉에서 만료시킨다. 탭 봉(저가 99.4)이 존 안이었으므로, 다음 봉이
     # 계속 존 안(저가 99.3)이어도 전이가 아니다 — 재예약 없이 조용해야 한다.
     order.limit_valid_bars = 1
     ev = engine.on_substep(_SYMBOL, _TF, time_ms=_FORMING + _H, low=99.3, high=100.5, close=100.0)
@@ -460,14 +442,26 @@ def test_no_retap_arming_while_price_stays_inside(monkeypatch: pytest.MonkeyPatc
         _SYMBOL, _TF, time_ms=_FORMING + _H + _M, low=99.3, high=100.0, close=99.8
     )
     assert ev2 == []
-    assert engine.book.pending(_SYMBOL, _TF) is None
+    assert _pending(engine) is None
 
 
-def test_slot_busy_blocks_new_arming(monkeypatch: pytest.MonkeyPatch) -> None:
-    """단일 포지션 규칙: 오픈 포지션이 있으면 새 주문을 걸지 않는다."""
-    engine = _engine(monkeypatch, [_zone()], has_position=lambda s, t: True)
-    events = engine.on_substep(_SYMBOL, _TF, time_ms=_FORMING, low=94.9, high=99.0, close=95.2)
-    assert events == []
+def test_retap_places_another_order_while_the_first_still_rests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """탭마다 독립 주문(WAN-451): 앞 주문이 걸려 있어도 재탭은 제 주문을 하나 더 건다.
+
+    옛 엔진은 칸당 주문 하나(슬롯)라 재탭을 `cell_busy`로 버렸다 — 정본 팔은 탭마다 주문을
+    독립으로 시뮬레이션하므로 그 탭을 놓치면 정본에 있는 체결이 라이브에 없다."""
+    engine = _rest_without_touch(monkeypatch)
+    ev = engine.on_substep(_SYMBOL, _TF, time_ms=_FORMING + _H, low=100.2, high=101.0, close=100.5)
+    assert ev == []  # 존 밖 — 탭 아님
+    ev = engine.on_substep(
+        _SYMBOL, _TF, time_ms=_FORMING + 2 * _H, low=99.4, high=101.5, close=100.0
+    )
+    assert [e.kind for e in ev] == ["placed"]
+    orders = engine.open_orders()
+    assert len(orders) == 2
+    assert [o.tap_index for o in orders] == [0, 0]  # 스텁 탐지기는 탭 기록을 안 늘린다
 
 
 def test_htf_gap_discards_pending(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -503,150 +497,6 @@ def test_journal_records_full_lifecycle(monkeypatch: pytest.MonkeyPatch, tmp_pat
     journal.close()
 
 
-# -- 익절 후 존 내 재진입 (WAN-273/274) --------------------------------------
-
-
-def _band_reentry_engine(
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    journal: OrderJournal | None = None,
-    session_id: int | None = None,
-) -> ZoneLimitLiveEngine:
-    """재진입 band를 켠 엔진(채택 규칙)에서 존 대장을 세운다."""
-    _install_stub_detector(monkeypatch, [_zone()])
-    engine = ZoneLimitLiveEngine(
-        params=_params(),
-        journal=journal,
-        session_id=session_id,
-        has_position=lambda _s, _t: False,
-        reentry_entry_rule="band",
-    )
-    engine.on_htf_bars(_SYMBOL, _TF, _htf_df())
-    return engine
-
-
-def _fill_base(engine: ZoneLimitLiveEngine) -> None:
-    """base 지정가를 체결시켜 `occupied_zone`을 세운다(재진입 준비 단계)."""
-    events = engine.on_substep(_SYMBOL, _TF, time_ms=_FORMING + _M, low=94.9, high=99.0, close=95.2)
-    assert "filled" in [e.kind for e in events]
-    assert engine.book.pending(_SYMBOL, _TF) is None  # 탭 봉 안에서 즉시 체결됐다.
-
-
-def test_reentry_band_rearms_after_take_profit(monkeypatch: pytest.MonkeyPatch) -> None:
-    """익절 청산 후 같은 존에 band 지정가를 다시 건다(무기한 대기 · 봉내 재산정)."""
-    engine = _band_reentry_engine(monkeypatch)
-    _fill_base(engine)
-    # 러너가 익절을 감지했다고 보고 재진입 훅을 호출한다.
-    events = engine.on_position_exit(
-        _SYMBOL, _TF, reason=SignalExitReason.TAKE_PROFIT, time_ms=_FORMING + 2 * _M
-    )
-    assert [e.kind for e in events] == ["placed"]
-    order = events[0].order
-    assert order.live_limit is not None  # 정적 지정가가 아니라 봉내 라이브 밴드 재산정.
-    assert order.limit_valid_bars is None  # 무기한 대기(백테스트 재진입과 같은 대리, WAN-223).
-    assert engine.book.pending(_SYMBOL, _TF) is not None
-
-
-def test_reentry_off_does_not_rearm_after_take_profit(monkeypatch: pytest.MonkeyPatch) -> None:
-    """재진입 off(기본)면 익절로 존이 끝난다 — 재무장 없음(옛 동작)."""
-    engine = _engine(monkeypatch, [_zone()])  # reentry_entry_rule 미지정 = None.
-    _fill_base(engine)
-    events = engine.on_position_exit(
-        _SYMBOL, _TF, reason=SignalExitReason.TAKE_PROFIT, time_ms=_FORMING + 2 * _M
-    )
-    assert events == []
-    assert engine.book.pending(_SYMBOL, _TF) is None
-
-
-def test_reentry_stop_loss_ends_the_zone(monkeypatch: pytest.MonkeyPatch) -> None:
-    """손절 청산은 재무장하지 않고 존을 끝낸다(`_iter_reentries`의 `if not is_win: break`)."""
-    engine = _band_reentry_engine(monkeypatch)
-    _fill_base(engine)
-    assert (
-        engine.on_position_exit(
-            _SYMBOL, _TF, reason=SignalExitReason.STOP_LOSS, time_ms=_FORMING + 2 * _M
-        )
-        == []
-    )
-    assert engine.book.pending(_SYMBOL, _TF) is None
-    # occupied_zone이 비워졌으므로 뒤늦은 익절 훅(가상)도 재무장할 존을 못 찾는다.
-    assert (
-        engine.on_position_exit(
-            _SYMBOL, _TF, reason=SignalExitReason.TAKE_PROFIT, time_ms=_FORMING + 3 * _M
-        )
-        == []
-    )
-
-
-def test_reentry_skips_invalidated_zone(monkeypatch: pytest.MonkeyPatch) -> None:
-    """무효화로 대장에서 사라진 존은 익절 후에도 재진입하지 않는다."""
-    engine = _band_reentry_engine(monkeypatch)
-    _fill_base(engine)
-    # 존이 무효화됐다 — 탐지기가 이제 빈 대장을 낸다(on_htf_bars가 존을 뺀다).
-    _install_stub_detector(monkeypatch, [])
-    engine.on_htf_bars(_SYMBOL, _TF, _htf_df())
-    events = engine.on_position_exit(
-        _SYMBOL, _TF, reason=SignalExitReason.TAKE_PROFIT, time_ms=_FORMING + 2 * _M
-    )
-    assert events == []
-    assert engine.book.pending(_SYMBOL, _TF) is None
-
-
-def test_reentry_rearm_matches_backtest_band_chain(monkeypatch: pytest.MonkeyPatch) -> None:
-    """재무장 체결이 백테스트 band 사슬과 같은 가격·시각을 낸다(파리티, 로직 이중화 금지).
-
-    재진입도 탭 예약과 **같은 `IntrabarLiveLimit`**(백테스트 재진입 팔과 공유)로 지정가를
-    산정하므로, 같은 확정봉·서브스텝을 넣으면 `simulate_zone_limit_trade`와 일치한다.
-    """
-    params = _params()
-    ob = _zone()
-    engine = _band_reentry_engine(monkeypatch)
-    _fill_base(engine)
-    placed = engine.on_position_exit(
-        _SYMBOL, _TF, reason=SignalExitReason.TAKE_PROFIT, time_ms=_FORMING + 2 * _M
-    )
-    assert [e.kind for e in placed] == ["placed"]
-
-    # 재무장 주문은 다음 서브스텝에서 체결된다.
-    rearm_fill = None
-    for event in engine.on_substep(
-        _SYMBOL, _TF, time_ms=_FORMING + 3 * _M, low=94.0, high=95.0, close=94.5
-    ):
-        if event.kind == "filled":
-            rearm_fill = event.fill
-    assert rearm_fill is not None
-
-    # 백테스트 시뮬레이터 — 같은 시딩([100]*30), 재무장 서브스텝만.
-    closes = [100.0] * _N_CLOSED
-    deviation = params.deviation_filter
-    assert deviation is not None
-    provider = zlb.IntrabarLiveLimit(
-        band=RealtimeBand.seed_from_closed(closes, deviation),
-        order_block=ob,
-        is_long=True,
-        params=params,
-        stop_price=ob.bottom,
-        lines=[],
-        trigger_time=_FORMING + 3 * _M,
-    )
-    outcome = simulate_zone_limit_trade(
-        direction=ob.direction,
-        live_limit=provider,
-        stop_price=ob.bottom,
-        substeps=[
-            SubStep(time=_FORMING + 3 * _M, high=95.0, low=94.0, close=94.5, htf_bar_time=_FORMING)
-        ],
-        rsi_state=RealtimeRsi.seed_from_closed(closes, params.rsi_length),
-        rsi_oversold=params.rsi_oversold,
-        rsi_overbought=params.rsi_overbought,
-        limit_valid_bars=None,  # 재진입은 무기한 대기.
-        rsi_gate_mode=params.rsi_gate_mode,
-    )
-    assert outcome.filled
-    assert outcome.entry_price == pytest.approx(rearm_fill.price)
-    assert outcome.entry_time == rearm_fill.time
-
-
 class TestLiveParamValidation:
     """라이브가 재현 못 하는 설정은 조용히 무시하지 않고 거부한다(WAN-95의 교훈)."""
 
@@ -668,24 +518,14 @@ class TestLiveParamValidation:
         with pytest.raises(ValueError, match="min_rr"):
             ZoneLimitLiveEngine(params=_params(min_rr=1.0))
 
-    def test_rejects_unwired_reentry_rules(self) -> None:
-        """라이브는 재진입 'band'만 배선했다 — 'freeze'/'zone'은 거부(WAN-267 측정 팔)."""
-        for rule in ("freeze", "zone"):
-            with pytest.raises(ValueError, match="재진입 규칙 'band'만"):
-                ZoneLimitLiveEngine(params=_params(), reentry_entry_rule=rule)
-
-    def test_band_reentry_requires_deviation_filter(self) -> None:
-        with pytest.raises(ValueError, match="볼린저 필터가 있어야"):
-            ZoneLimitLiveEngine(params=_params(deviation_filter=None), reentry_entry_rule="band")
-
 
 def test_engine_carries_penetration_requirement_onto_orders(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """설정한 관통 요구가 실제 주문에 실린다(라벨만 붙고 터치 체결로 도는 사고 방지)."""
     engine = _rest_without_touch(monkeypatch, params=_params(fill_penetration_bps=5.0))
-    order = engine.book.pending(_SYMBOL, _TF)
+    order = _pending(engine)
     assert order is not None and order.fill_penetration_bps == 5.0
     default = _rest_without_touch(monkeypatch)
-    order0 = default.book.pending(_SYMBOL, _TF)
+    order0 = _pending(default)
     assert order0 is not None and order0.fill_penetration_bps == 0.0

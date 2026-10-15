@@ -21,13 +21,11 @@ def _arm_settings(db: Path, **over: object) -> Settings:
     base: dict[str, object] = {
         "db_path": str(db),
         "confluence": {"retap_mode": "once", "fill_penetration_bps": ARM_FILL_PENETRATION_BPS},
-        "live_reentry_entry_rule": "off",
         "risk_sizing": {"risk_per_trade": ARM_RISK_PER_TRADE},
         "live_zone_limit_enabled": True,
         "universe_enabled": True,
         "live_arm_enabled": True,
         "live_tsmom_enabled": True,
-        "live_tick_feed_enabled": False,
         "live_zone_memory_days": 30,
     }
     base.update(over)
@@ -81,11 +79,11 @@ def test_each_blocker_is_reported(tmp_path: Path) -> None:
     db = tmp_path / "b.db"
     _seed(db, history_days=10, daily_days=40, stale=("AAA/USDT:USDT", "4h"))
     check = ac.run_check(
-        _arm_settings(db, live_arm_enabled=False, live_reentry_entry_rule="band"), db, now_ms=NOW
+        _arm_settings(db, live_arm_enabled=False, universe_enabled=False), db, now_ms=NOW
     )
     assert not check.ready
     assert any("ALPHABLOCK_LIVE_ARM_ENABLED" in p for p in check.settings_problems)
-    assert any("REENTRY" in p for p in check.settings_problems)
+    assert any("UNIVERSE_ENABLED" in p for p in check.settings_problems)
     stale = [i for i in check.pair_issues if i.problem.startswith("마지막 봉")]
     assert [(i.symbol, i.timeframe) for i in stale] == [("AAA/USDT:USDT", "4h")]
     short = {i.timeframe for i in check.pair_issues if i.problem.startswith("이력")}

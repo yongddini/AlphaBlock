@@ -19,6 +19,7 @@ from data.models import Candle
 from data.storage import OhlcvStore
 from execution.engine import build_execution_engine
 from execution.leverage import book_per_trade_sizing
+from live.arm_rules import ArmParams
 from live.engine_state import EngineStateStore
 from live.executor import PaperExecutor
 from live.limit_engine import ZoneLimitLiveEngine
@@ -56,14 +57,7 @@ def _runner(
     )
     journal = OrderJournal(db)
     session = journal.start_session(now_ms=end_ms)
-    engine = ZoneLimitLiveEngine(
-        params=settings.confluence,
-        journal=journal,
-        session_id=session,
-        has_position=lambda s, t: any(
-            p.symbol == s and p.timeframe == t for p in executor.open_positions
-        ),
-    )
+    engine = ZoneLimitLiveEngine(params=settings.confluence, journal=journal, session_id=session)
     return ZoneLimitPaperRunner(
         store=OhlcvStore(db),
         engine=engine,
@@ -75,6 +69,7 @@ def _runner(
         lookback_bars=400,
         poll_interval_seconds=0,
         engine_state=EngineStateStore(db),
+        arm=ArmParams(),
         now_ms=lambda: clock[0],
         reuse_loads=reuse,
     )

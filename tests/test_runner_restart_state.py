@@ -9,8 +9,11 @@
 
 1. **장부**(`live_limit_orders`) — 예약·체결·만료·폐기 행이 세션 축을 뺀 모든 열에서 같다.
 2. **페이퍼 거래**(`paper_trades`) — 진입/청산 가격·시각·사유가 같다.
-3. **엔진 스냅샷**(`SeriesStateSnapshot`) — 전이 맥락·형성 봉 누적·대기 주문 스칼라·
-   재진입 재무장 상태가 저장 시각(`saved_ms`)을 뺀 모든 필드에서 같다.
+3. **엔진 스냅샷**(`SeriesStateSnapshot`) — 전이 맥락·형성 봉 누적·대기 주문 스칼라가
+   저장 시각(`saved_ms`)을 뺀 모든 필드에서 같다.
+
+러너는 스토캐스틱 팔 규칙으로 진입한다(WAN-451 — 옛 오더블록 페이퍼의 고정 R 익절·재진입은
+없어졌다). 그래서 합성 시나리오의 청산은 익절이 아니라 2배 손절이다.
 """
 
 from __future__ import annotations
@@ -26,9 +29,11 @@ from data.models import Candle
 from data.storage import OhlcvStore
 from execution.engine import build_execution_engine
 from live import limit_engine
-from live.engine_state import EngineStateStore, SeriesStateSnapshot
+from live.arm_rules import ArmParams
+from live.engine_state import EngineStateStore, PersistedPendingOrder, SeriesStateSnapshot
 from live.executor import PaperExecutor
 from live.limit_engine import ZoneLimitLiveEngine
+from live.limit_orders import PendingLimitOrder
 from live.order_journal import OrderJournal
 from live.zone_limit_runner import ZoneLimitPaperRunner, expire_stale_pending
 from paper.store import PaperTradeRecorder, PaperTradeStore
@@ -56,20 +61,6 @@ def _resting_zone() -> OrderBlock:
     return OrderBlock(
         direction=OrderBlockDirection.BULLISH,
         top=99.5,
-        bottom=90.0,
-        start_time=0,
-        confirmed_time=_H,
-        ob_volume=1.0,
-        ob_low_volume=0.5,
-        ob_high_volume=0.5,
-    )
-
-
-def _wide_zone() -> OrderBlock:
-    """밴드보다 근단이 유리한 존(즉시 체결 좌표) — 재진입 시나리오용."""
-    return OrderBlock(
-        direction=OrderBlockDirection.BULLISH,
-        top=95.0,
         bottom=90.0,
         start_time=0,
         confirmed_time=_H,
@@ -128,12 +119,10 @@ class _Rig:
         tmp_path: Path,
         *,
         name: str,
-        reentry_entry_rule: str | None = None,
         params: ConfluenceParams | None = None,
         catchup_max_ms: int = 48 * 3_600_000,
     ) -> None:
         self.db = tmp_path / f"{name}.db"
-        self._reentry = reentry_entry_rule
         self._params = params if params is not None else ConfluenceParams(max_zone_width_atr=None)
         self._catchup_max_ms = catchup_max_ms
         self.now = {"ms": 0}
@@ -155,13 +144,7 @@ class _Rig:
             sizing=settings.risk_sizing,
         )
         self.engine = ZoneLimitLiveEngine(
-            params=self._params,
-            journal=self.journal,
-            session_id=self.session,
-            has_position=lambda s, t: any(
-                p.symbol == s and p.timeframe == t for p in self.executor.open_positions
-            ),
-            reentry_entry_rule=self._reentry,  # type: ignore[arg-type]
+            params=self._params, journal=self.journal, session_id=self.session
         )
         self.engine_state = EngineStateStore(self.db)
         self.runner = ZoneLimitPaperRunner(
@@ -176,6 +159,7 @@ class _Rig:
             poll_interval_seconds=1.0,
             engine_state=self.engine_state,
             catchup_max_ms=self._catchup_max_ms,
+            arm=ArmParams(),
             now_ms=lambda: self.now["ms"],
         )
 
@@ -234,7 +218,7 @@ class _Rig:
         ]
 
     def snapshot_fingerprint(self) -> dict[str, object] | None:
-        """엔진 상태 지문 — 저장 시각을 뺀 스냅샷 전체(전이 맥락·주문 스칼라·재무장)."""
+        """엔진 상태 지문 — 저장 시각을 뺀 스냅샷 전체(전이 맥락·주문 스칼라)."""
         last_htf = self.runner._last_htf.get((_SYMBOL, _TF))  # noqa: SLF001
         if last_htf is None:
             return None
@@ -257,7 +241,13 @@ def _seed_htf(rig: _Rig, closes: list[float]) -> None:
 
 
 _DESC_CLOSES = [130.0 - i for i in range(_N_CLOSED)]
-_FLAT_CLOSES = [100.0 for _ in range(_N_CLOSED)]
+
+
+def _pending(rig: _Rig) -> PendingLimitOrder | None:
+    """걸린 주문 하나(없으면 None) — 이 파일의 시나리오는 존이 하나라 주문도 많아야 하나다."""
+    orders = rig.engine.open_orders()
+    assert len(orders) <= 1
+    return orders[0] if orders else None
 
 
 # -- 합성: 대기 주문·전이 맥락·체결이 재시작을 넘어 이어진다 -------------------
@@ -277,7 +267,7 @@ def test_restart_midbar_with_resting_order_matches_continuous(
         _m1(_FORMING, 99.4, 101.5, 100.0),  # 탭 — 예약만(지정가 ≈98.8에는 안 닿음).
         _m1(_FORMING + _M, 99.6, 101.0, 100.5),  # 존 밖 — 대기 유지.
         _m1(_FORMING + 2 * _M, 96.0, 99.0, 98.0),  # 지정가 관통 — 체결.
-        _m1(_FORMING + 3 * _M, 95.0, 115.0, 114.0),  # 익절(≈112) 관통 — 청산.
+        _m1(_FORMING + 3 * _M, 80.0, 99.0, 81.0),  # 2배 손절(≈81) 관통 — 청산.
     ]
 
     a = _Rig(tmp_path, name="continuous")
@@ -313,7 +303,7 @@ def test_catchup_replays_gap_bars_and_fills(
     bars = [
         _m1(_FORMING, 99.4, 101.5, 100.0),  # 탭 — 예약만.
         _m1(_FORMING + _M, 96.0, 99.0, 98.0),  # (공백 중) 체결.
-        _m1(_FORMING + 2 * _M, 95.0, 115.0, 114.0),  # (공백 중) 익절(≈112) 청산.
+        _m1(_FORMING + 2 * _M, 80.0, 99.0, 81.0),  # (공백 중) 2배 손절(≈81) 청산.
         _m1(_FORMING + 3 * _M, 100.0, 101.0, 100.5),  # 재기동 후 정상 폴링.
     ]
 
@@ -370,39 +360,6 @@ def test_expiry_clock_survives_restart(tmp_path: Path, monkeypatch: pytest.Monke
     b.close()
 
 
-def test_reentry_rearm_survives_restart(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """익절 후 재진입 재무장(무기한 대기, WAN-274)이 재시작을 넘어 유지된다(완료 기준 2).
-
-    옛 정책의 08-13 실측(08-10 익절 직후 재무장이 `discarded_restart`로 소멸)의 재현
-    방지: 재기동 후에도 재무장 주문이 살아 있고, 지정가에 닿으면 두 번째 거래가 성사된다.
-    """
-    _install_stub_detector(monkeypatch, _wide_zone())
-    bars = [
-        _m1(_FORMING + _M, 94.9, 99.0, 95.2),  # base 탭+체결.
-        _m1(_FORMING + 2 * _M, 95.0, 103.5, 103.0),  # 익절 → 같은 존에 band 재무장.
-        _m1(_FORMING + 3 * _M, 94.9, 103.5, 103.0),  # 재무장 체결 → 두 번째 거래.
-    ]
-
-    a = _Rig(tmp_path, name="continuous", reentry_entry_rule="band")
-    _seed_htf(a, _FLAT_CLOSES)
-    a.feed(bars)
-
-    b = _Rig(tmp_path, name="restarted", reentry_entry_rule="band")
-    _seed_htf(b, _FLAT_CLOSES)
-    b.feed(bars[:2])
-    assert b.engine.book.pending(_SYMBOL, _TF) is not None  # 재무장 대기 중 재시작.
-    restored = b.restart()
-    assert len(restored) == 1
-    order = b.engine.book.pending(_SYMBOL, _TF)
-    assert order is not None and order.limit_valid_bars is None  # 무기한 유지.
-    b.feed(bars[2:])
-
-    _assert_equivalent(a, b)
-    assert len(b.trade_rows()) == 2  # 재무장이 살아남아 두 번째 거래가 성사됐다.
-    a.close()
-    b.close()
-
-
 def test_gap_over_limit_resets_explicitly(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """따라잡기 한도를 넘긴 공백은 명시적으로 초기화한다 — 대기 주문은 재시작 폐기로
     남고(이 경로가 이제 `discarded_restart`의 존재 이유다, 완료 기준 4) 스냅샷은 지운다."""
@@ -410,12 +367,12 @@ def test_gap_over_limit_resets_explicitly(tmp_path: Path, monkeypatch: pytest.Mo
     b = _Rig(tmp_path, name="reset", catchup_max_ms=2 * _H)
     _seed_htf(b, _DESC_CLOSES)
     b.feed([_m1(_FORMING, 99.4, 101.5, 100.0)])  # 탭 — 예약만.
-    assert b.engine.book.pending(_SYMBOL, _TF) is not None
+    assert _pending(b) is not None
 
     b.now["ms"] = _FORMING + 3 * _H  # 한도(2h) 초과 공백.
     restored = b.restart()
     assert restored == set()
-    assert b.engine.book.pending(_SYMBOL, _TF) is None
+    assert _pending(b) is None
     assert b.engine_state.load(_SYMBOL, _TF) is None  # 스냅샷 명시 삭제.
     # 기한(24봉) 전이므로 만료가 아니라 재시작 폐기로 남는다.
     statuses = [row[5] for row in b.journal_rows()]
@@ -432,7 +389,7 @@ def test_snapshot_pending_already_terminal_not_replaced(
     b = _Rig(tmp_path, name="reconcile")
     _seed_htf(b, _DESC_CLOSES)
     b.feed([_m1(_FORMING, 99.4, 101.5, 100.0)])
-    order = b.engine.book.pending(_SYMBOL, _TF)
+    order = _pending(b)
     assert order is not None and order.journal_id is not None
     # 스냅샷 저장 후, 장부만 앞서 나간 상황을 주입(취소 종결).
     from live.limit_orders import LimitOrderStatus
@@ -443,7 +400,7 @@ def test_snapshot_pending_already_terminal_not_replaced(
     b.now["ms"] = _FORMING + 2 * _M
     restored = b.restart()
     assert restored == set()
-    assert b.engine.book.pending(_SYMBOL, _TF) is None  # 되걸지 않았다.
+    assert _pending(b) is None  # 되걸지 않았다.
     b.close()
 
 
@@ -459,13 +416,24 @@ def test_engine_state_store_roundtrip(tmp_path: Path) -> None:
         forming_high=2.0,
         running_close=1.5,
         zones=[],
-        pending=None,
-        occupied_zone=("bullish", 0, 1),
+        shadows=[
+            PersistedPendingOrder(
+                journal_id=7,
+                zone=("bullish", 0, 1),
+                tap_index=0,
+                placed_ms=4,
+                limit_valid_bars=None,
+                bars_elapsed=1,
+                first_rested_ms=None,
+                last_limit_price=None,
+            )
+        ],
     )
     store.save(_SYMBOL, _TF, snap)
     loaded = store.load(_SYMBOL, _TF)
     assert loaded == snap
-    assert loaded is not None and loaded.occupied_zone == ("bullish", 0, 1)
+    assert loaded is not None and loaded.shadows[0].zone == ("bullish", 0, 1)
+    assert loaded.shadows[0].limit_valid_bars is None  # 무기한은 null로 왕복한다
     store.delete(_SYMBOL, _TF)
     assert store.load(_SYMBOL, _TF) is None
 
@@ -545,7 +513,7 @@ def test_restart_matches_continuous_on_real_data(tmp_path: Path) -> None:
 
     htf_candles = _candles(htf, _TF)
     m1_candles = _candles(m1, "1m")
-    params = ConfluenceParams()  # 채택 기본값 그대로(존폭 필터 1.28 포함).
+    params = ConfluenceParams()  # 채택 기본값 그대로(진입 판정은 팔 규칙).
 
     def _upsert_until(rig: _Rig, cutoff_close_ms: int, already: set[int]) -> None:
         """`cutoff_close_ms`까지 닫힌 상위TF 봉을 저장소에 싣는다 — 수집기가 봉이 닫힐

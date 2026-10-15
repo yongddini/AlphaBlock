@@ -117,7 +117,6 @@ def test_settings_check_lists_what_to_set() -> None:
     joined = "\n".join(problems)
     for key in (
         "RETAP_MODE=once",
-        "REENTRY_ENTRY_RULE=off",
         "FILL_PENETRATION_BPS=5",
         "RISK_PER_TRADE=",
         "UNIVERSE_ENABLED=true",
@@ -125,13 +124,24 @@ def test_settings_check_lists_what_to_set() -> None:
         assert key in joined
     ok = Settings(
         live_arm_enabled=True,
-        live_reentry_entry_rule="off",
         confluence={"retap_mode": "once", "fill_penetration_bps": 5.0},
         risk_sizing={"risk_per_trade": ARM_RISK_PER_TRADE},
         universe_enabled=True,
     )
     assert arm_settings_problems(ok) == []
     assert engine_settings_for(ok).risk_limits.daily_loss_limit_fraction is None
+
+
+def test_removed_old_paper_keys_are_harmless(monkeypatch: pytest.MonkeyPatch) -> None:
+    """옛 오더블록 페이퍼의 설정 키(틱 피드 · 재진입)는 WAN-451 옛 규칙 정리로 없어졌다.
+
+    서버 `.env`에 남아 있어도 기동이 죽으면 안 된다 — 환경변수·생성자 인자 모두 무시된다."""
+    monkeypatch.setenv("ALPHABLOCK_LIVE_TICK_FEED_ENABLED", "true")
+    monkeypatch.setenv("ALPHABLOCK_LIVE_TICK_FEED_EXCHANGE", "binanceusdm")
+    monkeypatch.setenv("ALPHABLOCK_LIVE_REENTRY_ENTRY_RULE", "band")
+    settings = Settings(live_reentry_entry_rule="off")
+    for gone in ("live_tick_feed_enabled", "live_tick_feed_exchange", "live_reentry_entry_rule"):
+        assert not hasattr(settings, gone)
 
 
 def test_time_exit_is_taker_like_backtest_end_of_data() -> None:

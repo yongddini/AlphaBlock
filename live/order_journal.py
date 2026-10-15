@@ -78,7 +78,9 @@ from live.limit_orders import LimitFill, LimitOrderStatus, PendingLimitOrder
 
 #: 주문 출처(`origin`, WAN-305): 이 지정가가 **탭 예약**에서 왔는지 **익절 후 재진입
 #: 재무장**(WAN-274 `on_position_exit`)에서 왔는지. 재무장 주문은 탭이 아니므로 깔때기의
-#: 「탭」 단계에 세지 않는다(WAN-305 §2 — 이중 계수 금지). 옛 행은 열 도입 전이라 NULL =
+#: 「탭」 단계에 세지 않는다(WAN-305 §2 — 이중 계수 금지). ⚠️ 재진입 재무장 경로는 WAN-451 옛
+#: 규칙 정리로 없어졌다 — 이제 러너는 `tap`만 쓰고 `reentry`는 옛 행을 읽기 위한 어휘다. 옛 행은
+#: 열 도입 전이라 NULL =
 #: **판별 불가**다(WAN-194 `entry_status` NULL 규약과 같다 — `limit_valid_bars IS NULL`이
 #: 재진입의 간접 서명이지만 그 역시 열 도입 전 행과 겹쳐 확정할 수 없다).
 ORDER_ORIGIN_TAP = "tap"
@@ -140,9 +142,10 @@ STATUS_SKIPPED = "skipped"
 #: (`backtest.leverage_book`)과 같은 라벨을 써서 두 경로의 깔때기를 나란히 읽는다.
 #: 존폭 필터(`max_zone_width_atr`, WAN-159)에 걸려 넓은 존이 기각됐다.
 SKIP_REASON_ZONE_WIDTH = "zone_width"
-#: 슬롯이 이미 차 있어(오픈 포지션 또는 대기 주문) 새 지정가를 걸지 못했다. 라이브
-#: 단일-대기-주문 규칙에서 칸 점유의 실질 발생 지점이다(체결 후 `cell_busy` 거부는
-#: 드물다 — 주문을 걸 때 이미 슬롯을 봤으므로). 백테스트 북의 `cell_busy`와 짝.
+#: 슬롯이 이미 차 있어(오픈 포지션 또는 대기 주문) 새 지정가를 걸지 못했다. 옛 라이브
+#: 단일-대기-주문 규칙의 스킵 사유다 — WAN-451 옛 규칙 정리 뒤 엔진은 탭마다 주문을 걸어
+#: 이 스킵을 더 남기지 않고, 칸 점유는 체결 뒤 진입 거부(`cell_busy`)로 남는다. 옛 행을
+#: 읽기 위해 어휘로 둔다. 백테스트 북의 `cell_busy`와 짝.
 SKIP_REASON_CELL_BUSY = "cell_busy"
 #: `retap_mode="once"`(옵트인)에서 이미 한 번 진입한 존의 재탭이라 걸렀다. 채택
 #: 기본값(`every_tap`)에서는 발생하지 않는다.
@@ -668,8 +671,8 @@ class OrderJournal:
         """주문 예약을 기록하고 장부 행 id를 반환한다(주문의 `journal_id`로 쓴다).
 
         `origin`(WAN-305)은 이 주문이 탭 예약(`"tap"`, 기본)인지 익절 후 재진입 재무장
-        (`"reentry"`, `on_position_exit` 경로)인지를 남긴다 — 재진입은 탭이 아니므로
-        깔때기 「탭」 단계에서 이중 계수하지 않기 위한 1급 기록이다.
+        (`"reentry"`, 옛 오더블록 페이퍼 — WAN-451에서 없어짐)인지를 남긴다 — 재진입은 탭이
+        아니므로 깔때기 「탭」 단계에서 이중 계수하지 않기 위한 1급 기록이다.
         """
         with self._lock, self._conn:
             cur = self._conn.execute(

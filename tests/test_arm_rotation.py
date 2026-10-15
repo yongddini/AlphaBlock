@@ -130,36 +130,6 @@ def test_dropped_series_lose_their_engine_snapshot(tmp_path: Path) -> None:
     )
 
 
-def test_runner_feed_restarts_on_symbol_change(tmp_path: Path) -> None:
-    db = tmp_path / "f.db"
-    now = [MONDAY + DAY]
-    with UniverseStore(db) as u:
-        u.save(_snap(MONDAY, ["A"]))
-        u.save(_snap(MONDAY + WEEK_MS, ["A", "B"]))
-    started: list[list[str]] = []
-    closed: list[int] = []
-
-    class _Feed:
-        def drain(self) -> list[object]:
-            return []
-
-        def close(self) -> None:
-            closed.append(1)
-
-    runner, _, _ = _runner(db, now)
-
-    def _factory(symbols: list[str]) -> _Feed:
-        started.append(symbols)
-        return _Feed()
-
-    runner._price_feed_factory = _factory  # type: ignore[assignment]
-    runner.sync_series(now[0])
-    now[0] = MONDAY + WEEK_MS + 1
-    runner.sync_series(now[0])
-    runner.close()
-    assert started == [["A"], ["A", "B"]] and closed == [1, 1]
-
-
 def _fill_rejection(db: Path) -> tuple[str, str]:
     row = (
         sqlite3.connect(db)

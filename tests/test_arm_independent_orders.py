@@ -1,9 +1,9 @@
 """팔은 탭마다 독립 주문이다(WAN-451) — 정본 북처럼 칸에 포지션이 없으면 먼저 체결된 것을 잡는다.
 
 옛 러너는 칸마다 대기 주문이 하나뿐이라(슬롯), 존 A의 주문이 걸려 있는 동안 탭된 존 B에는 주문을
-안 걸었다. B가 먼저 닿으면 정본(`wan436.place` → 채택 북)은 B로 들어가는데 라이브는 놓쳤다. 팔
-모드(`independent_orders=True`)는 그림자 주문을 진짜 주문으로 쓴다 — 장부에 생애를 남기고 체결은
-`shadow_filled`로 내며, 러너가 그 체결로 진입을 판정한다.
+안 걸었다. B가 먼저 닿으면 정본(`wan436.place` → 채택 북)은 B로 들어가는데 라이브는 놓쳤다. 이제
+엔진은 탭마다 주문을 하나씩 건다(옛 슬롯 경로는 WAN-451 옛 규칙 정리로 없어졌다) — 장부에 생애를
+남기고 체결은 `filled`로 내며, 러너가 그 체결로 진입을 판정한다.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from live.limit_engine import EngineEvent, ZoneLimitLiveEngine
 from live.limit_orders import LimitOrderStatus
 from live.order_journal import OrderJournal
 from strategy.models import OrderBlock
-from tests.test_arm_crowding import _crowd_runner, _decision, _zone
+from tests.test_arm_crowding import _crowd_runner, _zone
 from tests.test_limit_engine import (
     _DESC_CLOSES,
     _FORMING,
@@ -39,14 +39,12 @@ _TWO = [_zone(0), _zone(-_H, top=99.6)]
 
 
 def _engine(
-    monkeypatch: pytest.MonkeyPatch, zones: list[OrderBlock], *, independent: bool = True
+    monkeypatch: pytest.MonkeyPatch, zones: list[OrderBlock]
 ) -> tuple[ZoneLimitLiveEngine, OrderJournal]:
     _install_stub_detector(monkeypatch, zones)
     journal = OrderJournal(":memory:")
     session = journal.start_session(now_ms=0)
-    engine = ZoneLimitLiveEngine(
-        params=_params(), journal=journal, session_id=session, independent_orders=independent
-    )
+    engine = ZoneLimitLiveEngine(params=_params(), journal=journal, session_id=session)
     engine.on_htf_bars(_SYMBOL, _TF, _htf_df(closes=_DESC_CLOSES))
     return engine, journal
 
@@ -56,7 +54,7 @@ def _tap(engine: ZoneLimitLiveEngine) -> list[EngineEvent]:
 
 
 def _ids(engine: ZoneLimitLiveEngine) -> list[int]:
-    ids = [o.journal_id for _z, o in engine._series[(_SYMBOL, _TF)].shadows]
+    ids = [o.journal_id for _z, o in engine._series[(_SYMBOL, _TF)].orders]
     assert all(i is not None for i in ids)
     return [int(i) for i in ids if i is not None]
 
@@ -65,24 +63,20 @@ def _ids(engine: ZoneLimitLiveEngine) -> list[int]:
 
 
 def test_every_tap_gets_its_own_journaled_order(monkeypatch: pytest.MonkeyPatch) -> None:
-    """겹친 두 탭 — 옛 슬롯은 주문 하나(나머지는 `cell_busy`), 독립 주문은 둘 다 장부에 걸린다."""
-    old, _ = _engine(monkeypatch, _TWO, independent=False)
-    assert [e.kind for e in _tap(old)] == ["placed"]
-
+    """겹친 두 탭 — 옛 슬롯은 주문 하나(나머지는 `cell_busy`)였고, 이제 둘 다 장부에 걸린다."""
     engine, journal = _engine(monkeypatch, _TWO)
     events = _tap(engine)
     assert [e.kind for e in events] == ["placed", "placed"]
-    assert engine.book.open_orders == []  # 칸당 단일 주문은 안 쓴다
     ids = _ids(engine)
     assert len(set(ids)) == 2
     assert {journal.order_status(i) for i in ids} == {LimitOrderStatus.PENDING.value}
-    assert {e.zone for e in events} == {z for z, _o in engine._series[(_SYMBOL, _TF)].shadows}
+    assert {e.zone for e in events} == {z for z, _o in engine._series[(_SYMBOL, _TF)].orders}
     assert len(engine.open_orders()) == 2
 
     events = engine.on_substep(
         _SYMBOL, _TF, time_ms=_FORMING + _M, low=95.0, high=100.0, close=96.0
     )
-    assert [e.kind for e in events] == ["shadow_filled", "shadow_filled"]
+    assert [e.kind for e in events] == ["filled", "filled"]
     assert {e.order.journal_id for e in events} == set(ids)
     assert {journal.order_status(i) for i in ids} == {LimitOrderStatus.FILLED.value}
     assert engine.open_orders() == []
@@ -110,7 +104,9 @@ def test_invalidation_and_gap_are_journaled(monkeypatch: pytest.MonkeyPatch) -> 
     engine, journal = _engine(monkeypatch, [_zone(0)])
     _tap(engine)
     (jid,) = _ids(engine)
-    _install_stub_detector(monkeypatch, [])  # 존이 대장에서 사라진다(무효화)
+    # 존이 무효화된다 — 탐지 결과(아카이브)에 깨진 존으로 나온다. ⚠️ 그냥 사라지면(빈 결과)
+    # 창 밖으로 밀린 존으로 보고 엔진이 기억해 이어 든다(오래된 존 기억, WAN-451).
+    _install_stub_detector(monkeypatch, [_zone(0).model_copy(update={"break_time": _FORMING})])
     events = engine.on_htf_bars(_SYMBOL, _TF, _htf_df(closes=_DESC_CLOSES))
     assert [e.kind for e in events] == ["cancelled_invalidated"]
     assert journal.order_status(jid) == LimitOrderStatus.CANCELLED_INVALIDATED.value
@@ -125,7 +121,7 @@ def test_invalidation_and_gap_are_journaled(monkeypatch: pytest.MonkeyPatch) -> 
     assert journal.order_status(jid) == "discarded_restart"
 
 
-def test_wall_clock_backstop_expires_independent_orders(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_wall_clock_backstop_expires_every_order(monkeypatch: pytest.MonkeyPatch) -> None:
     engine, journal = _engine(monkeypatch, [_zone(0)])
     _tap(engine)
     (jid,) = _ids(engine)
@@ -140,7 +136,7 @@ def test_series_with_open_orders_is_not_dropped(monkeypatch: pytest.MonkeyPatch)
     engine, _ = _engine(monkeypatch, [_zone(0)])
     _tap(engine)
     assert engine.drop_series(_SYMBOL, _TF) is False
-    assert engine.shadow_journal_ids(_SYMBOL, _TF) == set(_ids(engine))
+    assert engine.journal_ids(_SYMBOL, _TF) == set(_ids(engine))
 
 
 def test_snapshot_keeps_the_journal_rows(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -152,20 +148,17 @@ def test_snapshot_keeps_the_journal_rows(monkeypatch: pytest.MonkeyPatch) -> Non
     snap = SeriesStateSnapshot.model_validate_json(snap.model_dump_json())
     fresh, _ = _engine(monkeypatch, _TWO)
     fresh.restore_series(_SYMBOL, _TF, snap)
-    assert fresh.shadow_journal_ids(_SYMBOL, _TF) == ids
+    assert fresh.journal_ids(_SYMBOL, _TF) == ids
 
 
 # ------------------------------------------------------------------ 러너
 
 
-def _shadow_fill(
-    event: EngineEvent, zone: tuple[str, int, int], *, after_ms: int = 0
-) -> EngineEvent:
+def _zone_fill(event: EngineEvent, zone: tuple[str, int, int], *, after_ms: int = 0) -> EngineEvent:
     fill = event.fill
     assert fill is not None
     return dataclasses.replace(
         event,
-        kind="shadow_filled",
         time_ms=event.time_ms + after_ms,
         fill=dataclasses.replace(fill, time=fill.time + after_ms),
         zone=zone,
@@ -184,13 +177,8 @@ def test_runner_enters_from_the_first_fill_and_skips_while_holding(
 
     runner, journal, session, db = _crowd_runner(tmp_path, ["SYN/USDT:USDT"])
     monkeypatch.setattr(runner, "_crowd_gate", lambda _event, decision: decision)
-    runner._engine = ZoneLimitLiveEngine(
-        params=runner._params, journal=journal, session_id=session, independent_orders=True
-    )
-    first = _shadow_fill(
-        _fill_event(journal, session, price=140.0, ob_stop=133.0), ("bullish", 7, 8)
-    )
-    second = _shadow_fill(
+    first = _zone_fill(_fill_event(journal, session, price=140.0, ob_stop=133.0), ("bullish", 7, 8))
+    second = _zone_fill(
         _fill_event(journal, session, price=140.0, ob_stop=133.0), ("bullish", 9, 9), after_ms=_M
     )
     runner._handle_events([first])
@@ -230,16 +218,11 @@ def test_same_minute_follows_the_price_order(
 
     runner, journal, session, db = _crowd_runner(tmp_path, ["SYN/USDT:USDT"])
     monkeypatch.setattr(runner, "_crowd_gate", lambda _event, decision: decision)
-    runner._engine = ZoneLimitLiveEngine(
-        params=runner._params, journal=journal, session_id=session, independent_orders=True
-    )
-    first = _shadow_fill(
-        _fill_event(journal, session, price=140.0, ob_stop=133.0), ("bullish", 7, 8)
-    )
+    first = _zone_fill(_fill_event(journal, session, price=140.0, ob_stop=133.0), ("bullish", 7, 8))
     runner._handle_events([first])
     (pos,) = runner._executor.open_positions
     assert pos.stop_price == pytest.approx(126.0)
-    second = _shadow_fill(
+    second = _zone_fill(
         _fill_event(journal, session, price=price, ob_stop=ob_stop), ("bullish", 9, 9), after_ms=_M
     )
     assert second.fill is not None
@@ -256,18 +239,6 @@ def test_same_minute_follows_the_price_order(
     assert rows == want
     (now,) = runner._executor.open_positions
     assert now.entry_price == (price if want[1][0] == "entered" else 140.0)
-
-
-def test_shadow_fill_does_not_enter_without_independent_orders(tmp_path: Path) -> None:
-    """몰림 신호만 세는 그림자(옛 엔진 · 대조 테스트)는 진입을 만들지 않는다."""
-    from tests.test_arm_rules import _fill_event
-
-    runner, journal, session, db = _crowd_runner(tmp_path, ["SYN/USDT:USDT"])
-    runner._handle_events(
-        [_shadow_fill(_fill_event(journal, session, price=140.0, ob_stop=133.0), ("bullish", 7, 8))]
-    )
-    assert runner._executor.open_positions == []
-    assert _decision(db)[0] in ("None", "")
 
 
 def test_restore_drops_orders_the_journal_already_closed(tmp_path: Path) -> None:
@@ -350,7 +321,7 @@ def _real_available(symbol: str, end: int) -> bool:
     return bool(row and row[0] and row[0] >= end)
 
 
-def _live_entries(symbol: str, tf: str, start: int, end: int, *, independent: bool) -> list[int]:
+def _live_entries(symbol: str, tf: str, start: int, end: int) -> list[int]:
     from config.settings import Settings
     from data.storage import OhlcvStore
     from execution.engine import build_execution_engine
@@ -364,7 +335,6 @@ def _live_entries(symbol: str, tf: str, start: int, end: int, *, independent: bo
         settings = Settings(
             db_path=str(db),
             confluence={"retap_mode": "once", "fill_penetration_bps": 5.0},
-            live_reentry_entry_rule="off",
         )
         paper = PaperTradeStore(db)
         journal = OrderJournal(db)
@@ -373,12 +343,7 @@ def _live_entries(symbol: str, tf: str, start: int, end: int, *, independent: bo
         runner = ZoneLimitPaperRunner(
             store=real,
             engine=ZoneLimitLiveEngine(
-                params=settings.confluence,
-                journal=journal,
-                session_id=session,
-                track_shadows=True,
-                carry_zones=True,
-                independent_orders=independent,
+                params=settings.confluence, journal=journal, session_id=session
             ),
             journal=journal,
             session_id=session,
@@ -480,4 +445,4 @@ def test_real_data_live_entries_equal_the_canonical_arm() -> None:
         pytest.skip("실데이터(data/ohlcv.db) 없음")
     exit_first, price_order = _canon_entries(symbol, tf, start, end)
     assert len(exit_first) == 2 and price_order == exit_first[:1]
-    assert _live_entries(symbol, tf, start, end, independent=True) == price_order
+    assert _live_entries(symbol, tf, start, end) == price_order

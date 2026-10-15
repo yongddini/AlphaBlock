@@ -32,7 +32,8 @@ WAN-41 시절 이 부품에는 2026-07-12 시절 규칙이 박혀 있었다: 닿
 
 `on_price`는 매 틱(웹소켓 가격) 호출하고, 상위TF 봉이 마감되면 `on_bar_close`로
 실시간 RSI·밴드 상태를 굴리며 경과 봉 수를 센다. 무효화는 `cancel_invalidated`로 즉시
-반영한다. 한 (symbol, timeframe) 시리즈에는 대기 주문 하나만 둔다(단일 포지션 규칙).
+반영한다. 한 시리즈에 주문이 여럿 걸릴 수 있다 — 탭마다 독립 주문이다(WAN-451,
+`live.limit_engine`이 들고 있다).
 
 ## 체결률 실측 필드 (WAN-45 1급 산출물)
 
@@ -44,18 +45,12 @@ WAN-41 시절 이 부품에는 2026-07-12 시절 규칙이 박혀 있었다: 닿
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass, field
 from enum import StrEnum
 
 from backtest.substep import LiveLimitProvider
 from strategy.models import OrderBlockDirection, RsiGateMode, rsi_gate_passes
 from strategy.realtime_rsi import RealtimeRsi
-
-_logger = logging.getLogger(__name__)
-
-#: (symbol, timeframe) 시리즈 키.
-SeriesKey = tuple[str, str]
 
 
 def expiry_deadline_ms(placed_ms: int, limit_valid_bars: int, htf_ms: int) -> int:
@@ -319,88 +314,3 @@ class PendingLimitOrder:
         if self.limit_valid_bars is None or self.placed_ms is None:
             return None
         return expiry_deadline_ms(self.placed_ms, self.limit_valid_bars, htf_ms)
-
-
-class LimitOrderBook:
-    """심볼·타임프레임별 대기 지정가 주문 장부.
-
-    한 시리즈에는 대기 주문 하나만 둔다(단일 포지션 규칙). 체결·취소된 주문은
-    장부에서 제거되며, 체결은 `LimitFill`로 반환해 실행/페이퍼 엔진이 포지션 오픈에
-    쓰도록 한다.
-    """
-
-    def __init__(self) -> None:
-        self._pending: dict[SeriesKey, PendingLimitOrder] = {}
-
-    def pending(self, symbol: str, timeframe: str) -> PendingLimitOrder | None:
-        """해당 시리즈의 대기 주문. 없으면 None."""
-        return self._pending.get((symbol, timeframe))
-
-    @property
-    def open_orders(self) -> list[PendingLimitOrder]:
-        return list(self._pending.values())
-
-    def place(self, order: PendingLimitOrder) -> PendingLimitOrder | None:
-        """대기 지정가 주문을 예약한다. 이미 대기 주문이 있으면 무시하고 None."""
-        key = (order.symbol, order.timeframe)
-        if key in self._pending:
-            _logger.warning("이미 대기 지정가 주문 존재 — 예약 무시: %s %s", *key)
-            return None
-        self._pending[key] = order
-        return order
-
-    def on_price(
-        self,
-        symbol: str,
-        timeframe: str,
-        low: float,
-        high: float,
-        close: float,
-        *,
-        now_ms: int,
-    ) -> LimitFill | None:
-        """시리즈의 대기 주문에 실시간 가격 틱을 반영한다. 체결되면 장부에서 제거."""
-        key = (symbol, timeframe)
-        order = self._pending.get(key)
-        if order is None:
-            return None
-        fill = order.on_price(low, high, close, now_ms=now_ms)
-        if order.status.is_terminal:
-            del self._pending[key]
-        return fill
-
-    def on_bar_close(
-        self, symbol: str, timeframe: str, closed_price: float
-    ) -> LimitOrderStatus | None:
-        """상위TF 봉 마감을 반영한다. 만료 취소되면 장부에서 제거하고 상태를 반환."""
-        key = (symbol, timeframe)
-        order = self._pending.get(key)
-        if order is None:
-            return None
-        order.on_bar_close(closed_price)
-        if order.status.is_terminal:
-            del self._pending[key]
-            return order.status
-        return None
-
-    def cancel_invalidated(self, symbol: str, timeframe: str) -> PendingLimitOrder | None:
-        """오더블록 무효화로 대기 주문을 취소한다. 취소한 주문을 반환(없으면 None)."""
-        key = (symbol, timeframe)
-        order = self._pending.pop(key, None)
-        if order is None:
-            return None
-        order.cancel_invalidated()
-        return order
-
-    def cancel_expired(self, symbol: str, timeframe: str) -> PendingLimitOrder | None:
-        """유효기간 초과 대기 주문을 만료 취소하고 장부에서 제거한다(벽시계 백스톱, WAN-298).
-
-        취소한 주문을 반환(없으면 None). 슬롯이 즉시 비므로 같은 시리즈의 새 탭이 다시
-        주문을 걸 수 있다.
-        """
-        key = (symbol, timeframe)
-        order = self._pending.pop(key, None)
-        if order is None:
-            return None
-        order.cancel_expired()
-        return order

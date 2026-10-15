@@ -16,7 +16,6 @@ import pytest
 
 from live.limit_orders import (
     LimitFill,
-    LimitOrderBook,
     LimitOrderStatus,
     PendingLimitOrder,
 )
@@ -238,34 +237,3 @@ def test_invalidation_cancels_immediately() -> None:
     order.cancel_invalidated()
     assert order.status is LimitOrderStatus.CANCELLED_INVALIDATED
     assert _tick(order, 100.0, now_ms=9) is None
-
-
-def test_book_single_order_per_series_and_fill_removes() -> None:
-    book = LimitOrderBook()
-    order = _long_order(_OVERSOLD_SEED)
-    assert book.place(order) is order
-    # 같은 시리즈 중복 예약은 무시.
-    assert book.place(_long_order(_OVERSOLD_SEED)) is None
-    assert book.pending("BTC/USDT:USDT", "1h") is order
-
-    assert book.on_price("BTC/USDT:USDT", "1h", 101.0, 101.0, 101.0, now_ms=1) is None
-    fill = book.on_price("BTC/USDT:USDT", "1h", 100.0, 100.0, 100.0, now_ms=2)
-    assert fill is not None
-    # 체결되면 장부에서 제거된다.
-    assert book.pending("BTC/USDT:USDT", "1h") is None
-    assert book.open_orders == []
-
-
-def test_book_bar_close_expiry_and_invalidation() -> None:
-    book = LimitOrderBook()
-    book.place(_long_order(_OVERSOLD_SEED, limit_valid_bars=1))
-    status = book.on_bar_close("BTC/USDT:USDT", "1h", 104.0)
-    assert status is LimitOrderStatus.CANCELLED_EXPIRED
-    assert book.pending("BTC/USDT:USDT", "1h") is None
-
-    placed = book.place(_long_order(_OVERSOLD_SEED))
-    assert placed is not None
-    cancelled = book.cancel_invalidated("BTC/USDT:USDT", "1h")
-    assert cancelled is placed
-    assert cancelled.status is LimitOrderStatus.CANCELLED_INVALIDATED
-    assert book.cancel_invalidated("BTC/USDT:USDT", "1h") is None

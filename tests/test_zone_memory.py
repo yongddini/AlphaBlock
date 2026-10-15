@@ -41,9 +41,9 @@ def _bars(start: int, n: int, *, lows: dict[int, float] | None = None) -> pd.Dat
     )
 
 
-def _engine(monkeypatch: pytest.MonkeyPatch, *, carry: bool = True) -> ZoneLimitLiveEngine:
+def _engine(monkeypatch: pytest.MonkeyPatch) -> ZoneLimitLiveEngine:
     _install_stub_detector(monkeypatch, [ZONE])
-    engine = ZoneLimitLiveEngine(params=_params(), carry_zones=carry)
+    engine = ZoneLimitLiveEngine(params=_params())
     engine.on_htf_bars(_SYMBOL, _TF, _bars(0, 30))
     _install_stub_detector(monkeypatch, [])  # 창이 미끄러져 탐지기가 더는 그 존을 못 만든다
     return engine
@@ -58,9 +58,6 @@ def test_zone_slid_out_of_the_window_is_carried(monkeypatch: pytest.MonkeyPatch)
     engine.on_htf_bars(_SYMBOL, _TF, _bars(1, 30))
     watch = engine._series[(_SYMBOL, _TF)].zones[ZID]
     assert watch.carried and watch.checked_through == 30 * _H
-    off = _engine(monkeypatch, carry=False)
-    off.on_htf_bars(_SYMBOL, _TF, _bars(1, 30))
-    assert ZID not in _zones(off)  # 끄면 예전처럼 잊는다
 
 
 def test_carried_zone_breaks_like_the_detector(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -97,7 +94,7 @@ def test_carried_zone_survives_snapshot_and_restore(monkeypatch: pytest.MonkeyPa
     snap = engine.snapshot_series(_SYMBOL, _TF, last_htf_time=30 * _H, saved_ms=0)
     assert snap is not None
     snap = SeriesStateSnapshot.model_validate_json(snap.model_dump_json())
-    fresh = ZoneLimitLiveEngine(params=_params(), carry_zones=True)
+    fresh = ZoneLimitLiveEngine(params=_params())
     fresh.on_htf_bars(_SYMBOL, _TF, _bars(1, 30, lows={30: 99.0}))  # 탐지기는 그 존을 못 만든다
     assert ZID not in _zones(fresh)
     fresh.restore_series(_SYMBOL, _TF, snap)

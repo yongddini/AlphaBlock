@@ -22,6 +22,7 @@ from data.storage import OhlcvStore
 from execution.engine import build_execution_engine
 from execution.leverage import LEGACY_BOOK_PARAMS, LeverageBookParams, book_per_trade_sizing
 from live import limit_engine
+from live.arm_rules import ArmParams
 from live.executor import PaperExecutor
 from live.limit_engine import ZoneLimitLiveEngine
 from live.order_journal import OrderJournal
@@ -104,7 +105,9 @@ def _build_runner(
 ) -> tuple[ZoneLimitPaperRunner, PaperExecutor, OhlcvStore, OrderJournal, PaperTradeStore]:
     store = OhlcvStore(db)
     for symbol in symbols:
-        store.upsert_candles([_htf(symbol, i) for i in range(_N_CLOSED)])
+        # 내리막(130→101) — 팔의 %K가 낮아(진입 조건 %K < 25) 체결이 진입이 된다. 밴드(≈98.8)는
+        # 존(90~95) 위라 지정가는 존 근단 + 2bp다.
+        store.upsert_candles([_htf(symbol, i, close=130.0 - i) for i in range(_N_CLOSED)])
     settings = Settings(db_path=str(db))
     params = ConfluenceParams(max_zone_width_atr=None)  # 합성 데이터 ATR로는 존이 걸러진다.
     journal = OrderJournal(db)
@@ -121,14 +124,7 @@ def _build_runner(
             else settings.risk_sizing
         ),
     )
-    engine = ZoneLimitLiveEngine(
-        params=params,
-        journal=journal,
-        session_id=session,
-        has_position=lambda s, t: any(
-            p.symbol == s and p.timeframe == t for p in executor.open_positions
-        ),
-    )
+    engine = ZoneLimitLiveEngine(params=params, journal=journal, session_id=session)
     runner = ZoneLimitPaperRunner(
         store=store,
         engine=engine,
@@ -139,6 +135,7 @@ def _build_runner(
         series=[(symbol, _TF) for symbol in symbols],
         lookback_bars=500,
         poll_interval_seconds=1.0,
+        arm=ArmParams(),
         now_ms=lambda: 999_999,
     )
     return runner, executor, store, journal, paper_store
@@ -171,9 +168,10 @@ def test_two_cells_share_one_wallet_fill_and_exit(
         # 두 칸 모두 체결이 장부에 남았다(칸별 체결률 실측).
         assert sum(s.filled for s in journal.fill_stats()) == 2
 
-        # 두 칸 모두 익절 관통 → 청산. 공유 자본이 두 실현손익을 모두 반영한다.
+        # 두 칸 모두 2배 손절(≈84.98) 관통 → 청산(팔은 익절이 없다). 공유 자본이 두 실현손익을
+        # 모두 반영한다.
         for symbol in ("BTC/USDT:USDT", "ETH/USDT:USDT"):
-            store.upsert_candles([_m1(symbol, _FORMING + 2 * _M, 95.0, 103.5, 103.0)])
+            store.upsert_candles([_m1(symbol, _FORMING + 2 * _M, 84.0, 95.5, 85.0)])
         runner.poll_once()
         assert executor.open_positions == []
         assert paper_store.count("BTC/USDT:USDT", _TF) == 1
@@ -203,7 +201,7 @@ def test_neutral_book_runner_matches_no_book_runner(
             store.upsert_candles([_m1("BTC/USDT:USDT", _FORMING + _M, 94.9, 99.0, 95.2)])
             runner.poll_once()
             qty = executor.open_positions[0].quantity
-            store.upsert_candles([_m1("BTC/USDT:USDT", _FORMING + 2 * _M, 95.0, 103.5, 103.0)])
+            store.upsert_candles([_m1("BTC/USDT:USDT", _FORMING + 2 * _M, 84.0, 95.5, 85.0)])
             runner.poll_once()
             return qty, executor.equity
         finally:

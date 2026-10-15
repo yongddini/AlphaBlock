@@ -161,7 +161,6 @@ def test_real_runner_ledger_matches_the_canon(tmp_path: Path) -> None:
         settings = Settings(
             db_path=str(ledger),
             confluence={"retap_mode": "once", "fill_penetration_bps": ARM_FILL_PENETRATION_BPS},
-            live_reentry_entry_rule="off",
             risk_sizing={"risk_per_trade": ARM_RISK_PER_TRADE},
         )
         journal = OrderJournal(ledger)
@@ -175,9 +174,6 @@ def test_real_runner_ledger_matches_the_canon(tmp_path: Path) -> None:
                 params=settings.confluence,
                 journal=journal,
                 session_id=session,
-                track_shadows=True,
-                carry_zones=True,
-                independent_orders=True,
             ),
             journal=journal,
             session_id=session,
