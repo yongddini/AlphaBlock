@@ -53,10 +53,14 @@ class ArmCheck:
     pair_issues: list[PairIssue] = field(default_factory=list)
     ledger: dict[str, int] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
+    arm_on: bool = False
+    """팔이 이미 켜져 있다 — 그러면 장부는 팔 러너 자신의 것이다(옛 규칙 잔재가 아니다)."""
 
     @property
     def leftovers(self) -> dict[str, int]:
-        """옛 규칙에서 남은 것(지우지 않고 켜면 섞인다)."""
+        """옛 규칙에서 남은 것(지우지 않고 켜면 섞인다) — 팔을 켠 뒤에는 없다."""
+        if self.arm_on:
+            return {}
         keys = ("open_positions", "pending_orders", "live_engine_state")
         return {k: v for k, v in self.ledger.items() if k in keys and v > 0}
 
@@ -138,7 +142,9 @@ def ledger_counts(db_path: str | Path) -> dict[str, int]:
 
 
 def run_check(settings: Settings, db_path: str | Path, *, now_ms: int) -> ArmCheck:
-    check = ArmCheck(settings_problems=settings_problems(settings))
+    check = ArmCheck(
+        settings_problems=settings_problems(settings), arm_on=settings.live_arm_enabled
+    )
     check.rebalance_ms = rebalance_at(now_ms)
     with UniverseStore(db_path) as universe:
         snap = universe.at(now_ms)
@@ -190,7 +196,10 @@ def render(check: ArmCheck) -> str:
         lines.append(
             f"- ✅ {len(check.members)}종목 × {len(CHECK_TIMEFRAMES)}TF 전부 최신 · 이력 충분"
         )
-    lines += ["", "### 4. 장부(지금 남아 있는 것)"]
+    lines += [
+        "",
+        "### 4. 장부(팔 러너의 지금 상태)" if check.arm_on else "### 4. 장부(지금 남아 있는 것)",
+    ]
     for name, n in check.ledger.items():
         lines.append(f"- {name}: {n}")
     if check.leftovers:

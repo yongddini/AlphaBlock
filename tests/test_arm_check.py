@@ -110,7 +110,25 @@ def test_missing_list_and_leftovers(tmp_path: Path) -> None:
     conn.execute("INSERT INTO open_positions VALUES ('X')")
     conn.commit()
     conn.close()
-    check = ac.run_check(_arm_settings(db), db, now_ms=NOW)
+    check = ac.run_check(_arm_settings(db, live_arm_enabled=False), db, now_ms=NOW)
     assert check.list_missing and not check.ready
     assert check.leftovers == {"open_positions": 1}
     assert "리셋 이음매" in ac.render(check)
+
+
+def test_ledger_is_not_a_leftover_once_the_arm_is_on(tmp_path: Path) -> None:
+    """팔을 켠 뒤의 엔진 스냅샷·포지션은 팔 러너 자신의 상태다 — 옛 규칙 경고를 띄우지 않는다."""
+    db = tmp_path / "e.db"
+    _seed(db)
+    import sqlite3
+
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE live_engine_state (k TEXT)")
+    conn.execute("INSERT INTO live_engine_state VALUES ('x')")
+    conn.commit()
+    conn.close()
+    on = ac.run_check(_arm_settings(db), db, now_ms=NOW)
+    assert on.ledger["live_engine_state"] == 1 and on.leftovers == {}
+    assert "옛 규칙" not in ac.render(on)
+    off = ac.run_check(_arm_settings(db, live_arm_enabled=False), db, now_ms=NOW)
+    assert off.leftovers == {"live_engine_state": 1} and "리셋 이음매다" in ac.render(off)
