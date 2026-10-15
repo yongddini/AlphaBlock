@@ -102,6 +102,7 @@ def backfill_pairs(
     *,
     lookback_days: Callable[[str], int],
     pause_seconds: float,
+    page_pause_seconds: float = 0.0,
     sleeper: Callable[[float], None] = time.sleep,
     now_ms: Callable[[], int] = lambda: int(time.time() * 1000),
 ) -> int:
@@ -122,7 +123,14 @@ def backfill_pairs(
             continue  # 새로 닫힌 봉이 없다
         try:
             total += backfill_symbol(
-                exchange, store, symbol, timeframe, since, sleeper=sleeper, now_ms=now_ms
+                exchange,
+                store,
+                symbol,
+                timeframe,
+                since,
+                sleeper=sleeper,
+                now_ms=now_ms,
+                page_pause_seconds=page_pause_seconds,
             )
         except Exception:  # noqa: BLE001 — 한 쌍 실패가 나머지를 막으면 안 된다
             logger.exception("팔 종목 백필 실패: %s %s(다음 따라잡기에서 다시)", symbol, timeframe)
@@ -149,9 +157,17 @@ class ArmCollection:
         base_timeframes: Sequence[str],
         lookback_days: Callable[[str], int],
         pause_seconds: float,
+        history_days: int = 0,
+        page_pause_seconds: float = 0.2,
         now_ms: Callable[[], int] = lambda: int(time.time() * 1000),
     ) -> None:
         self._exchange = exchange
+        #: 팔 종목 상위TF 이력 깊이(WAN-451 오래된 존 기억 — 러너가 처음에 이만큼으로 탐지한다).
+        #: 1분봉은 해당 없다(탐지에 안 쓴다).
+        self._history_days = history_days
+        self._page_pause = page_pause_seconds
+        #: 이력 확장을 이미 시도한 쌍 — 상장이 그보다 늦은 종목을 매번 다시 요청하지 않게.
+        self._extended: set[Pair] = set()
         self._store = store
         self._universe = universe
         self._db_path = db_path
@@ -173,18 +189,66 @@ class ArmCollection:
         """기본 격자 밖의 쌍(팔 쪽이 따로 채워야 하는 것)."""
         return [p for p in (plan or self.plan).pairs() if p not in self._base_pairs]
 
+    def _arm_lookback(self, timeframe: str) -> int:
+        base = self._lookback_days(timeframe)
+        return base if timeframe == "1m" else max(base, self._history_days)
+
     def fill(self, pairs: Sequence[Pair], arm_symbols: Iterable[str]) -> int:
-        """주어진 쌍을 천천히 채우고 팔 종목의 생성 TF(3h)를 이어 만든다(동기 · 스레드에서 돈다)."""
+        """주어진 쌍을 천천히 채우고 팔 종목의 생성 TF(3h)를 이어 만든다(동기 · 스레드에서 돈다).
+
+        저장분이 없는 쌍은 처음부터 이력 깊이(`history_days`)만큼 받는다 — 새로 들어온 종목도
+        러너가 처음 탐지할 때 몇 년 된 존까지 알 수 있게.
+        """
         n = backfill_pairs(
             self._exchange,
             self._store,
             pairs,
-            lookback_days=self._lookback_days,
+            lookback_days=self._arm_lookback,
             pause_seconds=self._pause,
+            page_pause_seconds=self._page_pause,
             now_ms=self._now_ms,
         )
         n += build_all_derived(self._store, sorted(set(arm_symbols)))
         return n
+
+    def extend_history(self) -> int:
+        """이미 모으던 팔 쌍의 상위TF 이력을 `history_days`까지 뒤로 늘린다(동기 · 백그라운드).
+
+        저장된 첫 봉이 목표보다 늦으면 그 앞을 받는다. 상장이 더 늦은 종목은 거래소가 더 줄 게
+        없으므로 쌍마다 한 번만 시도한다. 늘린 뒤 3h를 앞 구간까지 다시 접는다.
+        """
+        if self._history_days <= 0:
+            return 0
+        now = self._now_ms()
+        want = now - self._history_days * 86_400_000
+        total = 0
+        for symbol, timeframe in self.arm_pairs():
+            if timeframe == "1m" or (symbol, timeframe) in self._extended:
+                continue
+            first = self._store.first_open_time(symbol, timeframe)
+            self._extended.add((symbol, timeframe))
+            if first is None or first <= want + timeframe_to_ms(timeframe):
+                continue
+            try:
+                total += backfill_symbol(
+                    self._exchange,
+                    self._store,
+                    symbol,
+                    timeframe,
+                    want,
+                    until_ms=first,
+                    page_pause_seconds=self._page_pause,
+                    now_ms=self._now_ms,
+                )
+            except Exception:  # noqa: BLE001 — 한 쌍 실패가 나머지를 막으면 안 된다
+                logger.exception("팔 종목 이력 확장 실패: %s %s", symbol, timeframe)
+                self._extended.discard((symbol, timeframe))
+            if self._pause > 0:
+                time.sleep(self._pause)
+        total += build_all_derived(self._store, sorted(self.plan.arm_symbols))
+        if total:
+            logger.info("팔 종목 이력 확장: %d봉(목표 %d일)", total, self._history_days)
+        return total
 
     def catch_up(self) -> int:
         """지금 계획의 팔 쪽 전부를 따라잡는다(접속 직후 · 기동 직후)."""

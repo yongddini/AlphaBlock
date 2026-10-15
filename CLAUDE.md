@@ -6200,7 +6200,8 @@ backtest.wan447_funding_carry --part run` · 2,336초).
   거부한다(다른 팔 규칙보다 먼저 · 그 주 목록이 없으면 `arm_rotation_unknown`). 3h는 `backtest/sweep.py` 표에 정식 등록.
   몰림 규칙은 엔진의 **그림자 주문**(탭마다 독립 · 슬롯 무관)이 체결될 때 `arm_signals`에 남기고 실제 체결 때 직전
   24h를 센다(`crowd_decision` ≡ `wan436.rule_decision` · 그림자 체결 ≡ 백테스트 팔 후보, 실데이터 9칸 대조).
-  🚨 라이브 탐지 창(1500봉)보다 오래된 존은 아직 모른다(정본 팔 후보의 약 7%) — 다음 PR.
+  오래된 존(정본 팔 후보의 약 7%가 1500봉 밖)은 엔진이 기억한다(`carry_zones` · 처음 한 번 2년치 탐지
+  `live_zone_memory_days` · 수집기가 팔 종목 상위TF 2년치 이력) — 대조 BTC 15m 29/29 · BTC 1h 1년 96/96.
 
 ## 실험 도구 — 새 리포트 스크립트를 짜기 전에 읽을 것 (WAN-101)
 

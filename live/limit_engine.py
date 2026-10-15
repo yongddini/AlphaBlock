@@ -35,6 +35,7 @@
 
 from __future__ import annotations
 
+import bisect
 import enum
 import logging
 from collections.abc import Callable
@@ -85,6 +86,10 @@ __all__ = [
 
 #: (symbol, timeframe) 시리즈 키.
 SeriesKey = tuple[str, str]
+
+#: 오래된 존 기억(WAN-451): 시작이 창 앞쪽 이만큼 안이면 탐지에서 빠져도 이어 든다(스윙 맥락이
+#: 잘려 탐지가 달라지는 창 시작 근처 — WAN-343 실측 +5~25봉).
+_CARRY_MARGIN_BARS = 50
 
 #: 존의 안정적 식별자. 탐지기를 창마다 다시 돌리므로 `OrderBlock` 인스턴스 동일성이나
 #: 아카이브 인덱스로는 "같은 존"을 추적할 수 없다(창이 미끄러지면 인덱스가 밀린다).
@@ -148,6 +153,14 @@ class _ZoneWatch:
     """이번 형성 중 봉에서 이미 예약을 시도한 봉 시각(중복 예약 시도 방지)."""
     shadow_bar: int | None = None
     """이번 형성 중 봉에서 이미 그림자 주문을 만든 봉 시각(WAN-451 몰림 규칙 — 탭 하나에 하나)."""
+    carried: bool = False
+    """탐지 창 밖으로 밀려나 엔진이 직접 무효화·탭을 따라가는 존(WAN-451 · `carry_zones`)."""
+    bar_inside: bool = False
+    """마지막으로 반영한 **확정 봉**이 존과 겹쳤는지 — 탐지기 `_inside`와 같은 뜻(확정 봉 자신은
+    거짓). `was_inside`는 봉 경계에서 형성 봉 범위로 미리 바뀌므로 기억하는 존의 탭 판정에는
+    이 값을 따로 둔다."""
+    checked_through: int | None = None
+    """존 상태(무효화·탭)가 반영된 마지막 확정 봉 시각."""
     skip_recorded_forming_bar: int | None = None
     """이번 형성 중 봉에서 이미 미진입 사유를 장부에 남긴 봉 시각(WAN-217). `_maybe_arm`이
     매 서브스텝 재평가하므로 같은 봉·같은 존의 사유가 여러 번 찍히지 않게 한다. `armed`와
@@ -206,6 +219,7 @@ class ZoneLimitLiveEngine:
         skip_listener: Callable[[str, str, str, int], None] | None = None,
         reentry_entry_rule: ReentryEntryRule | None = None,
         track_shadows: bool = False,
+        carry_zones: bool = False,
     ) -> None:
         _validate_live_params(params)
         _validate_reentry_rule(params, reentry_entry_rule)
@@ -233,6 +247,12 @@ class ZoneLimitLiveEngine:
         #: 탭·겹친 탭을 못 본다. 켜면 첫 탭마다 **같은 `_build_order`·같은 판정**의 독립 주문을
         #: 하나씩 더 따라가 체결되면 `shadow_filled`를 낸다(장부·슬롯과 무관). 끄면 비트 동일.
         self._track_shadows = track_shadows
+        #: 오래된 존 기억(WAN-451). 탐지 창(`live_signal_lookback_bars`)이 미끄러져 존의 시작이 창
+        #: 밖으로 나가면 탐지기는 그 존을 다시 못 만든다 — 정본(전 이력 탐지)은 몇 년 된 존에도
+        #: 들어가는데(팔 후보의 약 7%가 1500봉보다 오래된 존) 라이브는 잊어버렸다. 켜면 창 밖으로
+        #: 밀려난 살아 있는 존을 엔진이 들고 **탐지기와 같은 규칙**(무효화 · 바깥→안 탭)으로 새 확정
+        #: 봉마다 갱신한다. 끄면 비트 동일.
+        self._carry_zones = carry_zones
         self._series: dict[SeriesKey, _SeriesState] = {}
 
     # -- 상위TF 확정봉: 존 대장 갱신 -----------------------------------------
@@ -270,6 +290,7 @@ class ZoneLimitLiveEngine:
         events: list[EngineEvent] = []
         now_ms = times[-1] + state.htf_ms  # 마지막 확정봉의 닫힌 시각.
         fresh: dict[ZoneId, _ZoneWatch] = {}
+        detected: set[ZoneId] = {_zone_id(ob) for ob in ob_result.order_blocks}
         for ob in ob_result.order_blocks:
             if ob.break_time is not None:
                 continue  # 무효화된 존 — 아래에서 대기 주문 취소로만 반영.
@@ -287,12 +308,17 @@ class ZoneLimitLiveEngine:
             )
             watch = state.zones.get(zid)
             if watch is None:
-                fresh[zid] = _ZoneWatch(ob=ob, was_inside=was_inside)
+                watch = _ZoneWatch(ob=ob, was_inside=was_inside)
             else:
                 # 존 내용(탭 기록 등)은 갱신하되 형성 중 봉의 예약 시도 기록은 유지.
                 watch.ob = ob
                 watch.was_inside = was_inside
-                fresh[zid] = watch
+            watch.carried = False
+            watch.bar_inside = was_inside
+            watch.checked_through = times[-1]
+            fresh[zid] = watch
+        if self._carry_zones:
+            self._carry_old_zones(state, df, times, detected, fresh)
         state.zones = fresh
         state.refreshed = True
 
@@ -549,6 +575,69 @@ class ZoneLimitLiveEngine:
                 )
             )
         return events
+
+    def _carry_old_zones(
+        self,
+        state: _SeriesState,
+        df: pd.DataFrame,
+        times: list[int],
+        detected: set[ZoneId],
+        fresh: dict[ZoneId, _ZoneWatch],
+    ) -> None:
+        """창 밖으로 밀려나 탐지에서 빠진 살아 있는 존을 이어 들고 간다(WAN-451).
+
+        이어 들 존: 직전 대장에 있었고 · 이번 탐지 결과(아카이브 — 무효화된 존도 든다)에는 없고 ·
+        시작이 창 앞쪽(`_CARRY_MARGIN_BARS` 안)이다. 창 시작 근처의 존은 스윙 맥락이 잘려 탐지가
+        달라질 수 있어 여유를 둔다(WAN-343: 창 시작 +5~25봉). 그 존들은 새 확정 봉마다
+        `strategy.order_blocks._invalidate`와 같은 규칙으로 갱신한다 — 무효화(강세: 저가가 바닥
+        아래 · `zone_invalidation="close"`면 시·종가 중 낮은 값)면 버리고, 바깥→안이면 탭을 단다.
+        """
+        if not state.zones or not times:
+            return
+        margin = _CARRY_MARGIN_BARS * state.htf_ms
+        use_wick = (self._ob_params or OrderBlockParams()).zone_invalidation == "wick"
+        opens = df["open"].astype(float).to_numpy()
+        highs = df["high"].astype(float).to_numpy()
+        lows = df["low"].astype(float).to_numpy()
+        closes = df["close"].astype(float).to_numpy()
+        for zid, watch in state.zones.items():
+            if zid in fresh or zid in detected:
+                continue
+            ob = watch.ob
+            if ob.start_time >= times[0] + margin or watch.checked_through is None:
+                continue
+            if watch.checked_through < times[0] - state.htf_ms:
+                _logger.warning(
+                    "기억하던 존 %s를 버립니다 — 마지막 반영 봉과 새 창 사이가 끊겼다", zid
+                )
+                continue
+            is_long = ob.direction is OrderBlockDirection.BULLISH
+            inside = watch.bar_inside
+            taps = list(ob.tapped_times)
+            broken = False
+            for i in range(bisect.bisect_right(times, watch.checked_through), len(times)):
+                t = times[i]
+                if is_long:
+                    low_cmp = lows[i] if use_wick else min(opens[i], closes[i])
+                    broken = bool(low_cmp < ob.bottom)
+                else:
+                    high_cmp = highs[i] if use_wick else max(opens[i], closes[i])
+                    broken = bool(high_cmp > ob.top)
+                if broken:
+                    break
+                now_inside = bool(lows[i] <= ob.top and highs[i] >= ob.bottom)
+                if now_inside and not inside and t > ob.confirmed_time:
+                    taps.append(t)
+                inside = now_inside
+            if broken:
+                continue
+            if len(taps) != len(ob.tapped_times):
+                watch.ob = ob.model_copy(update={"tapped_times": tuple(taps)})
+            watch.carried = True
+            watch.bar_inside = inside
+            watch.was_inside = inside
+            watch.checked_through = times[-1]
+            fresh[zid] = watch
 
     def _arm_shadows(self, state: _SeriesState, symbol: str, timeframe: str, time_ms: int) -> None:
         """새 탭(바깥→안 전이)마다 그림자 주문을 하나 만든다 — 슬롯·포지션과 무관(WAN-451).
@@ -864,6 +953,10 @@ class ZoneLimitLiveEngine:
                     was_inside=watch.was_inside,
                     armed_forming_bar=watch.armed_forming_bar,
                     skip_recorded_forming_bar=watch.skip_recorded_forming_bar,
+                    shadow_bar=watch.shadow_bar,
+                    carried_ob=watch.ob if watch.carried else None,
+                    bar_inside=watch.bar_inside,
+                    checked_through=watch.checked_through,
                 )
                 for zid, watch in state.zones.items()
             ],
@@ -930,8 +1023,16 @@ class ZoneLimitLiveEngine:
         state.last_substep_time = snapshot.last_substep_time
         for persisted in snapshot.zones:
             watch = state.zones.get(persisted.zone)
+            if watch is None and persisted.carried_ob is not None:
+                # 기억하던 존(WAN-451) — 탐지로 다시 세울 수 없으므로 스냅샷의 존을 그대로 되살린다.
+                watch = _ZoneWatch(ob=persisted.carried_ob, was_inside=persisted.was_inside)
+                watch.carried = True
+                watch.bar_inside = persisted.bar_inside
+                watch.checked_through = persisted.checked_through
+                state.zones[tuple(persisted.zone)] = watch  # type: ignore[index]
             if watch is None:
                 continue  # 스냅샷 이후 대장에서 사라진 존 — 탐지 결과가 정본이다.
+            watch.shadow_bar = persisted.shadow_bar
             watch.was_inside = persisted.was_inside
             watch.armed_forming_bar = persisted.armed_forming_bar
             watch.skip_recorded_forming_bar = persisted.skip_recorded_forming_bar

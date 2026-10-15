@@ -153,6 +153,7 @@ class ZoneLimitPaperRunner:
         universe: UniverseStore | None = None,
         signals: ArmSignalStore | None = None,
         price_feed_factory: Callable[[list[str]], PriceFeed] | None = None,
+        bootstrap_days: int = 0,
         reuse_loads: bool = True,
         sleep: Callable[[float], None] = time.sleep,
         now_ms: Callable[[], int] = lambda: int(time.time() * 1000),
@@ -180,6 +181,9 @@ class ZoneLimitPaperRunner:
         #: 팔 신호 장부(WAN-451 몰림 규칙). 주어지면 그림자 체결을 기록하고, 실제 체결 때 직전
         #: 24h 신호 수로 몰림 규칙을 건다. None이면 몰림 규칙 없음(예전 그대로).
         self._signals = signals
+        #: 오래된 존 기억의 시작(WAN-451): 시리즈를 **처음** 먹일 때만 이 일수만큼의 확정봉으로
+        #: 탐지해 몇 년 된 존까지 세운다(그 뒤는 `lookback_bars` 창 + 엔진 기억). 0이면 예전 그대로.
+        self._bootstrap_days = bootstrap_days
         #: 감시 종목이 바뀌면 틱 피드를 새 종목으로 다시 만든다(주어졌을 때만).
         self._price_feed_factory = price_feed_factory
         self._feed_symbols: tuple[str, ...] = ()
@@ -295,12 +299,17 @@ class ZoneLimitPaperRunner:
 
         가장 이른 cutoff: 프라이밍(since=None)은 최신 확정봉 이후만 보므로 상한이
         필요 없고, 이어 소비하는 경우 첫 1분봉 t는 `since + 1` 이상이라 cutoff
-        (= t + 1분 − htf_ms)가 `since + 1 + 1분 − htf_ms`보다 이를 수 없다.
+        (= t − htf_ms, WAN-451)가 `since + 1 − htf_ms`보다 이를 수 없다.
         """
-        end_ms = None if since is None else since + 1 + _MINUTE_MS - htf_ms
-        start = self._store.tail_window_start(
-            symbol, timeframe, bars=self._lookback_bars, end_ms=end_ms
-        )
+        end_ms = None if since is None else since + 1 - htf_ms
+        bars = self._window_bars(symbol, timeframe)
+        start = self._store.tail_window_start(symbol, timeframe, bars=bars, end_ms=end_ms)
+        if bars > self._lookback_bars:
+            # 처음 한 번의 긴 창(오래된 존 기억 시작) — 캐시에 남기지 않는다(310 시리즈의 2년치가
+            # 동시에 메모리에 남으면 서버 RAM을 넘는다). 다음 폴링부터는 짧은 창이다.
+            if start is None:
+                return self._store.load(symbol, timeframe)
+            return self._store.load(symbol, timeframe, start_ms=start)
         if not self._reuse_loads:
             if start is None:
                 return self._store.load(symbol, timeframe)
@@ -380,7 +389,7 @@ class ZoneLimitPaperRunner:
         window = closed_all
         if cutoff_open_time is not None:
             window = closed_all[closed_all["open_time"] <= cutoff_open_time]
-        window = window.tail(self._lookback_bars)
+        window = window.tail(self._window_bars(symbol, timeframe))
         if window.empty:
             return []
         last_time = int(window["open_time"].iloc[-1])
@@ -403,6 +412,13 @@ class ZoneLimitPaperRunner:
         events = self._engine.on_htf_bars(symbol, timeframe, window)
         self._last_htf[key] = last_time
         return events
+
+    def _window_bars(self, symbol: str, timeframe: str) -> int:
+        """이 시리즈에 먹일 창 길이 — 처음이면 오래된 존 기억 시작 창, 아니면 `lookback_bars`."""
+        if self._bootstrap_days <= 0 or (symbol, timeframe) in self._last_htf:
+            return self._lookback_bars
+        days_bars = -(-self._bootstrap_days * 86_400_000 // timeframe_to_ms(timeframe))
+        return max(self._lookback_bars, days_bars)
 
     def _note_gap_skip(self, symbol: str, timeframe: str, gaps: list[Gap], summary: str) -> None:
         """결측 건너뜀을 기록한다 — 같은 구멍이면 횟수·마지막 관측만 갱신(WAN-314)."""
@@ -1396,6 +1412,8 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
             reentry_entry_rule=reentry_rule,
             # 몰림 규칙의 모집단(WAN-451): 슬롯과 무관한 탭별 그림자 주문을 따라간다.
             track_shadows=settings.live_arm_enabled,
+            # 창 밖으로 밀린 살아 있는 존을 기억한다(WAN-451 — 정본은 몇 년 된 존에도 들어간다).
+            carry_zones=settings.live_arm_enabled,
         )
         # 옵트인 웹소켓 틱 피드(WAN-246, 페이퍼 한정 · 공개 체결 스트림만). 기본 꺼짐이면
         # None → 러너는 확정 1분봉만 소비(예전과 비트 동일). 켜면 심볼별 실시간 체결가로
@@ -1485,6 +1503,7 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
             universe=universe,
             signals=signals,
             price_feed_factory=feed_factory,
+            bootstrap_days=settings.live_zone_memory_days if settings.live_arm_enabled else 0,
         )
         # 재시작 복원(WAN-306): 이전 세션의 엔진 상태(전이 맥락·탭 표식·대기 주문·재진입
         # 재무장)를 되살린다 — 복원된 주문은 아래 재평가/폐기에서 제외한다(따라잡기 재생이
