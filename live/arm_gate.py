@@ -39,7 +39,7 @@ import shutil
 import sqlite3
 import tempfile
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -146,7 +146,19 @@ class Canon:
     """팔 후보마다 정본 판정(진입 · 몰림 건너뜀 · 칸에 포지션)."""
 
 
-def canon(symbols: Sequence[str], replay_from: int, cap: int, jobs: int) -> Canon:
+def canon(
+    symbols: Sequence[str],
+    replay_from: int,
+    cap: int,
+    jobs: int,
+    *,
+    members_at: Callable[[int], frozenset[str]] | None = None,
+) -> Canon:
+    """정본 팔 — 재생 시작 뒤에 탭된 후보만(라이브가 보는 것과 같다).
+
+    `members_at`(진입 시각 → 그 주 목록)를 주면 정본 `apply_rotation`처럼 목록 밖 후보를 처음부터
+    뺀다(몰림 신호 수도 남은 후보로 센다). 안 주면 `symbols` 전부가 매주 목록이다(관문의 고정 목록).
+    """
     payloads = run_cells(
         list(symbols),
         tuple(ARM_TIMEFRAMES),
@@ -161,6 +173,7 @@ def canon(symbols: Sequence[str], replay_from: int, cap: int, jobs: int) -> Cano
             e
             for e in w.build_entries(payloads, store=store, start_ms=replay_from, end_ms=cap)
             if int(e.cand.trigger_time) >= replay_from
+            and (members_at is None or e.symbol in members_at(int(e.cand.entry_time)))
         ]
         counts = w.signal_counts([int(e.cand.entry_time) for e in entries])
         b24, vr = c.btc_features(store, entries, replay_from - 2 * DAY, cap)

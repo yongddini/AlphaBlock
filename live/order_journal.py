@@ -613,6 +613,9 @@ class OrderJournal:
             # WAN-305: 이 주문이 탭 예약인지 익절 후 재진입 재무장인지. NULL = 열 도입 전
             # 행 = 판별 불가(WAN-194 규약) — 사후 수사가 재진입 여부에서 막히지 않게 한다.
             ("origin", "TEXT"),
+            # WAN-451: 팔 진입의 크기 배율(몰림 예산 × 폭락 0.5) — 장부 ↔ 정본 대조가 맞대는 값.
+            # 수량은 지갑 상태에 따라 달라 배율을 따로 남긴다. NULL = 팔 아님 · 열 도입 전 행.
+            ("entry_size_scale", "REAL"),
         ):
             if column not in existing:
                 self._conn.execute(
@@ -773,7 +776,13 @@ class OrderJournal:
             )
 
     def record_entry_result(
-        self, journal_id: int, *, entered: bool, reason: str = "", reason_code: str = ""
+        self,
+        journal_id: int,
+        *,
+        entered: bool,
+        reason: str = "",
+        reason_code: str = "",
+        size_scale: float | None = None,
     ) -> None:
         """체결의 **하류 처분**을 기록한다 — 포지션이 열렸는지, 거부면 사유(WAN-194).
 
@@ -785,15 +794,18 @@ class OrderJournal:
         `reason`은 사람용 자유 텍스트, `reason_code`(WAN-221 · `REJECT_CODE_*`)는 집계가
         문자열을 파싱하지 않고 사유를 세도록 싣는 안정 코드다 — 일일 요약의 사유 카운트
         (`funnel_counts`)가 이 코드로 명목/사이징/슬롯참을 가른다. 진입 성공이면 둘 다 비운다.
+
+        `size_scale`(WAN-451)은 팔 진입의 크기 배율(몰림 예산 × 폭락 0.5) — 진입했을 때만 남는다.
         """
         with self._lock, self._conn:
             self._conn.execute(
                 "UPDATE live_limit_orders SET entry_status = ?, entry_reject_reason = ?,"
-                " entry_reject_code = ? WHERE id = ?",
+                " entry_reject_code = ?, entry_size_scale = ? WHERE id = ?",
                 (
                     ENTRY_STATUS_ENTERED if entered else ENTRY_STATUS_REJECTED,
                     None if entered else (reason or "사유 미기록"),
                     None if entered else (reason_code or None),
+                    size_scale if entered else None,
                     journal_id,
                 ),
             )
