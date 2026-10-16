@@ -11,6 +11,9 @@
 2. **페이퍼 거래**(`paper_trades`) — 진입/청산 가격·시각·사유가 같다.
 3. **엔진 스냅샷**(`SeriesStateSnapshot`) — 전이 맥락·형성 봉 누적·대기 주문 스칼라가
    저장 시각(`saved_ms`)을 뺀 모든 필드에서 같다.
+4. **신호 장부**(`arm_signals`)와 **진입 처분**(`entry_status`·`entry_reject_code`) — 몰림
+   규칙이 세는 체결과 그 판정이 같다(WAN-453 — 그전에는 러너에 신호 장부가 안 붙어 있어 이
+   축을 아예 안 거쳤다).
 
 러너는 스토캐스틱 팔 규칙으로 진입한다(WAN-451 — 옛 오더블록 페이퍼의 고정 R 익절·재진입은
 없어졌다). 그래서 합성 시나리오의 청산은 익절이 아니라 2배 손절이다.
@@ -29,7 +32,8 @@ from data.models import Candle
 from data.storage import OhlcvStore
 from execution.engine import build_execution_engine
 from live import limit_engine
-from live.arm_rules import ArmParams
+from live.arm_rules import REJECT_CODE_ARM_CROWD_SKIP, ArmParams
+from live.arm_signals import ArmSignalStore
 from live.engine_state import EngineStateStore, PersistedPendingOrder, SeriesStateSnapshot
 from live.executor import PaperExecutor
 from live.limit_engine import ZoneLimitLiveEngine
@@ -147,6 +151,9 @@ class _Rig:
             params=self._params, journal=self.journal, session_id=self.session
         )
         self.engine_state = EngineStateStore(self.db)
+        # 몰림 규칙의 신호 장부(WAN-453) — 실제 기동(`run_zone_limit_runner`)과 같은 DB 파일에
+        # 붙인다. 이게 빠져 있으면 재시작 동등성이 신호 장부·몰림 판정을 아예 안 거친다.
+        self.signals = ArmSignalStore(self.db)
         self.runner = ZoneLimitPaperRunner(
             store=self.store,
             engine=self.engine,
@@ -160,6 +167,7 @@ class _Rig:
             engine_state=self.engine_state,
             catchup_max_ms=self._catchup_max_ms,
             arm=ArmParams(),
+            signals=self.signals,
             now_ms=lambda: self.now["ms"],
         )
 
@@ -182,6 +190,7 @@ class _Rig:
         self.journal.close()
         self.paper_store.close()
         self.engine_state.close()
+        self.signals.close()
         self._open()
         restored = self.runner.restore_state(now_ms=self.now["ms"])
         expire_stale_pending(self.journal, now_ms=self.now["ms"], exclude_ids=restored)
@@ -193,6 +202,7 @@ class _Rig:
         self.journal.close()
         self.paper_store.close()
         self.engine_state.close()
+        self.signals.close()
 
     # -- 동등성 지문 ---------------------------------------------------------
 
@@ -205,6 +215,35 @@ class _Rig:
                 " terminal_ms, first_rested_ms, fill_ms, fill_price, stop_price,"
                 " take_profit_price, wait_ms, skip_reason, limit_valid_bars"
                 " FROM live_limit_orders ORDER BY placed_ms, id"
+            ).fetchall()
+        finally:
+            conn.close()
+        return [tuple(r) for r in rows]
+
+    def signal_rows(self) -> list[tuple[object, ...]]:
+        """신호 장부 지문(체결 시각순) — 몰림 규칙이 세는 모집단과 세지 않은 사유까지."""
+        return [
+            (
+                s.symbol,
+                s.timeframe,
+                s.zone_start,
+                s.zone_confirmed,
+                s.fill_ms,
+                s.price,
+                s.ob_stop,
+                s.counted,
+                s.reason_code,
+            )
+            for s in self.signals.rows(0, 2**62)
+        ]
+
+    def entry_decisions(self) -> list[tuple[object, ...]]:
+        """체결된 주문의 진입 처분(진입/거부 · 사유 코드) — 몰림 판정이 재시작을 넘어 같은가."""
+        conn = sqlite3.connect(self.db)
+        try:
+            rows = conn.execute(
+                "SELECT fill_ms, entry_status, COALESCE(entry_reject_code, '')"
+                " FROM live_limit_orders WHERE status = 'filled' ORDER BY fill_ms, id"
             ).fetchall()
         finally:
             conn.close()
@@ -234,6 +273,8 @@ def _assert_equivalent(continuous: _Rig, restarted: _Rig) -> None:
     assert restarted.journal_rows() == continuous.journal_rows()
     assert restarted.trade_rows() == continuous.trade_rows()
     assert restarted.snapshot_fingerprint() == continuous.snapshot_fingerprint()
+    assert restarted.signal_rows() == continuous.signal_rows()
+    assert restarted.entry_decisions() == continuous.entry_decisions()
 
 
 def _seed_htf(rig: _Rig, closes: list[float]) -> None:
@@ -323,6 +364,116 @@ def test_catchup_replays_gap_bars_and_fills(
 
     _assert_equivalent(a, b)
     assert len(b.trade_rows()) == 1  # 공백 구간의 체결·청산이 집행됐다.
+    a.close()
+    b.close()
+
+
+# -- 몰림 규칙: 재시작 전에 남은 신호를 재시작 뒤 판정이 센다 (WAN-453) ---------
+
+
+def _second_zone() -> OrderBlock:
+    """존 A(`_resting_zone`)의 2배 손절(≈82.5)보다 아래에 놓인 강세 존 B — A가 손절된 뒤에야
+    탭된다(같은 1분 안에서 A 손절과 B 체결이 겹치지 않는다)."""
+    return OrderBlock(
+        direction=OrderBlockDirection.BULLISH,
+        top=80.0,
+        bottom=70.0,
+        start_time=2 * _H,
+        confirmed_time=3 * _H,
+        ob_volume=1.0,
+        ob_low_volume=0.5,
+        ob_high_volume=0.5,
+    )
+
+
+def _install_two_zone_detector(monkeypatch: pytest.MonkeyPatch) -> None:
+    result = OrderBlockResult(order_blocks=[_resting_zone(), _second_zone()], signals=[])
+
+    class _Stub:
+        def __init__(self, params: object = None) -> None:
+            pass
+
+        def run(self, df: pd.DataFrame) -> OrderBlockResult:
+            return result
+
+    monkeypatch.setattr(limit_engine, "OrderBlockDetector", _Stub)
+
+
+#: 존 A 탭 → A 체결(센 신호) → A 2배 손절 → 존 B 탭·체결 → 대기. B의 체결은 직전 24h에 「다른
+#: 신호」(A) 1개를 보므로 몰림 규칙(1~10개 = 급락 초반 건너뛰기)이 진입을 거부한다.
+_CROWD_BARS = [
+    _m1(_FORMING, 99.4, 101.5, 100.0),  # 존 A 탭 — 예약만.
+    _m1(_FORMING + _M, 96.0, 99.0, 98.0),  # A 체결 — 신호 0개라 진입, 신호 장부에 1행(셈).
+    _m1(_FORMING + 2 * _M, 81.0, 98.0, 81.5),  # A 2배 손절(≈82.5) — 칸이 빈다.
+    _m1(_FORMING + 3 * _M, 78.0, 82.0, 79.0),  # 존 B 탭·체결 — 직전 24h 신호 1개 → 건너뜀.
+    _m1(_FORMING + 4 * _M, 78.5, 80.5, 79.5),  # 그 뒤 정상 폴링.
+]
+
+
+def _assert_crowd_outcome(rig: _Rig) -> None:
+    """공허한 동등성 방지 — 신호 둘(둘 다 셈)이 남고 B 진입이 몰림 규칙으로 거부됐다."""
+    signals = rig.signal_rows()
+    assert len(signals) == 2 and all(row[7] for row in signals)
+    decisions = rig.entry_decisions()
+    assert [d[1:] for d in decisions] == [
+        ("entered", ""),
+        ("rejected", REJECT_CODE_ARM_CROWD_SKIP),
+    ]
+    assert len(rig.trade_rows()) == 1
+
+
+@pytest.mark.parametrize("restart_after", [1, 2, 3, 4])
+def test_crowd_signal_survives_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, restart_after: int
+) -> None:
+    """재시작 불변을 몰림 규칙까지 넓힌다 — 어느 봉 뒤에서 재시작해도 신호 장부·진입 처분이
+    연속 실행과 같다.
+
+    재시작 전에 체결된 A의 신호는 장부(같은 DB 파일)에 남아 재시작 뒤 B의 판정에서 세어진다.
+    러너가 신호를 메모리에만 들고 있었다면 재시작 판에서 B가 「신호 0개」로 진입했을 것이다.
+    """
+    _install_two_zone_detector(monkeypatch)
+
+    a = _Rig(tmp_path, name="continuous")
+    _seed_htf(a, _DESC_CLOSES)
+    a.feed(_CROWD_BARS)
+    _assert_crowd_outcome(a)
+
+    b = _Rig(tmp_path, name="restarted")
+    _seed_htf(b, _DESC_CLOSES)
+    b.feed(_CROWD_BARS[:restart_after])
+    b.restart()
+    b.feed(_CROWD_BARS[restart_after:])
+
+    _assert_equivalent(a, b)
+    _assert_crowd_outcome(b)
+    a.close()
+    b.close()
+
+
+def test_crowd_signal_from_catchup_gap_is_counted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """죽어 있던 구간의 체결도 따라잡기 재생이 신호 장부에 남기고, 같은 재생 안에서 뒤이은
+    체결의 몰림 판정이 그 신호를 센다 — 그리고 한 체결이 두 번 기록되지 않는다(기본키)."""
+    _install_two_zone_detector(monkeypatch)
+
+    a = _Rig(tmp_path, name="continuous")
+    _seed_htf(a, _DESC_CLOSES)
+    a.feed(_CROWD_BARS)
+
+    b = _Rig(tmp_path, name="restarted")
+    _seed_htf(b, _DESC_CLOSES)
+    b.feed(_CROWD_BARS[:1])  # A 탭 — 예약만 한 채로 죽는다.
+    # 러너가 죽어 있는 동안 수집기는 계속 쌓는다(A 체결 · A 손절 · B 체결이 전부 공백 구간).
+    b.store.upsert_candles(_CROWD_BARS[1:4])
+    b.now["ms"] = _CROWD_BARS[3].open_time + _M
+    restored = b.restart()
+    assert len(restored) == 1  # A의 대기 주문이 복원됐다.
+    b.feed(_CROWD_BARS[4:])
+
+    _assert_equivalent(a, b)
+    _assert_crowd_outcome(b)
     a.close()
     b.close()
 
@@ -552,6 +703,7 @@ def test_restart_matches_continuous_on_real_data(tmp_path: Path) -> None:
         assert a.snapshot_fingerprint() is not None
         assert len(a.journal_rows()) >= 1
         assert any(row[5] == "filled" for row in a.journal_rows())
+        assert len(a.signal_rows()) >= 1  # 체결이 신호 장부에도 남았다(WAN-453).
     finally:
         a.close()
         b.close()
