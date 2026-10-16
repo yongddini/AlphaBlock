@@ -56,6 +56,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from common.timefmt import format_kst_zoned
 from data.sqlite_util import configure_connection
 
 #: SQLite `.recover`가 고아 페이지를 쏟아붓는 산출 테이블(앱 스키마가 아니다).
@@ -92,6 +93,20 @@ STATE_LEDGER_TABLES: tuple[str, ...] = ("open_positions",)
 #: 두 성격을 합친 전체 장부 목록(인구조사 표기용). 분류가 빠진 장부가 생기지 않도록
 #: **두 집합에서 파생**한다 — 새 장부를 추가하려면 성격을 반드시 골라야 한다.
 LEDGER_TABLES: tuple[str, ...] = tuple(sorted(CUMULATIVE_LEDGER_TABLES + STATE_LEDGER_TABLES))
+
+#: 리셋 이력(WAN-455) — `scripts/paper-reset.sh`가 장부를 비우는 **그 트랜잭션**에서 한 줄
+#: 남긴다(`reset_ms`). 다음 리셋이 지우지 않는다(페이퍼 장부가 아니라 운영 기록이다).
+RESET_LOG_TABLE = "paper_reset_log"
+
+#: 누적 장부 중 **리셋 뒤 첫 청산 전에는 0행이 정상**인 것(WAN-455). 리셋은 누적 장부를
+#: 일부러 비우는데, 그중 주문 장부·세션 장부는 러너가 다시 켜지자마자 쌓이지만 거래 장부는
+#: **첫 청산**이 나와야 쌓인다(팔 시간 청산은 4봉 뒤 — TF에 따라 몇 시간~며칠). 그 사이 doctor가
+#: 매시간 「유실」로 경보했다(2026-10-16 실사고 · WAN-321 `open_positions`와 같은 병).
+#:
+#: ⚠️ **면제는 「리셋 표시가 있고 그 뒤 청산 흔적이 없을 때」만이다** — 리셋 뒤 진입했다가 그
+#: 칸의 포지션이 사라졌는데(= 청산이 있었는데) 거래 장부가 비었으면 그건 WAN-194 유실이라
+#: 그대로 경보한다(`closes_since_reset`). 리셋 표시가 없으면 옛 규칙 그대로다.
+RESET_EXCUSABLE_LEDGERS: frozenset[str] = frozenset({"paper_trades"})
 
 
 @dataclass(frozen=True)
@@ -237,6 +252,11 @@ class IntegrityReport:
     orphan_fills: list[OrphanFill]
     artifact_census: list[RecoveryArtifactCensus] = field(default_factory=list)
     """복구 산출물 안에 무엇이 갇혀 있는지(WAN-195). 산출물이 없으면 빈 리스트."""
+    last_reset_ms: int | None = None
+    """가장 최근 페이퍼 리셋 시각(`paper_reset_log`, WAN-455). 표시가 없으면 None."""
+    closes_since_reset: int = 0
+    """리셋 뒤 진입했다가 포지션이 이미 닫힌 수(장부로 추정, WAN-455) — 0이 아니면 거래
+    장부가 차 있어야 한다."""
 
     @property
     def salvageable_candles(self) -> list[SalvageableCandles]:
@@ -260,7 +280,24 @@ class IntegrityReport:
         읽혔고, 호출부가 옛 뜻을 조용히 이어받으면 거짓 경보가 그대로 돌아온다 — 이름이
         아니라 **성격을 고르게** 강제한다.
         """
-        return [t for t in self.tables if t.is_ledger and not t.is_state_ledger and t.rows == 0]
+        return [
+            t
+            for t in self.tables
+            if t.is_ledger and not t.is_state_ledger and t.rows == 0 and not self._reset_excuses(t)
+        ]
+
+    @property
+    def reset_excused_ledgers(self) -> list[TableCensus]:
+        """리셋 직후라 0행이 정상인 누적 장부(WAN-455) — **정보이지 경고가 아니다**."""
+        return [t for t in self.tables if t.rows == 0 and self._reset_excuses(t)]
+
+    def _reset_excuses(self, table: TableCensus) -> bool:
+        """이 빈 장부가 「리셋 뒤 첫 청산 전」이라 정상인가(WAN-455)."""
+        return (
+            table.name in RESET_EXCUSABLE_LEDGERS
+            and self.last_reset_ms is not None
+            and self.closes_since_reset == 0
+        )
 
     @property
     def empty_state_ledgers(self) -> list[TableCensus]:
@@ -506,6 +543,8 @@ def inspect(
         space = collect_space(conn, path)
         orphans = _orphan_fills(conn, since_ms=orphan_since_ms)
         census = census_recovery_artifacts(conn)
+        last_reset = _last_reset_ms(conn)
+        closes = _closes_since(conn, last_reset) if last_reset is not None else 0
     finally:
         conn.close()
 
@@ -516,6 +555,43 @@ def inspect(
         space=space,
         orphan_fills=orphans,
         artifact_census=census,
+        last_reset_ms=last_reset,
+        closes_since_reset=closes,
+    )
+
+
+def _last_reset_ms(conn: sqlite3.Connection) -> int | None:
+    """가장 최근 페이퍼 리셋 시각(WAN-455). 표가 없으면(리셋한 적 없음 · 옛 스크립트) None."""
+    if RESET_LOG_TABLE not in _table_names(conn):
+        return None
+    row = conn.execute(f"SELECT MAX(reset_ms) FROM {RESET_LOG_TABLE}").fetchone()
+    return None if row is None or row[0] is None else int(row[0])
+
+
+def _closes_since(conn: sqlite3.Connection, since_ms: int) -> int:
+    """리셋 뒤 진입했다가 이미 닫힌 포지션 수 — 장부만으로 추정한다(WAN-455).
+
+    칸(종목·TF)마다 포지션은 많아야 하나라(`open_positions` 기본키) 그 칸의 진입 체결 수에서
+    지금 열린 포지션(0 또는 1)을 빼면 닫힌 수다. 하나라도 있으면 거래 장부가 차 있어야 하므로
+    빈 `paper_trades`를 면제하지 않는다(그건 WAN-194 유실의 모양이다).
+    """
+    columns = {str(r[1]) for r in conn.execute("PRAGMA table_info(live_limit_orders)")}
+    if "entry_status" not in columns:
+        return 0
+    entered = conn.execute(
+        "SELECT symbol, timeframe, COUNT(*) FROM live_limit_orders"
+        " WHERE status = 'filled' AND entry_status = 'entered' AND fill_ms >= ?"
+        " GROUP BY symbol, timeframe",
+        (since_ms,),
+    ).fetchall()
+    open_cells: set[tuple[str, str]] = set()
+    if "open_positions" in _table_names(conn):
+        open_cells = {
+            (str(r[0]), str(r[1]))
+            for r in conn.execute("SELECT symbol, timeframe FROM open_positions")
+        }
+    return sum(
+        max(0, int(n) - (1 if (str(sym), str(tf)) in open_cells else 0)) for sym, tf, n in entered
     )
 
 
@@ -733,6 +809,8 @@ def render_report(report: IntegrityReport) -> str:
             # 사람이 다시 "빈 장부"로 읽는다.
             empty_note = " · 0행 = 열린 포지션 없음" if table.rows == 0 else ""
             note = "페이퍼 장부(현재 상태)" + empty_note
+        elif table.is_ledger and table in report.reset_excused_ledgers:
+            note = "페이퍼 장부(누적) · 0행 = 리셋 뒤 아직 청산 없음"
         elif table.is_ledger:
             note = "페이퍼 장부(누적)" + (" · **0행**" if table.rows == 0 else "")
         lines.append(f"| `{table.name}` | {table.rows:,} | {note} |")
@@ -746,6 +824,14 @@ def render_report(report: IntegrityReport) -> str:
         )
     else:
         lines.append("누적 장부에 빈 것은 없다.")
+    for table in report.reset_excused_ledgers:
+        # 정보 한 줄로만 남긴다 — 종료 코드에는 반영하지 않는다(WAN-455).
+        assert report.last_reset_ms is not None
+        lines.append(
+            f"ℹ️ `{table.name}` 0행 — **{format_kst_zoned(report.last_reset_ms)} 리셋 뒤 아직 청산이"
+            " 없다는 뜻이고 정상이다**(리셋이 일부러 비웠다). 리셋 뒤 진입한 포지션이 닫혔는데도"
+            " 비어 있으면 경고로 바뀐다."
+        )
     for table in report.empty_state_ledgers:
         # 정보 한 줄로만 남긴다 — 종료 코드에는 반영하지 않는다(WAN-321 §1).
         lines.append(

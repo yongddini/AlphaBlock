@@ -16,6 +16,8 @@ from data.integrity import (
     CUMULATIVE_LEDGER_TABLES,
     LEDGER_TABLES,
     RECOVERY_ARTIFACT_TABLES,
+    RESET_EXCUSABLE_LEDGERS,
+    RESET_LOG_TABLE,
     STATE_LEDGER_TABLES,
     SalvageableRowsPresent,
     drop_recovery_artifacts,
@@ -23,6 +25,7 @@ from data.integrity import (
     render_report,
     salvage_ohlcv,
 )
+from execution.models import Position
 from live.limit_orders import LimitFill, PendingLimitOrder
 from live.order_journal import OrderJournal
 from paper.store import PaperTradeRecord, PaperTradeStore
@@ -124,6 +127,178 @@ def _ledger_rows(path: Path, *, record_disposition: bool = True) -> None:
         )
     )
     store.close()
+
+
+# --- 리셋 직후의 빈 거래 장부 (WAN-455) ----------------------------------------
+
+
+def _mark_reset(path: Path, reset_ms: int) -> None:
+    """`scripts/paper-reset.sh`가 DELETE 트랜잭션에서 남기는 리셋 표시와 같은 모양."""
+    conn = sqlite3.connect(path)
+    with conn:
+        conn.execute(
+            f"CREATE TABLE IF NOT EXISTS {RESET_LOG_TABLE}"
+            " (reset_ms INTEGER PRIMARY KEY, export_dir TEXT NOT NULL DEFAULT '')"
+        )
+        conn.execute(f"INSERT INTO {RESET_LOG_TABLE} (reset_ms) VALUES (?)", (reset_ms,))
+    conn.close()
+
+
+def _entered_fill(path: Path, *, keep_open: bool) -> None:
+    """리셋 뒤의 진입 체결 1건 — `keep_open`이면 그 포지션이 아직 열려 있다.
+
+    거래 장부는 **비운 채** 둔다. 열려 있으면 「아직 청산 없음」(정상)이고, 닫혔다면
+    `paper_trades`에 행이 있어야 하므로 비어 있는 것은 WAN-194 유실의 모양이다.
+    """
+    journal = OrderJournal(path)
+    session = journal.start_session(now_ms=0)
+    journal_id = journal.record_placed(
+        _pending_order(), session_id=session, zone_start_time=0, zone_confirmed_time=0
+    )
+    fill = _limit_fill()
+    journal.record_filled(journal_id, fill)
+    journal.record_entry_result(journal_id, entered=True)
+    journal.close()
+    if keep_open:
+        store = PaperTradeStore(path)
+        store.record_open(
+            Position(
+                symbol=fill.symbol,
+                timeframe=fill.timeframe,
+                direction=fill.direction,
+                quantity=1.0,
+                entry_price=fill.price,
+                entry_time=fill.time,
+                stop_price=fill.stop_price,
+                take_profit_price=fill.take_profit_price,
+            ),
+            risk_amount=10.0,
+            entry_fee=0.02,
+        )
+        store.close()
+
+
+def test_empty_paper_trades_right_after_reset_is_healthy(tmp_path: Path) -> None:
+    """완료기준 (a) — 리셋 표시 + 열린 포지션 + 빈 `paper_trades` = **종료 코드 0**.
+
+    2026-10-16 실사고의 모양이다: 리셋 직후 러너가 진입해 포지션을 들고 있는데 아직 청산이
+    없어 거래 장부가 0행이다. 리셋이 일부러 비운 것이라 「매매 기록이 사라졌다」가 아니다.
+    """
+    db = tmp_path / "ohlcv.db"
+    _full_ledger_db(db)
+    _mark_reset(db, reset_ms=1_000)
+    _entered_fill(db, keep_open=True)
+
+    report = inspect(db)
+
+    assert report.last_reset_ms == 1_000
+    assert report.closes_since_reset == 0
+    assert [t.name for t in report.reset_excused_ledgers] == ["paper_trades"]
+    assert report.empty_cumulative_ledgers == []
+    assert report.healthy, "리셋 직후 첫 청산 전의 빈 거래 장부는 정상이다"
+    assert "리셋 뒤 아직 청산이" in render_report(report)
+
+
+def test_reset_excuse_is_what_makes_it_healthy(tmp_path: Path) -> None:
+    """완료기준 (c) 돌연변이 — 같은 DB에서 리셋 표시만 빼면 **옛 규칙대로 경보**다.
+
+    (a)가 초록인 이유가 「리셋 면제」 하나임을 동작으로 건다. 면제 로직을 되돌리면 (a)가
+    실패하고, 면제가 다른 경로로 새면 이 테스트가 실패한다.
+    """
+    db = tmp_path / "ohlcv.db"
+    _full_ledger_db(db)
+    _entered_fill(db, keep_open=True)
+
+    report = inspect(db)
+
+    assert report.last_reset_ms is None
+    assert report.reset_excused_ledgers == []
+    assert "paper_trades" in {t.name for t in report.empty_cumulative_ledgers}
+    assert not report.healthy
+
+
+def test_no_reset_marker_empty_paper_trades_still_trips(tmp_path: Path) -> None:
+    """완료기준 (b) — 리셋 표시가 없으면 빈 `paper_trades`는 **여전히 종료 코드 1**이다."""
+    db = tmp_path / "ohlcv.db"
+    _full_ledger_db(db)
+    _ledger_rows(db)
+    conn = sqlite3.connect(db)
+    with conn:
+        conn.execute("DELETE FROM paper_trades")
+    conn.close()
+
+    report = inspect(db)
+
+    assert report.last_reset_ms is None
+    assert [t.name for t in report.empty_cumulative_ledgers] == ["paper_trades"]
+    assert not report.healthy
+
+
+def test_closed_position_after_reset_with_empty_paper_trades_still_trips(
+    tmp_path: Path,
+) -> None:
+    """🚨 리셋 뒤 진입한 포지션이 **닫혔는데** 거래 장부가 비면 면제하지 않는다.
+
+    그건 「아직 청산 없음」이 아니라 「청산 기록이 사라졌다」 = WAN-194가 잡으려던 유실이다.
+    리셋 표시가 그 신호를 영원히 꺼 버리면 안 된다.
+    """
+    db = tmp_path / "ohlcv.db"
+    _full_ledger_db(db)
+    _mark_reset(db, reset_ms=1_000)
+    _entered_fill(db, keep_open=False)
+
+    report = inspect(db)
+
+    assert report.closes_since_reset == 1
+    assert report.reset_excused_ledgers == []
+    assert "paper_trades" in {t.name for t in report.empty_cumulative_ledgers}
+    assert not report.healthy
+
+
+def test_fill_before_reset_does_not_count_as_close(tmp_path: Path) -> None:
+    """리셋 **전** 체결은 셈에서 빠진다 — 리셋 뒤 장부에는 그 거래가 원래 없다."""
+    db = tmp_path / "ohlcv.db"
+    _full_ledger_db(db)
+    _entered_fill(db, keep_open=False)  # fill_ms = 61_000
+    _mark_reset(db, reset_ms=120_000)
+
+    report = inspect(db)
+
+    assert report.closes_since_reset == 0
+    assert report.healthy
+
+
+def test_reset_excuse_covers_paper_trades_only(tmp_path: Path) -> None:
+    """리셋 면제는 거래 장부 하나뿐 — 빈 주문 장부·처분 미기록 체결은 리셋 뒤에도 경보다."""
+    assert frozenset({"paper_trades"}) == RESET_EXCUSABLE_LEDGERS
+
+    db = tmp_path / "ohlcv.db"
+    _full_ledger_db(db)
+    _mark_reset(db, reset_ms=1_000)
+    journal = OrderJournal(db)
+    journal.start_session(now_ms=0)
+    journal.close()
+
+    report = inspect(db)
+
+    assert "live_limit_orders" in {t.name for t in report.empty_cumulative_ledgers}
+    assert not report.healthy
+
+    db2 = tmp_path / "orphan.db"
+    _full_ledger_db(db2)
+    _mark_reset(db2, reset_ms=1_000)
+    journal = OrderJournal(db2)
+    session = journal.start_session(now_ms=0)
+    journal_id = journal.record_placed(
+        _pending_order(), session_id=session, zone_start_time=0, zone_confirmed_time=0
+    )
+    journal.record_filled(journal_id, _limit_fill())  # 처분 미기록
+    journal.close()
+
+    report2 = inspect(db2)
+
+    assert report2.orphan_fills
+    assert not report2.healthy
 
 
 # --- 장부의 성격 구분: 누적 vs 현재 상태 (WAN-321 §1) --------------------------

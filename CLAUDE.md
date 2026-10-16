@@ -4115,6 +4115,23 @@ CSV로 떨군다.** [`docs/decisions/wan399.md`](docs/decisions/wan399.md). 운�
   `sed -n '2,40p'`가 코드 10줄을 뱉었다). 리셋 실행은 **사용자가** 채택 규칙 전환(WAN-404)과 같은
   이음매에 한다.
 
+📌 **리셋 직후의 빈 `paper_trades`는 경보가 아니다(WAN-455 = 2026-10-16 팔 켠 뒤 실사고): 리셋이
+리셋 시각을 DB에 남기고 doctor가 그것을 읽는다.** 리셋이 누적 장부를 **일부러** 비우는데 doctor는
+`paper_trades` 0행을 「유실」(WAN-194)로 읽어 **팔의 첫 청산이 날 때까지 매시간** 경보했다(WAN-321
+`open_positions`와 같은 병). 운영/도구 전용 — **엔진·전략·기본값·토대 불변** · 실거래 보류 유지.
+- 📌 **`scripts/paper-reset.sh`가 DELETE와 같은 트랜잭션에서 `paper_reset_log(reset_ms,
+  export_dir)`에 한 줄 남긴다** — 그 표는 페이퍼 장부가 아니라 운영 기록이라 다음 리셋이 안 지운다.
+  내보낸 CSV 폴더 이름(시간대 없는 로컬 시각 · `--export-dir`로 옮겨짐 · 내보내기가 중단돼도 남음)을
+  리셋의 증거로 쓰지 않은 이유가 그것이다.
+- 🚨 **면제는 「리셋 표시가 있고 그 뒤 닫힌 포지션이 없을 때」의 `paper_trades` 하나뿐이다**
+  (`RESET_EXCUSABLE_LEDGERS`). 닫힌 수는 장부로 센다 — 칸마다 리셋 뒤 진입 체결 수에서 지금 열린
+  포지션(0 또는 1)을 뺀다. 하나라도 닫혔는데 거래 장부가 비면 **여전히 경보**다(그게 WAN-194의
+  모양이다). 빈 `live_limit_orders`·`live_runner_sessions`와 `orphan_fills`는 리셋 뒤에도 그대로 경보.
+- 회귀 테스트가 동작으로 건다: 리셋 직후 + 열린 포지션 → healthy · 같은 DB에서 표시만 빼면 경보 ·
+  리셋 뒤 닫힌 포지션 + 빈 장부 → 경보 · 면제를 끄면 첫 테스트가 실패(돌연변이 확인).
+- ⚠️ 2026-10-16 리셋은 표시가 생기기 전이라 기록이 없다 — 한 줄 넣는 명령은 런북
+  [`docs/ops/wan451-arm-paper.md`](docs/ops/wan451-arm-paper.md) §4(안 넣어도 첫 청산 뒤 멈춘다).
+
 📌 **러너 정지 감시를 등록했다(WAN-344 §4 — §1~§3은 「크래시 아님」으로 닫힘): 러너가 죽은 걸
 아는 유일한 장치(`alphablock watch`)가 서버 어디에도 안 돌고 있었다.**
 [`docs/decisions/wan344.md`](docs/decisions/wan344.md) · 런북

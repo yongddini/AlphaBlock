@@ -475,3 +475,77 @@ def test_missing_optional_tables_do_not_block_reset(tmp_path: Path) -> None:
     assert proc.returncode == 0, proc.stderr
     for table in PAPER_TABLES:
         assert _count(db, table) == 0
+
+
+# --- 리셋 표시 (WAN-455) ---------------------------------------------------------
+
+
+def _reset_log(path: Path) -> list[tuple[int, str]]:
+    conn = sqlite3.connect(path)
+    try:
+        return [
+            (int(r[0]), str(r[1]))
+            for r in conn.execute("SELECT reset_ms, export_dir FROM paper_reset_log")
+        ]
+    finally:
+        conn.close()
+
+
+def test_reset_writes_marker_that_doctor_reads(tmp_path: Path) -> None:
+    """리셋이 `paper_reset_log`에 한 줄 남기고, doctor가 **그 표를 그대로** 읽는다.
+
+    doctor 쪽 테스트는 같은 모양을 손으로 만든다 — 이 테스트가 실제 스크립트 산출물과 doctor
+    판독을 잇는 다리다(스키마가 한쪽만 움직이면 여기서 깨진다).
+    """
+    from data.integrity import inspect
+
+    db = tmp_path / "ohlcv.db"
+    _make_db(db, with_backtest=False)
+
+    proc = _run(db, "--yes", "--no-restart")
+    assert proc.returncode == 0, proc.stderr
+
+    log = _reset_log(db)
+    assert len(log) == 1, log
+    reset_ms, export_dir = log[0]
+    dirs = _export_dirs(tmp_path / "paper-reset-exports")
+    assert export_dir == str(dirs[0])
+    assert reset_ms > 1_600_000_000_000  # epoch ms(초가 아니다)
+    assert inspect(db).last_reset_ms == reset_ms
+
+
+def test_reset_marker_survives_next_reset(tmp_path: Path) -> None:
+    """리셋 이력은 페이퍼 장부가 아니라 운영 기록이다 — 다음 리셋이 지우지 않는다."""
+    db = tmp_path / "ohlcv.db"
+    _make_db(db, with_backtest=False)
+    conn = sqlite3.connect(db)
+    with conn:
+        conn.execute(
+            "CREATE TABLE paper_reset_log"
+            " (reset_ms INTEGER PRIMARY KEY, export_dir TEXT NOT NULL DEFAULT '')"
+        )
+        conn.execute("INSERT INTO paper_reset_log (reset_ms) VALUES (1000)")
+    conn.close()
+
+    proc = _run(db, "--yes", "--no-restart")
+    assert proc.returncode == 0, proc.stderr
+
+    log = _reset_log(db)
+    assert (1000, "") in log
+    assert len(log) == 2, log
+
+
+def test_dry_run_writes_no_marker(tmp_path: Path) -> None:
+    """드라이런은 리셋 표시도 남기지 않는다(DB를 하나도 안 건드린다)."""
+    db = tmp_path / "ohlcv.db"
+    _make_db(db, with_backtest=False)
+
+    proc = _run(db, "--dry-run")
+    assert proc.returncode == 0, proc.stderr
+
+    conn = sqlite3.connect(db)
+    try:
+        names = {r[0] for r in conn.execute("SELECT name FROM sqlite_master")}
+    finally:
+        conn.close()
+    assert "paper_reset_log" not in names
