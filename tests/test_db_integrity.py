@@ -14,6 +14,8 @@ import pytest
 
 from data.integrity import (
     CUMULATIVE_LEDGER_TABLES,
+    ENGINE_C_LEDGER_TABLES,
+    ENGINE_C_RESET_GRACE_MS,
     LEDGER_TABLES,
     RECOVERY_ARTIFACT_TABLES,
     RESET_EXCUSABLE_LEDGERS,
@@ -29,6 +31,8 @@ from execution.models import Position
 from live.limit_orders import LimitFill, PendingLimitOrder
 from live.order_journal import OrderJournal
 from paper.store import PaperTradeRecord, PaperTradeStore
+from paper.tsmom_ledger import LEDGER_TABLES as TSMOM_LEDGER_TABLES
+from paper.tsmom_ledger import EquityMark, RebalanceRow, TsmomLedgerStore
 from strategy.models import OrderBlockDirection, SignalExitReason
 from strategy.realtime_rsi import RealtimeRsi
 
@@ -196,7 +200,7 @@ def test_empty_paper_trades_right_after_reset_is_healthy(tmp_path: Path) -> None
     assert [t.name for t in report.reset_excused_ledgers] == ["paper_trades"]
     assert report.empty_cumulative_ledgers == []
     assert report.healthy, "리셋 직후 첫 청산 전의 빈 거래 장부는 정상이다"
-    assert "리셋 뒤 아직 청산이" in render_report(report)
+    assert "첫 청산이 아직" in render_report(report)
 
 
 def test_reset_excuse_is_what_makes_it_healthy(tmp_path: Path) -> None:
@@ -268,9 +272,9 @@ def test_fill_before_reset_does_not_count_as_close(tmp_path: Path) -> None:
     assert report.healthy
 
 
-def test_reset_excuse_covers_paper_trades_only(tmp_path: Path) -> None:
-    """리셋 면제는 거래 장부 하나뿐 — 빈 주문 장부·처분 미기록 체결은 리셋 뒤에도 경보다."""
-    assert frozenset({"paper_trades"}) == RESET_EXCUSABLE_LEDGERS
+def test_reset_excuse_covers_trade_ledgers_only(tmp_path: Path) -> None:
+    """리셋 면제는 거래 장부(팔 · 엔진 C)뿐 — 빈 주문 장부·처분 미기록 체결은 리셋 뒤에도 경보다."""
+    assert frozenset({"paper_trades"}) | ENGINE_C_LEDGER_TABLES == RESET_EXCUSABLE_LEDGERS
 
     db = tmp_path / "ohlcv.db"
     _full_ledger_db(db)
@@ -299,6 +303,113 @@ def test_reset_excuse_covers_paper_trades_only(tmp_path: Path) -> None:
 
     assert report2.orphan_fills
     assert not report2.healthy
+
+
+# --- 엔진 C(추세추종) 원장도 장부다 (WAN-455) -----------------------------------
+
+_DAY_MS = 24 * 60 * 60 * 1000
+
+
+def _engine_c_rows(path: Path, *, rows: bool) -> None:
+    """엔진 C 원장을 만든다(스키마는 소유자가 만든다) — `rows`면 리밸런싱 1건 + 자본 표시 1건."""
+    with TsmomLedgerStore(path) as store:
+        if rows:
+            store.append(
+                RebalanceRow(
+                    asset="BTC/USDT:USDT",
+                    as_of_ms=0,
+                    executed_ms=_DAY_MS,
+                    price=100.0,
+                    prev_price=None,
+                    signal=1.0,
+                    annual_vol=0.6,
+                    weight=0.5,
+                    equity_basis=10_000.0,
+                    target_notional=2_000.0,
+                    prev_qty=0.0,
+                    new_qty=20.0,
+                    traded_notional=2_000.0,
+                    settled_pnl=0.0,
+                    funding=0.0,
+                    cost=1.8,
+                )
+            )
+            store.record_mark(EquityMark(_DAY_MS, 10_000.0, 0.0, 0))
+
+
+def test_engine_c_ledger_names_match_owner() -> None:
+    """doctor가 세는 엔진 C 원장 이름 = 원장 소유자(`paper.tsmom_ledger`)의 목록.
+
+    `data`는 `paper`를 임포트할 수 없어 이름을 한 벌 따로 둔다 — 한쪽만 바뀌면 여기서 깨진다.
+    """
+    assert set(TSMOM_LEDGER_TABLES) == ENGINE_C_LEDGER_TABLES
+    assert ENGINE_C_LEDGER_TABLES.issubset(CUMULATIVE_LEDGER_TABLES)
+
+
+def test_engine_c_trades_after_reset_are_shown_with_empty_paper_trades(tmp_path: Path) -> None:
+    """리셋 뒤 팔 청산은 없지만 엔진 C가 매매했다 → healthy, 그리고 리포트가 그 매매를 말한다.
+
+    2026-10-16 실사고의 실제 모양이다 — 러너는 엔진 C로 매일 매매했는데 doctor는 그 원장을
+    아예 안 봐서 「빈 누적 장부」로만 읽었다.
+    """
+    db = tmp_path / "ohlcv.db"
+    _full_ledger_db(db)
+    _engine_c_rows(db, rows=True)
+    _mark_reset(db, reset_ms=1_000)
+    _entered_fill(db, keep_open=True)
+
+    report = inspect(db, now_ms=2 * _DAY_MS)
+
+    assert report.engine_c_rows == 1
+    assert [t.name for t in report.reset_excused_ledgers] == ["paper_trades"]
+    assert report.healthy
+    text = render_report(report)
+    assert "`tsmom_rebalances`에는 1행" in text
+
+
+def test_empty_engine_c_ledger_without_reset_trips(tmp_path: Path) -> None:
+    """엔진 C를 켠 채 원장이 비면(리셋 표시 없음) 유실이다 — 경보한다."""
+    db = tmp_path / "ohlcv.db"
+    _full_ledger_db(db)
+    _ledger_rows(db)
+    _engine_c_rows(db, rows=False)
+
+    report = inspect(db)
+
+    assert {t.name for t in report.empty_cumulative_ledgers} == set(ENGINE_C_LEDGER_TABLES)
+    assert not report.healthy
+
+
+def test_empty_engine_c_ledger_is_fine_when_engine_c_is_off(tmp_path: Path) -> None:
+    """엔진 C를 끈 설정(`live_tsmom_enabled=False`)이면 빈 원장은 정상이다."""
+    db = tmp_path / "ohlcv.db"
+    _full_ledger_db(db)
+    _ledger_rows(db)
+    _engine_c_rows(db, rows=False)
+
+    report = inspect(db, engine_c_enabled=False)
+
+    assert report.empty_cumulative_ledgers == []
+    assert report.healthy
+    assert "엔진 C가 꺼진 설정" in render_report(report)
+
+
+def test_empty_engine_c_ledger_after_reset_has_a_grace_window(tmp_path: Path) -> None:
+    """리셋 직후엔 첫 리밸런싱 전이라 정상 — 유예(26시간)가 지나도 비면 경보다."""
+    db = tmp_path / "ohlcv.db"
+    _full_ledger_db(db)
+    _ledger_rows(db)
+    _engine_c_rows(db, rows=False)
+    reset_ms = 1_000_000
+    _mark_reset(db, reset_ms=reset_ms)
+
+    inside = inspect(db, now_ms=reset_ms + ENGINE_C_RESET_GRACE_MS - 1)
+    after = inspect(db, now_ms=reset_ms + ENGINE_C_RESET_GRACE_MS)
+
+    assert inside.healthy
+    assert {t.name for t in inside.reset_excused_ledgers} == set(ENGINE_C_LEDGER_TABLES)
+    assert {t.name for t in after.empty_cumulative_ledgers} == set(ENGINE_C_LEDGER_TABLES)
+    assert not after.healthy
 
 
 # --- 장부의 성격 구분: 누적 vs 현재 상태 (WAN-321 §1) --------------------------

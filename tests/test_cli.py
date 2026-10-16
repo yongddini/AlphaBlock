@@ -354,6 +354,23 @@ def test_cmd_doctor_exit_zero_when_only_open_positions_is_empty(
     assert "open_positions" in out  # 리포트에는 계속 찍는다(정보로).
 
 
+def test_cmd_doctor_reads_engine_c_setting(tmp_path: Path) -> None:
+    """WAN-455 — doctor가 `live_tsmom_enabled`를 실제로 넘긴다(라벨이 아니라 종료 코드로).
+
+    엔진 C 원장만 있고 비어 있는 DB: 엔진 C를 켠 설정이면 유실 경보(1), 끈 설정이면 정상(0).
+    배선이 빠지면 두 설정이 같은 종료 코드를 낸다.
+    """
+    from paper.tsmom_ledger import TsmomLedgerStore
+
+    settings = _settings(tmp_path)
+    TsmomLedgerStore(settings.db_path).close()
+
+    on = settings.model_copy(update={"live_tsmom_enabled": True})
+    off = settings.model_copy(update={"live_tsmom_enabled": False})
+    assert cmd_doctor(_doctor_args(), on) == 1
+    assert cmd_doctor(_doctor_args(), off) == 0
+
+
 def test_cmd_doctor_drop_is_explicit_and_reports(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

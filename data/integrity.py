@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import shutil
 import sqlite3
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -69,11 +70,28 @@ _OHLCV_ARITY = 9
 
 #: 페이퍼 운영 장부 중 **누적**되는 것 — 한 번 쓰면 지워지지 않으므로 0행이면 이상이다
 #: (WAN-194가 겪은 사고의 모양). **종료 코드에 반영된다.**
+#:
+#: 엔진 C(추세추종) 원장 둘도 여기 든다(WAN-455) — 엔진 C는 「진입 → 청산」 왕복이 아니라 하루
+#: 1행씩 쌓는 리밸런싱 원장을 쓰므로(`paper.tsmom_ledger`) `paper_trades`에는 안 들어간다.
+#: 그래서 옛 doctor는 **엔진 C 매매를 장부로 보지 않았다** — 리셋 뒤 엔진 C가 매일 매매해도
+#: 「빈 누적 장부」로 읽혔고, 반대로 그 원장이 사라져도 아무것도 몰랐다.
 CUMULATIVE_LEDGER_TABLES: tuple[str, ...] = (
     "live_limit_orders",
     "live_runner_sessions",
     "paper_trades",
+    "tsmom_rebalances",
+    "paper_equity_marks",
 )
+
+#: 엔진 C 원장(`paper.tsmom_ledger.LEDGER_TABLES`와 같은 이름 — `data`는 `paper`를 임포트할 수
+#: 없어 여기 한 벌 두고 테스트가 두 목록이 같은지 건다). 엔진 C를 끈 설정
+#: (`live_tsmom_enabled=False`)에서는 비어 있는 것이 정상이라 판정하지 않는다.
+ENGINE_C_LEDGER_TABLES: frozenset[str] = frozenset({"tsmom_rebalances", "paper_equity_marks"})
+
+#: 리셋 뒤 엔진 C 원장이 비어 있어도 되는 시간(WAN-455). 엔진 C는 러너가 뜨자마자 마지막 확정
+#: 일봉으로 첫 리밸런싱을 하므로 보통은 몇 분 안에 찬다. 일봉이 아직 안 들어와 보류되는 경우도
+#: 다음 일봉(00:00 UTC) 뒤에는 차야 하므로 하루 + 여유 2시간이다.
+ENGINE_C_RESET_GRACE_MS = (24 + 2) * 60 * 60 * 1000
 
 #: 페이퍼 운영 장부 중 **현재 상태**를 담는 것 — 포지션은 닫히므로 **0행이 정상이다**
 #: (WAN-321). 리포트에는 계속 찍되 **종료 코드에는 반영하지 않는다.**
@@ -106,7 +124,7 @@ RESET_LOG_TABLE = "paper_reset_log"
 #: ⚠️ **면제는 「리셋 표시가 있고 그 뒤 청산 흔적이 없을 때」만이다** — 리셋 뒤 진입했다가 그
 #: 칸의 포지션이 사라졌는데(= 청산이 있었는데) 거래 장부가 비었으면 그건 WAN-194 유실이라
 #: 그대로 경보한다(`closes_since_reset`). 리셋 표시가 없으면 옛 규칙 그대로다.
-RESET_EXCUSABLE_LEDGERS: frozenset[str] = frozenset({"paper_trades"})
+RESET_EXCUSABLE_LEDGERS: frozenset[str] = frozenset({"paper_trades"}) | ENGINE_C_LEDGER_TABLES
 
 
 @dataclass(frozen=True)
@@ -257,6 +275,10 @@ class IntegrityReport:
     closes_since_reset: int = 0
     """리셋 뒤 진입했다가 포지션이 이미 닫힌 수(장부로 추정, WAN-455) — 0이 아니면 거래
     장부가 차 있어야 한다."""
+    now_ms: int = 0
+    """점검 시각(epoch ms) — 리셋 뒤 엔진 C 원장 유예를 재는 기준(WAN-455)."""
+    engine_c_enabled: bool = True
+    """엔진 C가 켜진 설정인가(WAN-455). 꺼져 있으면 엔진 C 원장은 판정하지 않는다."""
 
     @property
     def salvageable_candles(self) -> list[SalvageableCandles]:
@@ -292,12 +314,24 @@ class IntegrityReport:
         return [t for t in self.tables if t.rows == 0 and self._reset_excuses(t)]
 
     def _reset_excuses(self, table: TableCensus) -> bool:
-        """이 빈 장부가 「리셋 뒤 첫 청산 전」이라 정상인가(WAN-455)."""
-        return (
-            table.name in RESET_EXCUSABLE_LEDGERS
-            and self.last_reset_ms is not None
-            and self.closes_since_reset == 0
-        )
+        """이 빈 장부가 리셋 직후라 정상인가(WAN-455).
+
+        * 엔진 C를 끈 설정이면 엔진 C 원장은 비어 있어야 정상이다.
+        * `paper_trades`: 리셋 뒤 팔의 **첫 청산 전**(닫힌 포지션 0)이면 정상.
+        * 엔진 C 원장: 리셋 뒤 **유예 시간 안**이면 정상(첫 리밸런싱이 아직일 수 있다).
+        """
+        if table.name in ENGINE_C_LEDGER_TABLES and not self.engine_c_enabled:
+            return True
+        if table.name not in RESET_EXCUSABLE_LEDGERS or self.last_reset_ms is None:
+            return False
+        if table.name in ENGINE_C_LEDGER_TABLES:
+            return self.now_ms - self.last_reset_ms < ENGINE_C_RESET_GRACE_MS
+        return self.closes_since_reset == 0
+
+    @property
+    def engine_c_rows(self) -> int:
+        """엔진 C 리밸런싱 원장 행 수 — 팔 청산 장부가 비어도 러너가 매매 중인지 보는 근거."""
+        return sum(t.rows for t in self.tables if t.name == "tsmom_rebalances")
 
     @property
     def empty_state_ledgers(self) -> list[TableCensus]:
@@ -503,7 +537,12 @@ def collect_space(conn: sqlite3.Connection, db_path: Path) -> SpaceReport:
 
 
 def inspect(
-    db_path: str | Path, *, quick_check: bool = True, orphan_since_ms: int | None = None
+    db_path: str | Path,
+    *,
+    quick_check: bool = True,
+    orphan_since_ms: int | None = None,
+    engine_c_enabled: bool = True,
+    now_ms: int | None = None,
 ) -> IntegrityReport:
     """DB를 읽기 전용 관점으로 점검한다(쓰기 없음).
 
@@ -513,6 +552,9 @@ def inspect(
             빠른 인구조사만 원하면 False.
         orphan_since_ms: 이 시각 이후 체결만 처분 미기록으로 본다(WAN-194 열 도입 이전
             기록은 전부 NULL이라 유실과 구분되지 않는다).
+        engine_c_enabled: 엔진 C가 켜진 설정인가(`live_tsmom_enabled`). 꺼져 있으면 엔진 C
+            원장이 비어도 경보하지 않는다(WAN-455).
+        now_ms: 점검 시각(테스트용). None이면 지금.
 
     Raises:
         FileNotFoundError: DB 파일이 없을 때 — 빈 DB를 새로 만들어 "정상"이라 보고하면
@@ -557,6 +599,8 @@ def inspect(
         artifact_census=census,
         last_reset_ms=last_reset,
         closes_since_reset=closes,
+        now_ms=int(time.time() * 1000) if now_ms is None else now_ms,
+        engine_c_enabled=engine_c_enabled,
     )
 
 
@@ -810,7 +854,12 @@ def render_report(report: IntegrityReport) -> str:
             empty_note = " · 0행 = 열린 포지션 없음" if table.rows == 0 else ""
             note = "페이퍼 장부(현재 상태)" + empty_note
         elif table.is_ledger and table in report.reset_excused_ledgers:
-            note = "페이퍼 장부(누적) · 0행 = 리셋 뒤 아직 청산 없음"
+            if table.name in ENGINE_C_LEDGER_TABLES and not report.engine_c_enabled:
+                note = "엔진 C 원장(누적) · 0행 = 엔진 C 꺼짐"
+            elif table.name in ENGINE_C_LEDGER_TABLES:
+                note = "엔진 C 원장(누적) · 0행 = 리셋 뒤 첫 리밸런싱 전"
+            else:
+                note = "팔 청산 장부(누적) · 0행 = 리셋 뒤 아직 청산 없음"
         elif table.is_ledger:
             note = "페이퍼 장부(누적)" + (" · **0행**" if table.rows == 0 else "")
         lines.append(f"| `{table.name}` | {table.rows:,} | {note} |")
@@ -826,11 +875,27 @@ def render_report(report: IntegrityReport) -> str:
         lines.append("누적 장부에 빈 것은 없다.")
     for table in report.reset_excused_ledgers:
         # 정보 한 줄로만 남긴다 — 종료 코드에는 반영하지 않는다(WAN-455).
+        if table.name in ENGINE_C_LEDGER_TABLES and not report.engine_c_enabled:
+            lines.append(f"ℹ️ `{table.name}` 0행 — 엔진 C가 꺼진 설정이라 판정하지 않는다.")
+            continue
         assert report.last_reset_ms is not None
+        reset_at = format_kst_zoned(report.last_reset_ms)
+        if table.name in ENGINE_C_LEDGER_TABLES:
+            lines.append(
+                f"ℹ️ `{table.name}` 0행 — **{reset_at} 리셋 뒤 엔진 C의 첫 리밸런싱 전이다**."
+                " 리셋 뒤 26시간이 지나도 비어 있으면 경고로 바뀐다."
+            )
+            continue
+        engine_c = (
+            f" 엔진 C(추세추종) 원장 `tsmom_rebalances`에는 {report.engine_c_rows:,}행이 있다 —"
+            " 러너는 리셋 뒤에도 매매하고 있다."
+            if report.engine_c_rows
+            else ""
+        )
         lines.append(
-            f"ℹ️ `{table.name}` 0행 — **{format_kst_zoned(report.last_reset_ms)} 리셋 뒤 아직 청산이"
-            " 없다는 뜻이고 정상이다**(리셋이 일부러 비웠다). 리셋 뒤 진입한 포지션이 닫혔는데도"
-            " 비어 있으면 경고로 바뀐다."
+            f"ℹ️ `{table.name}` 0행 — **{reset_at} 리셋 뒤 팔(오더블록)의 첫 청산이 아직"
+            " 없다는 뜻이고 정상이다**(리셋이 일부러 비웠다). 리셋 뒤 진입한 팔 포지션이 닫혔는데도"
+            f" 비어 있으면 경고로 바뀐다.{engine_c}"
         )
     for table in report.empty_state_ledgers:
         # 정보 한 줄로만 남긴다 — 종료 코드에는 반영하지 않는다(WAN-321 §1).
