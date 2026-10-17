@@ -1183,21 +1183,22 @@ _DB_CHECK_TTL_SECONDS = 3600
 
 
 @st.cache_data(ttl=_DB_CHECK_TTL_SECONDS, show_spinner="DB 무결성 점검 중(quick_check)…")
-def _cached_db_integrity(db_path: str) -> tuple[IntegrityReport, int]:
+def _cached_db_integrity(db_path: str, engine_c_enabled: bool) -> tuple[IntegrityReport, int]:
     """`alphablock doctor`와 **같은 판정**(`data.integrity.inspect`)을 캐시해 재사용한다.
 
     화면에서 새로 짜지 않는다(WAN-289 §3) — 판정 로직이 두 벌이 되면 doctor는
     경고하는데 화면은 초록인 어긋남이 생긴다. 반환에 점검 시각(ms)을 실어 카드가
     "언제 본 판정인지"를 밝힌다(캐시된 값이 최신인 척하지 않게).
     """
-    return inspect_db_integrity(db_path), int(time.time() * 1000)
+    report = inspect_db_integrity(db_path, engine_c_enabled=engine_c_enabled)
+    return report, int(time.time() * 1000)
 
 
 def _render_db_integrity(db_path: str) -> None:
     """Health 탭 「DB 무결성」 카드(WAN-289 §3, 목업 `● 정상 / quick_check OK · 3.5GB`)."""
     st.subheader("DB 무결성")
     try:
-        report, checked_at_ms = _cached_db_integrity(db_path)
+        report, checked_at_ms = _cached_db_integrity(db_path, get_settings().live_tsmom_enabled)
     except FileNotFoundError:
         st.caption("DB 파일이 없습니다 — 수집(WAN-6)이 만들면 여기서 점검합니다.")
         return

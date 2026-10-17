@@ -11,6 +11,8 @@
 #    WAN-451: 다음 상태 테이블은 **있을 때만** 함께 내보내고 비운다 — 엔진 C 원장
 #    (tsmom_rebalances · paper_equity_marks) · 엔진 스냅샷(live_engine_state) ·
 #    서킷브레이커 알림 상태(circuit_breaker_notice).
+#    WAN-455: 리셋 시각을 `paper_reset_log`에 한 줄 남긴다(지우지 않는다 — 리셋 이력) —
+#    doctor가 리셋 직후의 빈 paper_trades를 유실로 경보하지 않게 하는 근거다.
 #
 # 기본 동작(WAN-399 = 사용자 결정 2026-09-07·09-18): **장부 CSV 내보내기 → DELETE** 까지만 한다.
 #   • 지우기 전에 거래기록 4개 테이블을 CSV로 떨군다(시각이 붙은 새 디렉터리 — 덮어쓰지
@@ -239,6 +241,12 @@ else
 fi
 DELETE_SQL="BEGIN;"
 for t in "${TABLES[@]}"; do DELETE_SQL+=" DELETE FROM $t;"; done
+# WAN-455: 리셋 시각을 **같은 트랜잭션**으로 DB에 남긴다 — doctor가 「일부러 비운 장부」를
+# 「유실된 장부」와 가르는 유일한 근거다(빈 paper_trades를 리셋 뒤 첫 청산 전까지 정보로 찍는다).
+# 이 표는 PAPER_TABLES에 없으므로 다음 리셋이 지우지 않고 한 줄씩 쌓인다(리셋 이력).
+RESET_DIR_SQL="${EXPORT_DIR//\'/\'\'}"
+DELETE_SQL+=" CREATE TABLE IF NOT EXISTS paper_reset_log (reset_ms INTEGER PRIMARY KEY, export_dir TEXT NOT NULL DEFAULT '');"
+DELETE_SQL+=" INSERT OR REPLACE INTO paper_reset_log (reset_ms, export_dir) VALUES (CAST(strftime('%s','now') AS INTEGER) * 1000, '$RESET_DIR_SQL');"
 DELETE_SQL+=" COMMIT;"
 run "sqlite3 '$DB' \"$DELETE_SQL\""
 # WAN-399: VACUUM 은 DB 파일을 통째로 다시 쓴다(수 GB) — 지운 장부 수백 행으로는 회수할

@@ -121,6 +121,17 @@ cd ~/AlphaBlock && sudo scripts/paper-reset.sh --yes
   선상이다. 엔진 C 크기(k·λ)도 이번 재산출로 바뀌었다(1.590·0.885 → 1.569·0.906).
 - `data/live_runtime_state.json`(Health 탭 상태 파일)은 스크립트가 안 지운다 — 옛 표시가 남아
   보이면 러너를 멈춘 상태에서 지운다.
+- 📌 리셋은 `paper_reset_log`에 리셋 시각을 한 줄 남긴다(WAN-455). doctor는 그것을 보고 **리셋 뒤
+  첫 청산 전의 빈 `paper_trades`를 경보하지 않는다**(정보 줄로만 찍는다). 리셋 뒤 진입한 포지션이
+  닫혔는데도 거래 장부가 비면 그때는 여전히 경보다(WAN-194 유실). 엔진 C 원장(`tsmom_rebalances`·
+  `paper_equity_marks`)도 누적 장부로 세는데, 리셋 뒤 26시간이 지나도 비어 있으면 경보다(엔진 C를 끈
+  설정이면 판정하지 않는다).
+- 2026-10-16 리셋은 이 표시가 생기기 전이라 기록이 없다. 매시간 거짓 경보를 바로 멈추려면 한 번만
+  넣는다(안 넣어도 팔의 첫 청산이 나오면 저절로 멈춘다):
+
+  ```bash
+  sqlite3 ~/AlphaBlock/data/ohlcv.db "CREATE TABLE IF NOT EXISTS paper_reset_log (reset_ms INTEGER PRIMARY KEY, export_dir TEXT NOT NULL DEFAULT ''); INSERT OR IGNORE INTO paper_reset_log (reset_ms, export_dir) VALUES (1792077900000, 'manual: 2026-10-16 00:25 KST reset (pre-WAN-455)');"
+  ```
 
 ### 5. 첫 기동을 지켜본다
 

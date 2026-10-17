@@ -1056,7 +1056,12 @@ def cmd_doctor(args: argparse.Namespace, settings: Settings) -> int:
         since = datetime.strptime(args.orphans_since, "%Y-%m-%d").replace(tzinfo=KST)
         since_ms = int(since.timestamp() * 1000)
 
-    report = inspect(db_path, quick_check=not args.skip_quick_check, orphan_since_ms=since_ms)
+    report = inspect(
+        db_path,
+        quick_check=not args.skip_quick_check,
+        orphan_since_ms=since_ms,
+        engine_c_enabled=settings.live_tsmom_enabled,
+    )
     print(render_report(report))
 
     if not report.healthy and args.notify_on_failure:
