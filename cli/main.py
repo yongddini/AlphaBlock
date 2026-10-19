@@ -1344,7 +1344,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_tsmom_parity = sub.add_parser(
         "tsmom-parity",
-        help="엔진 C 페이퍼 원장 ↔ 저장 일봉 재계산 대조(WAN-451 · 불일치면 종료 코드 1)",
+        help="추세추종 페이퍼 원장 ↔ 저장 일봉 재계산 대조(WAN-451 · 불일치면 종료 코드 1)",
     )
     p_tsmom_parity.add_argument("--db", default=None, help="DB 경로(기본: 설정의 db_path)")
     p_tsmom_parity.add_argument(

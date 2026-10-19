@@ -1289,7 +1289,7 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
         raise SystemExit(
             "옛 오더블록 페이퍼는 WAN-451에서 없어졌다 — 스토캐스틱 팔을 켜거나"
             " (ALPHABLOCK_LIVE_ARM_ENABLED=true, `docs/ops/wan451-arm-paper.md`)"
-            " 오더블록 시리즈를 끈다(ALPHABLOCK_LIVE_ZONE_LIMIT_ENABLED=false — 엔진 C만 돈다)."
+            " 오더블록 시리즈를 끈다(ALPHABLOCK_LIVE_ZONE_LIMIT_ENABLED=false — 추세추종만 돈다)."
         )
     arm_params: ArmParams | None = None
     if settings.live_arm_enabled:

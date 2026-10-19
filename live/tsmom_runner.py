@@ -160,7 +160,7 @@ class TsmomRebalancer:
                 _logger.error("엔진 C %s 리밸런싱 보류 — %s", asset, exc)
                 if self.notify is not None:
                     self.notify(
-                        f"⚠️ 엔진 C {asset} 리밸런싱 보류 ({format_kst_zoned(now_ms)})\n{exc}\n"
+                        f"⚠️ 추세추종 {asset} 리밸런싱 보류 ({format_kst_zoned(now_ms)})\n{exc}\n"
                         "보유는 그대로 유지하고, 일봉이 채워지면 다음 폴링에 정산한다."
                     )
             return None, 0
@@ -225,7 +225,7 @@ def format_daily_rebalance(
 ) -> str:
     """하루 알림(⑩) — 목표 배율 · 바뀐 양 · 상승 신호 수 · 롱/숏 전환 강조. 평문."""
     gaps = gaps or {}
-    lines = [f"📈 엔진 C 리밸런싱 · {format_kst(rows[0].executed_ms)} KST"]
+    lines = [f"📈 추세추종 리밸런싱 · {format_kst(rows[0].executed_ms)} KST"]
     for r in rows:
         name = r.asset.split("/")[0]
         before, after = _side(r.prev_qty), _side(r.new_qty)

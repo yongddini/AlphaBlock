@@ -150,7 +150,7 @@ def test_daily_summary_is_sent_after_each_rebalance_even_on_quiet_days(tmp_path:
     assert rig.reb.tick(_after_close(N_DAYS - 1))
     # 리밸런싱 알림 + 지갑 요약 두 통 — 팔 거래가 하나도 없던 날에도 온다.
     assert len(rig.sent) == 2
-    assert rig.sent[0].startswith("📈 엔진 C 리밸런싱")
+    assert rig.sent[0].startswith("📈 추세추종 리밸런싱")
     assert rig.sent[1].startswith("💰 지갑 요약")
     assert "시작 대비" in rig.sent[1]  # 첫날은 비교할 어제가 없다.
 

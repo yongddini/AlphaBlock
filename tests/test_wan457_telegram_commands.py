@@ -204,7 +204,7 @@ def test_balance_reply_matches_ledger_and_labels_engine_c_as_reference(tmp_path:
         assert h is not None
         expected += h.qty * (h.price * 1.02 - h.price)
     assert unsettled == pytest.approx(expected)
-    assert "엔진 C 정산 이후 평가손익(참고)" in reply
+    assert "추세추종 정산 이후 평가손익(참고)" in reply
     assert f"지금 평가 총액(참고) ${snap.equity + unsettled:,.2f}" in reply
     assert read_latest_mark(rig.db, now) == mark
     assert "마지막 정산(" in reply

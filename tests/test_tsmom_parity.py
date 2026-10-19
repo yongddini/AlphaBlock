@@ -103,7 +103,7 @@ def test_cli_exit_code_follows_the_verdict(
     db = tmp_path / "d.db"
     _run_days(db, [N_DAYS - 1])
     assert cli_main(["tsmom-parity", "--db", str(db)]) == 0
-    assert "엔진 C 페이퍼 ↔ 다시 계산 대조" in capsys.readouterr().out
+    assert "추세추종 페이퍼 ↔ 다시 계산 대조" in capsys.readouterr().out
     conn = sqlite3.connect(db)
     conn.execute("UPDATE tsmom_rebalances SET weight = weight + 0.01 WHERE asset = ?", (ETH,))
     conn.commit()

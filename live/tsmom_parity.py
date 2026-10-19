@@ -189,10 +189,10 @@ def check_tsmom_parity(
 
 def render_tsmom_parity(report: TsmomParityReport) -> str:
     """사람이 읽는 표(평문 · KST)."""
-    lines = ["## 엔진 C 페이퍼 ↔ 다시 계산 대조", ""]
+    lines = ["## 추세추종 페이퍼 ↔ 다시 계산 대조", ""]
     if not report.checks:
         lines.append(
-            "원장(`tsmom_rebalances`)에 행이 없습니다 — 엔진 C가 아직 리밸런싱하지 않았습니다."
+            "원장(`tsmom_rebalances`)에 행이 없습니다 — 추세추종이 아직 리밸런싱하지 않았습니다."
         )
         return "\n".join(lines)
     n_ok = sum(1 for c in report.checks if c.ok)

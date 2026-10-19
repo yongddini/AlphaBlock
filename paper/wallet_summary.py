@@ -21,7 +21,9 @@
 ## 내역 = 변화 (숫자 일치)
 
 두 평가 시점 A → B 사이의 총자산 변화를 팔 실현 · 팔 평가손익 변화 · 엔진 C(가격 / 펀딩 / 비용)로
-쪼갠다. 실현 쪽 변화 중 장부 행으로 설명되지 않는 몫은 **잔차**로 따로 낸다(지우지 않는다). 정상이면
+쪼갠다(WAN-459: 화면에는 **확정**(실현 잔고 변화)과 **평가 포함**(확정 + 팔 평가손익 변화 + 추세추종
+미정산 평가손익)을 나란히 낸다 — 추세추종은 하루 1번만 정산하므로 낮에는 확정이 거의 늘 0이다).
+실현 쪽 변화 중 장부 행으로 설명되지 않는 몫은 **잔차**로 따로 낸다(지우지 않는다). 정상이면
 0이고, 0이 아니면 그 자체가 경보다 — 시각 경계에 걸친 청산(평가 시각 뒤 같은 폴링에서 처리된 청산)
 이거나 지갑과 장부가 어긋났다는 뜻이다(WAN-367: 칼 같은 0과 마찬가지로 설명 안 되는 몫을 숨기지
 않는다).
@@ -323,10 +325,34 @@ class WalletChange:
     """같은 행들의 거래 비용 지갑 기여(언제나 0 이하)."""
     residual: float
     """실현 변화 중 위 장부 행으로 설명되지 않는 몫(정상 0)."""
+    engine_c_unsettled: float | None = 0.0
+    """B 시각 추세추종 정산 이후 평가손익(참고 · 장부 밖). 가격이 없으면 None (WAN-459).
+
+    A는 언제나 정산 직후 장부 값(`paper_equity_marks`는 리밸런싱 직후에만 남는다)이라 A의 미정산
+    평가손익은 0이다 — 그래서 B의 값 하나가 곧 「정산 이후 움직임」이다. 하루 요약(B = 방금
+    정산)은 0.
+    """
 
     @property
     def total(self) -> float:
+        """장부 총자산 변화(실현 + 팔 평가손익 변화). `confirmed + arm_unrealized_change`."""
         return self.after_equity - self.before_equity
+
+    @property
+    def confirmed(self) -> float:
+        """확정 변화 — 실현 잔고 변화(팔 실현 + 추세추종 정산 + 잔차). 평가손익 제외(WAN-459)."""
+        return self.arm_realized + self.engine_c_net + self.residual
+
+    @property
+    def with_marks(self) -> float | None:
+        """평가 포함 변화 = 확정 + 팔 평가손익 변화 + 추세추종 미정산 평가손익(WAN-459).
+
+        낮에는 추세추종이 정산되지 않아 `confirmed`가 거의 늘 0이다 — 실제 움직임은 이 값에 있다.
+        추세추종 가격이 없으면 None(지어내지 않는다).
+        """
+        if self.engine_c_unsettled is None:
+            return None
+        return self.confirmed + self.arm_unrealized_change + self.engine_c_unsettled
 
     @property
     def engine_c_net(self) -> float:
@@ -344,8 +370,13 @@ def wallet_change(
     current: EquityMark,
     previous: EquityMark | None,
     initial_equity: float,
+    engine_c_unsettled: float | None = 0.0,
 ) -> WalletChange:
-    """`previous → current` 총자산 변화를 장부 행으로 쪼갠다(읽기 전용)."""
+    """`previous → current` 총자산 변화를 장부 행으로 쪼갠다(읽기 전용).
+
+    `engine_c_unsettled`는 `current` 시각의 추세추종 정산 이후 평가손익(참고)이다 — 「평가 포함」
+    변화에만 더한다(WAN-459). 하루 요약은 방금 정산했으니 0이다.
+    """
     lo = None if previous is None else previous.mark_ms
     hi = current.mark_ms
     arm = 0.0
@@ -390,6 +421,7 @@ def wallet_change(
         engine_c_funding=0.0 - funding,
         engine_c_cost=0.0 - cost,
         residual=residual,
+        engine_c_unsettled=engine_c_unsettled,
     )
 
 
@@ -427,11 +459,17 @@ def _price(value: float) -> str:
 
 
 def _change_lines(change: WalletChange, *, label: str) -> list[str]:
-    lines = [f"{label} {_signed(change.total)} ({_pct(change.total, change.before_equity)})"]
+    """변화 한 줄(확정 · 평가 포함 나란히) + 내역 — 하루 요약과 「/잔고」가 같은 모양(WAN-459)."""
+    base = change.before_equity
+    marked = change.with_marks
+    marked_text = "가격 없음" if marked is None else f"{_signed(marked)} ({_pct(marked, base)})"
+    lines = [
+        f"{label}: 확정 {_signed(change.confirmed)} ({_pct(change.confirmed, base)})"
+        f" · 평가 포함 {marked_text}"
+    ]
     lines.append(f"  · 팔 실현 {_signed(change.arm_realized)}")
-    lines.append(f"  · 팔 평가손익 변화 {_signed(change.arm_unrealized_change)}")
     lines.append(
-        f"  · 엔진 C 정산 {_signed(change.engine_c_net)} (가격 {_signed(change.engine_c_settled)}"
+        f"  · 추세추종 정산 {_signed(change.engine_c_net)} (가격 {_signed(change.engine_c_settled)}"
         f" · 펀딩 {_signed(change.engine_c_funding)} · 비용 {_signed(change.engine_c_cost)})"
     )
     if abs(change.residual) >= RESIDUAL_DISPLAY_EPS:
@@ -439,6 +477,10 @@ def _change_lines(change: WalletChange, *, label: str) -> list[str]:
             f"  · ⚠️ 장부로 설명 안 되는 몫 {_signed(change.residual)}"
             " (평가 시각 경계의 청산 또는 지갑·장부 불일치)"
         )
+    lines.append(f"  · 팔 평가손익 변화 {_signed(change.arm_unrealized_change)} (평가 포함에만)")
+    unsettled = change.engine_c_unsettled
+    unsettled_text = "가격 없음" if unsettled is None else _signed(unsettled)
+    lines.append(f"  · 추세추종 미정산 평가손익 {unsettled_text} (평가 포함에만)")
     return lines
 
 
@@ -467,9 +509,9 @@ def _position_lines(snapshot: WalletSnapshot, *, live_engine_c: bool) -> list[st
                 tail = "가격 없음" if unsettled is None else _signed(unsettled)
                 text += f" · 정산 후 {tail}"
             parts.append(text)
-        lines.append("엔진 C 보유: " + " / ".join(parts))
+        lines.append("추세추종 보유: " + " / ".join(parts))
     elif snapshot.engine_c:
-        lines.append("엔진 C 보유 없음(현금)")
+        lines.append("추세추종 보유 없음(현금)")
     return lines
 
 
@@ -525,9 +567,9 @@ def format_balance_reply(
         )
     unsettled = snapshot.engine_c_unsettled
     if unsettled is None:
-        lines.append("엔진 C 정산 이후 평가손익(참고): 가격 없음")
+        lines.append("추세추종 정산 이후 평가손익(참고): 가격 없음")
     else:
-        lines.append(f"엔진 C 정산 이후 평가손익(참고) {_signed(unsettled)}")
+        lines.append(f"추세추종 정산 이후 평가손익(참고) {_signed(unsettled)}")
         total = snapshot.equity + unsettled
         lines.append(
             f"지금 평가 총액(참고) {_usd(total)} (시작 대비 {_pct(total - initial, initial)})"
@@ -535,7 +577,7 @@ def format_balance_reply(
     if snapshot.legacy_rows:
         lines.append(f"⚠️ 달러 손익이 없는 옛 장부 행 {snapshot.legacy_rows}건 — 실현 잔고에서 빠짐")
     if change is not None and last_mark is not None:
-        lines += _change_lines(change, label=f"마지막 정산({format_kst(last_mark.mark_ms)}) 대비")
+        lines += _change_lines(change, label=f"마지막 정산({format_kst(last_mark.mark_ms)}) 이후")
     lines += _position_lines(snapshot, live_engine_c=True)
     return "\n".join(lines)
 
@@ -582,5 +624,6 @@ def build_balance_reply(
             current=snapshot.as_mark(),
             previous=last_mark,
             initial_equity=initial_equity,
+            engine_c_unsettled=snapshot.engine_c_unsettled,
         )
     return format_balance_reply(snapshot, change=change, last_mark=last_mark)

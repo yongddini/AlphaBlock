@@ -93,7 +93,7 @@ def test_digest_lines_and_frames(tmp_path: Path) -> None:
     _seed_ledger(db)
     view = read_engine_c(db)
     lines = engine_c_digest_lines(view)
-    assert lines[0] == "*엔진 C (추세추종)*"
+    assert lines[0] == "*추세추종 (BTC·ETH)*"
     assert "BTC 숏 -0.50배" in lines[1] and "ETH 롱 +0.50배" in lines[1]
     assert lines[2].startswith("리밸런싱 2일")
     assert "낙폭 최대 `10.00%`" in lines[3]
@@ -105,8 +105,8 @@ def test_digest_lines_and_frames(tmp_path: Path) -> None:
 
 def test_digest_shows_engine_c_when_arm_has_no_trades() -> None:
     perf = build_performance([])
-    text = build_digest(perf, period_label="p", engine_c_lines=["*엔진 C (추세추종)*", "x"])
-    assert "팔: 기간 내 청산 거래 없음" in text and "*엔진 C (추세추종)*" in text
+    text = build_digest(perf, period_label="p", engine_c_lines=["*추세추종 (BTC·ETH)*", "x"])
+    assert "팔: 기간 내 청산 거래 없음" in text and "*추세추종 (BTC·ETH)*" in text
     assert "기간 내 청산된 페이퍼 거래가 없습니다." not in text
     assert "기간 내 청산된 페이퍼 거래가 없습니다." in build_digest(perf, period_label="p")
 
@@ -117,7 +117,7 @@ def test_generate_digest_includes_engine_c(tmp_path: Path) -> None:
     text = paper_digest.generate_digest(
         Settings(db_path=str(db)), since_ms=None, until_ms=None, symbols=None, timeframes=None
     )
-    assert "*엔진 C (추세추종)*" in text and "보유:" in text
+    assert "*추세추종 (BTC·ETH)*" in text and "보유:" in text
 
 
 @pytest.fixture
@@ -134,6 +134,6 @@ def test_dashboard_balance_tab_shows_engine_c_without_arm_trades(engine_c_only_d
     at = AppTest.from_file("dashboard/app.py")
     at.run(timeout=30)
     assert not at.exception
-    assert "엔진 C (추세추종 · BTC·ETH)" in [s.value for s in at.subheader]
+    assert "추세추종 (BTC·ETH)" in [s.value for s in at.subheader]
     labels = {m.label for m in at.metric}
-    assert {"지갑 잔고(팔 + 엔진 C)", "엔진 C 누적 손익($)"} <= labels
+    assert {"지갑 잔고(팔 + 추세추종)", "추세추종 누적 손익($)"} <= labels

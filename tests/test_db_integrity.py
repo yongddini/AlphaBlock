@@ -391,7 +391,7 @@ def test_empty_engine_c_ledger_is_fine_when_engine_c_is_off(tmp_path: Path) -> N
 
     assert report.empty_cumulative_ledgers == []
     assert report.healthy
-    assert "엔진 C가 꺼진 설정" in render_report(report)
+    assert "추세추종이 꺼진 설정" in render_report(report)
 
 
 def test_empty_engine_c_ledger_after_reset_has_a_grace_window(tmp_path: Path) -> None:
