@@ -82,6 +82,11 @@ class TsmomRebalancer:
     funding_store: FundingRateStore | None = None
     notify: Callable[[str], object] | None = None
     """하루 알림을 보낼 함수(텔레그램 `send_message` 등). None이면 로그만."""
+    wallet_summary: Callable[[EquityMark], str] | None = None
+    """방금 남긴 시가평가 자본으로 「💰 지갑 요약」을 만드는 함수(WAN-457 §1). None이면 안 보낸다.
+
+    리밸런싱 알림 **뒤에** 별도 메시지로 보낸다 — 리밸런싱은 매일 일어나므로 조용한 날에도 온다.
+    실패해도 매매 기록·리밸런싱 알림을 막지 않는다."""
     assets: Sequence[str] = tsmom.ASSETS
     lookback_days: int = DEFAULT_LOOKBACK_DAYS
     _failed_day: dict[str, int] = field(default_factory=dict)
@@ -108,7 +113,24 @@ class TsmomRebalancer:
                     self.notify(message)
                 except Exception:  # noqa: BLE001 — 알림 실패가 매매 기록을 막지 않는다.
                     _logger.exception("엔진 C 리밸런싱 알림 실패")
+            self._send_wallet_summary(mark)
         return done
+
+    def _send_wallet_summary(self, mark: EquityMark) -> None:
+        """하루 1회 「💰 지갑 요약」(WAN-457 §1) — 조회·전송 실패는 로그만 남긴다."""
+        if self.wallet_summary is None:
+            return
+        try:
+            summary = self.wallet_summary(mark)
+        except Exception:  # noqa: BLE001 — 요약 조회 실패가 리밸런싱을 막지 않는다.
+            _logger.exception("지갑 요약 생성 실패(WAN-457)")
+            return
+        _logger.info("지갑 요약(WAN-457):\n%s", summary)
+        if self.notify is not None:
+            try:
+                self.notify(summary)
+            except Exception:  # noqa: BLE001
+                _logger.exception("지갑 요약 알림 실패(WAN-457)")
 
     # -- 내부 -------------------------------------------------------------
 

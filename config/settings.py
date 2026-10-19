@@ -233,6 +233,10 @@ class Settings(BaseSettings):
     # 예: ALPHABLOCK_TELEGRAM_BOT_TOKEN=123:abc, ALPHABLOCK_TELEGRAM_CHAT_ID=123456
     telegram_bot_token: str = Field(default="")
     telegram_chat_id: str = Field(default="")
+    # 「/잔고」 언제든 조회(WAN-457 §2) — 러너 안 데몬 스레드가 getUpdates 롱폴링으로 받는다.
+    # 읽기 전용 명령 하나뿐이고 위 chat_id에서 온 메시지에만 답한다. 텔레그램이 설정돼 있어야
+    # 돈다. 같은 봇 토큰을 다른 곳(웹훅 · 다른 봇 프로세스)에서 읽고 있으면 끈다.
+    telegram_commands_enabled: bool = Field(default=True)
     # 옛 오더블록 페이퍼의 고정 감시 좌표(수집 대상의 부분집합). ⚠️ 러너는 더 이상 이 값으로
     # 시리즈를 만들지 않는다 — 팔은 매주 종목 목록 × 팔 TF로 감시한다(WAN-451 옛 규칙 정리).
     # 대시보드 표시 범위·좌표 드리프트 점검·러너 주기 예산(Health)이 아직 읽는다.

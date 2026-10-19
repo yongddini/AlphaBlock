@@ -108,9 +108,11 @@ from live.limit_orders import LimitFill, LimitOrderStatus, expiry_deadline_ms
 from live.order_journal import SKIP_REASON_ZONE_WIDTH, OrderJournal
 from live.paper import PaperPosition
 from live.runtime_state import DataGapSkip, PendingOrderSnapshot, RuntimeStateStore
+from live.telegram_commands import TelegramCommandPoller
 from live.tsmom_runner import TsmomRebalancer
 from live.zone_limit_notifier import ZoneLimitNotifier
 from paper.tsmom_ledger import TsmomLedgerStore
+from paper.wallet_summary import build_balance_reply, build_daily_wallet_summary
 from strategy import stoch, tsmom
 from strategy.models import ConfluenceParams, OrderBlockDirection, SignalExitReason
 
@@ -1243,6 +1245,32 @@ def build_paper_recorder(
     )
 
 
+def start_balance_commands(settings: Settings) -> TelegramCommandPoller | None:
+    """「/잔고」 조회 스레드를 띄운다(WAN-457 §2). 텔레그램 미설정·꺼짐이면 None.
+
+    매매 루프와 공유하는 것이 없다 — 답은 DB를 읽기 전용으로 새로 읽어 만들고(러너 메모리 객체를
+    다른 스레드에서 만지지 않는다), 폴링·조회·전송 실패는 스레드 안에서 로그로 끝난다.
+    """
+    from common.telegram import build_telegram_client
+
+    if not settings.telegram_commands_enabled:
+        return None
+    client = build_telegram_client(settings)
+    if client is None:
+        return None
+    poller = TelegramCommandPoller(
+        bot_token=settings.telegram_bot_token,
+        chat_id=settings.telegram_chat_id,
+        reply_builder=lambda now_ms: build_balance_reply(
+            settings.db_path, initial_equity=settings.paper_equity, now_ms=now_ms
+        ),
+        send=lambda text: client.send_message(text, parse_mode=None),
+    )
+    poller.start()
+    _logger.info("「/잔고」 조회 켜짐(WAN-457) — getUpdates 롱폴링 · 허용 대화방만 · 읽기 전용")
+    return poller
+
+
 def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
     """페이퍼 러너를 실행한다 — 스토캐스틱 팔 + 엔진 C(`live.runner`가 위임하는 진입점).
 
@@ -1298,6 +1326,7 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
     engine_state = EngineStateStore(settings.db_path)
     universe: UniverseStore | None = None
     signals: ArmSignalStore | None = None
+    commands: TelegramCommandPoller | None = None
     try:
         now = int(time.time() * 1000)
         session_id = journal.start_session(now_ms=now)
@@ -1380,6 +1409,10 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
                     if telegram is not None and settings.paper_trade_notify_enabled
                     else None
                 ),
+                # 하루 1회 「💰 지갑 요약」(WAN-457 §1) — 리밸런싱 직후 · 장부 읽기 전용.
+                wallet_summary=lambda mark: build_daily_wallet_summary(
+                    settings.db_path, mark=mark, initial_equity=settings.paper_equity
+                ),
             )
             _logger.info(
                 "엔진 C 켜짐(WAN-451): %s · 하루 1회 00:00 UTC(KST 09:00) 리밸런싱 · "
@@ -1443,8 +1476,12 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
         )
         if universe is not None:
             runner.sync_series(now)  # 복원 뒤 목록 밖 칸 정리
+        if not once:
+            commands = start_balance_commands(settings)
         runner.run(max_polls=1 if once else None)
     finally:
+        if commands is not None:
+            commands.stop()
         if universe is not None:
             universe.close()
         if signals is not None:
