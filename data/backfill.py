@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Protocol
 
 from config.settings import Settings, get_settings
@@ -177,11 +177,16 @@ def backfill_all(
     backoff_base: float = 1.0,
     sleeper: Callable[[float], None] = time.sleep,
     now_ms: Callable[[], int] = lambda: int(time.time() * 1000),
+    last_open_times: Mapping[tuple[str, str], int | None] | None = None,
 ) -> dict[tuple[str, str], int]:
     """모든 심볼×타임프레임을 백필한다.
 
     각 (심볼, 타임프레임)에 대해 저장된 마지막 봉 다음부터(재시작 복구), 없으면
     설정 룩백일수만큼 과거부터 수집한다. (심볼, 타임프레임)→저장 봉수 맵을 반환한다.
+
+    `last_open_times`(WAN-456)가 주어지면 그 맵에 있는 시리즈는 저장소를 다시 읽지 않고
+    **그 값**을 「마지막 저장 봉」으로 쓴다 — 꼬리 따라잡기가 접속 순간 찍어 둔 스냅샷이다.
+    처리 순간 읽으면 그 사이 스트림이 넣은 새 봉이 앞의 구멍을 가린다(`TailCatchup`).
     """
     settings = settings or get_settings()
     results: dict[tuple[str, str], int] = {}
@@ -189,7 +194,7 @@ def backfill_all(
     for symbol in symbols:
         for timeframe in timeframes:
             tf_ms = timeframe_to_ms(timeframe)
-            last = store.last_open_time(symbol, timeframe)
+            last = resolve_last_open_time(store, symbol, timeframe, last_open_times)
             if last is not None:
                 since = last + tf_ms
             else:
@@ -210,3 +215,15 @@ def backfill_all(
             results[(symbol, timeframe)] = count
 
     return results
+
+
+def resolve_last_open_time(
+    store: OhlcvStore,
+    symbol: str,
+    timeframe: str,
+    snapshot: Mapping[tuple[str, str], int | None] | None,
+) -> int | None:
+    """스냅샷에 있으면 그 값, 없으면 지금 저장소의 마지막 봉(WAN-456)."""
+    if snapshot is not None and (symbol, timeframe) in snapshot:
+        return snapshot[(symbol, timeframe)]
+    return store.last_open_time(symbol, timeframe)

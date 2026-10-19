@@ -213,39 +213,35 @@ def test_on_candle_builds_3h_only_for_arm_symbols(tmp_path: Path) -> None:
     universe.close()
 
 
+class _EndingWs:
+    """수신하면 곧바로 연결 종료(정상)를 내는 가짜 웹소켓."""
+
+    async def recv(self) -> str:
+        from websockets.exceptions import ConnectionClosed
+
+        raise ConnectionClosed(None, None)
+
+
+class _RecordingConnect:
+    def __init__(self, urls: list[str], url: str) -> None:
+        urls.append(url)
+
+    async def __aenter__(self) -> _EndingWs:
+        return _EndingWs()
+
+    async def __aexit__(self, *exc: object) -> bool:
+        return False
+
+
 def test_pair_stream_splits_connections(monkeypatch: pytest.MonkeyPatch) -> None:
-    seen: list[list[tuple[str, str]]] = []
-
-    async def fake_conn(store: Any, pairs: Any, **kw: Any) -> None:
-        seen.append(list(pairs))
-
-    monkeypatch.setattr(stream_mod, "_stream_connection", fake_conn)
+    urls: list[str] = []
+    monkeypatch.setattr(stream_mod, "connect", lambda url: _RecordingConnect(urls, url))
     pairs = [(f"S{i}/USDT:USDT", "1m") for i in range(450)]
     asyncio.run(stream_mod.stream_kline_pairs(None, pairs))  # type: ignore[arg-type]
-    assert [len(c) for c in seen] == [200, 200, 50]
+    assert [url.count("@kline_") for url in urls] == [200, 200, 50]
     assert stream_mod.build_pair_stream_path([("BTC/USDT:USDT", "1w"), ("X/USDT:USDT", "1m")]) == (
         "/stream?streams=btcusdt@kline_1w/xusdt@kline_1m"
     )
-
-
-def test_one_dead_connection_takes_the_others_down(monkeypatch: pytest.MonkeyPatch) -> None:
-    cancelled: list[int] = []
-
-    async def fake_conn(store: Any, pairs: Any, **kw: Any) -> None:
-        if pairs[0][0] == "S0":
-            await asyncio.sleep(0.01)
-            raise ConnectionError("dead")
-        try:
-            await asyncio.sleep(10)
-        except asyncio.CancelledError:
-            cancelled.append(1)
-            raise
-
-    monkeypatch.setattr(stream_mod, "_stream_connection", fake_conn)
-    pairs = [(f"S{i}", "1m") for i in range(400)]
-    with pytest.raises(ExceptionGroup):
-        asyncio.run(stream_mod.stream_kline_pairs(None, pairs))  # type: ignore[arg-type]
-    assert cancelled == [1]
 
 
 class _FakeArm:

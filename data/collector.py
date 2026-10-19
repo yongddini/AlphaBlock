@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from functools import partial
 
 from common.heartbeat import HeartbeatStore
@@ -63,6 +63,10 @@ def _build_recovery_notifier(settings: Settings) -> Callable[[RecoveryEvent], No
     return _notify
 
 
+#: 시리즈 → 접속 순간의 마지막 저장 봉 `open_time`(없으면 None) — WAN-456 스냅샷.
+LastOpenSnapshot = dict[tuple[str, str], int | None]
+
+
 class TailCatchup:
     """웹소켓 접속 직후 꼬리 따라잡기 백필 (WAN-314).
 
@@ -77,6 +81,17 @@ class TailCatchup:
     「따라잡기 호출 이전 확정 = REST」의 합집합이 전 구간을 덮고, 저장소는 락으로
     직렬화돼(`OhlcvStore`, 백필 스레드 + 스트림 루프) 동시 접근이 안전하다. 밀린 봉이
     없으면 시리즈당 요청 1건(빈 손)으로 끝난다. 실패해도 스트림은 죽이지 않는다.
+
+    🚨 **시작점은 「접속 순간」의 마지막 저장 봉이다(WAN-456 §d).** 예전에는 시리즈를
+    **처리하는 순간** 저장소를 읽었는데, 팔 쪽 따라잡기는 쌍 사이에 간격을 둬 몇 분이
+    걸리므로 그 사이 스트림이 다음 봉을 넣어 버리면 그 앞의 구멍을 건너뛰었다 —
+    2026-10-17 09:03 재접속에서 팔 24종목의 09:02 1분봉이 그렇게 영구히 빠졌다(기본 격자
+    9종목은 먼저 처리돼 무사했다). 그래서 `schedule()`이 **소비가 시작되기 전에** 시리즈마다
+    마지막 저장 봉을 찍어 두고 그 값에서 받는다.
+
+    따라잡기가 아직 도는 중에 새 접속이 오면 건너뛰지 않고 그 스냅샷을 **보류**했다가 지금
+    실행이 끝나면 한 번 더 돈다(보류가 여러 번 겹치면 시리즈마다 더 이른 값으로 합쳐 한 번만).
+    건너뛰면 이미 처리를 마친 시리즈의 새 공백을 아무도 다시 보지 않는다.
     """
 
     def __init__(
@@ -85,31 +100,49 @@ class TailCatchup:
         store: OhlcvStore,
         settings: Settings,
         *,
-        extra: Callable[[], int] | None = None,
+        extra: Callable[[Mapping[tuple[str, str], int | None]], int] | None = None,
+        extra_pairs: Callable[[], Sequence[tuple[str, str]]] | None = None,
     ) -> None:
         self._exchange = exchange
         self._store = store
         self._settings = settings
-        #: 기본 격자 뒤에 이어 도는 따라잡기(WAN-451 ③ — 팔 종목 쌍 · 3h 생성).
+        #: 기본 격자 뒤에 이어 도는 따라잡기(WAN-451 ③ — 팔 종목 쌍 · 3h 생성). 스냅샷을 받는다.
         #: None이면 예전 그대로.
         self._extra = extra
+        #: 스냅샷에 넣을 팔 쪽 쌍(WAN-456) — `extra`가 받을 시리즈.
+        self._extra_pairs = extra_pairs
         self._tasks: set[asyncio.Task[None]] = set()
+        self._pending: LastOpenSnapshot | None = None
+
+    def snapshot(self) -> LastOpenSnapshot:
+        """지금 저장소의 시리즈별 마지막 봉(기본 격자 + 팔 쪽 쌍)."""
+        series = [(s, tf) for s in self._settings.symbols for tf in self._settings.timeframes]
+        if self._extra_pairs is not None:
+            series += list(self._extra_pairs())
+        return {pair: self._store.last_open_time(*pair) for pair in dict.fromkeys(series)}
 
     def schedule(self) -> None:
-        """따라잡기 태스크를 예약한다(이전 실행이 아직 돌고 있으면 건너뜀).
+        """따라잡기 태스크를 예약한다(이전 실행이 아직 돌고 있으면 보류했다가 이어서).
 
-        `stream_klines(on_connect=...)`에서 호출되므로 이벤트 루프 안이다. 빠른 재접속
-        루프에서 태스크가 겹겹이 쌓이지 않게 미완료 태스크가 있으면 예약하지 않는다
-        (UPSERT라 겹쳐도 무해하지만 낭비다).
+        `stream_klines(on_connect=...)`에서 호출되므로 이벤트 루프 안이고, **소비가 시작되기
+        전**이다 — 여기서 스냅샷을 찍는 것이 핵심이다(WAN-456 §d).
         """
+        snapshot = self.snapshot()
         if any(not t.done() for t in self._tasks):
-            logger.info("꼬리 따라잡기가 이미 진행 중 — 이번 접속에서는 예약 생략")
+            self._pending = _merge_snapshots(self._pending, snapshot)
+            logger.info("꼬리 따라잡기가 이미 진행 중 — 이번 접속분은 끝난 뒤 이어서 돈다")
             return
-        task = asyncio.get_running_loop().create_task(self._run())
+        task = asyncio.get_running_loop().create_task(self._run(snapshot))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
-    async def _run(self) -> None:
+    async def _run(self, snapshot: LastOpenSnapshot) -> None:
+        current: LastOpenSnapshot | None = snapshot
+        while current is not None:
+            await self._run_once(current)
+            current, self._pending = self._pending, None
+
+    async def _run_once(self, snapshot: LastOpenSnapshot) -> None:
         try:
             results = await asyncio.to_thread(
                 backfill_all,
@@ -118,10 +151,11 @@ class TailCatchup:
                 self._settings.symbols,
                 self._settings.timeframes,
                 settings=self._settings,
+                last_open_times=snapshot,
             )
             filled = sum(results.values())
             if self._extra is not None:
-                filled += await asyncio.to_thread(self._extra)
+                filled += await asyncio.to_thread(self._extra, snapshot)
             if filled:
                 logger.info(
                     "접속 직후 꼬리 따라잡기: %d봉 채움(스트림이 주지 않는 접속 전 확정봉)",
@@ -129,6 +163,25 @@ class TailCatchup:
                 )
         except Exception:  # noqa: BLE001 — 따라잡기 실패가 스트림을 죽이면 안 된다.
             logger.exception("꼬리 따라잡기 백필 실패 — 다음 (재)접속에서 다시 시도합니다")
+
+
+def _merge_snapshots(older: LastOpenSnapshot | None, newer: LastOpenSnapshot) -> LastOpenSnapshot:
+    """시리즈마다 더 이른 값을 남긴다(None = 저장분 없음 = 가장 이름)."""
+    if older is None:
+        return dict(newer)
+    merged = dict(older)
+    for pair, last in newer.items():
+        if pair not in merged:
+            merged[pair] = last
+            continue
+        prev = merged[pair]
+        merged[pair] = None if prev is None or last is None else min(prev, last)
+    return merged
+
+
+def _arm_catch_up(arm: ArmCollection, snapshot: Mapping[tuple[str, str], int | None]) -> int:
+    """`TailCatchup`의 팔 쪽 이어 돌기 — 접속 순간 스냅샷에서 시작한다(WAN-456)."""
+    return arm.catch_up(last_open_times=snapshot)
 
 
 def report_funding_task_exit(task: asyncio.Task[None]) -> None:
@@ -445,8 +498,16 @@ async def run_collector(
 
             # 접속 직후 꼬리 따라잡기(WAN-314) — 기동 백필~접속 사이·재접속 공백에
             # 닫힌 봉은 스트림이 다시 주지 않으므로 매 접속마다 REST로 메운다.
-            catchup = TailCatchup(
-                exchange, store, settings, extra=arm.catch_up if arm is not None else None
+            catchup = (
+                TailCatchup(
+                    exchange,
+                    store,
+                    settings,
+                    extra=partial(_arm_catch_up, arm),
+                    extra_pairs=arm.arm_pairs,
+                )
+                if arm is not None
+                else TailCatchup(exchange, store, settings)
             )
 
             async def _stream_once() -> None:

@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 from collections.abc import AsyncIterator, Callable, Iterable, Sequence
@@ -200,9 +201,20 @@ async def stream_kline_pairs(
 ) -> None:
     """(심볼, TF) 목록을 연결 여러 개로 나눠 구독한다(WAN-451 ③ — 종목마다 TF가 다르다).
 
-    연결마다 `stream_klines`와 같은 소비 규약이다. 한 연결이 끊기거나 멎으면 **나머지도 함께
-    취소**하고 예외를 올린다(`TaskGroup`) — 상위 재접속 루프가 전부 다시 붙인다(반쪽만 살아 있는
-    상태를 남기지 않는다). `on_connect`는 연결마다 불린다(따라잡기 예약은 중복을 스스로 거른다).
+    연결마다 `stream_klines`와 같은 소비 규약이다. 🚨 **한 연결이 어떤 이유로든 끝나면
+    (정상 종료 포함 · WAN-456) 나머지도 함께 취소**하고 돌아간다 — 예외로 끝났으면 그 예외를
+    그대로(묶지 않고) 올리고, 정상 종료면 정상 반환한다. 어느 쪽이든 상위 재접속 루프
+    (`run_with_recovery`)가 전부 다시 붙인다(반쪽만 살아 있는 상태를 남기지 않는다).
+
+    옛 구현은 `asyncio.TaskGroup`이었는데 그건 **예외가 났을 때만** 형제를 취소한다. 바이낸스가
+    한 연결을 닫으면 `_recv_stream`이 `ConnectionClosed`를 삼켜 그 연결은 **정상 종료**하므로,
+    그룹은 남은 연결이 끝날 때까지 기다렸고 절반 종목만 조용히 끊긴 채 2.5시간이 갔다
+    (2026-10-17 11:56~14:31 · 하트비트·유휴 감시는 남은 연결이 계속 갱신해 아무도 몰랐다).
+    게다가 예외는 `ExceptionGroup`으로 묶여 올라가 `run_with_recovery`의 `except`에 안 걸렸다.
+
+    여러 연결일 때 `on_connect`는 **모든 연결이 성립한 뒤 · 어느 연결도 소비를 시작하기 전에 한
+    번만** 불린다 — 따라잡기(`TailCatchup`)가 이 순간 「마지막 저장 봉」을 찍어 두므로, 그보다
+    먼저 소비가 시작되면 스트림이 넣은 새 봉이 그 앞의 구멍을 가린다(WAN-456 §d).
     """
     chunks = [
         list(pairs[i : i + max_streams_per_connection])
@@ -226,20 +238,53 @@ async def stream_kline_pairs(
             on_connect=on_connect,
         )
         return
-    async with asyncio.TaskGroup() as group:
-        for chunk in chunks:
-            group.create_task(
-                _stream_connection(
-                    store,
+    async with contextlib.AsyncExitStack() as stack:
+        sockets = [
+            await stack.enter_async_context(connect(ws_base + build_pair_stream_path(chunk)))
+            for chunk in chunks
+        ]
+        if on_connect is not None:
+            on_connect()
+        tasks = [
+            asyncio.create_task(
+                _consume_connection(
+                    ws,
                     chunk,
-                    ws_base=ws_base,
+                    store=store,
                     only_closed=only_closed,
                     on_candle=on_candle,
                     heartbeat=heartbeat,
                     idle_timeout_seconds=idle_timeout_seconds,
-                    on_connect=on_connect,
                 )
             )
+            for ws, chunk in zip(sockets, chunks, strict=True)
+        ]
+        await _first_to_end(tasks)
+
+
+async def _first_to_end(tasks: Sequence[asyncio.Task[int]]) -> None:
+    """먼저 끝난 태스크 하나로 전체를 끝낸다(WAN-456) — 나머지를 취소하고 그 결과를 따른다.
+
+    먼저 끝난 것들 중 예외가 있으면 (목록 순서로 첫) 예외를 묶지 않고 올리고, 전부 정상 종료면
+    정상 반환한다. 바깥에서 취소돼도(계획 교체 등) 남은 태스크를 취소·회수한 뒤 나간다.
+    """
+    try:
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+    for task in tasks:
+        if task in done and not task.cancelled():
+            error = task.exception()
+            if error is not None:
+                raise error
+    ended = [i + 1 for i, task in enumerate(tasks) if task in done]
+    logger.warning(
+        "웹소켓 연결 %s/%d이 정상 종료됨 — 나머지 연결도 닫고 다시 붙는다(WAN-456)",
+        ",".join(map(str, ended)),
+        len(tasks),
+    )
 
 
 async def _stream_connection(
@@ -254,18 +299,40 @@ async def _stream_connection(
     on_connect: Callable[[], None] | None,
 ) -> None:
     url = ws_base + build_pair_stream_path(pairs)
-    symbol_map = build_symbol_map(sorted({s for s, _ in pairs}))
     async with connect(url) as ws:
         if on_connect is not None:
             on_connect()
-        messages: AsyncIterator[str | bytes] = _recv_stream(ws)
-        if idle_timeout_seconds is not None:
-            messages = guard_idle(messages, idle_timeout_seconds=idle_timeout_seconds)
-        await consume_messages(
-            messages,
-            store,
-            symbol_map,
+        await _consume_connection(
+            ws,
+            pairs,
+            store=store,
             only_closed=only_closed,
             on_candle=on_candle,
             heartbeat=heartbeat,
+            idle_timeout_seconds=idle_timeout_seconds,
         )
+
+
+async def _consume_connection(
+    ws: ClientConnection,
+    pairs: Sequence[tuple[str, str]],
+    *,
+    store: OhlcvStore,
+    only_closed: bool,
+    on_candle: Callable[[Candle], None] | None,
+    heartbeat: Callable[[], None] | None,
+    idle_timeout_seconds: float | None,
+) -> int:
+    """접속된 연결 하나를 끝날 때까지 소비한다(저장한 봉 수)."""
+    symbol_map = build_symbol_map(sorted({s for s, _ in pairs}))
+    messages: AsyncIterator[str | bytes] = _recv_stream(ws)
+    if idle_timeout_seconds is not None:
+        messages = guard_idle(messages, idle_timeout_seconds=idle_timeout_seconds)
+    return await consume_messages(
+        messages,
+        store,
+        symbol_map,
+        only_closed=only_closed,
+        on_candle=on_candle,
+        heartbeat=heartbeat,
+    )

@@ -49,6 +49,13 @@ class _NullExchange:
         return []
 
 
+class _NullStore:
+    """스냅샷용 — 저장분이 없다."""
+
+    def last_open_time(self, symbol: str, timeframe: str) -> int | None:
+        return None
+
+
 async def _wait_until(cond: Any, *, timeout: float = 2.0) -> None:
     deadline = asyncio.get_running_loop().time() + timeout
     while not cond():
@@ -70,7 +77,7 @@ def test_tail_catchup_schedules_backfill_in_background(
     settings = _settings(tmp_path)
 
     async def main() -> None:
-        catchup = TailCatchup(_NullExchange(), object(), settings)  # type: ignore[arg-type]
+        catchup = TailCatchup(_NullExchange(), _NullStore(), settings)  # type: ignore[arg-type]
         catchup.schedule()
         await _wait_until(lambda: calls)
 
@@ -78,10 +85,14 @@ def test_tail_catchup_schedules_backfill_in_background(
     assert len(calls) == 1
 
 
-def test_tail_catchup_skips_overlapping_schedule(
+def test_tail_catchup_coalesces_overlapping_schedule(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """이전 따라잡기가 아직 도는 동안의 재예약은 건너뛴다(빠른 재접속 루프 보호)."""
+    """이전 따라잡기가 도는 동안의 재예약은 **합쳐서 한 번만** 이어 돈다(WAN-456).
+
+    예전에는 건너뛰었는데, 그러면 이미 처리를 마친 시리즈의 새 공백을 아무도 다시 안 본다.
+    빠른 재접속 루프 보호는 그대로다 — 몇 번 겹쳐도 추가 실행은 한 번이다.
+    """
     release = threading.Event()
     calls: list[int] = []
 
@@ -94,15 +105,16 @@ def test_tail_catchup_skips_overlapping_schedule(
     settings = _settings(tmp_path)
 
     async def main() -> None:
-        catchup = TailCatchup(_NullExchange(), object(), settings)  # type: ignore[arg-type]
+        catchup = TailCatchup(_NullExchange(), _NullStore(), settings)  # type: ignore[arg-type]
         catchup.schedule()
         await _wait_until(lambda: calls)  # 첫 실행이 스레드에 들어간 뒤
-        catchup.schedule()  # 겹침 — 예약 생략
+        catchup.schedule()  # 겹침 — 보류
+        catchup.schedule()  # 또 겹침 — 같은 보류에 합쳐진다
         release.set()
         await _wait_until(lambda: not catchup._tasks)  # noqa: SLF001 — 완료 대기
 
     asyncio.run(main())
-    assert len(calls) == 1
+    assert len(calls) == 2
 
 
 def test_run_collector_wires_catchup_into_stream_on_connect(
