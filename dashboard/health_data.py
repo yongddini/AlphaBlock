@@ -7,6 +7,7 @@ SQLite(OHLCV·펀딩)와 러너 상태파일을 읽어 `dashboard.health`의 순
 from __future__ import annotations
 
 import time
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict
 
@@ -24,6 +25,7 @@ from dashboard.health import (
     compute_overall,
     compute_runner_status,
 )
+from data.collection_plan import MonitorScope, monitor_scope
 from data.funding import FundingRateStore
 from data.models import timeframe_to_ms
 from data.repair import RepairStateStore, RepairSummary
@@ -36,6 +38,9 @@ from live.runtime_state import (
     RuntimeStateStore,
 )
 from strategy.models import OrderBlockDirection
+
+if TYPE_CHECKING:
+    from config.settings import Settings
 
 
 def _now_ms() -> int:
@@ -69,6 +74,14 @@ class HealthView(BaseModel):
     """마지막 갭 복구 요약(WAN-35). 복구를 한 번도 안 돌렸으면 None."""
     data_gap_skips: list[DataGapSkip] = []
     """러너가 데이터 결측으로 건너뛴 평가 구간(WAN-314). 해소된 기록도 남는다."""
+    excluded: list[SeriesFreshness] = []
+    """저장돼 있으나 **지금 수집 계획에 없는** 시리즈(WAN-458) — 판정·경보에서 뺀 정보 표시용.
+
+    팔 목록에서 빠진 종목처럼 수집기가 일부러 안 모으는 시리즈다. 판정에서 뺐다고 화면에서까지
+    지우면 WAN-156과 같은 침묵이 된다(WAN-157) — 그래서 여기에 따로 남긴다.
+    """
+    monitor_scope_applied: bool = False
+    """신선도 판정을 수집 계획으로 좁혔는가. False면 옛 동작(저장된 시리즈 전부)이다."""
 
 
 def series_freshness_rows(
@@ -171,12 +184,15 @@ def build_health_view(
     now_ms: int | None = None,
     include_bar_count: bool = False,
     cycle_budget_ms: int | None = None,
+    scope: MonitorScope | None = None,
 ) -> HealthView:
     """DB·상태파일을 읽어 완성된 `HealthView`를 조립한다.
 
     `include_bar_count`는 시리즈별 봉 수를 셀지 정한다(기본 False = 안 셈, WAN-186).
     `cycle_budget_ms`(WAN-313)는 러너 한 바퀴 완주 예산 — 주면 하트비트만 뛰고 한
     바퀴를 못 끝내는 상태도 STALE로 판정한다(`health.runner_cycle_budget_ms`로 유도).
+    `scope`(WAN-458)를 주면 신선도 판정을 **지금 수집 계획**으로 좁히고 나머지는 `excluded`에
+    정보로만 싣는다 — None이면 옛 동작(저장된 시리즈 전부 판정)이다.
     """
     now = now_ms if now_ms is not None else _now_ms()
 
@@ -198,7 +214,13 @@ def build_health_view(
         else None
     )
 
-    freshness = compute_freshness(fresh_rows, now_ms=now, stale_multiplier=stale_multiplier)
+    monitored_rows = fresh_rows
+    excluded_rows: list[tuple[str, str, int | None, int | None]] = []
+    if scope is not None:
+        monitored_rows = [r for r in fresh_rows if scope.covers(r[0], r[1])]
+        excluded_rows = [r for r in fresh_rows if not scope.covers(r[0], r[1])]
+    freshness = compute_freshness(monitored_rows, now_ms=now, stale_multiplier=stale_multiplier)
+    excluded = compute_freshness(excluded_rows, now_ms=now, stale_multiplier=stale_multiplier)
     funding = compute_funding_status(fund_rows, now_ms=now, stale_multiplier=stale_multiplier)
     collector = compute_collector_status(
         last_beat_ms=last_beat_ms,
@@ -233,4 +255,24 @@ def build_health_view(
         recent_events=list(reversed(runtime.recent_events)),
         last_repair=last_repair,
         data_gap_skips=runtime.data_gap_skips,
+        excluded=excluded,
+        monitor_scope_applied=scope is not None,
     )
+
+
+def monitor_scope_for(settings: Settings, *, now_ms: int | None = None) -> MonitorScope | None:
+    """설정에서 **지금 수집 계획** 범위를 읽는다(WAN-458) — 감시·`status`·Health 화면 공용.
+
+    세 곳이 같은 함수를 써야 화면과 폰이 같은 대상을 본다(WAN-407 §2와 같은 이유). 계획을 못
+    읽으면 None(옛 동작) — 읽다가 예외가 나도 감시를 끄지 않고 옛 동작으로 돌아간다.
+    """
+    try:
+        return monitor_scope(
+            settings.db_path,
+            base_symbols=settings.symbols,
+            base_timeframes=settings.timeframes,
+            universe_enabled=settings.universe_enabled,
+            now_ms=now_ms if now_ms is not None else _now_ms(),
+        )
+    except Exception:  # noqa: BLE001 — 범위 계산 실패가 감시를 멈추면 안 된다(옛 동작으로)
+        return None

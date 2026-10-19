@@ -30,8 +30,8 @@ from data.derived_bars import build_all_derived, source_closes_bucket
 from data.derived_bars import build_derived as _build_derived
 from data.models import Candle, timeframe_to_ms
 from data.storage import OhlcvStore
-from data.universe import ARM_STREAM_TIMEFRAMES
-from data.universe_pool import UniverseStore
+from data.universe import ARM_STREAM_TIMEFRAMES, BUILT_TIMEFRAMES
+from data.universe_pool import POOL_TIMEFRAME, UniverseStore, rotation_members_at
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +93,58 @@ def held_symbols(db_path: str | Path) -> set[str]:
         return set()
     finally:
         conn.close()
+
+
+@dataclass(frozen=True)
+class MonitorScope:
+    """신선도 감시가 보는 시리즈 = **지금 수집 계획에 있는 것**(WAN-458).
+
+    감시(`alphablock watch`)·`status`·Health 화면은 원래 DB에 저장된 **모든** 시리즈를 봤다.
+    팔 목록이 매주 바뀌면서 빠진 종목은 수집기가 일부러 안 모으는데, 그 봉이 「멈춤」으로 판정돼
+    거짓 경보가 매시간 쌓였다(2026-10-19 첫 교체 직후). 이 범위는 수집기와 **같은 함수**
+    (`build_plan`)로 계산한다 — 감시와 수집이 다른 목록을 보면 같은 병이 다른 모양으로 돌아온다.
+    """
+
+    pairs: frozenset[Pair]
+    any_symbol_timeframes: frozenset[str] = frozenset()
+    """종목과 무관하게 모으는 TF — 후보 풀 일봉(`1d`, 풀 전체를 하루 한 번 받는다).
+
+    풀(지금 상장된 USDT 무기한 전체)은 DB에 목록으로 남지 않아 종목 단위로 못 좁힌다 — 그래서
+    이 TF는 옛 동작(저장된 것 전부 감시)을 유지한다. 목록에서 빠진 종목의 1d도 풀이 계속
+    모으므로 여기에 들어가는 게 맞다.
+    """
+
+    def covers(self, symbol: str, timeframe: str) -> bool:
+        return (symbol, timeframe) in self.pairs or timeframe in self.any_symbol_timeframes
+
+
+def monitor_scope(
+    db_path: str | Path,
+    *,
+    base_symbols: Sequence[str],
+    base_timeframes: Sequence[str],
+    universe_enabled: bool,
+    now_ms: int,
+) -> MonitorScope | None:
+    """지금 수집기가 모으는 시리즈 범위 — 계획을 못 읽으면 None(호출부는 옛 동작으로 돌아간다).
+
+    * 팔이 꺼져 있으면(`universe_enabled=False`) 기본 격자뿐이다 — 수집기도 그것만 받는다.
+    * 팔이 켜져 있으면 기본 격자 + (그 주 목록 ∪ 보유 종목) × (팔 TF + 수집기가 접어 저장하는 3h)
+      + 풀 일봉. 그 주 목록을 못 읽으면(표 없음 · 아직 첫 목록 전) **None** — 감시가 꺼지는
+      쪽으로 실패하면 안 된다.
+    """
+    if not universe_enabled:
+        return MonitorScope(pairs=frozenset(build_plan(base_symbols, base_timeframes).pairs()))
+    members = rotation_members_at(db_path, now_ms)
+    if members is None:
+        return None
+    arm = set(members) | held_symbols(db_path)
+    plan = build_plan(base_symbols, base_timeframes, arm)
+    built = {(s, tf) for s in plan.arm_symbols for tf in BUILT_TIMEFRAMES}
+    return MonitorScope(
+        pairs=frozenset(plan.pairs()) | frozenset(built),
+        any_symbol_timeframes=frozenset({POOL_TIMEFRAME}),
+    )
 
 
 def backfill_pairs(
