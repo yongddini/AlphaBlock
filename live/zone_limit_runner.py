@@ -111,6 +111,7 @@ from live.runtime_state import DataGapSkip, PendingOrderSnapshot, RuntimeStateSt
 from live.tsmom_runner import TsmomRebalancer
 from live.zone_limit_notifier import ZoneLimitNotifier
 from paper.tsmom_ledger import TsmomLedgerStore
+from paper.wallet_summary import build_daily_wallet_summary
 from strategy import stoch, tsmom
 from strategy.models import ConfluenceParams, OrderBlockDirection, SignalExitReason
 
@@ -1379,6 +1380,10 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
                     (lambda text: telegram.send_message(text, parse_mode=None))
                     if telegram is not None and settings.paper_trade_notify_enabled
                     else None
+                ),
+                # 하루 1회 「💰 지갑 요약」(WAN-457 §1) — 리밸런싱 직후 · 장부 읽기 전용.
+                wallet_summary=lambda mark: build_daily_wallet_summary(
+                    settings.db_path, mark=mark, initial_equity=settings.paper_equity
                 ),
             )
             _logger.info(
