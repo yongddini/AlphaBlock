@@ -855,9 +855,9 @@ def render_report(report: IntegrityReport) -> str:
             note = "페이퍼 장부(현재 상태)" + empty_note
         elif table.is_ledger and table in report.reset_excused_ledgers:
             if table.name in ENGINE_C_LEDGER_TABLES and not report.engine_c_enabled:
-                note = "엔진 C 원장(누적) · 0행 = 엔진 C 꺼짐"
+                note = "추세추종 원장(누적) · 0행 = 추세추종 꺼짐"
             elif table.name in ENGINE_C_LEDGER_TABLES:
-                note = "엔진 C 원장(누적) · 0행 = 리셋 뒤 첫 리밸런싱 전"
+                note = "추세추종 원장(누적) · 0행 = 리셋 뒤 첫 리밸런싱 전"
             else:
                 note = "팔 청산 장부(누적) · 0행 = 리셋 뒤 아직 청산 없음"
         elif table.is_ledger:
@@ -876,18 +876,18 @@ def render_report(report: IntegrityReport) -> str:
     for table in report.reset_excused_ledgers:
         # 정보 한 줄로만 남긴다 — 종료 코드에는 반영하지 않는다(WAN-455).
         if table.name in ENGINE_C_LEDGER_TABLES and not report.engine_c_enabled:
-            lines.append(f"ℹ️ `{table.name}` 0행 — 엔진 C가 꺼진 설정이라 판정하지 않는다.")
+            lines.append(f"ℹ️ `{table.name}` 0행 — 추세추종이 꺼진 설정이라 판정하지 않는다.")
             continue
         assert report.last_reset_ms is not None
         reset_at = format_kst_zoned(report.last_reset_ms)
         if table.name in ENGINE_C_LEDGER_TABLES:
             lines.append(
-                f"ℹ️ `{table.name}` 0행 — **{reset_at} 리셋 뒤 엔진 C의 첫 리밸런싱 전이다**."
+                f"ℹ️ `{table.name}` 0행 — **{reset_at} 리셋 뒤 추세추종의 첫 리밸런싱 전이다**."
                 " 리셋 뒤 26시간이 지나도 비어 있으면 경고로 바뀐다."
             )
             continue
         engine_c = (
-            f" 엔진 C(추세추종) 원장 `tsmom_rebalances`에는 {report.engine_c_rows:,}행이 있다 —"
+            f" 추세추종 원장 `tsmom_rebalances`에는 {report.engine_c_rows:,}행이 있다 —"
             " 러너는 리셋 뒤에도 매매하고 있다."
             if report.engine_c_rows
             else ""

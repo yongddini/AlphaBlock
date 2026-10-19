@@ -147,7 +147,7 @@ def engine_c_digest_lines(view: EngineCView) -> list[str]:
     """다이제스트에 붙일 엔진 C 줄들(텔레그램 Markdown — 밑줄·별표 없는 값만 넣는다)."""
     if view.empty:
         return []
-    lines = ["*엔진 C (추세추종)*"]
+    lines = ["*추세추종 (BTC·ETH)*"]
     if view.holdings:
         last_weight = {r.asset: r.weight for r in view.rows}
         parts = []

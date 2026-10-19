@@ -79,7 +79,7 @@ def test_rebalances_once_per_closed_day_and_moves_the_wallet(tmp_path: Path) -> 
     assert [r.asset for r in rows] == [BTC, ETH]
     assert all(r.as_of_ms == T0 + last * DAY for r in rows)
     assert wallet.equity == pytest.approx(10_000.0 + sum(r.net_pnl for r in rows))
-    assert len(sent) == 1 and "엔진 C 리밸런싱" in sent[0]
+    assert len(sent) == 1 and "추세추종 리밸런싱" in sent[0]
     assert len(ledger.marks()) == 1
 
     assert reb.tick(_after_close(last) + 5 * 60_000) == []  # 같은 날 — 할 일 없음

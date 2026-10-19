@@ -162,7 +162,8 @@ def run_check(settings: Settings, db_path: str | Path, *, now_ms: int) -> ArmChe
     check.ledger = ledger_counts(db_path)
     if not settings.live_tsmom_enabled:
         check.notes.append(
-            "엔진 C가 꺼져 있다(ALPHABLOCK_LIVE_TSMOM_ENABLED=false) — 정본은 팔 + 엔진 C 합성이다"
+            "추세추종이 꺼져 있다(ALPHABLOCK_LIVE_TSMOM_ENABLED=false)"
+            " — 정본은 팔 + 추세추종 합성이다"
         )
     return check
 

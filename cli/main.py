@@ -919,7 +919,8 @@ def cmd_tsmom_parity(args: argparse.Namespace, settings: Settings) -> int:
     """`alphablock tsmom-parity` — 엔진 C 페이퍼 원장 ↔ 저장 일봉으로 다시 계산한 값 (WAN-451).
 
     읽기 전용이다. 원장 행마다 그날 목표(배율·신호)를 같은 단일 소스(`strategy.tsmom`)로 다시
-    내고 체결가·목표 명목과 함께 맞댄다. 하나라도 다르면 종료 코드 1(감시에 물릴 수 있게).
+    내고 체결가·목표 명목과 함께 맞댄다. 🔴 불일치가 하나라도 있으면 종료 코드 1(감시에 물릴 수
+    있게). 배율 끝자리만 다른 「거의 일치」는 정보로만 찍고 0이다(WAN-459 §3).
     러너 공백으로 건너뛴 날은 보여 주되 실패로 세지 않는다(소급 거래하지 않는 설계).
     """
     import time as _time
@@ -1344,7 +1345,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_tsmom_parity = sub.add_parser(
         "tsmom-parity",
-        help="엔진 C 페이퍼 원장 ↔ 저장 일봉 재계산 대조(WAN-451 · 불일치면 종료 코드 1)",
+        help="추세추종 페이퍼 원장 ↔ 저장 일봉 재계산 대조(WAN-451 · 불일치면 종료 코드 1)",
     )
     p_tsmom_parity.add_argument("--db", default=None, help="DB 경로(기본: 설정의 db_path)")
     p_tsmom_parity.add_argument(

@@ -1482,17 +1482,17 @@ def _render_engine_c(settings: Settings, view: EngineCView, *, arm_pnl: float | 
     남으므로, 이 블록이 없으면 화면에서 통째로 사라진다. `arm_pnl`은 팔 실현손익 합(재구성
     불가면 None) — 지갑은 두 엔진이 같이 쓴다.
     """
-    st.subheader("엔진 C (추세추종 · BTC·ETH)")
+    st.subheader("추세추종 (BTC·ETH)")
     cards = st.columns(3)
     if arm_pnl is not None:
         wallet = settings.paper_equity + arm_pnl + view.total_net_pnl
         cards[0].metric(
-            "지갑 잔고(팔 + 엔진 C)",
+            "지갑 잔고(팔 + 추세추종)",
             f"{wallet:,.0f}",
             delta=f"{wallet - settings.paper_equity:+,.2f}",
-            help="초기 자본 + 팔 실현손익 합 + 엔진 C 정산 합(매일 정산이라 미실현 없음).",
+            help="초기 자본 + 팔 실현손익 합 + 추세추종 정산 합(매일 정산이라 미실현 없음).",
         )
-    cards[1].metric("엔진 C 누적 손익($)", f"{view.total_net_pnl:+,.2f}")
+    cards[1].metric("추세추종 누적 손익($)", f"{view.total_net_pnl:+,.2f}")
     stats = mark_stats(view.marks)
     cards[2].metric(
         "MDD (하루 1회 시가평가)",
@@ -1527,7 +1527,7 @@ def _render_balance(settings: Settings) -> None:
     if not records:
         if not engine_c.empty:
             # 엔진 C만 도는 단계(WAN-451 ②)에는 팔 거래가 없는 게 보통이다.
-            st.info("팔(오더블록) 페이퍼 거래는 아직 없습니다 — 아래는 엔진 C 기록입니다.")
+            st.info("팔(오더블록) 페이퍼 거래는 아직 없습니다 — 아래는 추세추종 기록입니다.")
             _render_engine_c(settings, engine_c, arm_pnl=0.0)
             return
         st.info(
