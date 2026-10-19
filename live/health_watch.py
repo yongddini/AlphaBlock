@@ -20,6 +20,8 @@ WAN-30의 Health 판정 로직(`dashboard.health` / `dashboard.health_data.build
 * 동일 이슈(안정적 `key`)는 **쿨다운**(기본 60분) 내 1회만 보낸다. 이상이 계속되면
   쿨다운마다 1회씩 리마인더를 보내되, 그 사이 중복 경고가 쏟아지지 않는다.
 * 이상이 사라지면 **"✅ 정상 복구"** 알림을 이슈당 1회 보낸다.
+* 단 **수집 계획에서 빠져** 사라진 데이터 경고(팔 목록 교체, WAN-458)는 복구가 아니므로
+  「ℹ️ 감시 대상에서 제외」로 구분해 1회 보낸다.
 * 경고 상태는 JSON 파일(`WatchStateStore`)로 영속화해, 워치를 재시작해도 방금 보낸
   경고를 다시 보내거나 복구 알림을 놓치지 않는다.
 """
@@ -39,7 +41,7 @@ from common.telegram import build_telegram_client
 from common.timefmt import format_kst_zoned, kst_log_format, use_kst_logging
 from config.settings import Settings, get_settings
 from dashboard.health import HealthLevel, runner_cycle_budget_ms
-from dashboard.health_data import HealthView, build_health_view
+from dashboard.health_data import HealthView, build_health_view, monitor_scope_for
 
 _logger = logging.getLogger(__name__)
 
@@ -103,7 +105,7 @@ def evaluate_alerts(view: HealthView) -> list[Alert]:
             lag = _fmt_lag(f.lag_ms)
             alerts.append(
                 Alert(
-                    key=f"data:{f.symbol}:{f.timeframe}",
+                    key=data_alert_key(f.symbol, f.timeframe),
                     title=f"데이터 수집 지연: {f.symbol} {f.timeframe}",
                     detail=(
                         f"⚠️ *데이터 수집 지연* — `{f.symbol}` `{f.timeframe}`\n"
@@ -183,6 +185,20 @@ def evaluate_alerts(view: HealthView) -> list[Alert]:
     return alerts
 
 
+def data_alert_key(symbol: str, timeframe: str) -> str:
+    """데이터 수집 지연 경고의 안정적 키 — `evaluate_alerts`와 제외 판정이 같은 식을 쓴다."""
+    return f"data:{symbol}:{timeframe}"
+
+
+def excluded_alert_keys(view: HealthView) -> frozenset[str]:
+    """수집 계획에서 빠져 판정 대상이 아닌 시리즈의 경고 키(WAN-458).
+
+    이 키로 발효 중이던 경고가 사라지면 「정상 복구」가 아니라 「감시 대상에서 제외」다 —
+    봉이 다시 들어온 게 아니라 일부러 안 모으기 시작한 것이기 때문이다.
+    """
+    return frozenset(data_alert_key(f.symbol, f.timeframe) for f in view.excluded)
+
+
 # -- 쿨다운·복구 조정 (순수 함수) ---------------------------------------------
 
 
@@ -207,7 +223,7 @@ class Outbound(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    kind: Literal["alert", "recovery"]
+    kind: Literal["alert", "recovery", "excluded"]
     key: str
     """어느 이슈의 메시지인가(`Alert.key`). 전송 실패를 되돌릴 때 쓴다(WAN-344)."""
     text: str
@@ -219,6 +235,7 @@ def reconcile(
     *,
     now_ms: int,
     cooldown_ms: int,
+    excluded_keys: frozenset[str] = frozenset(),
 ) -> tuple[list[Outbound], WatchState]:
     """현재 경고와 이전 상태를 비교해 보낼 메시지와 다음 상태를 계산한다(순수 함수).
 
@@ -226,6 +243,8 @@ def reconcile(
     - 계속 발효 중이고 쿨다운이 지났으면 → 리마인더 1회(타임스탬프 갱신).
     - 계속 발효 중이지만 쿨다운 이내면 → 아무것도 보내지 않음(중복 억제).
     - 이전엔 발효 중이었으나 이번엔 사라진 경고 → "정상 복구" 1회, 상태에서 제거.
+    - 단 사라진 이유가 **수집 계획에서 빠져서**(`excluded_keys`, WAN-458)면 복구가 아니므로
+      "감시 대상에서 제외" 1회로 구분한다.
     """
     current = {a.key: a for a in alerts}
     new_active: dict[str, AlertRecord] = {}
@@ -241,7 +260,21 @@ def reconcile(
             new_active[key] = prev
 
     for key, prev in state.active.items():
-        if key not in current:
+        if key in current:
+            continue
+        if key in excluded_keys:
+            outbound.append(
+                Outbound(
+                    kind="excluded",
+                    key=key,
+                    text=(
+                        f"ℹ️ *감시 대상에서 제외* — {prev.title}\n"
+                        "지금 수집 계획(팔 그 주 목록·보유 종목)에 없어 더 이상 모으지 않습니다."
+                        " 복구된 것이 아닙니다."
+                    ),
+                )
+            )
+        else:
             outbound.append(
                 Outbound(kind="recovery", key=key, text=f"✅ *정상 복구* — {prev.title}")
             )
@@ -263,7 +296,7 @@ def apply_delivery_failures(
 
     - 실패한 **경고**: 이전 기록이 있으면 그 타임스탬프로 되돌리고(리마인더 재시도),
       없으면 아예 지운다(다음 점검에 새 경고로 다시 나간다).
-    - 실패한 **복구 알림**: 이전 기록을 되살린다 → 다음 점검에서 다시 「복구」로 잡힌다.
+    - 실패한 **복구·제외 알림**: 이전 기록을 되살린다 → 다음 점검에서 다시 잡힌다.
     """
     active = dict(next_state.active)
     for message in undelivered:
@@ -273,7 +306,7 @@ def apply_delivery_failures(
                 active.pop(message.key, None)
             else:
                 active[message.key] = prev
-        elif prev is not None:  # recovery — 복구 알림을 다시 낼 수 있게 되살린다.
+        elif prev is not None:  # recovery/excluded — 다시 낼 수 있게 되살린다.
             active[message.key] = prev
     return WatchState(active=active)
 
@@ -366,7 +399,11 @@ class HealthWatch:
         alerts = evaluate_alerts(view)
         state = self._store.load()
         outbound, new_state = reconcile(
-            alerts, state, now_ms=self._now_ms(), cooldown_ms=self._cooldown_ms
+            alerts,
+            state,
+            now_ms=self._now_ms(),
+            cooldown_ms=self._cooldown_ms,
+            excluded_keys=excluded_alert_keys(view),
         )
         undelivered = [m for m in outbound if not self._notify(m.text)]
         self._failed_sends += len(undelivered)
@@ -375,9 +412,10 @@ class HealthWatch:
         self._store.save(apply_delivery_failures(new_state, state, undelivered))
         if outbound:
             _logger.info(
-                "Health 점검: 경고 %d건, 복구 %d건%s",
+                "Health 점검: 경고 %d건, 복구 %d건, 감시 제외 %d건%s",
                 sum(1 for m in outbound if m.kind == "alert"),
                 sum(1 for m in outbound if m.kind == "recovery"),
+                sum(1 for m in outbound if m.kind == "excluded"),
                 f", 전송 실패 {len(undelivered)}건" if undelivered else "",
             )
         if undelivered:
@@ -415,6 +453,9 @@ def build_view_provider(settings: Settings) -> Callable[[], HealthView]:
             # 펀딩 정지와 구분되지 않는다(WAN-321이 고친 실패 부류).
             funding_symbols=list(settings.symbols),
             cycle_budget_ms=runner_cycle_budget_ms(settings.live_signal_timeframes),
+            # 데이터 신선도 판정을 **지금 수집 계획**으로 좁힌다(WAN-458) — 팔 목록에서 빠진
+            # 종목은 일부러 안 모으므로 「멈춤」이 아니다. 계획을 못 읽으면 None = 옛 동작.
+            scope=monitor_scope_for(settings),
         )
 
     return provider

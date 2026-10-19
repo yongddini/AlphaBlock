@@ -26,8 +26,8 @@ from common import timefmt
 from common.timefmt import KST
 from config import get_settings
 from config.settings import Settings
-from dashboard.health import HealthLevel, runner_cycle_budget_ms
-from dashboard.health_data import HealthView, build_health_view
+from dashboard.health import HealthLevel, SeriesFreshness, runner_cycle_budget_ms
+from dashboard.health_data import HealthView, build_health_view, monitor_scope_for
 from data.tick_probe import MARKET_LABEL, SOURCE_LABEL
 
 if TYPE_CHECKING:
@@ -125,6 +125,31 @@ def _funding_lines(view: HealthView) -> list[str]:
     return lines
 
 
+def _excluded_lines(view: HealthView) -> list[str]:
+    """저장돼 있으나 지금 수집 계획에 없는 시리즈(WAN-458) — 판정에서 뺀 정보 표시.
+
+    종목마다 한 줄로 묶는다(팔 목록에서 빠진 종목은 TF가 9개라 한 줄씩 찍으면 주마다 쌓인다).
+    판정에서 뺐다고 화면에서까지 지우면 WAN-156과 같은 침묵이 된다(WAN-157).
+    """
+    if not view.monitor_scope_applied:
+        return ["  ℹ️ 수집 계획을 못 읽어 저장된 시리즈 전부를 판정합니다(옛 동작)."]
+    if not view.excluded:
+        return []
+    by_symbol: dict[str, list[SeriesFreshness]] = {}
+    for f in view.excluded:
+        by_symbol.setdefault(f.symbol, []).append(f)
+    lines = [
+        f"  ℹ️ 수집 대상 아님(목록 제외) {len(by_symbol)}종목 · {len(view.excluded)}시리즈"
+        " — 판정·경보에서 뺐습니다(낡습니다):"
+    ]
+    for symbol in sorted(by_symbol):
+        rows = by_symbol[symbol]
+        tfs = ",".join(f.timeframe for f in sorted(rows, key=lambda r: r.expected_interval_ms or 0))
+        last = max((f.last_open_time for f in rows if f.last_open_time is not None), default=None)
+        lines.append(f"    {symbol} [{tfs}]  최신 {_fmt_time(last)}")
+    return lines
+
+
 def format_status(view: HealthView, *, configured_symbols: Sequence[str] | None = None) -> str:
     """Health 뷰를 사람이 읽는 여러 줄 텍스트로 요약한다(순수 함수, 테스트용).
 
@@ -147,7 +172,11 @@ def format_status(view: HealthView, *, configured_symbols: Sequence[str] | None 
         extra = sorted(stored - set(configured_symbols))
         if missing:
             lines.append(f"  ⚠️ 설정에 있으나 저장된 봉이 없음: {', '.join(missing)}")
-        if extra:
+        if extra and view.monitor_scope_applied:
+            # 수집 계획으로 좁힌 뒤에도 남은 설정 밖 종목은 팔 목록·보유 종목이다(WAN-458) —
+            # 낡는 게 아니라 지금 모으고 있다. 낡는 것은 아래 「목록 제외」 절이 따로 찍는다.
+            lines.append(f"  ℹ️ 설정 밖이지만 수집 계획(팔 목록·보유)에 있음: {len(extra)}종목")
+        elif extra:
             lines.append(f"  ⚠️ 저장돼 있으나 수집 대상이 아님(낡습니다): {', '.join(extra)}")
         lines.append("  ℹ️ `.env`를 고쳐도 이미 돌던 수집기는 옛 목록으로 돕니다 — 재시작하세요.")
         lines.append("")
@@ -181,6 +210,7 @@ def format_status(view: HealthView, *, configured_symbols: Sequence[str] | None 
             )
     else:
         lines.append("  저장된 OHLCV 없음 — 먼저 수집을 실행하세요.")
+    lines.extend(_excluded_lines(view))
 
     lines.extend(_funding_lines(view))
 
@@ -228,6 +258,8 @@ def _build_health_view(settings: Settings, *, include_bar_count: bool = False) -
         collector_heartbeat_interval_seconds=settings.collector_heartbeat_interval_seconds,
         repair_state_path=settings.repair_state_path,
         cycle_budget_ms=runner_cycle_budget_ms(settings.live_signal_timeframes),
+        # 신선도 판정 = 지금 수집 계획(WAN-458) — 워치와 같은 함수(화면과 폰이 같은 대상).
+        scope=monitor_scope_for(settings),
     )
 
 

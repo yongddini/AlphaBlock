@@ -77,7 +77,13 @@ from dashboard.health import (
     compute_runner_status,
     runner_cycle_budget_ms,
 )
-from dashboard.health_data import HealthView, OpenPositionView, build_health_view, latest_close
+from dashboard.health_data import (
+    HealthView,
+    OpenPositionView,
+    build_health_view,
+    latest_close,
+    monitor_scope_for,
+)
 from dashboard.lightweight_chart import BAND_LINE_COLOR, build_chart_html
 from dashboard.live_board import (
     ACTIVE_ZONE_LIMIT,
@@ -1084,6 +1090,20 @@ def _freshness_frame(rows: list[SeriesFreshness]) -> pd.DataFrame:
     )
 
 
+def _excluded_frame(rows: list[SeriesFreshness]) -> pd.DataFrame:
+    """목록 제외 시리즈(WAN-458) — 판정 대상이 아니므로 상태 배지를 일부러 안 단다."""
+    return pd.DataFrame(
+        {
+            "심볼": r.symbol,
+            "TF": r.timeframe,
+            "최신 봉(KST)": _fmt_time(r.last_open_time),
+            "지연": _fmt_lag(r.lag_ms),
+            "상태": "수집 대상 아님(목록 제외)",
+        }
+        for r in rows
+    )
+
+
 def _funding_frame(rows: list[FundingFreshness]) -> pd.DataFrame:
     return pd.DataFrame(
         {
@@ -1363,6 +1383,8 @@ def _render_health_body(settings: Settings) -> None:
         collector_heartbeat_interval_seconds=settings.collector_heartbeat_interval_seconds,
         repair_state_path=settings.repair_state_path,
         cycle_budget_ms=runner_cycle_budget_ms(settings.live_signal_timeframes),
+        # 신선도 판정 = 지금 수집 계획(WAN-458) — 워치·status와 같은 함수.
+        scope=monitor_scope_for(settings),
     )
 
     _render_overall_badge(view)
@@ -1372,6 +1394,16 @@ def _render_health_body(settings: Settings) -> None:
         st.dataframe(_freshness_frame(view.freshness), use_container_width=True, hide_index=True)
     else:
         st.warning("저장된 OHLCV 데이터가 없습니다. 먼저 수집(WAN-6)을 실행하세요.")
+    if not view.monitor_scope_applied:
+        st.caption("ℹ️ 수집 계획을 못 읽어 저장된 시리즈 전부를 판정합니다(옛 동작).")
+    elif view.excluded:
+        # 판정에서 뺐다고 화면에서까지 지우지 않는다(WAN-157) — 경보 대신 정보로만(WAN-458).
+        n_symbols = len({f.symbol for f in view.excluded})
+        with st.expander(
+            f"ℹ️ 수집 대상 아님(목록 제외) {n_symbols}종목 · {len(view.excluded)}시리즈"
+            " — 판정·경보에서 제외"
+        ):
+            st.dataframe(_excluded_frame(view.excluded), use_container_width=True, hide_index=True)
 
     st.subheader("펀딩비 상태")
     if view.funding:

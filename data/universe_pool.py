@@ -220,6 +220,49 @@ class UniverseStore:
         return self.at(rebalance_ms - 1)
 
 
+def rotation_members_at(db_path: str | Path, t_ms: int) -> frozenset[str] | None:
+    """시각 t에 유효한 그 주 목록(상위 `top_n`)을 **읽기 전용**으로 읽는다(WAN-458).
+
+    수집기 밖(감시·`status`·대시보드)이 「지금 무엇을 모으는가」를 알려고 쓴다. `UniverseStore`는
+    생성자에서 표를 만들므로(쓰기) 감시 쪽에는 맞지 않는다. DB·표·그 시각 목록이 없거나 읽기가
+    실패하면 None — 호출부가 「계획을 못 읽었다」로 받아 옛 동작으로 돌아간다(감시가 꺼지는
+    쪽으로 실패하면 안 된다).
+    """
+    path = str(db_path)
+    if path == ":memory:" or not Path(path).exists():
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return None
+    try:
+        tables = {
+            str(r[0])
+            for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name IN ('universe_rotations', 'universe_ranks')"
+            )
+        }
+        if tables != {"universe_rotations", "universe_ranks"}:
+            return None
+        head = conn.execute(
+            "SELECT rebalance_ms, top_n FROM universe_rotations WHERE rebalance_ms = "
+            "(SELECT MAX(rebalance_ms) FROM universe_rotations WHERE rebalance_ms <= ?)",
+            (t_ms,),
+        ).fetchone()
+        if head is None:
+            return None
+        rows = conn.execute(
+            "SELECT symbol FROM universe_ranks WHERE rebalance_ms = ? ORDER BY rank LIMIT ?",
+            (int(head[0]), int(head[1])),
+        ).fetchall()
+        return frozenset(str(r[0]) for r in rows)
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+
+
 # ---------------------------------------------------------------------------
 # 계산
 # ---------------------------------------------------------------------------
