@@ -12,14 +12,15 @@ import asyncio
 import contextlib
 import json
 import logging
+import time
 from collections.abc import AsyncIterator, Callable, Iterable, Sequence
 
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed
 
-from data.models import Candle
+from data.models import Candle, timeframe_to_ms
 from data.storage import OhlcvStore
-from data.watchdog import guard_idle
+from data.watchdog import StreamNoProgress, StreamStalled, guard_idle
 
 logger = logging.getLogger(__name__)
 
@@ -108,6 +109,10 @@ def parse_kline_message(
     )
 
 
+#: 「저장 없음」 정지 예외에 실을 마지막 메시지의 최대 길이(로그·진단용).
+_LAST_MESSAGE_CHARS = 300
+
+
 async def consume_messages(
     messages: AsyncIterator[str | bytes],
     store: OhlcvStore,
@@ -116,25 +121,62 @@ async def consume_messages(
     only_closed: bool = True,
     on_candle: Callable[[Candle], None] | None = None,
     heartbeat: Callable[[], None] | None = None,
+    progress_timeout_seconds: float | None = None,
+    clock: Callable[[], float] = time.monotonic,
 ) -> int:
     """메시지 스트림을 소비해 확정봉을 저장한다. 저장한 봉 수를 반환한다.
 
     `heartbeat`가 주어지면 봉 확정 여부와 무관하게 **수신한 모든 메시지마다** 호출해
     프로세스가 살아있음을 기록한다(미확정 봉 갱신도 수초 간격으로 오므로, 저조한 TF만
     수집해도 하트비트가 신선하게 유지된다).
+
+    `progress_timeout_seconds`가 주어지면(WAN-461) 마지막 저장(또는 소비 시작) 뒤 그 시간이
+    지나도록 봉을 하나도 저장하지 못한 채 메시지만 받고 있으면 `StreamNoProgress`를 던진다.
+    메시지가 아예 안 오는 경우는 `guard_idle`의 몫이고, 이쪽은 **메시지는 오는데 데이터가 안
+    쌓이는** 경우다 — 둘을 합쳐야 「그 연결이 일을 하고 있나」가 닫힌다. 판정은 메시지가 올
+    때만 하므로 따로 타이머 태스크가 없다(메시지가 끊기면 유휴 감시가 먼저 걸린다).
     """
     stored = 0
+    last_progress = clock()
+    since_progress = 0
     async for raw in messages:
         if heartbeat is not None:
             heartbeat()
         candle = parse_kline_message(raw, symbol_map, only_closed=only_closed)
         if candle is None:
+            since_progress += 1
+            if (
+                progress_timeout_seconds is not None
+                and clock() - last_progress >= progress_timeout_seconds
+            ):
+                text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
+                raise StreamNoProgress(
+                    progress_timeout_seconds,
+                    messages=since_progress,
+                    last_message=text[:_LAST_MESSAGE_CHARS],
+                )
             continue
         store.upsert_candles([candle])
         stored += 1
+        last_progress = clock()
+        since_progress = 0
         if on_candle is not None:
             on_candle(candle)
     return stored
+
+
+def progress_timeout_for(
+    pairs: Sequence[tuple[str, str]], grace_seconds: float | None
+) -> float | None:
+    """연결 하나의 「저장 없음」 한도(초) = 그 연결의 가장 짧은 TF + 여유(WAN-461).
+
+    1분봉이 섞인 연결은 1분마다 확정봉이 와야 하므로 여유 120초면 180초다. `grace_seconds`가
+    None이면 감시를 끈다(None 반환).
+    """
+    if grace_seconds is None or not pairs:
+        return None
+    shortest = min(timeframe_to_ms(tf) for _, tf in pairs) / 1000
+    return shortest + grace_seconds
 
 
 async def _recv_stream(ws: ClientConnection) -> AsyncIterator[str | bytes]:
@@ -157,6 +199,7 @@ async def stream_klines(
     heartbeat: Callable[[], None] | None = None,
     idle_timeout_seconds: float | None = None,
     on_connect: Callable[[], None] | None = None,
+    progress_grace_seconds: float | None = None,
 ) -> None:
     """선물 kline 결합 스트림에 접속해 확정봉을 계속 저장한다.
 
@@ -174,6 +217,9 @@ async def stream_klines(
     훅에서 REST로 메워야 구멍이 안 남는다. 접속 **후**에 호출되는 것이 핵심이다:
     「접속 이후 확정 = 스트림」 + 「호출 시각 이전 확정 = 따라잡기」의 합집합이 전
     구간을 덮는다(접속 전에 돌리면 그 사이에 닫힌 봉이 다시 빠진다).
+
+    `progress_grace_seconds`(WAN-461)가 주어지면 연결마다 「가장 짧은 TF + 여유」 동안 확정봉을
+    하나도 저장하지 못하면 `StreamNoProgress`를 던진다(`consume_messages` 참고).
     """
     await stream_kline_pairs(
         store,
@@ -184,6 +230,7 @@ async def stream_klines(
         heartbeat=heartbeat,
         idle_timeout_seconds=idle_timeout_seconds,
         on_connect=on_connect,
+        progress_grace_seconds=progress_grace_seconds,
     )
 
 
@@ -198,6 +245,7 @@ async def stream_kline_pairs(
     idle_timeout_seconds: float | None = None,
     on_connect: Callable[[], None] | None = None,
     max_streams_per_connection: int = MAX_STREAMS_PER_CONNECTION,
+    progress_grace_seconds: float | None = None,
 ) -> None:
     """(심볼, TF) 목록을 연결 여러 개로 나눠 구독한다(WAN-451 ③ — 종목마다 TF가 다르다).
 
@@ -215,6 +263,10 @@ async def stream_kline_pairs(
     여러 연결일 때 `on_connect`는 **모든 연결이 성립한 뒤 · 어느 연결도 소비를 시작하기 전에 한
     번만** 불린다 — 따라잡기(`TailCatchup`)가 이 순간 「마지막 저장 봉」을 찍어 두므로, 그보다
     먼저 소비가 시작되면 스트림이 넣은 새 봉이 그 앞의 구멍을 가린다(WAN-456 §d).
+
+    🚨 유휴·저장 없음 감시는 **연결마다 따로** 건다(WAN-173/461) — 한 연결이 멎으면 그 연결의
+    태스크가 `StreamStalled`/`StreamNoProgress`(「연결 N/M」 표시)로 끝나고, 위 규칙대로 나머지도
+    닫혀 전부 다시 붙는다. 하트비트(`heartbeat`)는 수집기 전체 하나라 이 판정에 못 쓴다.
     """
     chunks = [
         list(pairs[i : i + max_streams_per_connection])
@@ -236,6 +288,7 @@ async def stream_kline_pairs(
             heartbeat=heartbeat,
             idle_timeout_seconds=idle_timeout_seconds,
             on_connect=on_connect,
+            progress_grace_seconds=progress_grace_seconds,
         )
         return
     async with contextlib.AsyncExitStack() as stack:
@@ -255,9 +308,11 @@ async def stream_kline_pairs(
                     on_candle=on_candle,
                     heartbeat=heartbeat,
                     idle_timeout_seconds=idle_timeout_seconds,
+                    progress_grace_seconds=progress_grace_seconds,
+                    connection=(i + 1, len(chunks)),
                 )
             )
-            for ws, chunk in zip(sockets, chunks, strict=True)
+            for i, (ws, chunk) in enumerate(zip(sockets, chunks, strict=True))
         ]
         await _first_to_end(tasks)
 
@@ -297,6 +352,7 @@ async def _stream_connection(
     heartbeat: Callable[[], None] | None,
     idle_timeout_seconds: float | None,
     on_connect: Callable[[], None] | None,
+    progress_grace_seconds: float | None = None,
 ) -> None:
     url = ws_base + build_pair_stream_path(pairs)
     async with connect(url) as ws:
@@ -310,6 +366,8 @@ async def _stream_connection(
             on_candle=on_candle,
             heartbeat=heartbeat,
             idle_timeout_seconds=idle_timeout_seconds,
+            progress_grace_seconds=progress_grace_seconds,
+            connection=(1, 1),
         )
 
 
@@ -322,17 +380,40 @@ async def _consume_connection(
     on_candle: Callable[[Candle], None] | None,
     heartbeat: Callable[[], None] | None,
     idle_timeout_seconds: float | None,
+    progress_grace_seconds: float | None = None,
+    connection: tuple[int, int] | None = None,
 ) -> int:
-    """접속된 연결 하나를 끝날 때까지 소비한다(저장한 봉 수)."""
+    """접속된 연결 하나를 끝날 때까지 소비한다(저장한 봉 수).
+
+    멎으면(`StreamStalled`·`StreamNoProgress`) 어느 연결인지(`connection` = (번호, 전체))를
+    예외에 싣고 경고 로그를 남긴 뒤 그대로 올린다(WAN-461 — 알림이 「연결 2/2」를 밝힌다).
+    """
     symbol_map = build_symbol_map(sorted({s for s, _ in pairs}))
     messages: AsyncIterator[str | bytes] = _recv_stream(ws)
     if idle_timeout_seconds is not None:
         messages = guard_idle(messages, idle_timeout_seconds=idle_timeout_seconds)
-    return await consume_messages(
-        messages,
-        store,
-        symbol_map,
-        only_closed=only_closed,
-        on_candle=on_candle,
-        heartbeat=heartbeat,
-    )
+    try:
+        return await consume_messages(
+            messages,
+            store,
+            symbol_map,
+            only_closed=only_closed,
+            on_candle=on_candle,
+            heartbeat=heartbeat,
+            progress_timeout_seconds=progress_timeout_for(pairs, progress_grace_seconds),
+        )
+    except StreamStalled as exc:
+        if connection is not None:
+            exc.tag_connection(*connection)
+        logger.warning(
+            "웹소켓 정지 감지: %s (스트림 %d개 · %s~%s) — 전 연결을 닫고 다시 붙는다(WAN-461)",
+            exc,
+            len(pairs),
+            pairs[0][0] if pairs else "-",
+            pairs[-1][0] if pairs else "-",
+        )
+        if isinstance(exc, StreamNoProgress) and exc.last_message is not None:
+            logger.warning(
+                "정지 직전 마지막 메시지(앞 %d자): %s", _LAST_MESSAGE_CHARS, exc.last_message
+            )
+        raise

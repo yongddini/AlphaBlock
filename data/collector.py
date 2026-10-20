@@ -50,13 +50,14 @@ def _build_recovery_notifier(settings: Settings) -> Callable[[RecoveryEvent], No
     def _notify(event: RecoveryEvent) -> None:
         if telegram is None:
             return
+        # 평문 — 사유에 종목·테이블 이름이 섞이면 레거시 Markdown이 깨진다(WAN-321).
         text = (
-            "🔄 *수집기 스트림 복구* (WAN-173)\n"
-            f"사유: {event.reason}\n"
-            f"재접속 #{event.attempt} · {event.delay_seconds:g}s 후 재접속"
+            "🔄 수집기 스트림 복구 (WAN-173/461)\n"
+            f"{event.reason} → 재접속\n"
+            f"연속 재접속 #{event.attempt} · {event.delay_seconds:g}s 후"
         )
         try:
-            telegram.send_message(text)
+            telegram.send_message(text, parse_mode=None)
         except Exception:  # noqa: BLE001 - 알림 실패가 수집기를 죽이면 안 된다
             logger.exception("복구 이벤트 텔레그램 전송 실패(무시하고 계속)")
 
@@ -268,6 +269,7 @@ async def _stream_arm_plan(
     idle_timeout_seconds: float | None,
     on_connect: Callable[[], None],
     check_seconds: float,
+    progress_grace_seconds: float | None = None,
 ) -> None:
     """지금 계획으로 스트림을 돌리다 계획이 바뀌면 새 쌍을 채우고 다시 붙는다(WAN-451 ③).
 
@@ -283,6 +285,7 @@ async def _stream_arm_plan(
                 idle_timeout_seconds=idle_timeout_seconds,
                 on_connect=on_connect,
                 on_candle=arm.on_candle,
+                progress_grace_seconds=progress_grace_seconds,
             )
         )
         watch = asyncio.create_task(_wait_plan_change(arm, check_seconds))
@@ -521,6 +524,7 @@ async def run_collector(
                         idle_timeout_seconds=settings.collector_stream_idle_timeout_seconds,
                         on_connect=catchup.schedule,
                         check_seconds=settings.universe_plan_check_seconds,
+                        progress_grace_seconds=settings.collector_stream_progress_grace_seconds,
                     )
                     return
                 await stream_klines(
@@ -530,6 +534,7 @@ async def run_collector(
                     heartbeat=_beat,
                     idle_timeout_seconds=settings.collector_stream_idle_timeout_seconds,
                     on_connect=catchup.schedule,
+                    progress_grace_seconds=settings.collector_stream_progress_grace_seconds,
                 )
 
             try:
@@ -537,6 +542,7 @@ async def run_collector(
                     _stream_once,
                     on_recover=_build_recovery_notifier(settings),
                     max_backoff_seconds=settings.collector_reconnect_max_backoff_seconds,
+                    healthy_after_seconds=settings.collector_reconnect_healthy_after_seconds,
                 )
             finally:
                 if funding_task is not None:

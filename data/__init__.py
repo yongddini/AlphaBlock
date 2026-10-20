@@ -15,6 +15,7 @@ from data.stream import parse_kline_message, stream_klines
 from data.watchdog import (
     HeartbeatWatchdog,
     ProgressTracker,
+    StreamNoProgress,
     StreamStalled,
     guard_idle,
     run_with_recovery,
@@ -28,6 +29,7 @@ __all__ = [
     "ProgressTracker",
     "RepairSummary",
     "SeriesRepair",
+    "StreamNoProgress",
     "StreamStalled",
     "backfill_all",
     "backfill_symbol",
