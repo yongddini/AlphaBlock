@@ -374,17 +374,14 @@ def fit_variant(
     return Variant(name, k, lam, float(dd.max()), day, yearly(eq), eq)
 
 
-def run(
-    built: u.Markets, arm: ArmDaily | None = None
-) -> tuple[pd.DataFrame, list[Variant], list[str], dict[str, float]]:
-    """`arm`을 주면 다시 만들지 않는다(WAN-450이 같은 거래 목록을 함께 쓴다) — 값은 같다."""
-    t0 = time.monotonic()
-    arm = arm if arm is not None else arm_daily(built)
-    s = m.setting(built)
-    with fc.FUNDING_CACHE.open("rb") as fh:
-        rows, _fetched = pickle.load(fh)
+def engine_daily(
+    s: m.Setting, rows: Mapping[str, Sequence[tuple[int, float]]]
+) -> tuple[dict[str, EngineDaily], float]:
+    """자산마다 엔진 C 일 수익(일 고·저 판 + `#close` 종가 판)과 일봉 수익 검산 최대 차.
+
+    `run`의 속을 떼어 낸 것이다(WAN-462 — 바스켓 구성만 바꾸는 측정이 같은 식을 다시 쓰지 않게).
+    """
     fut_from = u.ms(FUT_FROM)
-    notes: list[str] = []
     engines: dict[str, EngineDaily] = {}
     worst_ret_gap = 0.0
     for sym in ASSETS:
@@ -400,6 +397,20 @@ def run(
         f = daily_funding(rows.get(sym, []), bars.index, fut_from)
         engines[sym] = tsmom_returns(bars["ret"], f, bars["low_r"], bars["high_r"])
         engines[sym + "#close"] = tsmom_returns(bars["ret"], f)
+    return engines, worst_ret_gap
+
+
+def run(
+    built: u.Markets, arm: ArmDaily | None = None
+) -> tuple[pd.DataFrame, list[Variant], list[str], dict[str, float]]:
+    """`arm`을 주면 다시 만들지 않는다(WAN-450이 같은 거래 목록을 함께 쓴다) — 값은 같다."""
+    t0 = time.monotonic()
+    arm = arm if arm is not None else arm_daily(built)
+    s = m.setting(built)
+    with fc.FUNDING_CACHE.open("rb") as fh:
+        rows, _fetched = pickle.load(fh)
+    notes: list[str] = []
+    engines, worst_ret_gap = engine_daily(s, rows)
     if worst_ret_gap > CHECK_TOL:
         raise ValueError(f"일봉 수익 검산 실패: 최대 차 {worst_ret_gap:.2e}")
     notes.append(

@@ -465,6 +465,8 @@ def place_segments(
     payloads: Sequence[CellPayload],
     *,
     risk_scale: Callable[[CellKey, _Candidate], float] | None = None,
+    open_weight_cap: float | None = None,
+    cap_weight: Callable[[CellKey, _Candidate], float] | None = None,
 ) -> list[BookSegment]:
     """배치 그 자체 — 🚨 이 팔의 북 인자가 사는 **유일한 자리**다.
 
@@ -478,6 +480,9 @@ def place_segments(
     # 안 줄 때는 인자 자체를 안 넘긴다 — 이 호출의 인자 목록이 곧 「같은 팔」의 대조 대상이다
     # (wan428 스파이 테스트).
     extra: dict[str, Any] = {} if risk_scale is None else {"risk_scale": risk_scale}
+    # WAN-462(옵트인): 동시 위험 합계 한도 — 안 줄 때는 인자 자체를 안 넘긴다(위와 같은 이유).
+    if open_weight_cap is not None:
+        extra.update(open_weight_cap=open_weight_cap, cap_weight=cap_weight)
     return list(
         iter_book_segments(
             payloads,

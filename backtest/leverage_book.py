@@ -547,8 +547,17 @@ def run_leverage_book(
     circuit_breaker_scope: CircuitBreakerScope = "both",
     blocked_from_by_day: Mapping[str, int] | None = None,
     risk_scale: Callable[[CellKey, _Candidate], float] | None = None,
+    open_weight_cap: float | None = None,
+    cap_weight: Callable[[CellKey, _Candidate], float] | None = None,
 ) -> BookOutcome:
     """칸별 후보를 하나의 공통 시간축에서 공유 자본으로 배치한다.
+
+    `open_weight_cap`·`cap_weight`(WAN-462 · **옵트인** · 둘 다 `None`이면 예전과 **비트 단위로
+    같다**)는 **동시 위험 합계 한도**다 — 진입 순간 이미 열린 포지션의 무게 합(`cap_weight`가 낸
+    값)에 이 후보의 무게를 더한 값이 한도를 넘으면 그 후보를 건너뛴다(`open_risk_cap`). 칸당
+    1포지션 검사 **뒤에** 판정하므로 이미 칸이 차서 못 들어갈 후보는 세지 않는다. 건너뛴 후보가
+    비운 칸·자본에는 뒤 후보가 들어올 수 있다(북 안에서 판정하는 이유, WAN-341). 둘 중 하나만
+    주면 거부한다.
 
     `one_entry_per_step`(WAN-409 · 옵트인 · 기본 꺼짐이라 예전과 **비트 단위로 같다**)은 **같은
     시각에 같은 칸을 다시 여는 것**을 막는다. 반개구간 규약(`exit_time == now`도 닫는다)은
@@ -651,6 +660,10 @@ def run_leverage_book(
         )
     if daily_stop_limit is not None and daily_stop_limit < 1:
         raise ValueError(f"daily_stop_limit은 1 이상이어야 합니다: {daily_stop_limit} (WAN-410).")
+    if (open_weight_cap is None) != (cap_weight is None):
+        raise ValueError("open_weight_cap과 cap_weight는 함께 줘야 합니다(WAN-462).")
+    if open_weight_cap is not None and not open_weight_cap > 0.0:
+        raise ValueError(f"open_weight_cap은 양수여야 합니다: {open_weight_cap} (WAN-462).")
     _validate_cells(cells)
     eff_cfg = apply_book_leverage(cfg, book)
     # cap-only(WAN-180 팔 B)는 북 상한만 N배다 — 거래당 사이징(크기·천장)은 원본 1배
@@ -669,6 +682,7 @@ def run_leverage_book(
 
     cash = eff_cfg.initial_capital
     open_by_cell: dict[CellKey, _OpenBookPosition] = {}
+    open_weight: dict[CellKey, float] = {}
     trades: list[Trade] = []
     stats = BookStats()
     last_event: int | None = None
@@ -728,6 +742,7 @@ def run_leverage_book(
                     # 이 줄이 아무것도 하지 않아 예전과 비트 단위로 같다.
                     ledger.credit(position)
                 del open_by_cell[cell_key]
+                open_weight.pop(cell_key, None)
 
     scaled_cfgs: dict[float, BacktestConfig] = {}
 
@@ -790,6 +805,13 @@ def run_leverage_book(
             stats.skipped_cell_busy += 1  # 칸당 1포지션(사용자 정의).
             stats.skip_records.append(SkippedSetup(cell.key, "cell_busy", cand, cash))
             continue
+        weight = 0.0
+        if open_weight_cap is not None and cap_weight is not None:
+            # WAN-462: 진입 순간 열린 무게 합 + 이 후보 > 한도면 건너뛴다(인과 — 이미 열린 것만).
+            weight = float(cap_weight(cell.key, cand))
+            if sum(open_weight.values()) + weight > open_weight_cap * (1.0 + 1e-12):
+                stats.skip_records.append(SkippedSetup(cell.key, "open_risk_cap", cand, cash))
+                continue
         open_notional = sum(p.notional for p in open_by_cell.values())
         # WAN-346 §2: 복리를 끈 팔은 **사이징이 보는 자본**만 초기 자본에 못 박는다 —
         # 현금(`cash`)은 그대로 손익을 쌓으므로 자본곡선·MDD·청산 검사는 진짜 장부다.
@@ -841,6 +863,8 @@ def run_leverage_book(
             # WAN-323: 부분 청산이 있으면 그 시각에 명목·리스크를 덜어내는 이벤트를 예약한다.
             reductions=_reductions_for(trade, len(cand.partial_exits), notional, risk_amount),
         )
+        if open_weight_cap is not None:
+            open_weight[cell.key] = weight
         trades.append(trade)
         stats.placed += 1
         stats.placed_records.append(
