@@ -68,6 +68,7 @@ _ADOPTED_USERS = {
     "wan451_same_minute_order.py",
     "wan460_trend_direction.py",
     "wan462_combo_levers.py",  # WAN-462 — 정본 위에 엔진 C 구성 · 동시 위험 한도만 바꾼다
+    "wan463_short_side_mult.py",  # WAN-463 — 정본 위에 엔진 C 숏 배율만 바꾼다
 }
 _PLACERS = {"place", "place_arm", "arm_trades"}
 _DEFINERS = {"wan436_stoch_crowd_rules.py", "wan439_crash_size_layer.py"}
