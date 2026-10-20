@@ -30,6 +30,14 @@
 (설정과 실제의 어긋남을 감추면 WAN-156과 같은 종류의 침묵을 다시 만든다). 미추적은
 `has_defect`에 안 들어가고 텔레그램도 안 탄다 — **보이되 울지 않는다.**
 
+📌 **수집 계획 밖 시리즈도 같은 대우다 (WAN-466)**: 팔 목록이 매주 바뀌면 빠진 종목의 봉은
+수집기가 일부러 안 모아 낡는다. 감시 세 곳(`status`·Health·`watch`)은 WAN-458이 「지금 수집
+계획」(`data.collection_plan.monitor_scope_for`)으로 좁혔는데 **이 모듈은 저장된 전부를 판정해**
+수집기를 재시작할 때마다 빠진 종목을 「🚨 수집 정지」로 텔레그램에 보냈다(2026-10-20 BR·LSK·
+ONE × 8TF = 24줄). 이제 `repair_all(scope=)`가 같은 범위를 받아 계획 밖 시리즈를 복구·신선도
+판정에서 빼고 `untracked_series`(`reason="plan"`)로 남긴다. 범위를 못 읽으면(None) 옛 동작
+(저장된 전부 판정)이다 — **감시가 꺼지는 쪽으로 실패하지 않는다.**
+
 복구 결과(`RepairSummary`)는 JSON 상태 파일로 남겨 Health 뷰(WAN-30)와 CLI
 `status`가 "마지막 복구에서 시리즈별 몇 봉을 채웠는지"를 보여줄 수 있게 한다.
 """
@@ -41,6 +49,7 @@ import os
 import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
@@ -48,6 +57,7 @@ from common.telegram import build_telegram_client
 from config.settings import Settings, get_settings
 from data.backfill import DEFAULT_LIMIT, FetchOHLCV
 from data.backfill import backfill_symbol as _backfill_symbol
+from data.collection_plan import MonitorScope, monitor_scope_for
 from data.freshness import (
     DEFAULT_STALE_MULTIPLIER,
     StaleSeries,
@@ -99,6 +109,25 @@ class UntrackedSeries(BaseModel):
     """마지막으로 저장된 봉의 시각(저장된 봉이 없으면 None)."""
     lag_ms: int | None
     """`now_ms - last_ms`. 낡은 정도를 사람이 읽을 수 있게 함께 싣는다."""
+    reason: Literal["timeframe", "plan"] = "timeframe"
+    """왜 판정에서 뺐나 (WAN-466).
+
+    * `"timeframe"` — 설정의 수집 대상 TF가 아니다(WAN-157 · 옛 상태 파일은 전부 이 값).
+    * `"plan"` — 그 TF를 다른 종목에서는 모으는데 이 종목은 지금 수집 계획 밖이다(팔 목록에서
+      빠진 종목 등 · WAN-458과 같은 범위). 고칠 일이 아니라 매주 교체의 정상 결과다.
+    """
+
+
+def format_plan_excluded(items: Sequence[UntrackedSeries]) -> str:
+    """수집 계획 밖이라 판정에서 뺀 시리즈를 한 줄로(WAN-466) — 종목 단위로 접는다.
+
+    매주 교체가 쌓이면 줄 수가 종목 × TF로 늘어난다(10-19 교체 하나만 24줄). 사람에게 필요한
+    것은 「어느 종목이 빠졌나」라 종목만 찍는다. CLI·대시보드가 같은 문장을 쓴다.
+    """
+    symbols = sorted({u.symbol for u in items})
+    return f"지금 수집 계획 밖(팔 목록에서 빠진 종목 등) {len(items)} 시리즈 — 종목: " + ", ".join(
+        symbols
+    )
 
 
 class RepairSummary(BaseModel):
@@ -317,6 +346,7 @@ def repair_all(
     funding_last_times: Sequence[tuple[str, int | None]] = (),
     tracked_timeframes: Sequence[str] | None = None,
     lookback_ms: int | None = None,
+    scope: MonitorScope | None = None,
 ) -> RepairSummary:
     """저장된 모든(또는 지정한) 시리즈의 갭을 탐지·복구하고 꼬리 신선도를 판정한다.
 
@@ -335,15 +365,29 @@ def repair_all(
 
     `lookback_ms`(WAN-187)를 주면 갭 **탐지**만 최근 창으로 좁힌다 — 신선도 판정은
     창과 무관하게 전 시리즈를 그대로 본다(꼬리 정지는 창을 좁혀도 보여야 한다).
+
+    `scope`(WAN-466)를 주면 **지금 수집 계획**에 없는 시리즈를 복구·신선도 판정에서 빼고
+    `untracked_series`에 싣는다 — 감시(WAN-458)와 같은 범위다. 사유는 그 TF를 다른 종목에서는
+    모으면 `"plan"`(팔 목록에서 빠진 종목 등), 아무도 안 모으면 `"timeframe"`(WAN-157과
+    같다). None이면(기본) 옛 동작이다. `tracked_timeframes`와 함께 주면 둘 다 적용된다(TF로
+    먼저 거르고 남은 것을 계획으로 거른다).
     """
     stored = list(series) if series is not None else store.list_series()
-    if tracked_timeframes is None:
-        targets = stored
-        untracked_pairs: list[tuple[str, str]] = []
-    else:
+    targets = stored
+    untracked_pairs: list[tuple[str, str, Literal["timeframe", "plan"]]] = []
+    if tracked_timeframes is not None:
         tracked = set(tracked_timeframes)
-        targets = [(sym, tf) for sym, tf in stored if tf in tracked]
-        untracked_pairs = [(sym, tf) for sym, tf in stored if tf not in tracked]
+        untracked_pairs += [(sym, tf, "timeframe") for sym, tf in targets if tf not in tracked]
+        targets = [(sym, tf) for sym, tf in targets if tf in tracked]
+    if scope is not None:
+        # 아무 종목에서도 안 모으는 TF는 설정 문제(WAN-157 「미추적」), 다른 종목에서는 모으는
+        # TF면 이 종목이 지금 계획 밖이다(팔 목록에서 빠짐) — 사람이 할 일이 달라 사유를 가른다.
+        untracked_pairs += [
+            (sym, tf, "plan" if scope.collects_timeframe(tf) else "timeframe")
+            for sym, tf in targets
+            if not scope.covers(sym, tf)
+        ]
+        targets = [(sym, tf) for sym, tf in targets if scope.covers(sym, tf)]
     results = [
         repair_series(
             exchange,
@@ -378,7 +422,7 @@ def repair_all(
         )
 
     untracked: list[UntrackedSeries] = []
-    for symbol, timeframe in untracked_pairs:
+    for symbol, timeframe, reason in untracked_pairs:
         last = store.last_open_time(symbol, timeframe)
         untracked.append(
             UntrackedSeries(
@@ -386,14 +430,15 @@ def repair_all(
                 timeframe=timeframe,
                 last_ms=last,
                 lag_ms=None if last is None else ran_at - last,
+                reason=reason,
             )
         )
     if untracked:
         # 결함이 아니므로 warning이 아니라 info다 — 그래도 조용히 사라지지는 않는다.
         logger.info(
-            "저장돼 있으나 수집 대상이 아닌 시리즈 %d건(낡습니다): %s",
+            "저장돼 있으나 판정에서 뺀 시리즈 %d건(낡습니다): %s",
             len(untracked),
-            ", ".join(f"{u.symbol} {u.timeframe}" for u in untracked),
+            ", ".join(f"{u.symbol} {u.timeframe}({u.reason})" for u in untracked),
         )
     return RepairSummary(
         ran_at_ms=ran_at,
@@ -462,6 +507,12 @@ def run_repair(
     판정 대상 TF는 **설정의 수집 대상**(`settings.timeframes`)으로 좁힌다(WAN-157).
     거기서 빠진 TF는 고장이 아니라 설정이므로 종료 코드·텔레그램을 흔들지 않되,
     `RepairSummary.untracked_series`로 계속 보인다.
+
+    📌 **지금 수집 계획을 읽을 수 있으면 그 범위로 판정한다(WAN-466)** — 수집기 시작 복구·
+    감시(WAN-458)와 같은 범위다. 이때는 TF 필터(`settings.timeframes`)를 **걸지 않는다**: 계획이
+    이미 기본 격자 + 팔 종목 × 팔 TF를 정확히 담고 있고, `settings.timeframes`(기본 격자 TF)로
+    다시 거르면 팔 종목의 3h·6h·12h·1w 같은 진짜 수집 대상이 「미추적」으로 숨는다. 계획을 못
+    읽으면 옛 동작(TF 필터만)이다.
     """
     settings = settings or get_settings()
 
@@ -475,12 +526,14 @@ def run_repair(
         funding_last = [
             (symbol, funding_store.last_funding_time(symbol)) for symbol in settings.symbols
         ]
+        scope = monitor_scope_for(settings)
         summary = repair_all(
             exchange,
             store,
             stale_multiplier=settings.health_stale_multiplier,
             funding_last_times=funding_last,
-            tracked_timeframes=settings.timeframes,
+            tracked_timeframes=settings.timeframes if scope is None else None,
+            scope=scope,
         )
     finally:
         funding_store.close()
@@ -497,7 +550,7 @@ def run_repair(
     )
     if summary.untracked_series:
         logger.info(
-            "판정 제외(수집 대상 TF 아님) %d 시리즈 — 설정: %s",
+            "판정 제외 %d 시리즈(수집 대상 TF 아님 또는 지금 수집 계획 밖) — 설정 TF: %s",
             len(summary.untracked_series),
             ", ".join(settings.timeframes),
         )

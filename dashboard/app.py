@@ -121,6 +121,7 @@ from dashboard.trade_table import (
 )
 from data.integrity import IntegrityReport
 from data.integrity import inspect as inspect_db_integrity
+from data.repair import format_plan_excluded
 from data.storage import OhlcvStore, source_timeframe
 from live.order_journal import LedgerEntry, OrderJournal
 from live.runtime_state import EventRecord, RuntimeStateStore
@@ -1286,9 +1287,16 @@ def _render_repair(view: HealthView) -> None:
         )
     if rep.has_error:
         st.error("일부 시리즈 갭 복구에 실패했습니다 — 로그/텔레그램 경고를 확인하세요.")
-    if rep.untracked_series:
+    plan_untracked = [u for u in rep.untracked_series if u.reason == "plan"]
+    tf_untracked = [u for u in rep.untracked_series if u.reason == "timeframe"]
+    if plan_untracked:
+        # 팔 목록에서 빠진 종목 등 — 매주 교체의 정상 결과라 경고가 아니라 정보다(WAN-466).
+        st.caption(
+            f"{format_plan_excluded(plan_untracked)} — 갭 복구·신선도 판정에서 제외했습니다."
+        )
+    if tf_untracked:
         # 판정에서 뺐다고 화면에서까지 지우면 WAN-156과 같은 침묵이 된다(WAN-157).
-        names = ", ".join(f"{u.symbol} {u.timeframe}" for u in rep.untracked_series)
+        names = ", ".join(f"{u.symbol} {u.timeframe}" for u in tf_untracked)
         st.warning(
             f"저장돼 있으나 수집 대상이 아님(낡습니다): {names}"
             " — 판정에서 제외했습니다. 계속 쓸 TF면 `ALPHABLOCK_TIMEFRAMES`에 넣고"

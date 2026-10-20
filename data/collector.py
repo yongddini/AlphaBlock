@@ -16,7 +16,7 @@ from common.telegram import build_telegram_client
 from common.timefmt import kst_log_format, use_kst_logging
 from config.settings import Settings, get_settings
 from data.backfill import FetchOHLCV, backfill_all
-from data.collection_plan import ArmCollection, CollectionPlan
+from data.collection_plan import ArmCollection, CollectionPlan, monitor_scope_for
 from data.exchange import create_exchange
 from data.funding import (
     FundingRateSource,
@@ -423,8 +423,12 @@ async def run_collector(
                 "갭 자동 복구 점검 시작: %s",
                 f"최근 {lookback_days}일" if lookback_ms else "전 구간",
             )
+            # 판정 범위는 감시(WAN-458)와 같은 「지금 수집 계획」이다(WAN-466) — 저장된 전부를
+            # 보면 팔 목록에서 빠진 종목이 재시작마다 「🚨 수집 정지」로 울린다. 계획을 못
+            # 읽으면 None → 옛 동작(전부 판정).
+            scope = monitor_scope_for(settings)
             summary = await asyncio.to_thread(
-                partial(repair_all, exchange, store, lookback_ms=lookback_ms)
+                partial(repair_all, exchange, store, lookback_ms=lookback_ms, scope=scope)
             )
             RepairStateStore(settings.repair_state_path).save(summary)
             logger.info(

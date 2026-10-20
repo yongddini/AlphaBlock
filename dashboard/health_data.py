@@ -7,7 +7,6 @@ SQLite(OHLCV·펀딩)와 러너 상태파일을 읽어 `dashboard.health`의 순
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict
 
@@ -25,7 +24,8 @@ from dashboard.health import (
     compute_overall,
     compute_runner_status,
 )
-from data.collection_plan import MonitorScope, monitor_scope
+from data.collection_plan import MonitorScope
+from data.collection_plan import monitor_scope_for as monitor_scope_for  # WAN-466: 재노출
 from data.funding import FundingRateStore
 from data.models import timeframe_to_ms
 from data.repair import RepairStateStore, RepairSummary
@@ -38,9 +38,6 @@ from live.runtime_state import (
     RuntimeStateStore,
 )
 from strategy.models import OrderBlockDirection
-
-if TYPE_CHECKING:
-    from config.settings import Settings
 
 
 def _now_ms() -> int:
@@ -258,21 +255,3 @@ def build_health_view(
         excluded=excluded,
         monitor_scope_applied=scope is not None,
     )
-
-
-def monitor_scope_for(settings: Settings, *, now_ms: int | None = None) -> MonitorScope | None:
-    """설정에서 **지금 수집 계획** 범위를 읽는다(WAN-458) — 감시·`status`·Health 화면 공용.
-
-    세 곳이 같은 함수를 써야 화면과 폰이 같은 대상을 본다(WAN-407 §2와 같은 이유). 계획을 못
-    읽으면 None(옛 동작) — 읽다가 예외가 나도 감시를 끄지 않고 옛 동작으로 돌아간다.
-    """
-    try:
-        return monitor_scope(
-            settings.db_path,
-            base_symbols=settings.symbols,
-            base_timeframes=settings.timeframes,
-            universe_enabled=settings.universe_enabled,
-            now_ms=now_ms if now_ms is not None else _now_ms(),
-        )
-    except Exception:  # noqa: BLE001 — 범위 계산 실패가 감시를 멈추면 안 된다(옛 동작으로)
-        return None
