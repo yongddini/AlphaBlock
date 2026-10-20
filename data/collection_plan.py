@@ -24,6 +24,7 @@ import time
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from data.backfill import FetchOHLCV, backfill_symbol, resolve_last_open_time
 from data.derived_bars import build_all_derived, source_closes_bucket
@@ -32,6 +33,9 @@ from data.models import Candle, timeframe_to_ms
 from data.storage import OhlcvStore
 from data.universe import ARM_STREAM_TIMEFRAMES, BUILT_TIMEFRAMES
 from data.universe_pool import POOL_TIMEFRAME, UniverseStore, rotation_members_at
+
+if TYPE_CHECKING:
+    from config.settings import Settings
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +121,17 @@ class MonitorScope:
     def covers(self, symbol: str, timeframe: str) -> bool:
         return (symbol, timeframe) in self.pairs or timeframe in self.any_symbol_timeframes
 
+    def collects_timeframe(self, timeframe: str) -> bool:
+        """이 TF를 **어느 종목에서든** 모으는가 (WAN-466).
+
+        False면 그 TF는 설정상 아무도 안 모으는 TF(예전에 받아 둔 5m 등 · WAN-157 「미추적」)이고,
+        True인데 `covers`가 False면 다른 종목에서는 모으지만 이 종목은 지금 계획 밖이다(팔
+        목록에서 빠진 종목 등). 두 경우는 사람이 할 일이 달라 사유를 가른다.
+        """
+        return timeframe in self.any_symbol_timeframes or any(
+            tf == timeframe for _, tf in self.pairs
+        )
+
 
 def monitor_scope(
     db_path: str | Path,
@@ -145,6 +160,33 @@ def monitor_scope(
         pairs=frozenset(plan.pairs()) | frozenset(built),
         any_symbol_timeframes=frozenset({POOL_TIMEFRAME}),
     )
+
+
+def monitor_scope_for(settings: Settings, *, now_ms: int | None = None) -> MonitorScope | None:
+    """설정에서 **지금 수집 계획** 범위를 읽는다(WAN-458 · WAN-466).
+
+    감시·`status`·Health 화면(WAN-458)과 **수집기 시작 갭 복구·`alphablock backfill --repair`
+    (WAN-466)**가 모두 이 함수를 쓴다 — 어느 하나라도 다른 목록을 보면 목록에서 빠진 종목이 그
+    경로에서 「🚨 수집 정지」로 다시 울린다(WAN-458이 감시 세 곳만 좁혀 수집기 시작 복구가 남았던
+    것이 WAN-466 사고다). 계획을 못 읽으면 None(옛 동작) — 읽다가 예외가 나도 감시를 끄지 않고
+    옛 동작으로 돌아간다.
+
+    (WAN-466 전에는 `dashboard.health_data`에 있었다 — `data`가 `dashboard`를 import할 수 없어
+    여기로 옮기고 그쪽은 재노출한다.)
+    """
+    try:
+        return monitor_scope(
+            settings.db_path,
+            base_symbols=settings.symbols,
+            base_timeframes=settings.timeframes,
+            universe_enabled=settings.universe_enabled,
+            now_ms=now_ms if now_ms is not None else int(time.time() * 1000),
+        )
+    except Exception:  # noqa: BLE001 — 범위 계산 실패가 감시를 멈추면 안 된다(옛 동작으로)
+        logger.warning(
+            "수집 계획 범위를 못 읽었습니다 — 옛 동작(저장된 시리즈 전부)으로", exc_info=True
+        )
+        return None
 
 
 def backfill_pairs(

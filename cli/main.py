@@ -28,6 +28,7 @@ from config import get_settings
 from config.settings import Settings
 from dashboard.health import HealthLevel, SeriesFreshness, runner_cycle_budget_ms
 from dashboard.health_data import HealthView, build_health_view, monitor_scope_for
+from data.repair import format_plan_excluded
 from data.tick_probe import MARKET_LABEL, SOURCE_LABEL
 
 if TYPE_CHECKING:
@@ -234,10 +235,15 @@ def format_status(view: HealthView, *, configured_symbols: Sequence[str] | None 
             # 「갭 없음」을 「전 구간 이상 없음」으로 읽지 않도록 창을 함께 밝힌다(WAN-187).
             detail += f" (최근 {rep.lookback_ms // 86_400_000}일 창)"
         lines.append(f"마지막 갭 복구: {_fmt_time(rep.ran_at_ms)} — {detail}")
-        if rep.untracked_series:
+        tf_untracked = [u for u in rep.untracked_series if u.reason == "timeframe"]
+        plan_untracked = [u for u in rep.untracked_series if u.reason == "plan"]
+        if tf_untracked:
             # 판정에서 뺐다고 화면에서까지 지우면 WAN-156과 같은 침묵이 된다(WAN-157).
-            names = ", ".join(f"{u.symbol} {u.timeframe}" for u in rep.untracked_series)
+            names = ", ".join(f"{u.symbol} {u.timeframe}" for u in tf_untracked)
             lines.append(f"  ⚠️ 저장돼 있으나 수집 대상이 아님(낡습니다): {names}")
+        if plan_untracked:
+            # 팔 목록에서 빠진 종목 등 — 매주 교체의 정상 결과다(WAN-466).
+            lines.append(f"  ℹ️ {format_plan_excluded(plan_untracked)}")
 
     return "\n".join(lines)
 
@@ -306,13 +312,18 @@ def cmd_backfill(args: argparse.Namespace, settings: Settings) -> int:
         for stale in summary.stale_series:
             print(f"  {format_stale(stale)}")
         print("  → `alphablock history --days N` 으로 밀린 구간을 먼저 채우세요.")
-    if summary.untracked_series:
+    tf_untracked = [u for u in summary.untracked_series if u.reason == "timeframe"]
+    plan_untracked = [u for u in summary.untracked_series if u.reason == "plan"]
+    if plan_untracked:
+        # 팔 목록에서 빠진 종목 등 — 정상 결과라 종료 코드를 흔들지 않는다(WAN-466).
+        print(f"ℹ️ {format_plan_excluded(plan_untracked)} — 판정에서 제외했습니다.")
+    if tf_untracked:
         # 결함이 아니라 설정과 실제의 어긋남 — 보이되 종료 코드는 흔들지 않는다(WAN-157).
         print(
-            f"ℹ️ 저장돼 있으나 수집 대상이 아님(낡습니다) {len(summary.untracked_series)}건"
+            f"ℹ️ 저장돼 있으나 수집 대상이 아님(낡습니다) {len(tf_untracked)}건"
             f" — 판정에서 제외했습니다:"
         )
-        for untracked in summary.untracked_series:
+        for untracked in tf_untracked:
             print(
                 f"  {untracked.symbol} {untracked.timeframe}:"
                 f" 최신 {_fmt_time(untracked.last_ms)} (지연 {_fmt_lag(untracked.lag_ms)})"
