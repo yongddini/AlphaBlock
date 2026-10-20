@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import dataclasses
+
 import numpy as np
 import pandas as pd
 import pytest
 
+from backtest import wan424_stoch_ob_arm as w424
+from backtest import wan436_stoch_crowd_rules as w
 from backtest import wan460_trend_direction as t
+from backtest.models import ExitReason, PositionSide
+from backtest.zone_limit_backtest import _Candidate
 from strategy import tsmom
 
 DAY = t.DAY_MS
@@ -108,3 +114,125 @@ def test_branch_b_long_is_subset_of_a_long() -> None:
     # 하드 제로 경보(WAN-367): 합성 자료가 두 추세를 다 내야 이 검산이 뜻이 있다.
     assert 0 < len(c_short) < len(a)
     assert t.select_for_branch(entries, branch="B", side="short", entry_ms=int, lookup=lk) == []
+
+
+# --- 팔 숏 거울(WAN-460 · 옵트인 — 롱 경로는 비트 그대로) -------------------------------------
+
+MIN = 60_000
+
+
+def _short_cand(entry: float = 100.0, stop: float = 105.0) -> _Candidate:
+    return _Candidate(
+        side=PositionSide.SHORT,
+        trigger_time=0,
+        entry_time=0,
+        entry_price=entry,
+        stop_price=stop,
+        exit_time=0,
+        exit_price=entry,
+        reason=ExitReason.END_OF_DATA,
+    )
+
+
+def _short_entry(highs: list[float], closes: list[float]) -> w.ArmEntry:
+    times = np.arange(len(highs), dtype=np.int64) * MIN
+    return w.ArmEntry(
+        "X",
+        "1h",
+        _short_cand(),
+        0.0,
+        times,
+        np.array(closes) - 1.0,
+        np.array(closes),
+        highs=np.array(highs),
+    )
+
+
+def test_base_cell_kwargs_default_unchanged_short_opt_in() -> None:
+    """안 켜면 dict가 예전과 같다(캐시 키 · 결과 비트 동일) — 켤 때만 `short_enabled`."""
+    assert "short_enabled" not in w424.base_cell_kwargs()
+    assert w424.base_cell_kwargs(short_enabled=True)["short_enabled"] is True
+    rest = w424.base_cell_kwargs(short_enabled=True)
+    del rest["short_enabled"]
+    assert rest == w424.base_cell_kwargs()
+
+
+def test_arm_pool_side_filter() -> None:
+    long_c = dataclasses.replace(_short_cand(), side=PositionSide.LONG, stop_price=90.0)
+    short_c = _short_cand(stop=110.0)
+    assert w424.arm_pool([long_c, short_c], min_width=0.04) == [long_c]
+    assert w424.arm_pool([long_c, short_c], min_width=0.04, side=-1) == [short_c]
+    with pytest.raises(ValueError):
+        w424.arm_pool([long_c], min_width=0.04, side=0)
+
+
+def test_short_arm_exit_mirrors_long() -> None:
+    """숏은 고가가 손절가 이상이면 손절 · `bar_low`는 그 1분 고가 · 2배 손절은 위로 두 배."""
+    e = _short_entry([101, 104, 106, 103, 99], [100, 103, 105, 101, 98])
+    c1, off1 = w.arm_exit(e, 1.0)
+    assert (c1.reason, off1, c1.exit_price) == (ExitReason.STOP_LOSS, 2, 105.0)
+    hi, _ = w.arm_exit(e, 1.0, stop_fill="bar_low")
+    assert hi.exit_price == 106.0
+    c2, off2 = w.arm_exit(e, 2.0)  # 손절 110 → 안 닿음 → 마지막 1분 종가
+    assert (c2.reason, off2, c2.exit_price, c2.stop_price) == (ExitReason.END_OF_DATA, 4, 98, 110.0)
+
+
+def test_short_entry_needs_highs() -> None:
+    e = dataclasses.replace(_short_entry([101.0], [100.0]), highs=None)
+    with pytest.raises(ValueError, match="고가"):
+        _ = e.adverse
+    long_e = w.ArmEntry(
+        "X",
+        "1h",
+        dataclasses.replace(_short_cand(), side=PositionSide.LONG, stop_price=95.0),
+        0.0,
+        np.array([0], dtype=np.int64),
+        np.array([99.0]),
+        np.array([99.5]),
+    )
+    assert long_e.adverse is long_e.lows  # 롱은 예전과 같은 배열
+
+
+def _placed(short: bool, entry: float, stop: float, stopped: bool) -> w.PlacedTrade:
+    z = np.array([], dtype=np.int64)
+    return w.PlacedTrade(
+        "X", "1h", 0, 10, -1.0 if stopped else 0.5, stopped, False, 1.0, entry, stop, z, z, z, short
+    )
+
+
+def test_fill_before_exit_short_and_mixed() -> None:
+    # 숏끼리: 앞 숏이 105에서 손절(오르는 가격) — 다음 숏 지정가 103(손절가 아래)이 먼저 닿는다.
+    prev = _placed(True, 100.0, 105.0, True)
+    assert w.fill_before_exit(prev, _placed(True, 103.0, 110.0, False))
+    assert not w.fill_before_exit(prev, _placed(True, 106.0, 110.0, False))
+    # 방향이 다르면 순서를 못 가른다 → 보수적으로 체결이 먼저(칸이 차 있다).
+    assert w.fill_before_exit(prev, _placed(False, 100.0, 95.0, False))
+    # 롱은 예전과 같다.
+    lp = _placed(False, 100.0, 95.0, True)
+    assert w.fill_before_exit(lp, _placed(False, 96.0, 90.0, False))
+    assert not w.fill_before_exit(lp, _placed(False, 94.0, 90.0, False))
+
+
+def test_mtm_path_short_marks_against_highs_and_profits_on_fall() -> None:
+    """숏 평가손은 고가 쪽 · 손절선(105)까지 오르면 −1R · 명목은 양수로 센다(상한 위반 0)."""
+    times = np.arange(0, 4 * MIN, MIN, dtype=np.int64)
+    t = w.PlacedTrade(
+        "X",
+        "1h",
+        0,
+        4 * MIN,
+        0.5,
+        False,
+        False,
+        1.0,
+        100.0,
+        105.0,
+        times,
+        np.array([101.0, 105.0, 102.0, 99.0]),  # 숏은 고가
+        np.array([100.0, 104.0, 101.0, 98.0]),
+        True,
+    )
+    p = w.mtm_path([t], risk=0.01)
+    assert p.breaches == 0
+    assert float(p.mtm_low.min()) == pytest.approx(1.0 - 0.01)
+    assert float(p.mtm_close[-1]) == pytest.approx(1.005)

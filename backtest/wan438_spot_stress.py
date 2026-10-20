@@ -311,15 +311,18 @@ def spot_payloads(
     end: str,
     jobs: int,
     timeframes: Sequence[str] = TIMEFRAMES,
+    short_enabled: bool = False,
 ) -> list[CellPayload]:
     """현물 루트에서 base 후보 — 인자는 `wan424.base_cell_kwargs` 그대로(차가운 절단만 끈다).
+
+    `short_enabled`(옵트인, WAN-460)는 숏 후보를 같이 낸다 — 안 주면 예전과 비트 동일하다.
 
     `timeframes`(옵트인, WAN-439)는 TF 목록만 바꾼다 — 안 주면 8TF 그대로라 캐시 키·결과가 같다.
 
     차가운 절단(`is`/`oos`)은 이 이슈가 안 읽는 구간이라 끈다(`full` 후보는 불변 — WAN-301).
     펀딩 대리는 걸지 않는다 — 현물에는 펀딩이 없다.
     """
-    kwargs = base_cell_kwargs()
+    kwargs = base_cell_kwargs(short_enabled=short_enabled)
     # 익절 회계가 채택 값(메이커, WAN-370)이어야 선물 쪽(WAN-424 캐시)과 같은 팔이다.
     if kwargs["take_profit_liquidity"] is not harness.ADOPTED_TAKE_PROFIT_LIQUIDITY:
         raise AssertionError("base_cell_kwargs의 take_profit_liquidity가 채택 값이 아닙니다")
