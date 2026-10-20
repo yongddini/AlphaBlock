@@ -86,6 +86,8 @@ class EngineDaily:
     ret: pd.Series
     low: pd.Series
     """보유 포지션이 그날 고가·저가 중 불리한 쪽에 닿았을 때의 수익(비용·펀딩 포함)."""
+    held: pd.Series | None = None
+    """그날 보유 배율(전날 정한 w) — WAN-463 노출 스트레스용 관측(손익에 안 쓰인다)."""
 
 
 def tsmom_returns(
@@ -93,8 +95,12 @@ def tsmom_returns(
     funding: pd.Series,
     low_r: pd.Series | None = None,
     high_r: pd.Series | None = None,
+    short_mult: float = 1.0,
 ) -> EngineDaily:
     """한 자산의 엔진 C 일 수익 — 어제 정한 배율 × 오늘 수익 − 비용 − 펀딩.
+
+    `short_mult`(WAN-463 · 옵트인)는 **숏 배율**이다 — 정본 클립 뒤의 목표 배율 w가 음수인 날만
+    w × s로 키운다(다시 클립하지 않는다 · 비용 · 펀딩은 바뀐 w로). `1.0`(기본)이면 예전과 비트 동일.
 
     `low_r`·`high_r`(그날 저가·고가 ÷ 전날 종가 − 1)을 주면 롱은 저가, 숏은 고가에서 잰 그날 최악
     수익을 함께 낸다(MDD를 일 저가 기준으로 재기 위해). 안 주면 최악 = 종가 수익(초안 판).
@@ -102,16 +108,20 @@ def tsmom_returns(
     r = returns.fillna(0.0)
     price = (1.0 + r).cumprod()
     wgt = tsmom_weights(price, returns)
+    if short_mult != 1.0:
+        if not short_mult > 0.0:
+            raise ValueError(f"short_mult는 양수여야 합니다: {short_mult} (WAN-463)")
+        wgt = wgt.where(wgt >= 0.0, wgt * short_mult)
     held = wgt.shift(1).fillna(0.0)
     cost = (wgt.diff().abs().fillna(wgt.abs()) * COST).shift(1).fillna(0.0)
     ret = held * r - cost - held * funding
     if low_r is None or high_r is None:
-        return EngineDaily(ret, ret.copy())
+        return EngineDaily(ret, ret.copy(), held)
     adverse = np.where(
         held > 0, low_r.reindex(r.index).fillna(r), high_r.reindex(r.index).fillna(r)
     )
     low = pd.Series(held.to_numpy() * adverse, index=r.index) - cost - held * funding
-    return EngineDaily(ret, np.minimum(low, ret))
+    return EngineDaily(ret, np.minimum(low, ret), held)
 
 
 def daily_returns(spot: m.Daily | None, fut: m.Daily, fut_from_ms: int) -> pd.Series:
@@ -375,7 +385,7 @@ def fit_variant(
 
 
 def engine_daily(
-    s: m.Setting, rows: Mapping[str, Sequence[tuple[int, float]]]
+    s: m.Setting, rows: Mapping[str, Sequence[tuple[int, float]]], *, short_mult: float = 1.0
 ) -> tuple[dict[str, EngineDaily], float]:
     """자산마다 엔진 C 일 수익(일 고·저 판 + `#close` 종가 판)과 일봉 수익 검산 최대 차.
 
@@ -395,8 +405,10 @@ def engine_daily(
             raise ValueError(f"{sym}: 일봉 고·저 로드가 기준 수익과 날짜가 안 맞는다")
         worst_ret_gap = max(worst_ret_gap, float((bars["ret"][common] - ref[common]).abs().max()))
         f = daily_funding(rows.get(sym, []), bars.index, fut_from)
-        engines[sym] = tsmom_returns(bars["ret"], f, bars["low_r"], bars["high_r"])
-        engines[sym + "#close"] = tsmom_returns(bars["ret"], f)
+        engines[sym] = tsmom_returns(
+            bars["ret"], f, bars["low_r"], bars["high_r"], short_mult=short_mult
+        )
+        engines[sym + "#close"] = tsmom_returns(bars["ret"], f, short_mult=short_mult)
     return engines, worst_ret_gap
 
 
