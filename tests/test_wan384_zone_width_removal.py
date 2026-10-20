@@ -281,6 +281,7 @@ _NO_PIN_NEEDED: frozenset[str] = frozenset(
         "wan452_adopted_optimism",  # WAN-449 정본 그대로 · 진입가·크기·손절폭·15m만 바꿔 잰다
         "wan451_same_minute_order",  # WAN-449 정본 그대로 · 같은 1분 규약만 바꿔 잰다
         "wan460_trend_direction",  # WAN-449 정본 그대로 · 팔의 방향(추세 부호)만 바꿔 잰다
+        "wan462_combo_levers",  # WAN-449 정본 그대로 · 엔진 C 구성 · 동시 위험 한도만 바꾼다
         # 존 병합 × 재탭 2×2(WAN-388)도 같다 — 필터를 켠 채 낸 표가 아니라 **필터 꺼진 채택
         # 북** 위에서 존 정의와 재탭 정책만 갈아끼운 표다(핀 없음이 설계, WAN-305). 검산
         # (a-1)/(a-2)가 `split_every` 팔 ≡ 인자 없는 채택 북을 못 박는다.

@@ -60,7 +60,7 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
@@ -500,8 +500,15 @@ def place(
     size_layer: Sequence[float] | None = None,
     layer_in_book: bool = True,
     same_minute: SameMinute = ADOPTED_SAME_MINUTE,
+    open_risk_cap: float | None = None,
 ) -> list[PlacedTrade]:
-    """규칙 적용 → 채택 북 배치. `same_minute`(WAN-451)가 같은 1분 순서 규약이다.
+    """규칙 적용 → 채택 북 배치.
+
+    `open_risk_cap`(WAN-462 · 옵트인 · 안 주면 비트 동일)은 동시 위험 합계 한도다 — 진입 순간 이미
+    열린 팔 포지션의 크기 배율 합(몰림 예산 × 층, 거래당 리스크 단위) + 이 진입이 한도를 넘으면 북
+    안에서 건너뛴다(`run_leverage_book` 독스트링이 정본).
+
+    `same_minute`(WAN-451)가 같은 1분 순서 규약이다.
 
     `"price_order"`(채택)면 가격 순서로 못 들어가는 진입을 빼고 다시 배치한다 — 빠지면 그 칸이 비어
     다른 후보가 들어갈 수 있으므로 새 충돌이 없을 때까지 되풀이한다. 몰림 신호 수(`counts`)는 다시
@@ -521,6 +528,7 @@ def place(
             stop_fill=stop_fill,
             size_layer=size_layer,
             layer_in_book=layer_in_book,
+            open_risk_cap=open_risk_cap,
         )
     if same_minute != SAME_MINUTE_PRICE_ORDER:
         raise ValueError(f"same_minute은 exit_first·price_order 중 하나여야 한다: {same_minute!r}")
@@ -537,6 +545,7 @@ def place(
             stop_fill=stop_fill,
             size_layer=None if size_layer is None else [size_layer[i] for i in keep],
             layer_in_book=layer_in_book,
+            open_risk_cap=open_risk_cap,
         )
         # 충돌은 손절가 체결(`"stop"`) 배치로 판정한다 — 체결 변형은 청산가만 바꾸고 시각은 같다.
         probe = (
@@ -550,6 +559,7 @@ def place(
                 stop_fill="stop",
                 size_layer=None if size_layer is None else [size_layer[i] for i in keep],
                 layer_in_book=layer_in_book,
+                open_risk_cap=open_risk_cap,
             )
         )
         bad = same_minute_conflicts(probe)
@@ -568,6 +578,7 @@ def _place(
     stop_fill: str = "stop",
     size_layer: Sequence[float] | None = None,
     layer_in_book: bool = True,
+    open_risk_cap: float | None = None,
 ) -> list[PlacedTrade]:
     """규칙 적용 → 칸마다 후보 → `wan424.place_segments`(채택 북) → `full` 거래.
 
@@ -624,8 +635,18 @@ def _place(
         )
 
     risk_scale = scale if (layer_in_book and book_scale) else None
+
+    def weight(cell: tuple[str, str], cand: _Candidate) -> float:
+        # 크기 배율(몰림 예산 × 층) = 그 진입이 거래당 리스크 몇 단위인가(WAN-462).
+        return meta[(cell[0], cell[1], int(cand.entry_time), float(cand.entry_price))][1]
+
+    cap_kw: dict[str, Any] = (
+        {} if open_risk_cap is None else {"open_weight_cap": open_risk_cap, "cap_weight": weight}
+    )
     seg = next(
-        s for s in place_segments(pl, risk_scale=risk_scale) if s.segment == harness.SEGMENT_FULL
+        s
+        for s in place_segments(pl, risk_scale=risk_scale, **cap_kw)
+        if s.segment == harness.SEGMENT_FULL
     )
     out: list[PlacedTrade] = []
     for trade, placed in seg.trades_with_placements():

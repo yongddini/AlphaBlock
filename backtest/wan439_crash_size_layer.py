@@ -266,8 +266,12 @@ def place_arm(
     *,
     in_book: bool,
     same_minute: w.SameMinute = w.ADOPTED_SAME_MINUTE,
+    open_risk_cap: float | None = None,
 ) -> list[w.PlacedTrade]:
-    """`same_minute`(WAN-451)은 같은 1분 순서 규약 — 기본은 채택(가격 순서) · 옛 리포트는 고정."""
+    """`same_minute`(WAN-451)은 같은 1분 순서 규약 — 기본은 채택(가격 순서) · 옛 리포트는 고정.
+
+    `open_risk_cap`(WAN-462 · 옵트인)은 동시 위험 합계 한도(`w.place` 독스트링) — 안 주면 비트 동일.
+    """
     layer = None if arm == ARM_A else mk.layer(arm)
     return w.place(
         mk.payloads,
@@ -278,6 +282,7 @@ def place_arm(
         size_layer=layer,
         layer_in_book=in_book,
         same_minute=same_minute,
+        **({} if open_risk_cap is None else {"open_risk_cap": open_risk_cap}),
     )
 
 

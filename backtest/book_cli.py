@@ -289,6 +289,8 @@ def iter_book_segments(
     circuit_breaker_scope: CircuitBreakerScope = "both",
     blocked_from_by_day: Mapping[str, int] | None = None,
     risk_scale: Callable[[CellKey, _Candidate], float] | None = None,
+    open_weight_cap: float | None = None,
+    cap_weight: Callable[[CellKey, _Candidate], float] | None = None,
 ) -> list[BookSegment]:
     """`build_book_rows`의 속 — 집계 행뿐 아니라 그 행을 만든 `BookOutcome`까지 돌려준다.
 
@@ -298,7 +300,8 @@ def iter_book_segments(
     (WAN-410 §1-1, 옵트인)는 **하루 손실 서킷브레이커**를 그대로 흘려보낸다 — 안 주면
     예전과 **비트 단위로 같다**. 스위치의 뜻·경계는 `run_leverage_book` 독스트링이 정본이다
     (여기서 다시 정의하지 않는다 — 두 벌로 적으면 갈라진다). `risk_scale`(WAN-439, 옵트인)도
-    같다 — 후보별 거래당 리스크 배율을 그대로 흘려보낸다.
+    같다 — 후보별 거래당 리스크 배율을 그대로 흘려보낸다. `open_weight_cap`·`cap_weight`
+    (WAN-462, 옵트인)는 동시 위험 합계 한도를 그대로 흘려보낸다.
     """
     unknown = [s for s in segments if s not in SUPPORTED_SEGMENTS]
     if unknown:
@@ -330,6 +333,8 @@ def iter_book_segments(
             circuit_breaker_scope=circuit_breaker_scope,
             blocked_from_by_day=blocked_from_by_day,
             risk_scale=risk_scale,
+            open_weight_cap=open_weight_cap,
+            cap_weight=cap_weight,
         )
         result = build_result_from_trades(
             outcome.trades, outcome.effective_config, BOOK_ANNUALIZATION_TF
