@@ -280,9 +280,19 @@ def aggregate_3h(root: Path, symbols: Sequence[str]) -> int:
 
 
 def root_payloads(
-    root: Path, symbols: Sequence[str], tfs: Sequence[str], start: str, end: str, jobs: int
+    root: Path,
+    symbols: Sequence[str],
+    tfs: Sequence[str],
+    start: str,
+    end: str,
+    jobs: int,
+    *,
+    short_enabled: bool = False,
 ) -> list[CellPayload]:
-    """별도 루트에서 base 후보 — 인자는 `wan424.base_cell_kwargs` 그대로(차가운 절단만 끈다)."""
+    """별도 루트에서 base 후보 — 인자는 `wan424.base_cell_kwargs` 그대로(차가운 절단만 끈다).
+
+    `short_enabled`(옵트인, WAN-460)는 숏 후보를 같이 낸다 — 안 주면 예전과 비트 동일하다.
+    """
     with m438.working_root(root):
         payloads = run_cells(
             [store_symbol(s) for s in symbols],
@@ -292,7 +302,7 @@ def root_payloads(
             jobs=jobs,
             cold_segments=False,
             payload_cache=PayloadCache(root / "payloads"),
-            **base_cell_kwargs(),
+            **base_cell_kwargs(short_enabled=short_enabled),
         )
     blank = {harness.SEGMENT_IS: (), harness.SEGMENT_OOS: ()}
     return [dataclasses.replace(p, funding={**blank, **p.funding}) for p in payloads]
@@ -308,19 +318,27 @@ def market_from(
     entry_to_ms: int,
     btc_store: OhlcvStore,
     btc_from_ms: int,
+    side: int = 1,
 ) -> c.Market:
     """여러 루트의 payload를 한 시장으로 — 팔 후보는 루트마다 그 루트 1분봉으로, 폭락 판정은 그
-    시장의 BTC 하나로(두 벌 금지)."""
+    시장의 BTC 하나로(두 벌 금지).
+
+    `side`(옵트인, WAN-460) = −1이면 숏 거울 시장이다 — 후보는 숏 · %K는 `w.K_SHORT_THRESHOLD`
+    초과 · **BTC 특징(4h · 24h 수익)은 부호를 뒤집어** 싣는다(몰림 게이트 · 폭락 층 · 체결 α 층이
+    코드 변경 없이 거울이 된다). 안 주면 롱이라 예전과 비트 동일하다.
+    """
     payloads: list[CellPayload] = []
     entries: list[w.ArmEntry] = []
     for pls, store in parts:
         es = w.build_entries(
-            pls, store=store, start_ms=start_ms, end_ms=end_ms, btc_store=btc_store
+            pls, store=store, start_ms=start_ms, end_ms=end_ms, btc_store=btc_store, side=side
         )
         entries += [e for e in es if entry_from_ms <= int(e.cand.entry_time) < entry_to_ms]
         payloads += pls
     counts = w.signal_counts([int(e.cand.entry_time) for e in entries])
     b24, vr = c.btc_features(btc_store, entries, btc_from_ms, end_ms)
+    if side < 0:
+        b24 = [-x for x in b24]
     return c.Market(name, payloads, entries, counts, b24, vr)
 
 
@@ -383,10 +401,17 @@ class Markets:
     old_spot_syms: set[str]
     rule_store: set[str]
     notes: list[str]
+    spot_short: c.Market | None = None
+    """숏 거울 시장(WAN-460 · `build_markets(short_enabled=True)`일 때만)."""
+    fut_short: c.Market | None = None
 
 
-def build_markets(jobs: int) -> Markets:
-    """규칙 유니버스 전체의 현물 · 선물 시장(팔 후보 + BTC 특징)을 만든다."""
+def build_markets(jobs: int, *, short_enabled: bool = False) -> Markets:
+    """규칙 유니버스 전체의 현물 · 선물 시장(팔 후보 + BTC 특징)을 만든다.
+
+    `short_enabled`(옵트인, WAN-460)는 숏 후보까지 낸 payload에서 롱 시장(정본과 같아야 한다 —
+    WAN-460 검산 (a))과 숏 거울 시장을 함께 만든다. 안 주면 예전과 비트 동일하다.
+    """
     t0 = time.monotonic()
     notes: list[str] = []
     rule = rule_symbols()
@@ -395,9 +420,21 @@ def build_markets(jobs: int) -> Markets:
     new_fut = sorted(s for s in rule if store_symbol(s) not in main31)
     tfs = (*c.FUT_TIMEFRAMES, TF15)
     main_pl = build_base_payloads(
-        jobs=jobs, payload_dir=w.DEFAULT_PAYLOAD_DIR, symbols=SYMBOLS_31, timeframes=tfs
+        jobs=jobs,
+        payload_dir=w.DEFAULT_PAYLOAD_DIR,
+        symbols=SYMBOLS_31,
+        timeframes=tfs,
+        short_enabled=short_enabled,
     )
-    new_pl = root_payloads(FUT_ROOT, new_fut, tfs, harness.DEFAULT_START, harness.DEFAULT_END, jobs)
+    new_pl = root_payloads(
+        FUT_ROOT,
+        new_fut,
+        tfs,
+        harness.DEFAULT_START,
+        harness.DEFAULT_END,
+        jobs,
+        short_enabled=short_enabled,
+    )
     # 앞/뒤 경계는 칸의 **마지막 봉** 기준(WAN-166)이라 상폐 종목(LEND 2020-11 등)은 경계가 앞당겨져
     # 그 거래가 「6년 뒤」로 잘못 분류된다 — 새 종목 칸의 경계를 같은 TF의 BTC 칸 경계로 맞춘다
     # (달력 한 점). 경계는 거래를 앞/뒤로 나누는 데만 쓰이고 후보·배치는 안 바뀐다.
@@ -408,16 +445,22 @@ def build_markets(jobs: int) -> Markets:
         f"({time.monotonic() - t0:.0f}초)"
     )
     main_store = OhlcvStore(harness.DB_PATH)
-    fut = market_from(
-        "선물",
-        [(main_pl, main_store), (new_pl, OhlcvStore(sk.root_db_path(FUT_ROOT)))],
-        start_ms=ms(harness.DEFAULT_START),
-        end_ms=ms(harness.DEFAULT_END),
-        entry_from_ms=0,
-        entry_to_ms=1 << 62,
-        btc_store=main_store,
-        btc_from_ms=ms(harness.DEFAULT_START) - (c.VOL_BASE_MIN + 60) * c.MINUTE_MS,
-    )
+
+    def fut_market(side: int) -> c.Market:
+        return market_from(
+            "선물" if side > 0 else "선물 숏",
+            [(main_pl, main_store), (new_pl, OhlcvStore(sk.root_db_path(FUT_ROOT)))],
+            start_ms=ms(harness.DEFAULT_START),
+            end_ms=ms(harness.DEFAULT_END),
+            entry_from_ms=0,
+            entry_to_ms=1 << 62,
+            btc_store=main_store,
+            btc_from_ms=ms(harness.DEFAULT_START) - (c.VOL_BASE_MIN + 60) * c.MINUTE_MS,
+            side=side,
+        )
+
+    fut = fut_market(1)
+    fut_short = fut_market(-1) if short_enabled else None
     stress = m438.DEFAULT_ROOTS / "stress"
     old_spot_pl = m438.spot_payloads(
         stress,
@@ -425,6 +468,7 @@ def build_markets(jobs: int) -> Markets:
         end=m438.STRESS_END,
         jobs=jobs,
         timeframes=(*m438.TIMEFRAMES, TF15),
+        short_enabled=short_enabled,
     )
     old_spot_syms = {p.symbol for p in old_spot_pl}
     spot_new = sorted(
@@ -433,19 +477,34 @@ def build_markets(jobs: int) -> Markets:
         if store_symbol(s) not in old_spot_syms and store_symbol(s) in _root_symbols(SPOT_ROOT)
     )
     new_spot_pl = root_payloads(
-        SPOT_ROOT, spot_new, (*m438.TIMEFRAMES, TF15), m438.STRESS_START, m438.STRESS_END, jobs
+        SPOT_ROOT,
+        spot_new,
+        (*m438.TIMEFRAMES, TF15),
+        m438.STRESS_START,
+        m438.STRESS_END,
+        jobs,
+        short_enabled=short_enabled,
     )
     spot_stress_store = OhlcvStore(sk.root_db_path(stress))
-    spot = market_from(
-        "현물",
-        [(old_spot_pl, spot_stress_store), (new_spot_pl, OhlcvStore(sk.root_db_path(SPOT_ROOT)))],
-        start_ms=ms(m438.STRESS_START),
-        end_ms=ms(m438.STRESS_END),
-        entry_from_ms=ms(c.WINDOW_START),
-        entry_to_ms=ms(m438.STRESS_END),
-        btc_store=spot_stress_store,
-        btc_from_ms=ms(c.STRESS_BTC_FROM),
-    )
+
+    def spot_market(side: int) -> c.Market:
+        return market_from(
+            "현물" if side > 0 else "현물 숏",
+            [
+                (old_spot_pl, spot_stress_store),
+                (new_spot_pl, OhlcvStore(sk.root_db_path(SPOT_ROOT))),
+            ],
+            start_ms=ms(m438.STRESS_START),
+            end_ms=ms(m438.STRESS_END),
+            entry_from_ms=ms(c.WINDOW_START),
+            entry_to_ms=ms(m438.STRESS_END),
+            btc_store=spot_stress_store,
+            btc_from_ms=ms(c.STRESS_BTC_FROM),
+            side=side,
+        )
+
+    spot = spot_market(1)
+    spot_short = spot_market(-1) if short_enabled else None
     notes.append(
         f"현물 후보 — 기존 루트 {len(old_spot_pl)}칸 · 새 종목 {len(spot_new)}개 "
         f"{len(new_spot_pl)}칸"
@@ -455,7 +514,7 @@ def build_markets(jobs: int) -> Markets:
     if bounds[-1] - bounds[0] > 7 * 86_400_000:
         raise AssertionError(f"앞/뒤 경계가 일주일 넘게 벌어졌다: {bounds[0]}~{bounds[-1]}")
     boundary_ms = bounds[len(bounds) // 2]
-    return Markets(spot, fut, boundary_ms, old_spot_syms, rule_store, notes)
+    return Markets(spot, fut, boundary_ms, old_spot_syms, rule_store, notes, spot_short, fut_short)
 
 
 def run(jobs: int) -> tuple[list[c.Row], list[str]]:

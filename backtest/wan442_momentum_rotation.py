@@ -270,7 +270,11 @@ def apply_rotation(mk: c.Market, rot: Rotation, *, force_close: bool) -> tuple[c
                     if n < 1:
                         raise AssertionError("강제 청산 시각이 진입 분보다 앞선다")
                     e = dataclasses.replace(
-                        e, times=e.times[:n], lows=e.lows[:n], closes=e.closes[:n]
+                        e,
+                        times=e.times[:n],
+                        lows=e.lows[:n],
+                        closes=e.closes[:n],
+                        highs=None if e.highs is None else e.highs[:n],
                     )
                     cut += 1
                     break

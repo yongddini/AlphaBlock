@@ -235,12 +235,20 @@ def time_exit(
     )
 
 
-def arm_pool(candidates: Iterable[_Candidate], *, min_width: float) -> list[_Candidate]:
-    """팔이 쓰는 base 후보 — 롱 · 첫 탭 · 재진입 아님 · 손절폭 ≥ `min_width`."""
+def arm_pool(
+    candidates: Iterable[_Candidate], *, min_width: float, side: int = 1
+) -> list[_Candidate]:
+    """팔이 쓰는 base 후보 — 롱 · 첫 탭 · 재진입 아님 · 손절폭 ≥ `min_width`.
+
+    `side`(옵트인, WAN-460)는 방향 부호다 — 안 주면 롱(+1)이라 예전과 비트 동일하다. −1이면
+    숏 거울(같은 조건 · 숏 후보만)이다.
+    """
+    if side not in (1, -1):
+        raise ValueError(f"side는 +1(롱) 또는 −1(숏): {side!r}")
     return [
         c
         for c in candidates
-        if c.side.sign > 0
+        if c.side.sign == side
         and not c.is_reentry
         and c.tap_index == 0
         and c.entry_price > 0
@@ -319,11 +327,13 @@ def build_base_payloads(
     symbols: Sequence[str] = SYMBOLS,
     timeframes: Sequence[str] = TIMEFRAMES,
     fill_lens: str = "pen_5bp",
+    short_enabled: bool = False,
 ) -> list[CellPayload]:
     """base 후보 — 롱 온리 · 첫 탭 · 재진입 없음 · `pen_5bp` × 같은 분 익절 금지 · 익절 메이커.
 
     `fill_lens`(옵트인, WAN-436)는 체결 렌즈만 바꾼다 — 안 주면 `pen_5bp` 그대로라 캐시 키·결과가
-    예전과 비트 동일하다.
+    예전과 비트 동일하다. `short_enabled`(옵트인, WAN-460)는 숏 후보를 같이 낸다(롱 후보는 같다 —
+    `wan169` 규약).
     """
     payloads, _donor = apply_funding_proxy(
         run_cells(
@@ -333,20 +343,20 @@ def build_base_payloads(
             end=harness.DEFAULT_END,
             jobs=jobs,
             payload_cache=PayloadCache(payload_dir),
-            **base_cell_kwargs(fill_lens),
+            **base_cell_kwargs(fill_lens, short_enabled=short_enabled),
         )
     )
     return payloads
 
 
-def base_cell_kwargs(fill_lens: str = "pen_5bp") -> dict[str, Any]:
+def base_cell_kwargs(fill_lens: str = "pen_5bp", *, short_enabled: bool = False) -> dict[str, Any]:
     """base 후보를 만드는 `run_cells` 인자 — 🚨 이 팔의 후보 규약이 사는 **유일한 자리**다.
 
     창(`start`/`end`)·병렬·캐시는 호출부 몫이고 나머지(롱 · 첫 탭 · 재진입 없음 · 체결 렌즈 ·
     같은 분 익절 금지 · 익절 메이커)는 여기서만 읽는다 — 다른 창으로 같은 팔을 도는 측정(WAN-438
     현물 루트)이 인자를 베껴 두 벌로 갈라지지 않게 한다(WAN-95/112/123).
     """
-    return {
+    out: dict[str, Any] = {
         "take_profit_liquidity": harness.ADOPTED_TAKE_PROFIT_LIQUIDITY,
         "retap_mode": "once",
         "reentry": False,
@@ -354,6 +364,10 @@ def base_cell_kwargs(fill_lens: str = "pen_5bp") -> dict[str, Any]:
         "fill": harness.fill_preset(fill_lens),
         "no_same_step_tp": True,
     }
+    # 숏(WAN-460, 옵트인)은 켤 때만 키를 얹는다 — 안 주면 dict가 예전과 같다.
+    if short_enabled:
+        out["short_enabled"] = True
+    return out
 
 
 def build_arm_cells(

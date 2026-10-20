@@ -104,6 +104,8 @@ WAN434_COMBO = "ts4·하한4%·%K<25"
 HOLD = 4
 """시간 청산 봉 수(ts4) — WAN-423/424 표시 조합."""
 K_THRESHOLD = 25.0
+K_SHORT_THRESHOLD = 75.0
+"""숏 거울(WAN-460) — 직전 확정봉 %K > 75(롱 %K < 25의 거울)."""
 """직전 확정봉 %K 문턱 — WAN-424 표시 조합."""
 FLOOR = ADOPTED_FLOOR
 """손절폭 하한 4% — WAN-432 채택 하한."""
@@ -238,6 +240,21 @@ class ArmEntry:
     """체결 분부터 ts4 시간 청산 분까지(포함)의 1분봉 `open_time`."""
     lows: np.ndarray
     closes: np.ndarray
+    highs: np.ndarray | None = None
+    """숏 거울(WAN-460)만 싣는다 — 숏의 손절·평가손은 고가 쪽이다. 롱은 `None`(예전과 같다)."""
+
+    @property
+    def is_short(self) -> bool:
+        return self.cand.side.sign < 0
+
+    @property
+    def adverse(self) -> np.ndarray:
+        """불리한 쪽 극값 경로 — 롱 저가 · 숏 고가."""
+        if not self.is_short:
+            return self.lows
+        if self.highs is None:
+            raise ValueError("숏 후보인데 고가 경로가 없다(WAN-460)")
+        return self.highs
 
     @property
     def key(self) -> tuple[str, str, int, float]:
@@ -271,10 +288,20 @@ def arm_exit(
     )
     if stop_fill not in STOP_FILLS:
         raise ValueError(f"stop_fill은 {STOP_FILLS} 중 하나여야 한다: {stop_fill!r}")
-    hit = np.flatnonzero(entry.lows <= stop)
+    # 숏 거울(WAN-460): 손절은 고가가 손절가 이상 · `bar_low`는 그 1분 **고가** 체결(최악 쪽).
+    # `e − k(e − sp)`는 숏에도 같은 식이다(sp > e라 손절선이 위로 k배 멀어진다).
+    if entry.is_short:
+        hit = np.flatnonzero(entry.adverse >= stop)
+    else:
+        hit = np.flatnonzero(entry.lows <= stop)
     if len(hit):
         off = int(hit[0])
-        px = stop if stop_fill == "stop" else min(stop, float(entry.lows[off]))
+        if stop_fill == "stop":
+            px = stop
+        elif entry.is_short:
+            px = max(stop, float(entry.adverse[off]))
+        else:
+            px = min(stop, float(entry.lows[off]))
         reason = ExitReason.STOP_LOSS
     else:
         off = len(entry.closes) - 1
@@ -311,6 +338,7 @@ def build_entries(
     end_ms: int | None = None,
     k_threshold: float = K_THRESHOLD,
     btc_store: OhlcvStore | None = None,
+    side: int = 1,
 ) -> list[ArmEntry]:
     """팔 후보(롱 · 첫 탭 · 재진입 아님 · 손절폭 ≥ 4% · 직전 확정봉 %K < 25)와 그 보유 구간
     1분봉.
@@ -318,6 +346,11 @@ def build_entries(
     `start_ms`·`end_ms`·`k_threshold`(옵트인, WAN-438)는 1분봉 창과 %K 문턱이다 — 안 주면 채택 창 ·
     %K<25 그대로라 예전과 비트 동일하다(현물 루트 · 문턱 민감도 팔이 쓴다).
     """
+    # `side`(옵트인, WAN-460) = −1이면 숏 거울 — 숏 후보 · 직전 확정봉 %K > `K_SHORT_THRESHOLD`
+    # (`k_threshold`는 안 읽는다) · 고가 경로를 싣고 · BTC 4h 수익은 **부호를 뒤집어** 싣는다
+    # (몰림 게이트 「BTC 4h ≤ −2.59%」가 「≥ +2.59%」로 거울이 된다). 안 주면 예전과 비트 동일.
+    if side not in (1, -1):
+        raise ValueError(f"side는 +1(롱) 또는 −1(숏): {side!r}")
     store = store or OhlcvStore(harness.DB_PATH)
     start = parse_date_ms(harness.DEFAULT_START) if start_ms is None else start_ms
     end = parse_date_ms(harness.DEFAULT_END) if end_ms is None else end_ms
@@ -335,26 +368,32 @@ def build_entries(
         ot = frame["open_time"].to_numpy(np.int64)
         lo = frame["low"].to_numpy(float)
         cl = frame["close"].to_numpy(float)
+        hi = frame["high"].to_numpy(float) if side < 0 else None
         for p in cells:
             tf_ms = timeframe_to_ms(p.timeframe)
             k_times, k_values = stoch_series(store, p.symbol, p.timeframe)
-            for c in arm_pool(p.candidates.get(harness.SEGMENT_FULL, ()), min_width=FLOOR):
+            pool = arm_pool(p.candidates.get(harness.SEGMENT_FULL, ()), min_width=FLOOR, side=side)
+            for c in pool:
                 kv = k_before(k_times, k_values, int(c.entry_time), tf_ms)
-                if kv is None or kv >= k_threshold:
+                if kv is None:
+                    continue
+                if (kv <= K_SHORT_THRESHOLD) if side < 0 else (kv >= k_threshold):
                     continue
                 j = int(np.searchsorted(ot, c.entry_time))
                 if j >= len(ot) or ot[j] != c.entry_time:
                     continue
                 je = j + hold_end(ot[j:], tf_ms)
+                b4 = btc_return(btc_t, btc_c, int(c.entry_time))
                 out.append(
                     ArmEntry(
                         symbol=p.symbol,
                         timeframe=p.timeframe,
                         cand=c,
-                        btc_4h=btc_return(btc_t, btc_c, int(c.entry_time)),
+                        btc_4h=-b4 if side < 0 else b4,
                         times=ot[j:je].copy(),
                         lows=lo[j:je].copy(),
                         closes=cl[j:je].copy(),
+                        highs=None if hi is None else hi[j:je].copy(),
                     )
                 )
         if progress:
@@ -400,6 +439,8 @@ class PlacedTrade:
     path_lows: np.ndarray
     path_closes: np.ndarray
     """체결 분부터 청산 **직전** 분까지 — 평가손 경로."""
+    short: bool = False
+    """숏 거울(WAN-460). 숏이면 `path_lows`에 **고가**(불리한 쪽 극값)가 들어 있다."""
 
 
 #: 같은 칸 · 같은 1분에 「앞 포지션 청산」과 「다음 체결」이 겹칠 때의 순서
@@ -418,9 +459,18 @@ _MAX_SAME_MINUTE_ROUNDS = 50
 
 
 def fill_before_exit(prev: PlacedTrade, nxt: PlacedTrade) -> bool:
-    """같은 칸 · `nxt.entry_time == prev.exit_time`에서 체결이 청산보다 먼저인가(롱 · 가격 순서)."""
+    """같은 칸 · `nxt.entry_time == prev.exit_time`에서 체결이 청산보다 먼저인가(롱 · 가격 순서).
+
+    숏 거울(WAN-460): 숏끼리는 부호를 뒤집는다(체결가가 손절가 **아래**면 오르는 가격이 지정가에
+    먼저 닿는다). 방향이 다른 둘은 1분봉으로 순서를 못 가르므로 **보수적으로 체결이 먼저**(= 칸이
+    차 있어 못 들어간다)로 본다.
+    """
     if not prev.stopped:
         return True
+    if prev.short != nxt.short:
+        return True
+    if prev.short:
+        return nxt.entry_price < prev.stop_price
     return nxt.entry_price > prev.stop_price
 
 
@@ -596,8 +646,9 @@ def _place(
                 entry_price=float(trade.entry_price),
                 stop_price=float(placed.stop_price),
                 path_times=entry.times[:off],
-                path_lows=entry.lows[:off],
+                path_lows=entry.adverse[:off],
                 path_closes=entry.closes[:off],
+                short=entry.is_short,
             )
         )
     return out
@@ -675,7 +726,8 @@ def mtm_path(
             open_notional -= notional[i]
             continue
         weight[i] = eq * t.size
-        notional[i] = risk * weight[i] * t.entry_price / (t.entry_price - t.stop_price)
+        # 숏(WAN-460)은 분모가 음수라 절댓값 — 롱은 그대로(비트 동일).
+        notional[i] = abs(risk * weight[i] * t.entry_price / (t.entry_price - t.stop_price))
         open_notional += notional[i]
         if open_notional > CAP_MULTIPLE * eq:
             breaches += 1

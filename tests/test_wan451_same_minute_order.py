@@ -62,7 +62,12 @@ def test_conflicts_only_same_cell_same_minute() -> None:
 # ------------------------------------------------------------------ 배선 가드
 
 #: 기본값(채택 규칙)을 쓰는 것이 맞는 모듈 — 채택 정본과 이 결정의 근거 표.
-_ADOPTED_USERS = {"wan449_tsmom_second_engine.py", "wan451_same_minute_order.py"}
+# wan460(WAN-460)은 정본(채택 규칙)에서 팔의 방향만 바꿔 잰다 — 채택 규칙 사용자다.
+_ADOPTED_USERS = {
+    "wan449_tsmom_second_engine.py",
+    "wan451_same_minute_order.py",
+    "wan460_trend_direction.py",
+}
 _PLACERS = {"place", "place_arm", "arm_trades"}
 _DEFINERS = {"wan436_stoch_crowd_rules.py", "wan439_crash_size_layer.py"}
 
