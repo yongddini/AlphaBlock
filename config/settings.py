@@ -300,8 +300,15 @@ class Settings(BaseSettings):
     #     바이낸스 kline은 미확정 봉 갱신을 수초 간격으로 밀어 주므로 90s 무수신은 확실한
     #     half-open이다 — 정상 봉 간격보다 넉넉해 오탐하지 않는다.
     collector_stream_idle_timeout_seconds: float = Field(default=90.0, gt=0)
+    # (1′) 「저장 없음」 여유(초, WAN-461): 연결마다 「가장 짧은 TF + 이 값」 동안 메시지는 오는데
+    #     확정봉을 하나도 저장하지 못하면 그 연결이 멎은 것으로 보고 전 연결을 다시 붙인다.
+    #     1분봉이 섞인 연결이면 60+120 = 180초. 유휴 감시(메시지가 안 옴)와 짝을 이룬다.
+    collector_stream_progress_grace_seconds: float = Field(default=120.0, gt=0)
     # 재접속 백오프 상한(초). 지수 백오프로 재시작 폭주를 막되 상한을 둬 복구를 포기하지 않는다.
     collector_reconnect_max_backoff_seconds: float = Field(default=60.0, gt=0)
+    # 이만큼(초) 버틴 접속은 정상으로 보고 연속 재접속 카운터(백오프·「재접속 #N」)를
+    # 리셋한다(WAN-461).
+    collector_reconnect_healthy_after_seconds: float = Field(default=120.0, gt=0)
     # (2) 프로세스 레벨 워치독. 하트비트가 이 시간(초) 넘게 안 갱신되면 이벤트 루프가 통째로
     #     멎은 것으로 보고 프로세스를 종료해 systemd/launchd 재시작을 유도한다(hang→exit).
     #     스트림 유휴 타임아웃보다 넉넉해 in-process 재접속이 먼저 시도되게 한다.

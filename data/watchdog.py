@@ -55,11 +55,71 @@ class StreamStalled(RuntimeError):
 
     `ConnectionClosed`는 소켓이 **닫혔다는 신호**지만, 이쪽은 소켓이 열린 채
     **조용히 멎은** 경우다 — WAN-173이 진단한 2026-07-22 22:07 stall의 모양이다.
+
+    연결이 여러 개면(WAN-451 ③) 어느 연결이 멎었는지를 `connection`/`connections`에 싣는다
+    (`tag_connection`, WAN-461) — 복구 알림이 「연결 2/2」를 한 줄로 밝힌다.
     """
 
-    def __init__(self, idle_timeout_seconds: float) -> None:
+    def __init__(
+        self,
+        idle_timeout_seconds: float,
+        *,
+        connection: int | None = None,
+        connections: int | None = None,
+    ) -> None:
         self.idle_timeout_seconds = idle_timeout_seconds
-        super().__init__(f"웹소켓 유휴 {idle_timeout_seconds:g}s 초과 무수신 — half-open 소켓 의심")
+        self.connection = connection
+        self.connections = connections
+        super().__init__(self._message())
+
+    @property
+    def where(self) -> str:
+        """「연결 N/M: 」 접두(연결 정보가 없으면 빈 문자열)."""
+        if self.connection is None or self.connections is None:
+            return ""
+        return f"연결 {self.connection}/{self.connections}: "
+
+    def _message(self) -> str:
+        return (
+            f"{self.where}웹소켓 유휴 {self.idle_timeout_seconds:g}s 초과 무수신 "
+            "— half-open 소켓 의심"
+        )
+
+    def tag_connection(self, connection: int, connections: int) -> None:
+        """멎은 연결의 번호(1부터)를 싣는다 — 메시지도 그에 맞춰 다시 만든다."""
+        self.connection = connection
+        self.connections = connections
+        self.args = (self._message(),)
+
+
+class StreamNoProgress(StreamStalled):
+    """메시지는 계속 오는데 **확정봉이 하나도 저장되지 않는다**(WAN-461).
+
+    `guard_idle`은 「메시지가 오나」만 본다. 2026-10-20 05:20 KST에 연결 2/2의 11종목이
+    136분 동안 1분봉을 한 건도 남기지 못했는데 끊김·재접속·에러 기록이 전혀 없었다 — 이벤트
+    루프는 살아 있었고(연결 1/2는 계속 저장) 유휴 감시는 90초 무수신이면 반드시 걸리므로, 그
+    연결로 **무언가는 계속 들어왔다**고 읽는 것이 정합적이다. 그래서 「저장되나」를 따로 본다.
+    ⚠️ 원인 확정은 아니다(서버 로그 대조 전) — 다음에 걸리면 `last_message`가 그 답을 남긴다.
+    """
+
+    def __init__(
+        self,
+        progress_timeout_seconds: float,
+        *,
+        messages: int,
+        last_message: str | None = None,
+        connection: int | None = None,
+        connections: int | None = None,
+    ) -> None:
+        self.messages = messages
+        self.last_message = last_message
+        super().__init__(progress_timeout_seconds, connection=connection, connections=connections)
+
+    def _message(self) -> str:
+        return (
+            f"{self.where}{self.idle_timeout_seconds:g}s 동안 메시지 {self.messages}건 · "
+            "확정봉 저장 0건 — 스트림 데이터 정지 의심"
+        )
 
 
 async def guard_idle(
@@ -191,7 +251,8 @@ class RecoveryEvent:
     """재접속 한 번의 요약(로그·텔레그램 메시지에 담긴다)."""
 
     attempt: int
-    """이번이 몇 번째 재접속 시도인지(연속 실패 카운터, 성공 수신 시 1로 리셋)."""
+    """이번이 몇 번째 **연속** 재접속 시도인지(1부터). 직전 접속이 `healthy_after_seconds` 넘게
+    버텼으면 1로 돌아간다(WAN-461 — 옛 구현은 이 설명과 달리 프로세스 수명 내내 누적했다)."""
     reason: str
     """직전 스트림이 끝난 이유(사람이 읽는 한 줄)."""
     delay_seconds: float
@@ -218,11 +279,18 @@ def compute_backoff(
 def _describe_end(error: BaseException | None) -> str:
     if error is None:
         return "스트림 정상 종료(재접속)"
+    if isinstance(error, StreamNoProgress):
+        return f"데이터 정지(stall) — {error}"
     if isinstance(error, StreamStalled):
         return f"조용한 stall — {error}"
     if isinstance(error, ConnectionClosed):
         return f"연결 종료 — {error}"
     return f"{type(error).__name__} — {error}"
+
+
+#: 이만큼(초) 버틴 접속은 「정상이었다」로 보고 연속 재접속 카운터를 리셋한다(WAN-461).
+#: 백오프 상한(60s)보다 길게 잡아 「붙자마자 끊김」이 반복될 때는 백오프가 계속 자라게 한다.
+DEFAULT_HEALTHY_AFTER_SECONDS = 120.0
 
 
 async def run_with_recovery(
@@ -232,7 +300,9 @@ async def run_with_recovery(
     max_reconnects: int | None = None,
     base_backoff_seconds: float = 1.0,
     max_backoff_seconds: float = 60.0,
+    healthy_after_seconds: float = DEFAULT_HEALTHY_AFTER_SECONDS,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    clock: Callable[[], float] = time.monotonic,
 ) -> None:
     """스트림을 돌리고 stall/절단/정상종료 시 백오프 후 무한 재접속한다.
 
@@ -240,33 +310,44 @@ async def run_with_recovery(
     조용히 끝남 → 재접속, `RECOVERABLE_ERRORS`/`StreamStalled` = 실패 → 재접속). 복구
     불가 예외(프로그래밍 오류 등)는 그대로 올려 조용히 삼키지 않는다.
 
-    `max_reconnects`가 주어지면 그만큼 재접속한 뒤 반환한다(테스트용 · 기본 None = 무한).
-    `sleep`을 주입해 테스트에서 실제 대기 없이 백오프를 소비한다.
+    백오프와 `RecoveryEvent.attempt`는 **연속** 재접속 횟수로 센다 — 직전 `stream_once`가
+    `healthy_after_seconds` 넘게 돌았으면(= 정상 접속이었다) 1부터 다시 센다(WAN-461). 옛
+    구현은 프로세스가 사는 내내 누적해, 며칠 정상으로 돈 뒤 한 번 멎어도 「재접속 #5 · 16s」처럼
+    이미 긴 백오프로 시작했다.
+
+    `max_reconnects`가 주어지면 그만큼 재접속한 뒤 반환한다(테스트용 · 기본 None = 무한 ·
+    리셋과 무관한 **누적** 횟수). `sleep`·`clock`을 주입해 테스트에서 실제 대기 없이 돈다.
     """
     reconnects = 0
+    streak = 0
     while True:
         error: BaseException | None = None
+        started = clock()
         try:
             await stream_once()
         except StreamStalled as exc:
             error = exc
         except RECOVERABLE_ERRORS as exc:
             error = exc
+        lasted = clock() - started
 
         if max_reconnects is not None and reconnects >= max_reconnects:
             return
 
         reconnects += 1
+        if lasted >= healthy_after_seconds:
+            streak = 0
+        streak += 1
         delay = compute_backoff(
-            reconnects,
+            streak,
             base_seconds=base_backoff_seconds,
             max_seconds=max_backoff_seconds,
         )
         reason = _describe_end(error)
         if error is None:
-            logger.warning("스트림이 조용히 끝남 — %.1fs 후 재접속(#%d)", delay, reconnects)
+            logger.warning("스트림이 조용히 끝남 — %.1fs 후 재접속(#%d)", delay, streak)
         else:
-            logger.warning("스트림 복구: %s — %.1fs 후 재접속(#%d)", reason, delay, reconnects)
+            logger.warning("스트림 복구: %s — %.1fs 후 재접속(#%d)", reason, delay, streak)
         if on_recover is not None:
-            on_recover(RecoveryEvent(attempt=reconnects, reason=reason, delay_seconds=delay))
+            on_recover(RecoveryEvent(attempt=streak, reason=reason, delay_seconds=delay))
         await sleep(delay)
