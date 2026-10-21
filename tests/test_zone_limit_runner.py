@@ -113,6 +113,7 @@ def _make_rig(
     zone: OrderBlock | None = None,
     closes: list[float] | None = None,
     now_ms: object = None,
+    notifier: ZoneLimitNotifier | None = None,
 ) -> dict[str, object]:
     _install_stub_detector(monkeypatch, zone=zone)
     db = tmp_path / "ohlcv.db"
@@ -150,6 +151,7 @@ def _make_rig(
         poll_interval_seconds=1.0,
         runtime_state=RuntimeStateStore(state_path),
         arm=ArmParams(),
+        notifier=notifier,
         now_ms=now_ms if now_ms is not None else (lambda: 999_999),  # type: ignore[arg-type]
     )
     return {

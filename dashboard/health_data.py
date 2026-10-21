@@ -234,6 +234,9 @@ def build_health_view(
         last_cycle_ms=runtime.last_cycle_completed_at,
         cycle_duration_ms=runtime.last_cycle_duration_ms,
         cycle_budget_ms=cycle_budget_ms,
+        notification_mode=runtime.notification_mode,
+        notification_failures=runtime.notification_failures,
+        last_notification_failure_ms=runtime.last_notification_failure_at,
     )
     overall = compute_overall(freshness, funding, runner, collector)
 

@@ -247,7 +247,8 @@ def test_fill_sends_when_configured() -> None:
 
 def test_dry_run_logs_when_telegram_missing(caplog: pytest.LogCaptureFixture) -> None:
     notif = ZoneLimitNotifier(None, now_ms=lambda: 14 * _H)
-    with caplog.at_level(logging.INFO, logger="live.zone_limit_notifier"):
+    # 드라이런 로그는 발송 추적기(WAN-351 `live.notification_delivery`)가 남긴다.
+    with caplog.at_level(logging.INFO, logger="live.notification_delivery"):
         notif.handle_fill(_fill(), _entry_report())
     assert any("드라이런" in r.message for r in caplog.records)
 

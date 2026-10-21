@@ -168,6 +168,33 @@ def evaluate_alerts(view: HealthView) -> list[Alert]:
                 )
             )
 
+    # 러너는 살아 있는데 그 러너의 알림만 안 나가는 상태(WAN-351) — 하트비트로는 안 보인다.
+    # 🚨 「한동안 발송이 없다」로는 경고하지 않는다: 팔은 진입이 드물어 조용한 날이 정상이고
+    # (상승장마다 울리는 거짓 경보 = WAN-321 부류), 그 판정은 「보낼 게 없었다」와 「못
+    # 보냈다」를 못 가른다. 여기서 보는 것은 조용한 날에 **원리적으로 안 생기는** 두 신호뿐이다
+    # — 「보내려다 실패했다」(실패 수 > 0)와 「보낼 길이 없다」(드라이런).
+    if view.runner.ran and (
+        view.runner.notification_failures > 0 or view.runner.notification_mode == "dry_run"
+    ):
+        if view.runner.notification_failures > 0:
+            body = (
+                f"마지막 성공 이후 전송 실패 *{view.runner.notification_failures}회* — 마지막 실패"
+                f" {_fmt_at(view.runner.last_notification_failure_ms)}. 러너 로그의"
+                " 「텔레그램 전송 실패」를 확인하세요."
+            )
+        else:
+            body = (
+                "러너가 텔레그램 미설정(드라이런)으로 돌고 있어 매매 알림이 로그로만 갑니다."
+                " 설정을 고쳤다면 러너를 재시작하세요."
+            )
+        alerts.append(
+            Alert(
+                key=RUNNER_DELIVERY_ALERT_KEY,
+                title="러너 알림 경로 막힘",
+                detail=f"⚠️ *러너 알림 경로 막힘*\n{body}",
+            )
+        )
+
     if view.collector.ran and view.collector.level is HealthLevel.STALE:
         lag = _fmt_lag(view.collector.lag_ms)
         alerts.append(
@@ -183,6 +210,10 @@ def evaluate_alerts(view: HealthView) -> list[Alert]:
         )
 
     return alerts
+
+
+#: 러너 알림 경로 막힘 경고의 키(WAN-351) — 실패가 다음 성공으로 해소되면 복구 알림이 간다.
+RUNNER_DELIVERY_ALERT_KEY = "runner_delivery"
 
 
 def data_alert_key(symbol: str, timeframe: str) -> str:

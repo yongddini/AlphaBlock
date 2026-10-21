@@ -16,6 +16,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from live.notification_delivery import DeliveryStatus, NotificationMode
 from live.notifier import SignalEvent
 from live.paper import PaperPosition
 from strategy.confluence import SignalKind
@@ -144,8 +145,16 @@ class RunnerRuntimeState(BaseModel):
     last_cycle_completed_at: int | None = None
     #: 그 완주에 걸린 시간(ms, WAN-313).
     last_cycle_duration_ms: int | None = None
-    #: 마지막으로 새 신호 알림이 나온 벽시계 시각(ms). 한 번도 없으면 None.
+    #: 마지막으로 알림 **전송에 성공한** 벽시계 시각(ms). 한 번도 없으면 None.
+    #: WAN-351 전에는 채택 러너가 이 칸을 한 번도 채우지 않았다(`new_events=[]` 고정).
     last_notification_at: int | None = None
+    #: 알림 경로의 모드(WAN-351) — `telegram`·`dry_run`(로그로만)·`disabled`(일부러 끔).
+    #: 이 칸을 남기지 않는 옛 러너·호출부는 None.
+    notification_mode: NotificationMode | None = None
+    #: 마지막으로 알림 전송에 실패한 시각(ms, WAN-351).
+    last_notification_failure_at: int | None = None
+    #: 마지막 성공 이후 실패한 전송 수(WAN-351) — 0이 아니면 「보낼 게 있었는데 못 보냈다」.
+    notification_failures: int = 0
     #: 현재 오픈 중인 페이퍼 포지션.
     open_positions: list[PositionSnapshot] = Field(default_factory=list)
     #: 현재 대기 중인 존-지정가 주문(WAN-45, 존-지정가 러너 전용 — A안 러너는 빈 목록).
@@ -183,6 +192,18 @@ class RuntimeStateStore:
         self._state = self._read()
         return self._state
 
+    def delivery_status(self) -> DeliveryStatus | None:
+        """상태 파일에 남은 알림 발송 기록(WAN-351) — 재시작 때 추적기가 이어받는다."""
+        st = self._state
+        if st.notification_mode is None:
+            return None
+        return DeliveryStatus(
+            mode=st.notification_mode,
+            last_success_ms=st.last_notification_at,
+            last_failure_ms=st.last_notification_failure_at,
+            failures_since_success=st.notification_failures,
+        )
+
     def touch(self, now_ms: int) -> None:
         """하트비트(`updated_at`)만 갱신·저장한다(WAN-313 — 시리즈 단위 생존 신호).
 
@@ -202,6 +223,7 @@ class RuntimeStateStore:
         cycle_completed_ms: int | None = None,
         cycle_duration_ms: int | None = None,
         data_gap_skips: list[DataGapSkip] | None = None,
+        delivery: DeliveryStatus | None = None,
     ) -> RunnerRuntimeState:
         """이번 폴링 결과를 반영해 상태를 갱신·저장하고 반환한다.
 
@@ -213,15 +235,41 @@ class RuntimeStateStore:
           주지 않으면 이전 값을 보존한다(A안 러너 등 완주 개념이 없는 호출부 호환).
         - `data_gap_skips`(WAN-314)를 주면 결측 건너뜀 기록을 통째로 교체하고, 주지
           않으면 이전 값을 보존한다(결측 추적이 없는 호출부가 기록을 지우지 않도록).
+        - `delivery`(WAN-351)를 주면 알림 발송 결과로 「마지막 알림」(= 마지막 **성공** 시각)
+          ·모드·실패 수를 갱신한다. 주지 않으면 이 칸들을 보존하고, 옛 규약대로
+          `new_events`가 있을 때만 `last_notification_at`을 올린다.
         """
         events = list(self._state.recent_events)
         events.extend(EventRecord.from_event(e) for e in new_events)
         if len(events) > self._max_events:
             events = events[-self._max_events :]
 
+        prev = self._state
+        if delivery is not None:
+            last_notification_at = (
+                delivery.last_success_ms
+                if delivery.last_success_ms is not None
+                else prev.last_notification_at
+            )
+            notification_mode: NotificationMode | None = delivery.mode
+            last_failure = (
+                delivery.last_failure_ms
+                if delivery.last_failure_ms is not None
+                else prev.last_notification_failure_at
+            )
+            failures = delivery.failures_since_success
+        else:
+            last_notification_at = now_ms if new_events else prev.last_notification_at
+            notification_mode = prev.notification_mode
+            last_failure = prev.last_notification_failure_at
+            failures = prev.notification_failures
+
         self._state = RunnerRuntimeState(
             updated_at=now_ms,
-            last_notification_at=(now_ms if new_events else self._state.last_notification_at),
+            last_notification_at=last_notification_at,
+            notification_mode=notification_mode,
+            last_notification_failure_at=last_failure,
+            notification_failures=failures,
             open_positions=[PositionSnapshot.from_position(p) for p in open_positions],
             pending_orders=list(pending_orders) if pending_orders is not None else [],
             recent_events=events,

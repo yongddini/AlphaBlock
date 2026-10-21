@@ -54,6 +54,7 @@ from live.message_format import (
     fmt_usd,
     short_symbol,
 )
+from live.notification_delivery import NotificationDelivery
 from live.order_journal import REASON_PHRASES, FunnelCounts
 from strategy.models import OrderBlockDirection, SignalExitReason
 
@@ -316,8 +317,12 @@ class ZoneLimitNotifier:
         funnel_provider: Callable[[int, int], FunnelCounts] | None = None,
         quiet_reject_codes: frozenset[str] = frozenset(),
         now_ms: Callable[[], int] = lambda: int(time.time() * 1000),
+        delivery: NotificationDelivery | None = None,
     ) -> None:
         self._telegram = telegram
+        #: 발송 결과 추적기(WAN-351) — 러너가 엔진 C와 **같은 추적기**를 넘겨 「마지막 알림」이
+        #: 모든 발송 경로를 센다. 안 넘기면 이 알림기 전용 추적기를 만든다(드라이런 규약 동일).
+        self._delivery = delivery if delivery is not None else NotificationDelivery(telegram)
         #: 건별 거부 알림을 보내지 않을 사유 코드(WAN-451 ⑩ — 팔 규칙은 일일 요약에만 모은다).
         self._quiet_reject_codes = quiet_reject_codes
         self._events = frozenset(events) if events is not None else frozenset(DEFAULT_EVENTS)
@@ -491,8 +496,11 @@ class ZoneLimitNotifier:
             _logger.exception("일일 요약 깔때기 조회 실패: %s", day.isoformat())
             return None
 
+    @property
+    def delivery(self) -> NotificationDelivery:
+        """이 알림기가 보내는 경로의 발송 결과 추적기(WAN-351)."""
+        return self._delivery
+
     def _send(self, message: str) -> bool:
-        if self._telegram is None:
-            _logger.info("[드라이런] 텔레그램 미설정 — 매매 알림:\n%s", message)
-            return False
-        return self._telegram.send_message(message)
+        # 드라이런(텔레그램 미설정)·실패는 False — 「마지막 알림」은 성공만 센다(WAN-351).
+        return self._delivery.send(message)
