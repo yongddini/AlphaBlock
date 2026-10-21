@@ -75,6 +75,8 @@ from dashboard.health import (
     RunnerStatus,
     SeriesFreshness,
     compute_runner_status,
+    last_notification_text,
+    notification_warnings,
     runner_cycle_budget_ms,
 )
 from dashboard.health_data import (
@@ -351,6 +353,9 @@ def _cached_runner_status(
         last_cycle_ms=runtime.last_cycle_completed_at,
         cycle_duration_ms=runtime.last_cycle_duration_ms,
         cycle_budget_ms=cycle_budget_ms,
+        notification_mode=runtime.notification_mode,
+        notification_failures=runtime.notification_failures,
+        last_notification_failure_ms=runtime.last_notification_failure_at,
     )
 
 
@@ -1180,7 +1185,7 @@ def _render_runner(runner: RunnerStatus) -> None:
     cols = st.columns(4)
     cols[0].metric("상태", _LEVEL_BADGE[runner.level])
     cols[1].metric("마지막 폴링", _fmt_lag(runner.lag_ms) + " 전")
-    cols[2].metric("마지막 알림", _fmt_time(runner.last_notification_ms))
+    cols[2].metric("마지막 알림", last_notification_text(runner))
     # 한 바퀴 완주 소요(WAN-313) — 하트비트와 별개의 「따라가고 있는가」 지표.
     cols[3].metric(
         "한 바퀴 소요",
@@ -1194,6 +1199,9 @@ def _render_runner(runner: RunnerStatus) -> None:
             )
         else:
             st.error("러너 하트비트가 끊겼습니다 — 프로세스가 멈췄을 수 있습니다.")
+    # 알림 경로가 막혔다는 신호(WAN-351) — 로그에만 있으면 아무도 안 본다.
+    for warning in notification_warnings(runner):
+        st.warning(warning)
 
 
 #: DB 무결성 점검 캐시 TTL(WAN-289 완료 기준 2). `PRAGMA quick_check`는 3.5GB DB에서

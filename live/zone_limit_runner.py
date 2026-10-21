@@ -105,6 +105,7 @@ from live.engine_state import EngineStateStore, SeriesStateSnapshot
 from live.executor import PaperExecutor, TradeReport
 from live.limit_engine import EngineEvent, ZoneLimitLiveEngine
 from live.limit_orders import LimitFill, LimitOrderStatus, expiry_deadline_ms
+from live.notification_delivery import NotificationDelivery
 from live.order_journal import SKIP_REASON_ZONE_WIDTH, OrderJournal
 from live.paper import PaperPosition
 from live.runtime_state import DataGapSkip, PendingOrderSnapshot, RuntimeStateStore
@@ -161,6 +162,7 @@ class ZoneLimitPaperRunner:
         signals: ArmSignalStore | None = None,
         bootstrap_days: int = 0,
         reuse_loads: bool = True,
+        delivery: NotificationDelivery | None = None,
         sleep: Callable[[float], None] = time.sleep,
         now_ms: Callable[[], int] = lambda: int(time.time() * 1000),
     ) -> None:
@@ -201,6 +203,13 @@ class ZoneLimitPaperRunner:
         #: 탐지해 몇 년 된 존까지 세운다(그 뒤는 `lookback_bars` 창 + 엔진 기억). 0이면 예전 그대로.
         self._bootstrap_days = bootstrap_days
         self._notifier = notifier
+        #: 알림 발송 결과 추적기(WAN-351) — 상태 파일의 「마지막 알림」(마지막 **성공** 발송)·
+        #: 모드(드라이런·꺼짐)·실패 수의 출처. 안 주면 알림기의 추적기를 쓴다.
+        self._delivery = (
+            delivery
+            if delivery is not None
+            else getattr(notifier, "delivery", None)  # 테스트용 스파이 알림기는 추적기가 없다.
+        )
         self._sleep = sleep
         self._now_ms = now_ms
         #: 시리즈별 마지막으로 반영한 확정 상위TF 봉 시각.
@@ -518,6 +527,8 @@ class ZoneLimitPaperRunner:
                 data_gap_skips=sorted(
                     self._gap_skips.values(), key=lambda s: (s.symbol, s.timeframe)
                 ),
+                # 알림 발송 결과(WAN-351) — 「마지막 알림」은 성공한 발송만 센다.
+                delivery=self._delivery.status() if self._delivery is not None else None,
             )
         return emitted
 
@@ -1363,10 +1374,23 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
         # 매매 이벤트 알림(WAN-189, 페이퍼 한정). 텔레그램 미설정이면 build_telegram_client가
         # None을 주고 알림기는 드라이런(로그만)으로 돈다 — `notifier`의 기존 관행 그대로다.
         # 엔진보다 **먼저** 만든다 — 엔진의 스킵 훅이 알림기를 참조하기 때문이다(WAN-221).
+        # 발송 경로는 하나다(WAN-351) — 팔 알림기와 엔진 C가 **같은 클라이언트·같은 추적기**로
+        # 보내 「마지막 알림」이 어느 길의 성공이든 센다(엔진 C의 매일 09시 리밸런싱·지갑 요약은
+        # 조용한 날에도 나가므로, 그 성공이 「경로가 살아 있다」의 신호가 된다).
+        runtime_state = RuntimeStateStore(settings.live_runtime_state_path)
+        telegram = build_telegram_client(settings)
+        delivery = NotificationDelivery(telegram, enabled=settings.paper_trade_notify_enabled)
+        delivery.restore(runtime_state.delivery_status())
+        if delivery.mode == "dry_run":
+            _logger.warning(
+                "텔레그램 미설정 — 매매 알림이 로그로만 갑니다(드라이런). `alphablock status`에도"
+                " 이 사실이 표시됩니다(WAN-351)."
+            )
         notifier: ZoneLimitNotifier | None = None
         if settings.paper_trade_notify_enabled:
             notifier = ZoneLimitNotifier(
-                build_telegram_client(settings),
+                telegram,
+                delivery=delivery,
                 events=frozenset(settings.paper_trade_notify_events),
                 # 일일 요약의 체결률·사유 카운트는 DB 장부 창 조회로 낸다(재계산 아님, WAN-221).
                 funnel_provider=lambda s, e: journal.funnel_counts(start_ms=s, end_ms=e),
@@ -1398,14 +1422,13 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
 
         tsmom_rebalancer: TsmomRebalancer | None = None
         if tsmom_ledger is not None:
-            telegram = build_telegram_client(settings)
             tsmom_rebalancer = TsmomRebalancer(
                 store=store,
                 ledger=tsmom_ledger,
                 wallet=executor,
                 funding_store=funding_store,
                 notify=(
-                    (lambda text: telegram.send_message(text, parse_mode=None))
+                    (lambda text: delivery.send(text, parse_mode=None))
                     if telegram is not None and settings.paper_trade_notify_enabled
                     else None
                 ),
@@ -1432,8 +1455,9 @@ def run_zone_limit_runner(settings: Settings, *, once: bool = False) -> None:
             series=series,
             lookback_bars=settings.live_signal_lookback_bars,
             poll_interval_seconds=settings.live_poll_interval_seconds,
-            runtime_state=RuntimeStateStore(settings.live_runtime_state_path),
+            runtime_state=runtime_state,
             notifier=notifier,
+            delivery=delivery,
             engine_state=engine_state,
             catchup_max_ms=int(settings.live_catchup_max_hours * 3_600_000),
             tsmom=tsmom_rebalancer,

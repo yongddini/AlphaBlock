@@ -23,6 +23,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict
 
+from common.timefmt import format_kst_zoned
 from data.models import timeframe_to_ms
 
 #: 무기한 선물 펀딩 정산 주기(기본 8시간, ms).
@@ -95,6 +96,14 @@ class RunnerStatus(BaseModel):
     """마지막 완주 이후 경과(WAN-313). 판정에 안 쓰였으면 None."""
     cycle_stale: bool = False
     """살아는 있는데 한 바퀴 완주가 예산(최단 TF 주기)을 넘겼는지(WAN-313)."""
+    notification_mode: str | None = None
+    """알림 경로 모드(WAN-351): `telegram`·`dry_run`(로그로만)·`disabled`. 러너가 안 남기면 None."""
+    notification_lag_ms: int | None = None
+    """마지막 **성공** 발송 이후 경과(WAN-351). 성공 기록이 없으면 None."""
+    notification_failures: int = 0
+    """마지막 성공 이후 실패한 전송 수(WAN-351) — 0이 아니면 「보낼 게 있었는데 못 보냈다」."""
+    last_notification_failure_ms: int | None = None
+    """마지막 전송 실패 시각(WAN-351)."""
 
 
 class CollectorStatus(BaseModel):
@@ -240,8 +249,14 @@ def compute_runner_status(
     last_cycle_ms: int | None = None,
     cycle_duration_ms: int | None = None,
     cycle_budget_ms: int | None = None,
+    notification_mode: str | None = None,
+    notification_failures: int = 0,
+    last_notification_failure_ms: int | None = None,
 ) -> RunnerStatus:
     """러너 하트비트 + 완주 지표로 생존 상태를 판정한다(WAN-313).
+
+    알림 발송 지표(WAN-351: 모드·마지막 성공·실패 수)는 **표시용**이고 생존 판정(`level`)에
+    안 섞는다 — 러너는 살아 있는데 알림만 막힌 상태를 「러너 멈춤」으로 읽으면 안 된다.
 
     * **하트비트**: 없으면 미실행(UNKNOWN). 폴링 간격의 `stale_multiplier`배를 넘겨
       갱신이 없으면 멈춤(STALE). 하트비트는 시리즈 단위로 갱신되므로(WAN-313) 이
@@ -276,7 +291,68 @@ def compute_runner_status(
         cycle_duration_ms=cycle_duration_ms,
         cycle_lag_ms=cycle_lag,
         cycle_stale=cycle_stale,
+        notification_mode=notification_mode,
+        notification_lag_ms=(
+            None if last_notification_ms is None else now_ms - last_notification_ms
+        ),
+        notification_failures=notification_failures,
+        last_notification_failure_ms=last_notification_failure_ms,
     )
+
+
+def _fmt_ago(lag_ms: int) -> str:
+    """경과 시간을 사람이 읽는 말로(`3분 전`·`15.0시간 전`·`2.1일 전`)."""
+    if lag_ms < 60_000:
+        return "방금"
+    minutes = lag_ms / 60_000
+    if minutes < 60:
+        return f"{minutes:.0f}분 전"
+    hours = minutes / 60
+    if hours < 48:
+        return f"{hours:.1f}시간 전"
+    return f"{hours / 24:.1f}일 전"
+
+
+def last_notification_text(runner: RunnerStatus) -> str:
+    """「마지막 알림」 칸의 글(WAN-351) — 마지막 **성공** 발송 시각 + 몇 시간 전인지.
+
+    `—` 하나로는 「알림이 없었다」·「이 칸을 안 채우는 러너」·「드라이런」을 못 가른다(그게
+    WAN-351의 사고다). 그래서 칸이 비면 **왜 비었는지**를 말한다.
+    """
+    if runner.last_notification_ms is not None and runner.notification_lag_ms is not None:
+        return (
+            f"{format_kst_zoned(runner.last_notification_ms)} "
+            f"({_fmt_ago(runner.notification_lag_ms)})"
+        )
+    if runner.notification_mode == "dry_run":
+        return "없음 (드라이런 — 로그로만)"
+    if runner.notification_mode == "disabled":
+        return "없음 (알림 꺼짐)"
+    if runner.notification_mode == "telegram":
+        return "아직 성공 발송 없음"
+    return "기록 없음 (러너가 이 칸을 남기지 않음)"
+
+
+def notification_warnings(runner: RunnerStatus) -> list[str]:
+    """알림 경로가 막혔다는 신호들(WAN-351) — 화면(`status`·Health 탭)에 그대로 찍는다.
+
+    조용한 날(보낼 게 없던 날)에는 아무것도 안 나온다 — 판정은 「보낼 게 있었는데 못
+    보냈다」(실패)와 「애초에 보낼 길이 없다」(드라이런)뿐이다. 「한동안 발송이 없다」는
+    경고하지 않는다(상승장마다 울리는 거짓 경보 — WAN-321 부류).
+    """
+    out: list[str] = []
+    if runner.notification_mode == "dry_run":
+        out.append(
+            "텔레그램 미설정 — 매매 알림이 로그로만 갑니다(드라이런). "
+            "`.env`에 ALPHABLOCK_TELEGRAM_BOT_TOKEN·CHAT_ID를 넣고 러너를 재시작하세요."
+        )
+    if runner.notification_failures > 0:
+        when = format_kst_zoned(runner.last_notification_failure_ms)
+        out.append(
+            f"알림 전송 실패 {runner.notification_failures}회(마지막 성공 이후) — "
+            f"마지막 실패 {when}. 러너 로그의 「텔레그램 전송 실패」를 확인하세요."
+        )
+    return out
 
 
 def compute_collector_status(

@@ -26,7 +26,13 @@ from common import timefmt
 from common.timefmt import KST
 from config import get_settings
 from config.settings import Settings
-from dashboard.health import HealthLevel, SeriesFreshness, runner_cycle_budget_ms
+from dashboard.health import (
+    HealthLevel,
+    SeriesFreshness,
+    last_notification_text,
+    notification_warnings,
+    runner_cycle_budget_ms,
+)
 from dashboard.health_data import HealthView, build_health_view, monitor_scope_for
 from data.repair import format_plan_excluded
 from data.tick_probe import MARKET_LABEL, SOURCE_LABEL
@@ -195,8 +201,10 @@ def format_status(view: HealthView, *, configured_symbols: Sequence[str] | None 
     else:
         lines.append(
             f"  {_LEVEL_TEXT[view.runner.level]} 마지막 폴링 {_fmt_lag(view.runner.lag_ms)} 전"
-            f"  ·  마지막 알림 {_fmt_time(view.runner.last_notification_ms)}"
+            f"  ·  마지막 알림 {last_notification_text(view.runner)}"
         )
+        # 알림 경로가 막혔다는 신호(WAN-351) — 드라이런·전송 실패. 조용한 날에는 안 찍힌다.
+        lines.extend(f"  ⚠️ {w}" for w in notification_warnings(view.runner))
 
     lines.append("데이터 신선도:")
     if view.freshness:
