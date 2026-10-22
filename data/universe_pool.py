@@ -64,8 +64,22 @@ CREATE TABLE IF NOT EXISTS universe_ranks (
 )
 """
 
+_POOL_SCHEMA = """
+CREATE TABLE IF NOT EXISTS universe_pool_members (
+    symbol      TEXT    PRIMARY KEY,
+    captured_ms INTEGER NOT NULL
+)
+"""
+"""마지막으로 확인한 후보 풀(지금 거래 중인 USDT 무기한) — **최신 한 벌만** 남는다(WAN-471).
+
+감시(`data.collection_plan.monitor_scope`)가 후보 풀 일봉(1d)을 「DB에 1d가 있는 모든 종목」이
+아니라 「지금 풀에 있는 종목」으로 좁히려고 읽는다. 상폐된 종목은 풀 수집이 이미 빼지만
+(`status == "TRADING"`) 그 사실이 어디에도 안 남아 감시가 영원히 「수집 지연」으로 울렸다
+(2026-10-22 EPIC).
+"""
+
 #: `paper-reset.sh`가 지우지 않는 테이블이다 — 목록은 장부가 아니라 시장 기록이다.
-UNIVERSE_TABLES: tuple[str, ...] = ("universe_rotations", "universe_ranks")
+UNIVERSE_TABLES: tuple[str, ...] = ("universe_rotations", "universe_ranks", "universe_pool_members")
 
 
 # ---------------------------------------------------------------------------
@@ -133,6 +147,7 @@ class UniverseStore:
         configure_connection(self._conn)
         self._conn.execute(_ROTATION_SCHEMA)
         self._conn.execute(_RANK_SCHEMA)
+        self._conn.execute(_POOL_SCHEMA)
         self._conn.commit()
 
     def __enter__(self) -> UniverseStore:
@@ -175,6 +190,30 @@ class UniverseStore:
         except sqlite3.IntegrityError:
             return False
         return True
+
+    def save_pool(self, symbols: Iterable[str], *, captured_ms: int) -> bool:
+        """지금의 후보 풀을 **통째로 갈아끼운다**(WAN-471) — 빈 풀은 저장하지 않고 False.
+
+        빈 풀은 거래소 응답이 비었다는 뜻이지 「모든 종목이 상폐됐다」가 아니다 — 저장하면 감시가
+        풀 일봉 전부를 판정에서 빼 버린다(감시가 꺼지는 쪽으로 실패하면 안 된다, WAN-458). 그때는
+        마지막으로 확인한 풀을 그대로 둔다.
+        """
+        members = sorted(set(symbols))
+        if not members:
+            return False
+        with self._lock, self._conn:
+            self._conn.execute("DELETE FROM universe_pool_members")
+            self._conn.executemany(
+                "INSERT INTO universe_pool_members (symbol, captured_ms) VALUES (?, ?)",
+                [(s, captured_ms) for s in members],
+            )
+        return True
+
+    def pool(self) -> frozenset[str] | None:
+        """마지막으로 저장한 후보 풀 — 한 번도 저장하지 않았으면 None."""
+        with self._lock:
+            rows = self._conn.execute("SELECT symbol FROM universe_pool_members").fetchall()
+        return frozenset(str(r[0]) for r in rows) if rows else None
 
     def rebalance_times(self) -> list[int]:
         with self._lock:
@@ -257,6 +296,33 @@ def rotation_members_at(db_path: str | Path, t_ms: int) -> frozenset[str] | None
             (int(head[0]), int(head[1])),
         ).fetchall()
         return frozenset(str(r[0]) for r in rows)
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+
+
+def pool_members_latest(db_path: str | Path) -> frozenset[str] | None:
+    """마지막으로 저장한 후보 풀을 **읽기 전용**으로 읽는다(WAN-471).
+
+    `rotation_members_at`과 같은 규약이다 — DB·표가 없거나 비었거나 읽기가 실패하면 None이고,
+    호출부는 「풀을 못 읽었다」로 받아 옛 동작(저장된 1d 전부 감시)으로 돌아간다.
+    """
+    path = str(db_path)
+    if path == ":memory:" or not Path(path).exists():
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return None
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='universe_pool_members'"
+        ).fetchone()
+        if row is None:
+            return None
+        rows = conn.execute("SELECT symbol FROM universe_pool_members").fetchall()
+        return frozenset(str(r[0]) for r in rows) if rows else None
     except sqlite3.Error:
         return None
     finally:
@@ -401,6 +467,9 @@ def run_universe_once(
     """풀 갱신 → 이번 주 목록이 없으면 계산·저장(동기 · 수집기 스레드에서 돈다)."""
     markets = exchange.load_markets(True)
     pool = pool_symbols(markets)
+    # 감시가 「지금 풀에 있는 종목」의 1d만 보도록 그때의 풀을 남긴다(WAN-471 · 상폐 종목 제외).
+    if not universe.save_pool(pool, captured_ms=now_ms()):
+        logger.warning("후보 풀이 비었습니다 — 마지막으로 저장한 풀 목록을 그대로 둡니다")
     refresh = refresh_pool_daily(
         exchange,
         store,

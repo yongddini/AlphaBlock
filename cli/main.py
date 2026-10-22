@@ -135,6 +135,9 @@ def _funding_lines(view: HealthView) -> list[str]:
 def _excluded_lines(view: HealthView) -> list[str]:
     """저장돼 있으나 지금 수집 계획에 없는 시리즈(WAN-458) — 판정에서 뺀 정보 표시.
 
+    사유를 둘로 접는다(WAN-471): 팔 목록에서 빠진 종목(「목록 제외」)과 후보 풀에서 빠진 종목
+    (「상장 폐지·정산」 — 다시는 봉이 안 온다).
+
     종목마다 한 줄로 묶는다(팔 목록에서 빠진 종목은 TF가 9개라 한 줄씩 찍으면 주마다 쌓인다).
     판정에서 뺐다고 화면에서까지 지우면 WAN-156과 같은 침묵이 된다(WAN-157).
     """
@@ -142,18 +145,36 @@ def _excluded_lines(view: HealthView) -> list[str]:
         return ["  ℹ️ 수집 계획을 못 읽어 저장된 시리즈 전부를 판정합니다(옛 동작)."]
     if not view.excluded:
         return []
-    by_symbol: dict[str, list[SeriesFreshness]] = {}
-    for f in view.excluded:
-        by_symbol.setdefault(f.symbol, []).append(f)
-    lines = [
-        f"  ℹ️ 수집 대상 아님(목록 제외) {len(by_symbol)}종목 · {len(view.excluded)}시리즈"
-        " — 판정·경보에서 뺐습니다(낡습니다):"
+    groups = [
+        (
+            "수집 대상 아님(목록 제외)",
+            [f for f in view.excluded if f.symbol not in view.left_pool_symbols],
+        ),
+        (
+            "상장 폐지·정산(풀에서 빠짐)",
+            [f for f in view.excluded if f.symbol in view.left_pool_symbols],
+        ),
     ]
-    for symbol in sorted(by_symbol):
-        rows = by_symbol[symbol]
-        tfs = ",".join(f.timeframe for f in sorted(rows, key=lambda r: r.expected_interval_ms or 0))
-        last = max((f.last_open_time for f in rows if f.last_open_time is not None), default=None)
-        lines.append(f"    {symbol} [{tfs}]  최신 {_fmt_time(last)}")
+    lines: list[str] = []
+    for label, items in groups:
+        if not items:
+            continue
+        by_symbol: dict[str, list[SeriesFreshness]] = {}
+        for f in items:
+            by_symbol.setdefault(f.symbol, []).append(f)
+        lines.append(
+            f"  ℹ️ {label} {len(by_symbol)}종목 · {len(items)}시리즈"
+            " — 판정·경보에서 뺐습니다(낡습니다):"
+        )
+        for symbol in sorted(by_symbol):
+            rows = by_symbol[symbol]
+            tfs = ",".join(
+                f.timeframe for f in sorted(rows, key=lambda r: r.expected_interval_ms or 0)
+            )
+            last = max(
+                (f.last_open_time for f in rows if f.last_open_time is not None), default=None
+            )
+            lines.append(f"    {symbol} [{tfs}]  최신 {_fmt_time(last)}")
     return lines
 
 

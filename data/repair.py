@@ -114,7 +114,8 @@ class UntrackedSeries(BaseModel):
 
     * `"timeframe"` — 설정의 수집 대상 TF가 아니다(WAN-157 · 옛 상태 파일은 전부 이 값).
     * `"plan"` — 그 TF를 다른 종목에서는 모으는데 이 종목은 지금 수집 계획 밖이다(팔 목록에서
-      빠진 종목 등 · WAN-458과 같은 범위). 고칠 일이 아니라 매주 교체의 정상 결과다.
+      빠진 종목 등 · WAN-458과 같은 범위). 고칠 일이 아니라 매주 교체의 정상 결과다. 후보 풀에서
+      빠진 상장 폐지 종목의 1d도 여기다(WAN-471).
     """
 
 
@@ -125,8 +126,9 @@ def format_plan_excluded(items: Sequence[UntrackedSeries]) -> str:
     것은 「어느 종목이 빠졌나」라 종목만 찍는다. CLI·대시보드가 같은 문장을 쓴다.
     """
     symbols = sorted({u.symbol for u in items})
-    return f"지금 수집 계획 밖(팔 목록에서 빠진 종목 등) {len(items)} 시리즈 — 종목: " + ", ".join(
-        symbols
+    return (
+        f"지금 수집 계획 밖(팔 목록에서 빠진 종목·상장 폐지 종목 등) {len(items)} 시리즈 — 종목: "
+        + ", ".join(symbols)
     )
 
 
