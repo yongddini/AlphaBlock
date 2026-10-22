@@ -29,6 +29,9 @@ class Heartbeat(BaseModel):
     updated_at: int | None = None
     #: 어떤 프로세스가 남긴 하트비트인지 식별용 라벨(예: "collector").
     label: str = ""
+    #: 남긴 프로세스의 pid(WAN-470) — 워치가 멎은 수집기에 SIGTERM을 보내고, 사람이
+    #: `kill -USR1`로 태스크 덤프를 받을 때 쓴다. 옛 파일에는 없다(None).
+    pid: int | None = None
 
 
 class HeartbeatStore:
@@ -61,7 +64,7 @@ class HeartbeatStore:
         now = self._now_ms()
         if self._last_written is not None and now - self._last_written < self._min_interval_ms:
             return False
-        self._write(Heartbeat(updated_at=now, label=self._label))
+        self._write(Heartbeat(updated_at=now, label=self._label, pid=os.getpid()))
         self._last_written = now
         return True
 

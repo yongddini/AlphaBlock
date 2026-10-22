@@ -317,6 +317,21 @@ class Settings(BaseSettings):
     collector_watchdog_poll_seconds: float = Field(default=15.0, gt=0)
     # 프로세스 레벨 워치독 on/off. 끄면 스트림 유휴 재접속만 동작한다.
     collector_watchdog_enabled: bool = Field(default=True)
+    # ⚠️ (2)의 「진행」은 WAN-470부터 **메시지 수신이 아니라 새 봉(웹소켓 새 확정봉 · REST 수집 ·
+    #     기동 백필 진척)**이다 — 메시지만 오고 새 봉이 없던 2026-10-22 4.5시간 정지를 못 잡았다.
+    # (3) 웹소켓 워치독(WAN-470): 웹소켓이 이 시간(초) 넘게 **새** 확정봉을 하나도 못 주면 종료한다.
+    #     REST 이중 수집이 데이터를 메우는 동안에도 웹소켓 경로가 조용히 죽어 있지 않게 하는
+    #     상한이다
+    #     (재접속은 「저장 없음」 감시가 먼저 시도한다 — 이건 그래도 안 살아날 때).
+    collector_stream_watchdog_timeout_seconds: float = Field(default=900.0, gt=0)
+
+    # 확정봉 REST 이중 수집(WAN-470 §0). 매 분 마감 + 오프셋(초)마다 수집 계획의 시리즈 중
+    # 「닫혔는데 아직 없는 봉」을 REST로 받는다. 웹소켓이 건강하면 확정 이벤트가 먼저 와
+    # 요청이 거의 안 나간다.
+    collector_rest_poll_enabled: bool = Field(default=True)
+    collector_rest_poll_offset_seconds: float = Field(default=5.0, ge=0, lt=60)
+    # 한 시리즈를 한 번에 거슬러 받는 최대 봉 수(그보다 긴 구멍은 접속 직후 따라잡기·갭 복구 몫).
+    collector_rest_poll_max_bars: int = Field(default=500, ge=1)
 
     # OHLCV 갭 자동 탐지·복구 백필(WAN-35). 저장된 시리즈의 내부 누락 봉을 찾아 그
     # 구간만 재수집한다. 수집 데몬(`alphablock collect`) 시작 시 1회 자동 점검을 켜는
@@ -336,6 +351,15 @@ class Settings(BaseSettings):
     health_watch_cooldown_seconds: int = Field(default=3600, ge=0)
     # 발효 중인 경고 상태를 남겨 재시작 시 중복/누락을 막는 상태 파일 경로.
     health_watch_state_path: str = Field(default="data/health_watch_state.json")
+    # 수집기 자동 재시작 백스톱(WAN-470). 기본 격자(설정 심볼 × 설정 TF — 팔 목록 교체와 무관)의
+    # 시리즈가 「다음 봉이 닫힌 지 이 시간(초)」 넘게 비어 있으면 워치가 수집기에 SIGTERM을 보낸다
+    # (systemd `Restart=always`가 다시 띄우고 기동 백필·꼬리 따라잡기가 공백을 메운다). 쿨다운·하루
+    # 상한으로 재시작 고리를 막는다. 수집기 안 원인이 무엇이든 공백을 수십 분 안으로 닫는
+    # 바깥 상한이다.
+    health_watch_collector_restart_enabled: bool = Field(default=True)
+    health_watch_collector_restart_after_seconds: int = Field(default=600, ge=60)
+    health_watch_collector_restart_cooldown_seconds: int = Field(default=1800, ge=0)
+    health_watch_collector_restart_max_per_day: int = Field(default=6, ge=0)
 
     # 대시보드 상시 구동·자동 새로고침(WAN-48). launchd 데몬으로 상주시켜 터미널
     # 없이 북마크(http://localhost:<port>)로 확인한다. port는 설치 스크립트가

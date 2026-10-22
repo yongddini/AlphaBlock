@@ -16,7 +16,8 @@ from common.telegram import build_telegram_client
 from common.timefmt import kst_log_format, use_kst_logging
 from config.settings import Settings, get_settings
 from data.backfill import FetchOHLCV, backfill_all
-from data.collection_plan import ArmCollection, CollectionPlan, monitor_scope_for
+from data.collection_plan import ArmCollection, CollectionPlan, build_plan, monitor_scope_for
+from data.derived_bars import build_derived
 from data.exchange import create_exchange
 from data.funding import (
     FundingRateSource,
@@ -24,15 +25,19 @@ from data.funding import (
     backfill_funding_all,
     run_funding_refresh,
 )
+from data.models import Candle, timeframe_to_ms
 from data.repair import RepairStateStore, alert_on_failure, repair_all
+from data.rest_poll import ClosedBarPoller, report_poller_task_exit
 from data.storage import OhlcvStore
 from data.stream import stream_kline_pairs, stream_klines
+from data.universe import ARM_STREAM_TIMEFRAMES, BUILT_TIMEFRAMES
 from data.universe_pool import UniverseStore
 from data.watchdog import (
     HeartbeatWatchdog,
     ProgressTracker,
     RecoveryEvent,
     force_exit,
+    install_task_dump_signal,
     run_with_recovery,
 )
 
@@ -265,7 +270,7 @@ async def _stream_arm_plan(
     store: OhlcvStore,
     arm: ArmCollection,
     *,
-    heartbeat: Callable[[], None],
+    on_progress: Callable[[Candle], None],
     idle_timeout_seconds: float | None,
     on_connect: Callable[[], None],
     check_seconds: float,
@@ -281,7 +286,7 @@ async def _stream_arm_plan(
             stream_kline_pairs(
                 store,
                 arm.plan.pairs(),
-                heartbeat=heartbeat,
+                on_progress=on_progress,
                 idle_timeout_seconds=idle_timeout_seconds,
                 on_connect=on_connect,
                 on_candle=arm.on_candle,
@@ -324,6 +329,105 @@ async def _wait_plan_change(arm: ArmCollection, check_seconds: float) -> Collect
             continue
         if plan.pairs() != arm.plan.pairs():
             return plan
+
+
+class ProgressSignals:
+    """수집기의 「진행」 신호 한 곳(WAN-470) — 하트비트 파일과 두 워치독을 무엇이 찍는가.
+
+    🚨 「진행」은 **메시지 수신이 아니라 새 봉**이다. 2026-10-22 04:00 KST 사고에서 연결 1/2는
+    4.5시간 동안 메시지는 계속 보내면서 새 봉을 하나도 안 줬고, 메시지마다 찍던 하트비트·워치독은
+    내내 「살아 있음」이었다(`alphablock status` [OK] 0분 전).
+
+    * `data` = 데이터 진행: 웹소켓 새 확정봉 · REST 수집 한 바퀴(봉을 넣었거나 이미 현재까지 와
+      있음) · 기동 백필 진척. 하트비트 파일도 같은 순간에 찍는다.
+    * `stream` = 웹소켓 진행: 웹소켓이 **이 프로세스에서 처음 보는 더 늦은** 확정봉을 줬을 때만.
+      재접속 뒤 같은 옛 봉을 다시 줘도 세지 않는다(연결 단위 판정은 `consume_messages`가 따로).
+    """
+
+    def __init__(self, heartbeat: HeartbeatStore) -> None:
+        self._heartbeat = heartbeat
+        self.data = ProgressTracker()
+        self.stream = ProgressTracker()
+        self._stream_newest: dict[tuple[str, str], int] = {}
+
+    def mark_data(self) -> None:
+        self._heartbeat.beat()
+        self.data.mark()
+
+    def mark_startup(self) -> None:
+        """기동 백필 진척 — 웹소켓 접속 전이라 둘 다 찍는다(WAN-451 — 안 찍으면 워치독이 죽인다)."""
+        self.mark_data()
+        self.stream.mark()
+
+    def on_stream_progress(self, candle: Candle) -> None:
+        key = (candle.symbol, candle.timeframe)
+        seen = self._stream_newest.get(key)
+        if seen is not None and candle.open_time <= seen:
+            return
+        self._stream_newest[key] = candle.open_time
+        self.mark_data()
+        self.stream.mark()
+
+
+def _build_plan_pairs(settings: Settings) -> list[tuple[str, str]]:
+    """팔이 꺼져 있을 때의 수집 계획(기본 격자)."""
+    return build_plan(settings.symbols, settings.timeframes).pairs()
+
+
+def watchdog_timeouts(settings: Settings) -> tuple[float, float]:
+    """(데이터, 웹소켓) 워치독 한도(초) — 둘 다 「가장 짧은 TF + 여유」보다 짧지 않게(WAN-470).
+
+    진행이 「새 봉」이 됐으므로 가장 짧은 TF가 길면(1분봉 없이 15m만 모으는 설정) 정상인데도 그 TF
+    간격만큼 진행이 없다. 설정값이 그보다 짧으면 늘려 쓴다(오살 방지). 팔이 켜져 있으면 팔 TF도
+    본다(팔은 1분봉을 늘 받는다 — `ARM_STREAM_TIMEFRAMES`).
+    """
+    timeframes = list(settings.timeframes)
+    if settings.universe_enabled:
+        timeframes += list(ARM_STREAM_TIMEFRAMES)
+    shortest = min((timeframe_to_ms(tf) for tf in timeframes), default=60_000) / 1000
+    floor = shortest + settings.collector_stream_progress_grace_seconds
+    data_timeout = max(settings.collector_watchdog_timeout_seconds, floor)
+    stream_timeout = max(
+        settings.collector_stream_watchdog_timeout_seconds,
+        floor + settings.collector_stream_idle_timeout_seconds,
+        data_timeout,
+    )
+    return data_timeout, stream_timeout
+
+
+def _build_rest_poller(
+    settings: Settings,
+    store: OhlcvStore,
+    arm: ArmCollection | None,
+    *,
+    on_progress: Callable[[], None],
+) -> ClosedBarPoller:
+    """확정봉 REST 이중 수집기(WAN-470 §0). 거래소 인스턴스는 따로 만든다(스레드 공유 회피).
+
+    대상 = 지금 수집 계획(팔이 있으면 팔 계획 — 주간 교체를 따라간다). 팔 종목의 1h를 넣으면 그
+    버킷의 3h를 이어 만든다(스트림 훅 `ArmCollection.on_candle`과 같은 일).
+    """
+    base_pairs = _build_plan_pairs(settings)
+
+    def _pairs() -> list[tuple[str, str]]:
+        return arm.plan.pairs() if arm is not None else base_pairs
+
+    def _on_filled(symbol: str, timeframe: str, _n: int) -> None:
+        if arm is None or symbol not in arm.plan.arm_symbols:
+            return
+        for target, source in BUILT_TIMEFRAMES.items():
+            if source == timeframe:
+                build_derived(store, symbol, target)
+
+    return ClosedBarPoller(
+        create_exchange(settings),
+        store,
+        _pairs,
+        offset_seconds=settings.collector_rest_poll_offset_seconds,
+        max_bars=settings.collector_rest_poll_max_bars,
+        on_progress=on_progress,
+        on_filled=_on_filled,
+    )
 
 
 async def _backfill_funding(settings: Settings, exchange: FundingRateSource) -> None:
@@ -388,6 +492,9 @@ async def run_collector(
     for line in render_drift_lines(check_coordinate_drift(settings)):
         logger.warning(line)
 
+    # 멎은 것 같으면 `kill -USR1 <pid>`로 태스크 스택을 로그에 받는다(WAN-470 · pid는 하트비트).
+    install_task_dump_signal(asyncio.get_running_loop())
+
     do_repair = settings.repair_on_start if repair_on_start is None else repair_on_start
     exchange = create_exchange(settings)
     store = OhlcvStore(settings.db_path)
@@ -445,13 +552,11 @@ async def run_collector(
 
         heartbeat.beat()  # 백필 완료 = 첫 하트비트(스트림 접속 전에도 생존 표시).
 
-        # 프로세스 레벨 워치독의 진행 시각. 메시지 수신마다 mark 하고, 감시 스레드가
-        # 이걸 폴링해 이벤트 루프가 통째로 멎으면 프로세스를 종료한다(WAN-173 (2)).
-        tracker = ProgressTracker()
-
-        def _beat() -> None:  # stream_klines 는 None 반환 콜백을 기대한다.
-            heartbeat.beat()
-            tracker.mark()
+        # 진행 신호(WAN-470) — 메시지가 아니라 **새 봉**이 진행이다(`ProgressSignals`).
+        signals = ProgressSignals(heartbeat)
+        tracker, stream_tracker = signals.data, signals.stream
+        _mark_data, _mark_startup = signals.mark_data, signals.mark_startup
+        _on_stream_progress = signals.on_stream_progress
 
         if run_stream:
             # 실시간 스트림과 함께 펀딩 현재값을 주기적으로 최신화한다(백필은 위에서
@@ -473,16 +578,33 @@ async def run_collector(
             # 프로세스 레벨 워치독 스레드(WAN-173 (2)). in-process 재접속(아래 유휴
             # 워치독)조차 못 돌 만큼 이벤트 루프가 멎으면 hang→exit로 바꿔 서비스
             # 매니저가 재시작하게 한다. 진행 시각은 백필 완료 직후로 초기화한다.
-            watchdog: HeartbeatWatchdog | None = None
+            watchdogs: list[HeartbeatWatchdog] = []
             if settings.collector_watchdog_enabled:
-                tracker.mark()
-                watchdog = HeartbeatWatchdog(
-                    tracker,
-                    timeout_seconds=settings.collector_watchdog_timeout_seconds,
-                    poll_seconds=settings.collector_watchdog_poll_seconds,
-                    on_stale=force_exit(),
+                _mark_startup()
+                data_timeout, stream_timeout = watchdog_timeouts(settings)
+                watchdogs = [
+                    HeartbeatWatchdog(
+                        tracker,
+                        timeout_seconds=data_timeout,
+                        poll_seconds=settings.collector_watchdog_poll_seconds,
+                        on_stale=force_exit(what="새 봉(데이터 진행)"),
+                        name="collector-watchdog",
+                    ),
+                    HeartbeatWatchdog(
+                        stream_tracker,
+                        timeout_seconds=stream_timeout,
+                        poll_seconds=settings.collector_watchdog_poll_seconds,
+                        on_stale=force_exit(what="웹소켓 새 확정봉"),
+                        name="collector-stream-watchdog",
+                    ),
+                ]
+                for wd in watchdogs:
+                    wd.start()
+                logger.info(
+                    "워치독: 새 봉 %gs · 웹소켓 새 확정봉 %gs 넘게 없으면 종료(WAN-470)",
+                    data_timeout,
+                    stream_timeout,
                 )
-                watchdog.start()
 
             # 팔 종목 수집(WAN-451 ③): 그 주 목록 + 보유 종목을 1분봉·전 TF로. 목록 기능이
             # 꺼져 있으면 None이고 아래는 예전 경로 그대로다.
@@ -492,7 +614,7 @@ async def run_collector(
                 plan = arm.compute()
                 arm.adopt(plan)
                 # 접속 전이라 메시지가 없다 — 쌍마다 진행을 찍어 워치독이 죽이지 않게 한다(WAN-451).
-                filled = await asyncio.to_thread(arm.catch_up, tracker.mark)
+                filled = await asyncio.to_thread(arm.catch_up, _mark_startup)
                 # 이미 모으던 팔 종목의 이력을 뒤로 늘리는 일(오래된 존 기억, WAN-451)은 수 분~십수
                 # 분이라 스트림 접속을 막지 않게 백그라운드로 돈다(WAN-314 기동 지연 사고).
                 history_task = asyncio.create_task(asyncio.to_thread(arm.extend_history))
@@ -517,6 +639,14 @@ async def run_collector(
                 else TailCatchup(exchange, store, settings)
             )
 
+            # 확정봉 REST 이중 수집(WAN-470 §0) — 웹소켓이 얼어도 매 분 빠진 봉을 받는다.
+            # 기동 백필이 끝난 뒤에 붙인다(그 전에 돌면 같은 꼬리를 두 번 받는다).
+            poller_task: asyncio.Task[None] | None = None
+            if settings.collector_rest_poll_enabled:
+                poller = _build_rest_poller(settings, store, arm, on_progress=_mark_data)
+                poller_task = asyncio.create_task(poller.run())
+                poller_task.add_done_callback(report_poller_task_exit)
+
             async def _stream_once() -> None:
                 # 한 번의 접속·소비. 유휴 타임아웃을 걸어(WAN-173 (1)) half-open stall을
                 # StreamStalled 예외로 바꾼다 — run_with_recovery가 잡아 재접속한다.
@@ -524,7 +654,7 @@ async def run_collector(
                     await _stream_arm_plan(
                         store,
                         arm,
-                        heartbeat=_beat,
+                        on_progress=_on_stream_progress,
                         idle_timeout_seconds=settings.collector_stream_idle_timeout_seconds,
                         on_connect=catchup.schedule,
                         check_seconds=settings.universe_plan_check_seconds,
@@ -535,7 +665,7 @@ async def run_collector(
                     store,
                     settings.symbols,
                     settings.timeframes,
-                    heartbeat=_beat,
+                    on_progress=_on_stream_progress,
                     idle_timeout_seconds=settings.collector_stream_idle_timeout_seconds,
                     on_connect=catchup.schedule,
                     progress_grace_seconds=settings.collector_stream_progress_grace_seconds,
@@ -555,8 +685,10 @@ async def run_collector(
                     universe_task.cancel()
                 if history_task is not None:
                     history_task.cancel()
-                if watchdog is not None:
-                    watchdog.stop()
+                if poller_task is not None:
+                    poller_task.cancel()
+                for wd in watchdogs:
+                    wd.stop()
     finally:
         store.close()
 
