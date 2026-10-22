@@ -178,6 +178,7 @@ def backfill_all(
     sleeper: Callable[[float], None] = time.sleep,
     now_ms: Callable[[], int] = lambda: int(time.time() * 1000),
     last_open_times: Mapping[tuple[str, str], int | None] | None = None,
+    progress: Callable[[], None] | None = None,
 ) -> dict[tuple[str, str], int]:
     """모든 심볼×타임프레임을 백필한다.
 
@@ -187,8 +188,12 @@ def backfill_all(
     `last_open_times`(WAN-456)가 주어지면 그 맵에 있는 시리즈는 저장소를 다시 읽지 않고
     **그 값**을 「마지막 저장 봉」으로 쓴다 — 꼬리 따라잡기가 접속 순간 찍어 둔 스냅샷이다.
     처리 순간 읽으면 그 사이 스트림이 넣은 새 봉이 앞의 구멍을 가린다(`TailCatchup`).
+
+    `progress`(WAN-468)는 시리즈를 시작할 때와 **쪽을 하나 저장할 때마다** 부른다 — 「진행이 있으면
+    살아 있다」. 안 주면 예전과 같다.
     """
     settings = settings or get_settings()
+    on_page = page_progress(progress)
     results: dict[tuple[str, str], int] = {}
 
     for symbol in symbols:
@@ -200,6 +205,8 @@ def backfill_all(
             else:
                 lookback_days = settings.lookback_days_for(timeframe)
                 since = now_ms() - lookback_days * 86_400_000
+            if progress is not None:
+                progress()
             count = backfill_symbol(
                 exchange,
                 store,
@@ -211,10 +218,30 @@ def backfill_all(
                 backoff_base=backoff_base,
                 sleeper=sleeper,
                 now_ms=now_ms,
+                progress=on_page,
             )
             results[(symbol, timeframe)] = count
 
     return results
+
+
+def page_progress(
+    progress: Callable[[], None] | None,
+) -> Callable[[int, int, int], None] | None:
+    """인자 없는 진행 콜백을 `backfill_symbol`의 쪽마다 콜백 모양으로 바꾼다(WAN-468).
+
+    🚨 진행 표시는 **쌍을 시작할 때만이 아니라 쪽을 저장할 때마다** 찍어야 한다. 시작할 때만 찍으면
+    쪽이 많은 쌍 하나(새로 들어온 종목의 2년치 15m ≈ 70쪽)가 워치독 한도를 넘겨 「멎었다」로
+    죽는다 — 진행이 있는데도. 반대로 거래소가 응답을 안 주면(쪽이 안 쌓이면) 찍히지 않아
+    워치독이 제대로 죽인다.
+    """
+    if progress is None:
+        return None
+
+    def _on_page(_total: int, _last_open: int, _end: int) -> None:
+        progress()
+
+    return _on_page
 
 
 def resolve_last_open_time(

@@ -26,7 +26,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from data.backfill import FetchOHLCV, backfill_symbol, resolve_last_open_time
+from data.backfill import (
+    DEFAULT_LIMIT,
+    FetchOHLCV,
+    backfill_symbol,
+    page_progress,
+    resolve_last_open_time,
+)
 from data.derived_bars import build_all_derived, source_closes_bucket
 from data.derived_bars import build_derived as _build_derived
 from data.models import Candle, timeframe_to_ms
@@ -207,14 +213,15 @@ def backfill_pairs(
     `last_open_times`(WAN-456)는 `backfill_all`과 같다 — 접속 순간의 스냅샷이 있으면 그 값에서
     시작한다(쌍 사이 간격 때문에 이 경로가 특히 오래 걸려 스트림이 앞질러 가기 쉽다).
 
-    `progress`는 쌍 하나를 시작할 때마다 부른다 — 수집기 워치독의 진행 표시(WAN-451 · 아래
-    `ArmCollection.catch_up` 참고). 안 주면 예전과 같다.
+    `progress`는 쌍 하나를 시작할 때마다, 그리고 **쪽을 하나 저장할 때마다**(WAN-468) 부른다 —
+    수집기 워치독의 진행 표시(WAN-451 · 아래 `ArmCollection.catch_up` 참고). 안 주면 예전과 같다.
 
     팔 종목은 처음 들어오면 TF 9개 × 몇 쪽이라 한꺼번에 쏘면 바이낸스 가중치 한도(분당 2400)를
     넘는다. 기본 격자(`backfill_all`)는 예전 그대로 두고, 팔 쪽만 이 경로로 천천히 받는다.
     한 쌍이 실패해도 나머지는 계속 받는다(다음 따라잡기에서 다시 시도된다).
     """
     total = 0
+    on_page = page_progress(progress)
     for i, (symbol, timeframe) in enumerate(pairs):
         if progress is not None:
             progress()
@@ -235,6 +242,7 @@ def backfill_pairs(
                 sleeper=sleeper,
                 now_ms=now_ms,
                 page_pause_seconds=page_pause_seconds,
+                progress=on_page,
             )
         except Exception:  # noqa: BLE001 — 한 쌍 실패가 나머지를 막으면 안 된다
             logger.exception("팔 종목 백필 실패: %s %s(다음 따라잡기에서 다시)", symbol, timeframe)
@@ -270,6 +278,8 @@ class ArmCollection:
         #: 1분봉은 해당 없다(탐지에 안 쓴다).
         self._history_days = history_days
         self._page_pause = page_pause_seconds
+        #: 이력 확장 한 쪽의 봉 수(거래소 쪽 크기 · 테스트가 줄인다).
+        self._page_limit = DEFAULT_LIMIT
         #: 이력 확장을 이미 시도한 쌍 — 상장이 그보다 늦은 종목을 매번 다시 요청하지 않게.
         self._extended: set[Pair] = set()
         self._store = store
@@ -324,43 +334,71 @@ class ArmCollection:
         n += build_all_derived(self._store, sorted(set(arm_symbols)), progress=progress)
         return n
 
-    def extend_history(self) -> int:
-        """이미 모으던 팔 쌍의 상위TF 이력을 `history_days`까지 뒤로 늘린다(동기 · 백그라운드).
+    def extend_history(self, plan: CollectionPlan | None = None) -> int:
+        """팔 쌍의 상위TF 이력을 `history_days`까지 뒤로 늘린다(동기 · 백그라운드).
+
+        `plan`이 주어지면 그 계획의 팔 쌍을 본다 — 운영 중 교체(WAN-468)는 새 계획을
+        **채택하기 전에** 이 일을 마쳐야 하므로(그동안 옛 스트림을 감시하며) 아직 `self.plan`이
+        아닌 계획을 넘긴다.
 
         저장된 첫 봉이 목표보다 늦으면 그 앞을 받는다. 상장이 더 늦은 종목은 거래소가 더 줄 게
         없으므로 쌍마다 한 번만 시도한다. 늘린 뒤 3h를 앞 구간까지 다시 접는다.
+
+        🚨 **뒤에서 앞으로 한 쪽씩 받는다(WAN-468 재시작 고리 방지).** 예전에는 목표 시점부터
+        앞으로 쪽을 넘겼는데, 중간에 프로세스가 죽으면 저장된 첫 봉이 이미 목표에 닿아 있어 다음
+        기동이 「다 늘렸다」로 건너뛰고 **받다 만 구간과 옛 첫 봉 사이의 구멍이 영구히
+        남았다**(기동 갭 복구는 최근 7일만 본다). 저장된 첫 봉 바로 앞 한 쪽씩 받으면 어디서
+        죽어도 저장분이 이어져 있고, 다음 기동은 그 첫 봉에서 이어 간다.
         """
         if self._history_days <= 0:
             return 0
+        plan = plan or self.plan
         now = self._now_ms()
         want = now - self._history_days * 86_400_000
         total = 0
-        for symbol, timeframe in self.arm_pairs():
+        for symbol, timeframe in self.arm_pairs(plan):
             if timeframe == "1m" or (symbol, timeframe) in self._extended:
                 continue
             first = self._store.first_open_time(symbol, timeframe)
             self._extended.add((symbol, timeframe))
-            if first is None or first <= want + timeframe_to_ms(timeframe):
+            tf_ms = timeframe_to_ms(timeframe)
+            if first is None or first <= want + tf_ms:
                 continue
             try:
-                total += backfill_symbol(
-                    self._exchange,
-                    self._store,
-                    symbol,
-                    timeframe,
-                    want,
-                    until_ms=first,
-                    page_pause_seconds=self._page_pause,
-                    now_ms=self._now_ms,
-                )
+                total += self._extend_backwards(symbol, timeframe, first, want)
             except Exception:  # noqa: BLE001 — 한 쌍 실패가 나머지를 막으면 안 된다
                 logger.exception("팔 종목 이력 확장 실패: %s %s", symbol, timeframe)
                 self._extended.discard((symbol, timeframe))
             if self._pause > 0:
                 time.sleep(self._pause)
-        total += build_all_derived(self._store, sorted(self.plan.arm_symbols))
+        total += build_all_derived(self._store, sorted(plan.arm_symbols))
         if total:
             logger.info("팔 종목 이력 확장: %d봉(목표 %d일)", total, self._history_days)
+        return total
+
+    def _extend_backwards(self, symbol: str, timeframe: str, first: int, want: int) -> int:
+        """`first` 앞을 한 쪽씩 뒤로 받아 `want`까지 늘린다(각 쪽이 저장분과 이어진다)."""
+        tf_ms = timeframe_to_ms(timeframe)
+        page_ms = self._page_limit * tf_ms
+        total = 0
+        while first > want + tf_ms:
+            start = max(want, first - page_ms)
+            total += backfill_symbol(
+                self._exchange,
+                self._store,
+                symbol,
+                timeframe,
+                start,
+                until_ms=first,
+                limit=self._page_limit,
+                now_ms=self._now_ms,
+            )
+            earlier = self._store.first_open_time(symbol, timeframe)
+            if earlier is None or earlier >= first:
+                break  # 그 앞에는 거래소도 줄 게 없다(상장 이전)
+            first = earlier
+            if self._page_pause > 0 and first > want + tf_ms:
+                time.sleep(self._page_pause)
         return total
 
     def catch_up(
