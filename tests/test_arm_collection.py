@@ -286,7 +286,7 @@ def test_plan_change_fills_new_pairs_then_reconnects(monkeypatch: pytest.MonkeyP
             collector._stream_arm_plan(
                 None,  # type: ignore[arg-type]
                 arm,  # type: ignore[arg-type]
-                heartbeat=lambda: None,
+                on_progress=lambda _c: None,
                 idle_timeout_seconds=None,
                 on_connect=lambda: None,
                 check_seconds=0.01,
@@ -412,7 +412,8 @@ def test_collector_passes_watchdog_progress_to_startup_catch_up() -> None:
     import inspect
 
     src = inspect.getsource(collector)
-    assert "asyncio.to_thread(arm.catch_up, tracker.mark)" in src
+    # WAN-470: 기동 따라잡기는 두 워치독(데이터·웹소켓)을 함께 찍는 `_mark_startup`을 넘긴다.
+    assert "asyncio.to_thread(arm.catch_up, _mark_startup)" in src
 
 
 def test_backfill_older_reads_only_the_missing_front(tmp_path: Path) -> None:

@@ -30,18 +30,24 @@ from __future__ import annotations
 
 import logging
 import os
+import signal
+import subprocess
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from common.heartbeat import HeartbeatStore
 from common.telegram import build_telegram_client
 from common.timefmt import format_kst_zoned, kst_log_format, use_kst_logging
 from config.settings import Settings, get_settings
-from dashboard.health import HealthLevel, runner_cycle_budget_ms
+from dashboard.health import HealthLevel, SeriesFreshness, runner_cycle_budget_ms
 from dashboard.health_data import HealthView, build_health_view, monitor_scope_for
+from data.collection_plan import build_plan
 
 _logger = logging.getLogger(__name__)
 
@@ -204,7 +210,8 @@ def evaluate_alerts(view: HealthView) -> list[Alert]:
                 detail=(
                     "⚠️ *수집기 하트비트 끊김*\n"
                     f"마지막 하트비트 {_fmt_at(view.collector.last_beat_ms)} (*{lag}* 전). "
-                    "수집기(`alphablock collect`)가 멈췄을 수 있습니다."
+                    "수집기(`alphablock collect`)가 멈췄거나 새 봉을 못 받고 있습니다"
+                    "(하트비트 = 새 봉 저장 · WAN-470)."
                 ),
             )
         )
@@ -247,6 +254,8 @@ class WatchState(BaseModel):
     """워치가 파일로 영속화하는 상태(발효 중인 경고 집합)."""
 
     active: dict[str, AlertRecord] = {}
+    collector_restarts: list[int] = []
+    """워치가 수집기에 재시작 신호를 보낸 시각들(ms · WAN-470) — 쿨다운·하루 상한 판정용."""
 
 
 class Outbound(BaseModel):
@@ -254,7 +263,7 @@ class Outbound(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    kind: Literal["alert", "recovery", "excluded"]
+    kind: Literal["alert", "recovery", "excluded", "action"]
     key: str
     """어느 이슈의 메시지인가(`Alert.key`). 전송 실패를 되돌릴 때 쓴다(WAN-344)."""
     text: str
@@ -310,7 +319,7 @@ def reconcile(
                 Outbound(kind="recovery", key=key, text=f"✅ *정상 복구* — {prev.title}")
             )
 
-    return outbound, WatchState(active=new_active)
+    return outbound, state.model_copy(update={"active": new_active})
 
 
 def apply_delivery_failures(
@@ -337,9 +346,131 @@ def apply_delivery_failures(
                 active.pop(message.key, None)
             else:
                 active[message.key] = prev
-        elif prev is not None:  # recovery/excluded — 다시 낼 수 있게 되살린다.
+        elif message.kind != "action" and prev is not None:  # recovery/excluded — 되살린다.
             active[message.key] = prev
-    return WatchState(active=active)
+    # 「조치」(수집기 재시작) 알림은 되돌릴 게 없다 — 재시작 자체는 이미 일어났다(WAN-470).
+    return next_state.model_copy(update={"active": active})
+
+
+# -- 수집기 자동 재시작 백스톱 (WAN-470) ---------------------------------------
+
+_DAY_MS = 86_400_000
+#: 재시작 실패·하루 상한 도달 경고의 키 — 쿨다운·복구 알림은 일반 경고와 같은 경로를 탄다.
+COLLECTOR_RESTART_ALERT_KEY = "collector_restart"
+
+
+@dataclass(frozen=True)
+class CollectorRestartPolicy:
+    """워치가 수집기를 다시 띄우는 조건(WAN-470).
+
+    판정 대상은 **기본 격자**(설정 심볼 × 설정 TF)뿐이다 — 팔 목록은 매주 바뀌어 새로 든 종목이
+    아직 비어 있는 것이 정상이라(WAN-458/468) 그걸로 재시작하면 교체 날 고리가 된다. 기본 격자는
+    수집기가 늘 받는 시리즈라 그게 비면 수집기 안 무언가가 멎은 것이다.
+    """
+
+    base_pairs: frozenset[tuple[str, str]]
+    after_ms: int
+    """「다음 봉이 닫힌 뒤」 이만큼 지나도 비어 있으면 재시작한다."""
+    cooldown_ms: int
+    max_per_day: int
+    enabled: bool = True
+
+
+def collector_restart_reason(
+    view: HealthView, policy: CollectorRestartPolicy, *, now_ms: int
+) -> str | None:
+    """기본 격자 시리즈가 충분히 오래 비어 있으면 그 사유 한 줄(아니면 None · 순수 함수).
+
+    「비어 있다」 = 마지막 봉 다음 봉이 닫힌 시각(`마지막 봉 + 2 × TF`)에서 `after_ms` 넘게 지났는데
+    그 봉이 없다. STALE(빨강) 판정도 함께 요구한다 — 화면·경고와 다른 기준으로 프로세스를 죽이지
+    않게.
+    """
+    overdue: list[tuple[int, SeriesFreshness]] = []
+    for f in view.freshness:
+        if (f.symbol, f.timeframe) not in policy.base_pairs:
+            continue
+        if f.level is not HealthLevel.STALE or f.last_open_time is None:
+            continue
+        if f.expected_interval_ms is None:
+            continue
+        over = now_ms - (f.last_open_time + 2 * f.expected_interval_ms)
+        if over >= policy.after_ms:
+            overdue.append((over, f))
+    if not overdue:
+        return None
+    over, worst = max(overdue, key=lambda item: item[0])
+    return (
+        f"기본 격자 {len(overdue)}개 시리즈가 비어 있음 — 가장 오래된 {worst.symbol} "
+        f"{worst.timeframe} 최신 봉 {_fmt_at(worst.last_open_time)} (다음 봉 {_fmt_lag(over)} 지연)"
+    )
+
+
+RestartDecision = Literal["restart", "cooldown", "capped"]
+
+
+def decide_collector_restart(
+    state: WatchState, policy: CollectorRestartPolicy, *, now_ms: int
+) -> tuple[RestartDecision, int]:
+    """(결정, 지난 24시간 재시작 수). 쿨다운 안이면 조용히 기다리고, 하루 상한이면 멈춘다."""
+    recent = [t for t in state.collector_restarts if now_ms - t < _DAY_MS]
+    if recent and now_ms - max(recent) < policy.cooldown_ms:
+        return "cooldown", len(recent)
+    if len(recent) >= policy.max_per_day:
+        return "capped", len(recent)
+    return "restart", len(recent)
+
+
+def _process_command(pid: int) -> str | None:
+    """pid의 명령줄(없으면 None). 리눅스는 /proc, 그 밖은 `ps`."""
+    proc = Path(f"/proc/{pid}/cmdline")
+    try:
+        if proc.exists():
+            return proc.read_bytes().replace(b"\0", b" ").decode("utf-8", "replace").strip()
+    except OSError:
+        return None
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "command=", "-p", str(pid)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    command = out.stdout.strip()
+    return command or None
+
+
+def is_collector_command(command: str) -> bool:
+    """수집기 프로세스의 명령줄인가(`alphablock collect` · `python -m data.collector`)."""
+    return ("alphablock" in command and " collect" in command) or "data.collector" in command
+
+
+def signal_collector(heartbeat_path: str | Path) -> tuple[bool, str]:
+    """하트비트 파일의 pid가 **수집기 프로세스가 맞으면** SIGTERM을 보낸다 — (성공, 설명).
+
+    systemd `Restart=always`가 다시 띄운다(유닛의 `SuccessExitStatus=143`이 이 종료를 정상으로
+    기록한다). pid가 재사용됐을 수 있어 명령줄을 확인한다 — 확인이 안 되면 보내지 않는다.
+    `systemctl restart`를 쓰지 않는 이유: 워치는 일반 사용자로 돌아 시스템 유닛을 다룰 권한이
+    없다(sudo 규칙을 늘리지 않는다). 수집기는 같은 사용자라 신호는 보낼 수 있다.
+    """
+    pid = HeartbeatStore(heartbeat_path).load().pid
+    if pid is None:
+        return False, "하트비트 파일에 pid가 없습니다(WAN-470 이전 수집기 — 재시작 뒤부터 기록)"
+    command = _process_command(pid)
+    if command is None:
+        return False, f"pid {pid} 프로세스가 없습니다(이미 재시작 중일 수 있음)"
+    if not is_collector_command(command):
+        return False, f"pid {pid}는 수집기가 아닙니다({command[:80]}) — 신호를 보내지 않음"
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError as exc:
+        return False, f"pid {pid}에 SIGTERM 실패: {exc}"
+    return True, f"pid {pid}에 SIGTERM"
+
+
+Restarter = Callable[[], tuple[bool, str]]
 
 
 # -- 상태 영속화 ---------------------------------------------------------------
@@ -401,7 +532,11 @@ class HealthWatch:
         interval_seconds: float,
         sleep: Callable[[float], None] = time.sleep,
         now_ms: Callable[[], int] = lambda: int(time.time() * 1000),
+        restart_policy: CollectorRestartPolicy | None = None,
+        restart_collector: Restarter | None = None,
     ) -> None:
+        self._restart_policy = restart_policy
+        self._restart_collector = restart_collector
         self._view_provider = view_provider
         self._notify = notify
         self._store = store
@@ -429,6 +564,7 @@ class HealthWatch:
 
         alerts = evaluate_alerts(view)
         state = self._store.load()
+        actions, alerts, state = self._collector_backstop(view, alerts, state)
         outbound, new_state = reconcile(
             alerts,
             state,
@@ -436,6 +572,7 @@ class HealthWatch:
             cooldown_ms=self._cooldown_ms,
             excluded_keys=excluded_alert_keys(view),
         )
+        outbound = actions + outbound
         undelivered = [m for m in outbound if not self._notify(m.text)]
         self._failed_sends += len(undelivered)
         # 실패한 것만 이전 상태로 되돌린다 — 안 그러면 「안 갔는데 쿨다운은 걸린」 상태가
@@ -455,6 +592,65 @@ class HealthWatch:
                 len(undelivered),
             )
         return outbound
+
+    def _collector_backstop(
+        self, view: HealthView, alerts: list[Alert], state: WatchState
+    ) -> tuple[list[Outbound], list[Alert], WatchState]:
+        """기본 격자가 오래 비면 수집기를 다시 띄운다(WAN-470) — (조치 알림, 경고, 상태).
+
+        이번 사건(2026-10-22)에서 실제로 감지한 것은 워치뿐이었다. 수집기 안 원인이 무엇이든
+        공백을 「워치 주기 + `after`」 안으로 닫는 바깥 상한이다. 쿨다운 안이면 조용히 기다리고,
+        하루 상한이면 재시작을 멈추고 경고로 사람을 부른다.
+        """
+        policy = self._restart_policy
+        if policy is None or not policy.enabled or self._restart_collector is None:
+            return [], alerts, state
+        now = self._now_ms()
+        reason = collector_restart_reason(view, policy, now_ms=now)
+        if reason is None:
+            return [], alerts, state
+        decision, count = decide_collector_restart(state, policy, now_ms=now)
+        if decision == "cooldown":
+            return [], alerts, state
+        if decision == "capped":
+            capped = Alert(
+                key=COLLECTOR_RESTART_ALERT_KEY,
+                title="수집기 자동 재시작 중단(하루 상한)",
+                detail=(
+                    "🚨 *수집기 자동 재시작 중단* (WAN-470)\n"
+                    f"지난 24시간에 이미 {count}회 재시작했는데 아직 비어 있습니다 — {reason}.\n"
+                    "재시작으로 안 풀리는 문제입니다. 수집기 로그(`logs/collector.log`)를 보세요."
+                ),
+            )
+            return [], [*alerts, capped], state
+        ok, detail = self._restart_collector()
+        if not ok:
+            failed = Alert(
+                key=COLLECTOR_RESTART_ALERT_KEY,
+                title="수집기 자동 재시작 실패",
+                detail=f"🚨 *수집기 자동 재시작 실패* (WAN-470)\n{reason}.\n{detail}",
+            )
+            _logger.error("수집기 자동 재시작 실패: %s — %s", reason, detail)
+            return [], [*alerts, failed], state
+        _logger.warning("수집기 자동 재시작: %s — %s", reason, detail)
+        message = Outbound(
+            kind="action",
+            key="collector_restart_done",
+            text=(
+                "🔁 *수집기 자동 재시작함* (WAN-470)\n"
+                f"{reason}.\n{detail} — 서비스 매니저가 다시 띄우고 기동 백필이 공백을 메웁니다"
+                f" (지난 24시간 {count + 1}/{policy.max_per_day}회)."
+            ),
+        )
+        restarted = state.model_copy(
+            update={
+                "collector_restarts": [
+                    *[t for t in state.collector_restarts if now - t < _DAY_MS],
+                    now,
+                ]
+            }
+        )
+        return [message], alerts, restarted
 
     def run(self, *, max_checks: int | None = None) -> None:
         """점검 루프. `max_checks`가 None이면 무한 반복(테스트에서는 유한 지정)."""
@@ -490,6 +686,17 @@ def build_view_provider(settings: Settings) -> Callable[[], HealthView]:
         )
 
     return provider
+
+
+def collector_restart_policy(settings: Settings) -> CollectorRestartPolicy:
+    """설정에서 수집기 자동 재시작 조건을 만든다(WAN-470 · 기본 격자 = 수집기와 같은 함수)."""
+    return CollectorRestartPolicy(
+        base_pairs=frozenset(build_plan(settings.symbols, settings.timeframes).pairs()),
+        after_ms=settings.health_watch_collector_restart_after_seconds * 1000,
+        cooldown_ms=settings.health_watch_collector_restart_cooldown_seconds * 1000,
+        max_per_day=settings.health_watch_collector_restart_max_per_day,
+        enabled=settings.health_watch_collector_restart_enabled,
+    )
 
 
 def run_health_watch(
@@ -545,6 +752,8 @@ def run_health_watch(
         store=WatchStateStore(settings.health_watch_state_path),
         cooldown_seconds=settings.health_watch_cooldown_seconds,
         interval_seconds=settings.health_watch_interval_seconds,
+        restart_policy=collector_restart_policy(settings),
+        restart_collector=partial(signal_collector, settings.collector_heartbeat_path),
     )
     _logger.info(
         "Health 워치 시작: 점검 %ds, 쿨다운 %ds",

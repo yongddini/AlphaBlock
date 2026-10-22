@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import collections
 import contextlib
 import json
 import logging
@@ -18,6 +19,7 @@ from collections.abc import AsyncIterator, Callable, Iterable, Sequence
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.exceptions import ConnectionClosed
 
+from common.timefmt import format_kst
 from data.models import Candle, timeframe_to_ms
 from data.storage import OhlcvStore
 from data.watchdog import StreamNoProgress, StreamStalled, guard_idle
@@ -111,6 +113,8 @@ def parse_kline_message(
 
 #: 「저장 없음」 정지 예외에 실을 마지막 메시지의 최대 길이(로그·진단용).
 _LAST_MESSAGE_CHARS = 300
+#: 정지 예외에 실을 「새 봉이 아닌 확정봉」 최근 기록 수(WAN-470 진단).
+_RECENT_REPEATS = 5
 
 
 async def consume_messages(
@@ -123,6 +127,7 @@ async def consume_messages(
     heartbeat: Callable[[], None] | None = None,
     progress_timeout_seconds: float | None = None,
     clock: Callable[[], float] = time.monotonic,
+    on_progress: Callable[[Candle], None] | None = None,
 ) -> int:
     """메시지 스트림을 소비해 확정봉을 저장한다. 저장한 봉 수를 반환한다.
 
@@ -135,34 +140,63 @@ async def consume_messages(
     메시지가 아예 안 오는 경우는 `guard_idle`의 몫이고, 이쪽은 **메시지는 오는데 데이터가 안
     쌓이는** 경우다 — 둘을 합쳐야 「그 연결이 일을 하고 있나」가 닫힌다. 판정은 메시지가 올
     때만 하므로 따로 타이머 태스크가 없다(메시지가 끊기면 유휴 감시가 먼저 걸린다).
+
+    🚨 **「진행」은 「저장 호출」이 아니라 「새 봉」이다(WAN-470).** 시리즈마다 이 연결에서 본
+    가장 늦은 `open_time`을 들고, 그보다 **늦은** 확정봉이 와야만 진행으로 센다. 2026-10-22
+    04:00 KST에 연결 1/2가 4.5시간 동안 메시지는 계속 보내면서 새 봉을 하나도 안 줬는데(모든 TF가
+    정확히 04:00 마감 봉에서 멈춤 — 이미 저장한 확정봉을 되풀이한 것으로 본다), 옛 판정은 같은
+    봉을 다시 저장해도 진행으로 세서 아무것도 안 걸렸다. 같은 봉은 그대로 저장하되(값이 같아
+    무해하다) 진행이 아니다. `on_progress`는 새 봉이 저장될 때만 불린다 — 수집기 워치독·하트비트가
+    이것을 「데이터가 들어오고 있다」의 신호로 쓴다(`heartbeat`는 예전처럼 메시지마다).
+    멎으면 예외에 마지막 메시지와 최근 되풀이 봉 몇 개를 싣는다 — 다음 사건에서 거래소가 무엇을
+    보냈는지 확정하려는 것이다.
     """
     stored = 0
     last_progress = clock()
     since_progress = 0
+    newest: dict[tuple[str, str], int] = {}
+    repeats: collections.deque[str] = collections.deque(maxlen=_RECENT_REPEATS)
     async for raw in messages:
         if heartbeat is not None:
             heartbeat()
         candle = parse_kline_message(raw, symbol_map, only_closed=only_closed)
-        if candle is None:
-            since_progress += 1
-            if (
-                progress_timeout_seconds is not None
-                and clock() - last_progress >= progress_timeout_seconds
-            ):
-                text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
-                raise StreamNoProgress(
-                    progress_timeout_seconds,
-                    messages=since_progress,
-                    last_message=text[:_LAST_MESSAGE_CHARS],
-                )
-            continue
-        store.upsert_candles([candle])
-        stored += 1
-        last_progress = clock()
-        since_progress = 0
-        if on_candle is not None:
-            on_candle(candle)
+        if candle is not None:
+            store.upsert_candles([candle])
+            stored += 1
+            if on_candle is not None:
+                on_candle(candle)
+            key = (candle.symbol, candle.timeframe)
+            seen = newest.get(key)
+            if seen is None or candle.open_time > seen:
+                newest[key] = candle.open_time
+                last_progress = clock()
+                since_progress = 0
+                repeats.clear()
+                if on_progress is not None:
+                    on_progress(candle)
+                continue
+            repeats.append(_describe_candle(candle))
+        since_progress += 1
+        if (
+            progress_timeout_seconds is not None
+            and clock() - last_progress >= progress_timeout_seconds
+        ):
+            text = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
+            raise StreamNoProgress(
+                progress_timeout_seconds,
+                messages=since_progress,
+                last_message=text[:_LAST_MESSAGE_CHARS],
+                recent_repeats=tuple(repeats),
+            )
     return stored
+
+
+def _describe_candle(candle: Candle) -> str:
+    """진단용 한 줄 — 「같은 봉 반복」인지 보이게 시각(KST)·확정 여부를 함께."""
+    return (
+        f"{candle.symbol} {candle.timeframe} {format_kst(candle.open_time)}"
+        f" x={'true' if candle.closed else 'false'}"
+    )
 
 
 def progress_timeout_for(
@@ -200,6 +234,7 @@ async def stream_klines(
     idle_timeout_seconds: float | None = None,
     on_connect: Callable[[], None] | None = None,
     progress_grace_seconds: float | None = None,
+    on_progress: Callable[[Candle], None] | None = None,
 ) -> None:
     """선물 kline 결합 스트림에 접속해 확정봉을 계속 저장한다.
 
@@ -231,6 +266,7 @@ async def stream_klines(
         idle_timeout_seconds=idle_timeout_seconds,
         on_connect=on_connect,
         progress_grace_seconds=progress_grace_seconds,
+        on_progress=on_progress,
     )
 
 
@@ -246,6 +282,7 @@ async def stream_kline_pairs(
     on_connect: Callable[[], None] | None = None,
     max_streams_per_connection: int = MAX_STREAMS_PER_CONNECTION,
     progress_grace_seconds: float | None = None,
+    on_progress: Callable[[Candle], None] | None = None,
 ) -> None:
     """(심볼, TF) 목록을 연결 여러 개로 나눠 구독한다(WAN-451 ③ — 종목마다 TF가 다르다).
 
@@ -289,6 +326,7 @@ async def stream_kline_pairs(
             idle_timeout_seconds=idle_timeout_seconds,
             on_connect=on_connect,
             progress_grace_seconds=progress_grace_seconds,
+            on_progress=on_progress,
         )
         return
     async with contextlib.AsyncExitStack() as stack:
@@ -310,6 +348,7 @@ async def stream_kline_pairs(
                     idle_timeout_seconds=idle_timeout_seconds,
                     progress_grace_seconds=progress_grace_seconds,
                     connection=(i + 1, len(chunks)),
+                    on_progress=on_progress,
                 )
             )
             for i, (ws, chunk) in enumerate(zip(sockets, chunks, strict=True))
@@ -353,6 +392,7 @@ async def _stream_connection(
     idle_timeout_seconds: float | None,
     on_connect: Callable[[], None] | None,
     progress_grace_seconds: float | None = None,
+    on_progress: Callable[[Candle], None] | None = None,
 ) -> None:
     url = ws_base + build_pair_stream_path(pairs)
     async with connect(url) as ws:
@@ -368,6 +408,7 @@ async def _stream_connection(
             idle_timeout_seconds=idle_timeout_seconds,
             progress_grace_seconds=progress_grace_seconds,
             connection=(1, 1),
+            on_progress=on_progress,
         )
 
 
@@ -382,6 +423,7 @@ async def _consume_connection(
     idle_timeout_seconds: float | None,
     progress_grace_seconds: float | None = None,
     connection: tuple[int, int] | None = None,
+    on_progress: Callable[[Candle], None] | None = None,
 ) -> int:
     """접속된 연결 하나를 끝날 때까지 소비한다(저장한 봉 수).
 
@@ -401,6 +443,7 @@ async def _consume_connection(
             on_candle=on_candle,
             heartbeat=heartbeat,
             progress_timeout_seconds=progress_timeout_for(pairs, progress_grace_seconds),
+            on_progress=on_progress,
         )
     except StreamStalled as exc:
         if connection is not None:
@@ -415,5 +458,12 @@ async def _consume_connection(
         if isinstance(exc, StreamNoProgress) and exc.last_message is not None:
             logger.warning(
                 "정지 직전 마지막 메시지(앞 %d자): %s", _LAST_MESSAGE_CHARS, exc.last_message
+            )
+        if isinstance(exc, StreamNoProgress) and exc.recent_repeats:
+            # 「같은 봉 반복」인지 다음 사건에서 바로 보이게(WAN-470).
+            logger.warning(
+                "새 봉이 아닌 최근 확정봉 %d개: %s",
+                len(exc.recent_repeats),
+                " | ".join(exc.recent_repeats),
             )
         raise

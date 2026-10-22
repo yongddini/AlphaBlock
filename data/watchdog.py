@@ -26,8 +26,10 @@ WAN-156이 **감지**(꼬리 정지 → 텔레그램 경고)까지 넣었다면 
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 import os
+import signal
 import threading
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -110,15 +112,18 @@ class StreamNoProgress(StreamStalled):
         last_message: str | None = None,
         connection: int | None = None,
         connections: int | None = None,
+        recent_repeats: tuple[str, ...] = (),
     ) -> None:
         self.messages = messages
         self.last_message = last_message
+        #: 정지 직전 받은 「새 봉이 아닌」 확정봉 요약(WAN-470) — 같은 봉 반복인지 확정용.
+        self.recent_repeats = recent_repeats
         super().__init__(progress_timeout_seconds, connection=connection, connections=connections)
 
     def _message(self) -> str:
         return (
             f"{self.where}{self.idle_timeout_seconds:g}s 동안 메시지 {self.messages}건 · "
-            "확정봉 저장 0건 — 스트림 데이터 정지 의심"
+            "새 확정봉 저장 0건 — 스트림 데이터 정지 의심"
         )
 
 
@@ -168,22 +173,62 @@ class ProgressTracker:
             return self._now() - self._last
 
 
-def force_exit(exit_code: int = 1) -> Callable[[float], None]:
+def force_exit(exit_code: int = 1, *, what: str = "하트비트") -> Callable[[float], None]:
     """`HeartbeatWatchdog`의 기본 `on_stale`: 프로세스를 즉시 종료한다.
 
     이벤트 루프가 멎어 정상 종료(태스크 취소·`store.close()`)를 기다릴 수 없는 상황이라
     `os._exit`로 곧장 빠진다 — systemd `Restart=always`/launchd `KeepAlive`가 재시작한다
     (hang → exit 전환, WAN-173 작업 범위 (2a)). 반환 콜백은 idle 초를 받아 로깅한다.
+    `what`은 로그에 남길 「무엇이 멎었나」다(WAN-470 — 워치독이 둘이라 구분한다).
     """
 
     def _exit(idle_seconds: float) -> None:
         logger.critical(
-            "하트비트 %0.1fs 정지 — 프로세스를 종료해 서비스 매니저 재시작을 유도합니다(WAN-173)",
+            "%s %0.1fs 정지 — 프로세스를 종료해 서비스 매니저 재시작을 유도합니다(WAN-173/470)",
+            what,
             idle_seconds,
         )
         os._exit(exit_code)
 
     return _exit
+
+
+def dump_asyncio_tasks(loop: asyncio.AbstractEventLoop | None = None) -> str:
+    """살아 있는 asyncio 태스크마다 「지금 어느 await에 걸려 있나」를 글로 낸다(WAN-470 진단).
+
+    py-spy는 스레드 스택만 보여 줘 이벤트 루프가 `select`에서 쉬는 것까지만 보인다 — 2026-10-22
+    사고에서 「어느 코루틴이 어디서 멈췄나」를 못 봤다. 태스크 스택(`Task.get_stack`)은 그 답이다.
+    """
+    tasks = asyncio.all_tasks(loop)
+    lines = [f"asyncio 태스크 {len(tasks)}개 (WAN-470 진단 덤프)"]
+    for task in sorted(tasks, key=lambda t: t.get_name()):
+        coro = task.get_coro()
+        name = getattr(coro, "__qualname__", repr(coro))
+        lines.append(f"── {task.get_name()} · {name} · {'끝남' if task.done() else '진행 중'}")
+        buffer = io.StringIO()
+        task.print_stack(file=buffer)
+        lines.extend("   " + line for line in buffer.getvalue().rstrip().splitlines())
+    return "\n".join(lines)
+
+
+def install_task_dump_signal(loop: asyncio.AbstractEventLoop) -> bool:
+    """`SIGUSR1`을 받으면 `dump_asyncio_tasks`를 로그에 찍는다(WAN-470). 설치했으면 True.
+
+    서버에서 멎은 것 같으면 `kill -USR1 <수집기 pid>` 뒤 `logs/collector.log`를 본다(pid는
+    하트비트 파일에 있다). 시그널이 없는 플랫폼(윈도)이나 메인 스레드 밖이면 조용히 건너뛴다.
+    """
+    signum = getattr(signal, "SIGUSR1", None)
+    if signum is None:
+        return False
+
+    def _dump() -> None:
+        logger.warning("%s", dump_asyncio_tasks(loop))
+
+    try:
+        loop.add_signal_handler(signum, _dump)
+    except (NotImplementedError, RuntimeError, ValueError):
+        return False
+    return True
 
 
 class HeartbeatWatchdog:
@@ -329,6 +374,11 @@ async def run_with_recovery(
             error = exc
         except RECOVERABLE_ERRORS as exc:
             error = exc
+        except Exception:
+            # 복구할 수 없는 예외는 그대로 올리되 조용히 사라지지 않게 한다(WAN-470) —
+            # 프로세스가 끝나면 서비스 매니저가 다시 띄운다.
+            logger.critical("스트림이 복구 불가 예외로 끝남 — 수집기를 종료합니다", exc_info=True)
+            raise
         lasted = clock() - started
 
         if max_reconnects is not None and reconnects >= max_reconnects:
