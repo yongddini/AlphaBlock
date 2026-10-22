@@ -450,8 +450,8 @@ def is_collector_command(command: str) -> bool:
 def signal_collector(heartbeat_path: str | Path) -> tuple[bool, str]:
     """하트비트 파일의 pid가 **수집기 프로세스가 맞으면** SIGTERM을 보낸다 — (성공, 설명).
 
-    systemd `Restart=always`가 다시 띄운다(유닛의 `SuccessExitStatus=143`이 이 종료를 정상으로
-    기록한다). pid가 재사용됐을 수 있어 명령줄을 확인한다 — 확인이 안 되면 보내지 않는다.
+    systemd `Restart=always`가 종료 코드와 무관하게 다시 띄운다. pid가 재사용됐을 수 있어
+    명령줄을 확인한다 — 확인이 안 되면 보내지 않는다.
     `systemctl restart`를 쓰지 않는 이유: 워치는 일반 사용자로 돌아 시스템 유닛을 다룰 권한이
     없다(sudo 규칙을 늘리지 않는다). 수집기는 같은 사용자라 신호는 보낼 수 있다.
     """

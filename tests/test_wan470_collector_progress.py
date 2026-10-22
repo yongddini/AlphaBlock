@@ -19,7 +19,7 @@ import json
 import logging
 import os
 import signal
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 
 import pytest
@@ -163,7 +163,7 @@ def test_stream_progress_ignores_old_bar_replayed_after_reconnect(tmp_path: Path
     """재접속하면 연결 단위 판정은 처음부터지만, 프로세스 신호는 옛 봉 반복을 진행으로 안 센다."""
     signals = collector.ProgressSignals(HeartbeatStore(tmp_path / "hb.json"))
     now = {"t": 0.0}
-    signals.data._now = signals.stream._now = lambda: now["t"]  # type: ignore[method-assign]
+    signals.data._now = signals.stream._now = lambda: now["t"]
     signals.data.mark()
     signals.stream.mark()
     bar = Candle(symbol=SYM, timeframe="1m", open_time=T0, open=1, high=1, low=1, close=1, volume=1)
@@ -180,7 +180,7 @@ def test_startup_marks_both_trackers_and_heartbeat(tmp_path: Path) -> None:
     hb = HeartbeatStore(tmp_path / "hb.json")
     signals = collector.ProgressSignals(hb)
     now = {"t": 100.0}
-    signals.data._now = signals.stream._now = lambda: now["t"]  # type: ignore[method-assign]
+    signals.data._now = signals.stream._now = lambda: now["t"]
     now["t"] = 200.0
     signals.mark_startup()
     assert signals.data.idle_seconds() == 0.0 and signals.stream.idle_seconds() == 0.0
@@ -200,7 +200,7 @@ def test_watchdog_fires_when_messages_flow_but_no_new_bar(tmp_path: Path) -> Non
     """
     clock = _Clock()
     signals = collector.ProgressSignals(HeartbeatStore(tmp_path / "hb.json"))
-    signals.data._now = signals.stream._now = clock  # type: ignore[method-assign]
+    signals.data._now = signals.stream._now = clock
     signals.data.mark()
     fired: list[float] = []
     watchdog = HeartbeatWatchdog(signals.data, timeout_seconds=300.0, on_stale=fired.append)
@@ -237,7 +237,7 @@ class _Exchange:
 
     def __init__(self, now_ms: list[int]) -> None:
         self._now = now_ms
-        self.calls: list[tuple[str, str, int, int | None]] = []
+        self.calls: list[tuple[str, str, int, int]] = []
 
     def fetch_ohlcv(
         self,
@@ -461,6 +461,14 @@ def _view(series: list[SeriesFreshness]) -> HealthView:
     )
 
 
+def _collect(sent: list[str]) -> Callable[[str], bool]:
+    def _notify(text: str) -> bool:
+        sent.append(text)
+        return True
+
+    return _notify
+
+
 def _policy(**kw: object) -> CollectorRestartPolicy:
     defaults: dict[str, object] = {
         "base_pairs": frozenset({(SYM, "1m")}),
@@ -508,7 +516,7 @@ def test_health_watch_restarts_collector_once_then_waits(tmp_path: Path) -> None
 
     watch = HealthWatch(
         view_provider=lambda: view,
-        notify=lambda text: sent.append(text) or True,
+        notify=_collect(sent),
         store=WatchStateStore(tmp_path / "w.json"),
         cooldown_seconds=3600,
         interval_seconds=600,
@@ -541,7 +549,7 @@ def test_health_watch_reports_failed_restart(tmp_path: Path) -> None:
     sent: list[str] = []
     watch = HealthWatch(
         view_provider=lambda: _view([_fresh(SYM, "1m", T0 - M, now, HealthLevel.STALE)]),
-        notify=lambda text: sent.append(text) or True,
+        notify=_collect(sent),
         store=WatchStateStore(tmp_path / "w.json"),
         cooldown_seconds=3600,
         interval_seconds=600,
@@ -565,7 +573,7 @@ def test_signal_collector_checks_the_process_before_killing(
 
     killed: list[tuple[int, int]] = []
     monkeypatch.setattr(health_watch, "_process_command", lambda pid: "uv run alphablock collect")
-    monkeypatch.setattr(health_watch.os, "kill", lambda pid, sig: killed.append((pid, sig)))
+    monkeypatch.setattr(os, "kill", lambda pid, sig: killed.append((pid, sig)))
     ok, detail = signal_collector(path)
     assert ok and killed == [(os.getpid(), signal.SIGTERM)]
 
