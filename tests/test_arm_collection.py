@@ -263,7 +263,7 @@ class _FakeArm:
         self.plan = plan
         return ["N"], []
 
-    def extend_history(self) -> int:
+    def extend_history(self, plan: CollectionPlan | None = None) -> int:
         return 0
 
     def on_candle(self, candle: Candle) -> None:
@@ -362,7 +362,9 @@ def test_extend_history_reaches_back_once_and_rebuilds_3h(tmp_path: Path) -> Non
     assert store.first_open_time("X", "1h") == now - 60 * DAY
     assert store.first_open_time("X", "3h") == now - 60 * DAY  # 3h도 앞 구간까지 다시 접었다
     one_hour = [c for c in ex.calls if c[:2] == ("X", "1h")]
-    assert one_hour and all(c[2] == now - 60 * DAY for c in one_hour[:1])
+    # 뒤에서 앞으로 한 쪽씩 받는다(WAN-468) — 마지막 쪽이 목표 시점에서 시작한다.
+    assert one_hour and one_hour[-1][2] == now - 60 * DAY
+    assert [c[2] for c in one_hour] == sorted((c[2] for c in one_hour), reverse=True)
     assert not any(c[1] == "1m" for c in ex.calls)  # 1분봉은 늘리지 않는다
     ex.calls.clear()
     arm.extend_history()
@@ -402,8 +404,8 @@ def test_catch_up_marks_progress_per_pair_and_symbol(tmp_path: Path) -> None:
     pairs = arm.arm_pairs()
     marks: list[int] = []
     arm.catch_up(lambda: marks.append(1))
-    # 쌍 하나마다 + 생성 TF를 접는 종목 하나마다(요청을 건너뛴 쌍도 센다)
-    assert len(marks) == len(pairs) + len(arm.plan.arm_symbols)
+    # 쌍 하나마다 + 생성 TF를 접는 종목 하나마다(요청을 건너뛴 쌍도 센다) + 저장한 쪽마다(WAN-468)
+    assert len(marks) >= len(pairs) + len(arm.plan.arm_symbols)
     store.close()
     universe.close()
 

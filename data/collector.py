@@ -266,6 +266,33 @@ def _build_arm_collection(settings: Settings, store: OhlcvStore) -> ArmCollectio
     )
 
 
+#: 운영 중 교체에서 채우기 태스크가 돌려주는 것 — (새 계획, 새 쌍, 받은 봉 수).
+_FillResult = tuple[CollectionPlan, list[tuple[str, str]], int]
+
+
+class PlanTransition:
+    """운영 중 계획 교체의 「새 쌍을 채우는 중」 상태 — **재접속을 넘어 산다**(WAN-468).
+
+    새 쌍 채우기(`arm.fill` + `arm.extend_history`)는 주간 교체 날 수 분이 걸린다. 그동안 옛
+    스트림은 계속 돌아야 하고 **감시도 받아야 한다** — 스트림이 그 사이 끊기면 곧바로 복구
+    루프로 올려 다시 붙인다. 그때 채우기를 처음부터 다시 하지 않도록 진행 중인 태스크를 여기
+    들고 있다가, 다시 붙은 `_stream_arm_plan`이 이어서 기다린다.
+    """
+
+    def __init__(self) -> None:
+        self.task: asyncio.Task[_FillResult] | None = None
+
+
+async def _fill_new_plan(arm: ArmCollection, new_plan: CollectionPlan) -> _FillResult:
+    """새 계획의 새 쌍을 채우고 이력을 늘린다(채택 **전** — 옛 스트림은 그대로 돈다)."""
+    new_pairs = new_plan.new_pairs(arm.plan)
+    filled = await asyncio.to_thread(arm.fill, new_pairs, new_plan.arm_symbols)
+    # 원래 기본 격자로 모으던 종목이 팔로 들어오면 이력이 얕을 수 있다 — 새로 든 쌍만 늘린다
+    # (이미 시도한 쌍은 건너뛴다, WAN-451 오래된 존 기억).
+    filled += await asyncio.to_thread(arm.extend_history, new_plan)
+    return new_plan, new_pairs, filled
+
+
 async def _stream_arm_plan(
     store: OhlcvStore,
     arm: ArmCollection,
@@ -275,12 +302,22 @@ async def _stream_arm_plan(
     on_connect: Callable[[], None],
     check_seconds: float,
     progress_grace_seconds: float | None = None,
+    transition: PlanTransition | None = None,
 ) -> None:
     """지금 계획으로 스트림을 돌리다 계획이 바뀌면 새 쌍을 채우고 다시 붙는다(WAN-451 ③).
 
     계획 교체는 오류가 아니다 — 복구 루프(`run_with_recovery`)로 돌려보내지 않고 여기서 다시
     붙는다(복구 알림이 매주 울리지 않게). 스트림이 끊기거나 멎으면 예외를 그대로 올린다.
+
+    🚨 **새 쌍을 채우는 동안에도 스트림을 지켜본다(WAN-468).** 예전에는 계획이 바뀌면 채우기
+    (`arm.fill` → `extend_history`, 주간 교체 날 수 분)를 다 끝낼 때까지 스트림 태스크를 아무도
+    기다리지 않았다. 그 사이 스트림이 끊기면 재접속도 진행 표시도 없이 워치독 한도가 지나 프로세스가
+    죽었고, 재시작해도 같은 교체를 다시 시작해 고리가 됐다(2026-10-19 09:17·09:30). 이제 채우기는
+    태스크로 돌고(`transition` — 재접속을 넘어 산다) 스트림과 함께 기다린다: 스트림이 먼저 끝나면
+    예외를 곧바로 올려 복구 루프가 **옛 계획으로** 다시 붙이고, 채우기가 끝나면 그때 새 계획을
+    채택하고 다시 붙는다.
     """
+    transition = transition if transition is not None else PlanTransition()
     while True:
         stream = asyncio.create_task(
             stream_kline_pairs(
@@ -293,20 +330,38 @@ async def _stream_arm_plan(
                 progress_grace_seconds=progress_grace_seconds,
             )
         )
-        watch = asyncio.create_task(_wait_plan_change(arm, check_seconds))
-        done, _ = await asyncio.wait({stream, watch}, return_when=asyncio.FIRST_COMPLETED)
-        if stream in done:
-            watch.cancel()
-            await asyncio.gather(watch, return_exceptions=True)
-            stream.result()  # 예외면 그대로 올린다(복구 루프가 다시 붙인다)
-            return
-        new_plan = watch.result()
-        new_pairs = new_plan.new_pairs(arm.plan)
-        filled = await asyncio.to_thread(arm.fill, new_pairs, new_plan.arm_symbols)
+        while True:
+            filling = transition.task
+            waiter: asyncio.Task[CollectionPlan] | asyncio.Task[_FillResult] = (
+                filling
+                if filling is not None
+                else asyncio.create_task(_wait_plan_change(arm, check_seconds))
+            )
+            done, _ = await asyncio.wait({stream, waiter}, return_when=asyncio.FIRST_COMPLETED)
+            if stream in done:
+                if filling is None:
+                    waiter.cancel()
+                    await asyncio.gather(waiter, return_exceptions=True)
+                elif not filling.done():
+                    logger.warning(
+                        "팔 새 쌍 채우는 중 스트림이 끝남 — 옛 계획으로 다시 붙고 "
+                        "채우기는 이어 갑니다"
+                    )
+                stream.result()  # 예외면 그대로 올린다(복구 루프가 다시 붙인다)
+                return
+            if filling is None:
+                new_plan = waiter.result()
+                assert isinstance(new_plan, CollectionPlan)
+                transition.task = asyncio.create_task(_fill_new_plan(arm, new_plan))
+                continue  # 스트림은 그대로 두고 채우기와 함께 기다린다
+            transition.task = None
+            try:
+                new_plan, new_pairs, filled = filling.result()
+            except Exception:  # noqa: BLE001 — 옛 계획으로 계속 돌고 다음 주기에 다시 본다
+                logger.exception("팔 새 쌍 채우기 실패 — 옛 계획으로 계속(다음 주기에 다시)")
+                continue
+            break
         added, removed = arm.adopt(new_plan)
-        # 원래 기본 격자로 모으던 종목이 팔로 들어오면 이력이 얕을 수 있다 — 새로 든 쌍만 늘린다
-        # (이미 시도한 쌍은 건너뛴다, WAN-451 오래된 존 기억).
-        filled += await asyncio.to_thread(arm.extend_history)
         logger.info(
             "팔 수집 종목 교체: 들어옴 %s · 빠짐 %s · 새 쌍 %d개 백필 %d봉 — 웹소켓 재접속",
             ",".join(added) or "없음",
@@ -430,6 +485,11 @@ def _build_rest_poller(
     )
 
 
+def _beat_file(heartbeat: HeartbeatStore) -> None:
+    """하트비트 파일만 찍는다(기동 백필 쪽마다 · WAN-468 — 워치독은 아직 안 돈다)."""
+    heartbeat.beat()
+
+
 async def _backfill_funding(settings: Settings, exchange: FundingRateSource) -> None:
     """OHLCV 백필 직후 펀딩 이력을 백필한다(WAN-63).
 
@@ -510,13 +570,18 @@ async def run_collector(
             len(settings.timeframes),
             settings.db_path,
         )
+        # 쪽마다 하트비트 파일을 찍는다(WAN-468) — 워치독은 아직 안 돌지만 `status`·워치가 보는
+        # 「마지막 하트비트」가 긴 기동 백필 동안 멎은 것처럼 보이지 않게(진행이 있으면 살아 있다).
         results = await asyncio.to_thread(
-            backfill_all,
-            exchange,
-            store,
-            settings.symbols,
-            settings.timeframes,
-            settings=settings,
+            partial(
+                backfill_all,
+                exchange,
+                store,
+                settings.symbols,
+                settings.timeframes,
+                settings=settings,
+                progress=partial(_beat_file, heartbeat),
+            )
         )
         logger.info("백필 총 %d 봉 저장", sum(results.values()))
 
@@ -647,6 +712,9 @@ async def run_collector(
                 poller_task = asyncio.create_task(poller.run())
                 poller_task.add_done_callback(report_poller_task_exit)
 
+            # 운영 중 계획 교체의 「채우는 중」 상태 — 재접속을 넘어 이어 간다(WAN-468).
+            transition = PlanTransition()
+
             async def _stream_once() -> None:
                 # 한 번의 접속·소비. 유휴 타임아웃을 걸어(WAN-173 (1)) half-open stall을
                 # StreamStalled 예외로 바꾼다 — run_with_recovery가 잡아 재접속한다.
@@ -659,6 +727,7 @@ async def run_collector(
                         on_connect=catchup.schedule,
                         check_seconds=settings.universe_plan_check_seconds,
                         progress_grace_seconds=settings.collector_stream_progress_grace_seconds,
+                        transition=transition,
                     )
                     return
                 await stream_klines(
