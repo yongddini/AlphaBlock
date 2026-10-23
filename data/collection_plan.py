@@ -220,6 +220,29 @@ def monitor_scope_for(settings: Settings, *, now_ms: int | None = None) -> Monit
         return None
 
 
+def current_arm_pairs(
+    db_path: str | Path,
+    *,
+    base_symbols: Sequence[str],
+    base_timeframes: Sequence[str],
+    now_ms: int,
+) -> list[Pair]:
+    """지금 팔 쪽이 받는 원천 kline 쌍(기본 격자 밖).
+
+    `ArmCollection.compute()` + `arm_pairs()`와 같은 정의다.
+
+    수집기 시작 갭 복구가 「정지로 보이는 시리즈 중 기동 백필이 아직 안 닿은 팔 쪽」만 골라 꼬리를
+    받을 때 쓴다(WAN-472). 파생·생성 TF(2h·3h)와 팔 밖 종목의 풀 일봉은 들어가지 않는다. 그 주
+    목록을 못 읽으면 빈 목록 — 받을 쌍이 없으면 판정은 옛 동작 그대로다.
+    """
+    members = rotation_members_at(db_path, now_ms)
+    if members is None:
+        return []
+    plan = build_plan(base_symbols, base_timeframes, set(members) | held_symbols(db_path))
+    base = set(build_plan(base_symbols, base_timeframes).pairs())
+    return [p for p in plan.pairs() if p not in base]
+
+
 def backfill_pairs(
     exchange: FetchOHLCV,
     store: OhlcvStore,

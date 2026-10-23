@@ -349,6 +349,7 @@ def repair_all(
     tracked_timeframes: Sequence[str] | None = None,
     lookback_ms: int | None = None,
     scope: MonitorScope | None = None,
+    refill_stale: Callable[[Sequence[tuple[str, str]]], object] | None = None,
 ) -> RepairSummary:
     """저장된 모든(또는 지정한) 시리즈의 갭을 탐지·복구하고 꼬리 신선도를 판정한다.
 
@@ -373,6 +374,13 @@ def repair_all(
     모으면 `"plan"`(팔 목록에서 빠진 종목 등), 아무도 안 모으면 `"timeframe"`(WAN-157과
     같다). None이면(기본) 옛 동작이다. `tracked_timeframes`와 함께 주면 둘 다 적용된다(TF로
     먼저 거르고 남은 것을 계획으로 거른다).
+
+    `refill_stale`(WAN-472)을 주면 **정지로 보이는 OHLCV 시리즈의 꼬리를 그 함수로 한 번 받은
+    뒤 그 시리즈만 다시 판정한다** — 갭 복구는 봉 *사이* 구멍만 메우고 꼬리는 안 채우므로, 기동
+    백필(기본 격자)이 아직 안 닿은 시리즈(팔 종목)가 수집기가 꺼져 있던 몇 분 때문에 「🚨 수집
+    정지」로 찍힌다(2026-10-23 재시작 직후 21건). 받은 뒤에도 문턱을 넘으면 그대로 정지다(거래소
+    무응답 · 받기 실패) — 문턱은 안 바뀐다. 함수가 예외를 내면 로그만 남기고 저장분으로 판정한다
+    (실패를 「정상」으로 바꾸지 않는다). None이면(기본) 옛 동작이다.
     """
     stored = list(series) if series is not None else store.list_series()
     targets = stored
@@ -411,6 +419,10 @@ def repair_all(
         now_ms=ran_at,
         stale_multiplier=stale_multiplier,
     )
+    if refill_stale is not None and stale:
+        stale = _refill_and_rejudge(
+            stale, refill_stale, store, now_ms=now_ms, stale_multiplier=stale_multiplier
+        )
     stale += find_stale_funding(
         list(funding_last_times),
         now_ms=ran_at,
@@ -449,6 +461,46 @@ def repair_all(
         untracked_series=untracked,
         lookback_ms=lookback_ms,
     )
+
+
+def _refill_and_rejudge(
+    stale: Sequence[StaleSeries],
+    refill: Callable[[Sequence[tuple[str, str]]], object],
+    store: OhlcvStore,
+    *,
+    now_ms: Callable[[], int],
+    stale_multiplier: float,
+) -> list[StaleSeries]:
+    """정지로 보이는 시리즈의 꼬리를 받고 그 시리즈만 다시 판정한다(WAN-472).
+
+    다시 판정하는 것은 **방금 정지로 보인 시리즈뿐**이다 — 나머지는 이미 신선했다. 판정 시각은
+    받은 **뒤**의 지금이다(받는 데 걸린 시간만큼 문턱이 엄격해지지 느슨해지지 않는다).
+    """
+    pairs = [(s.symbol, s.timeframe) for s in stale]
+    try:
+        refill(pairs)
+    except Exception:  # noqa: BLE001 — 받기 실패는 정지 경보로 드러나야 한다(삼키지 않는다)
+        logger.exception(
+            "정지로 보이는 시리즈 %d건의 꼬리를 받지 못했습니다 — 저장분으로 판정합니다",
+            len(pairs),
+        )
+    rejudged = find_stale_series(
+        [(symbol, tf, store.last_open_time(symbol, tf)) for symbol, tf in pairs],
+        now_ms=now_ms(),
+        stale_multiplier=stale_multiplier,
+    )
+    cleared = len(pairs) - len(rejudged)
+    if cleared:
+        logger.info(
+            "꼬리를 받아 정지에서 벗어난 시리즈 %d건(수집기가 꺼져 있던 공백): %s",
+            cleared,
+            ", ".join(
+                f"{sym} {tf}"
+                for sym, tf in pairs
+                if not any(r.symbol == sym and r.timeframe == tf for r in rejudged)
+            ),
+        )
+    return rejudged
 
 
 # -- 오케스트레이션 (설정 배선 + 텔레그램 경고) --------------------------------
