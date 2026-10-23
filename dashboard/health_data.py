@@ -78,6 +78,12 @@ class HealthView(BaseModel):
     지우면 WAN-156과 같은 침묵이 된다(WAN-157) — 그래서 여기에 따로 남긴다.
     """
     monitor_scope_applied: bool = False
+    left_pool_symbols: frozenset[str] = frozenset()
+    """`excluded` 중 **후보 풀에서 빠진** 종목(WAN-471) — 상장 폐지·정산으로 다시는 봉이 안 온다.
+
+    팔 목록에서 빠진 종목(매주 교체의 정상 결과)과 사람이 읽을 사유가 달라 화면이 따로 접는다.
+    판정·경보에서 뺀다는 점은 같다(둘 다 `excluded`에 있다).
+    """
     """신선도 판정을 수집 계획으로 좁혔는가. False면 옛 동작(저장된 시리즈 전부)이다."""
 
 
@@ -257,4 +263,7 @@ def build_health_view(
         data_gap_skips=runtime.data_gap_skips,
         excluded=excluded,
         monitor_scope_applied=scope is not None,
+        left_pool_symbols=frozenset(
+            r[0] for r in excluded_rows if scope is not None and scope.left_pool(r[0])
+        ),
     )

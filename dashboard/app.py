@@ -1096,15 +1096,24 @@ def _freshness_frame(rows: list[SeriesFreshness]) -> pd.DataFrame:
     )
 
 
-def _excluded_frame(rows: list[SeriesFreshness]) -> pd.DataFrame:
-    """목록 제외 시리즈(WAN-458) — 판정 대상이 아니므로 상태 배지를 일부러 안 단다."""
+def _excluded_frame(
+    rows: list[SeriesFreshness], left_pool: frozenset[str] = frozenset()
+) -> pd.DataFrame:
+    """목록 제외 시리즈(WAN-458) — 판정 대상이 아니므로 상태 배지를 일부러 안 단다.
+
+    후보 풀에서 빠진 종목(`left_pool`)은 사유가 「상장 폐지·정산」이다(WAN-471).
+    """
     return pd.DataFrame(
         {
             "심볼": r.symbol,
             "TF": r.timeframe,
             "최신 봉(KST)": _fmt_time(r.last_open_time),
             "지연": _fmt_lag(r.lag_ms),
-            "상태": "수집 대상 아님(목록 제외)",
+            "상태": (
+                "상장 폐지·정산(풀에서 빠짐)"
+                if r.symbol in left_pool
+                else "수집 대상 아님(목록 제외)"
+            ),
         }
         for r in rows
     )
@@ -1415,11 +1424,17 @@ def _render_health_body(settings: Settings) -> None:
     elif view.excluded:
         # 판정에서 뺐다고 화면에서까지 지우지 않는다(WAN-157) — 경보 대신 정보로만(WAN-458).
         n_symbols = len({f.symbol for f in view.excluded})
+        n_left = len({f.symbol for f in view.excluded} & view.left_pool_symbols)
+        left_note = f" (그중 상장 폐지·정산 {n_left}종목)" if n_left else ""
         with st.expander(
             f"ℹ️ 수집 대상 아님(목록 제외) {n_symbols}종목 · {len(view.excluded)}시리즈"
-            " — 판정·경보에서 제외"
+            f"{left_note} — 판정·경보에서 제외"
         ):
-            st.dataframe(_excluded_frame(view.excluded), use_container_width=True, hide_index=True)
+            st.dataframe(
+                _excluded_frame(view.excluded, view.left_pool_symbols),
+                use_container_width=True,
+                hide_index=True,
+            )
 
     st.subheader("펀딩비 상태")
     if view.funding:

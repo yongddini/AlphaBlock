@@ -38,7 +38,12 @@ from data.derived_bars import build_derived as _build_derived
 from data.models import Candle, timeframe_to_ms
 from data.storage import OhlcvStore
 from data.universe import ARM_STREAM_TIMEFRAMES, BUILT_TIMEFRAMES
-from data.universe_pool import POOL_TIMEFRAME, UniverseStore, rotation_members_at
+from data.universe_pool import (
+    POOL_TIMEFRAME,
+    UniverseStore,
+    pool_members_latest,
+    rotation_members_at,
+)
 
 if TYPE_CHECKING:
     from config.settings import Settings
@@ -117,12 +122,23 @@ class MonitorScope:
 
     pairs: frozenset[Pair]
     any_symbol_timeframes: frozenset[str] = frozenset()
-    """종목과 무관하게 모으는 TF — 후보 풀 일봉(`1d`, 풀 전체를 하루 한 번 받는다).
+    """종목과 무관하게 모으는 TF — **후보 풀 목록을 못 읽었을 때만** 쓰는 옛 동작(WAN-471).
 
-    풀(지금 상장된 USDT 무기한 전체)은 DB에 목록으로 남지 않아 종목 단위로 못 좁힌다 — 그래서
-    이 TF는 옛 동작(저장된 것 전부 감시)을 유지한다. 목록에서 빠진 종목의 1d도 풀이 계속
-    모으므로 여기에 들어가는 게 맞다.
+    풀(지금 상장된 USDT 무기한 전체)은 원래 DB에 목록으로 남지 않아 풀 일봉(`1d`)을 「저장된 것
+    전부」로 감시했다 — 그러자 상폐된 종목(EPIC, 2026-10-22)의 1d가 다시는 안 오는데도 영원히
+    「수집 지연」으로 울렸다. 지금은 수집기가 매일 풀을 `universe_pool_members`에 남기고, 그것을
+    읽으면 풀 일봉이 종목 단위 `pairs`로 들어가 이 집합은 비어 있다. 못 읽으면(첫 갱신 전·표
+    없음) 감시가 꺼지지 않게 옛 동작으로 돌아간다(WAN-458 규칙).
     """
+    pool_symbols: frozenset[str] | None = None
+    """마지막으로 확인한 후보 풀(WAN-471) — 못 읽었거나 팔이 꺼져 있으면 None."""
+
+    def left_pool(self, symbol: str) -> bool:
+        """이 종목이 마지막 후보 풀에 **없는가** — 상장 폐지·정산으로 풀에서 빠진 종목(WAN-471).
+
+        풀을 모르면(None) False다 — 모르는 것을 「상폐」로 지어내지 않는다.
+        """
+        return self.pool_symbols is not None and symbol not in self.pool_symbols
 
     def covers(self, symbol: str, timeframe: str) -> bool:
         return (symbol, timeframe) in self.pairs or timeframe in self.any_symbol_timeframes
@@ -153,6 +169,8 @@ def monitor_scope(
     * 팔이 켜져 있으면 기본 격자 + (그 주 목록 ∪ 보유 종목) × (팔 TF + 수집기가 접어 저장하는 3h)
       + 풀 일봉. 그 주 목록을 못 읽으면(표 없음 · 아직 첫 목록 전) **None** — 감시가 꺼지는
       쪽으로 실패하면 안 된다.
+    * 풀 일봉은 **마지막으로 저장한 후보 풀**의 종목만이다(WAN-471 — 상폐 종목은 풀에서 빠진다).
+      풀 목록을 못 읽으면 1d만 옛 동작(저장된 1d 전부)으로 돌아간다.
     """
     if not universe_enabled:
         return MonitorScope(pairs=frozenset(build_plan(base_symbols, base_timeframes).pairs()))
@@ -162,9 +180,16 @@ def monitor_scope(
     arm = set(members) | held_symbols(db_path)
     plan = build_plan(base_symbols, base_timeframes, arm)
     built = {(s, tf) for s in plan.arm_symbols for tf in BUILT_TIMEFRAMES}
+    pool = pool_members_latest(db_path)
+    if pool is None:
+        return MonitorScope(
+            pairs=frozenset(plan.pairs()) | frozenset(built),
+            any_symbol_timeframes=frozenset({POOL_TIMEFRAME}),
+        )
+    pool_daily = {(s, POOL_TIMEFRAME) for s in pool}
     return MonitorScope(
-        pairs=frozenset(plan.pairs()) | frozenset(built),
-        any_symbol_timeframes=frozenset({POOL_TIMEFRAME}),
+        pairs=frozenset(plan.pairs()) | frozenset(built) | frozenset(pool_daily),
+        pool_symbols=pool,
     )
 
 
