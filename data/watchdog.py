@@ -136,12 +136,21 @@ async def guard_idle(
 
     정상 종료(`StopAsyncIteration`)는 그대로 흘려 조용히 끝난다. 유휴 초과면 대기 중인
     `__anext__`를 취소하고 `StreamStalled`를 올려 상위 재접속 루프가 잡게 한다.
+
+    🚨 `asyncio.wait_for`가 아니라 `asyncio.timeout`이다. Python 3.11의 `wait_for`는 **기다리던
+    메시지가 막 도착한 순간에 바깥에서 취소가 오면 그 취소를 삼키고 메시지를 돌려준다**(CPython
+    gh-86296 · 3.12에서 고침). 그러면 `_first_to_end`가 「나머지 연결을 닫는다」며 취소한 연결이
+    계속 돌고, 그 연결을 기다리는 `gather`가 영원히 안 끝난다 — 메시지가 몇 ms마다 오는 실제
+    연결에서는 그 순간이 드물지 않다. 테스트에서는 바쁜 기계에서 WAN-461 테스트가 몇 시간씩
+    멈추는 모양으로 드러났다. `asyncio.timeout`은 같은 태스크 안에서 취소 횟수를 세어 바깥 취소와
+    자기 시간 초과를 가르므로 바깥 취소를 잃지 않는다.
     """
     if idle_timeout_seconds <= 0:
         raise ValueError("idle_timeout_seconds는 양수여야 합니다")
     while True:
         try:
-            item = await asyncio.wait_for(anext(source), idle_timeout_seconds)
+            async with asyncio.timeout(idle_timeout_seconds):
+                item = await anext(source)
         except StopAsyncIteration:
             return
         except TimeoutError as exc:

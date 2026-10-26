@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from collections.abc import Callable, Mapping, Sequence
 from functools import partial
 
@@ -16,7 +17,14 @@ from common.telegram import build_telegram_client
 from common.timefmt import kst_log_format, use_kst_logging
 from config.settings import Settings, get_settings
 from data.backfill import FetchOHLCV, backfill_all
-from data.collection_plan import ArmCollection, CollectionPlan, build_plan, monitor_scope_for
+from data.collection_plan import (
+    ArmCollection,
+    CollectionPlan,
+    backfill_pairs,
+    build_plan,
+    current_arm_pairs,
+    monitor_scope_for,
+)
 from data.derived_bars import build_derived
 from data.exchange import create_exchange
 from data.funding import (
@@ -188,6 +196,54 @@ def _merge_snapshots(older: LastOpenSnapshot | None, newer: LastOpenSnapshot) ->
 def _arm_catch_up(arm: ArmCollection, snapshot: Mapping[tuple[str, str], int | None]) -> int:
     """`TailCatchup`의 팔 쪽 이어 돌기 — 접속 순간 스냅샷에서 시작한다(WAN-456)."""
     return arm.catch_up(last_open_times=snapshot)
+
+
+def _arm_tail_refill(
+    settings: Settings,
+    exchange: FetchOHLCV,
+    store: OhlcvStore,
+    *,
+    progress: Callable[[], None] | None = None,
+    now_ms: Callable[[], int] = lambda: int(time.time() * 1000),
+) -> Callable[[Sequence[tuple[str, str]]], int]:
+    """시작 갭 복구의 `refill_stale` — 정지로 보이는 **팔 쪽** 시리즈의 꼬리만 받는다(WAN-472).
+
+    기동 백필(`backfill_all`)은 기본 격자만 꼬리까지 채우고 팔 종목은 스트림 접속 직전
+    `arm.catch_up`에서야 채운다. 그 사이에 신선도를 재면 수집기가 꺼져 있던 몇 분이 「🚨 수집
+    정지」로 찍힌다(2026-10-23 · 1m 21건). 판정을 `arm.catch_up` 뒤로 미루면 안 되는 이유: 그
+    따라잡기는 279쌍 × 0.5초로 5분이 넘어, 앞에서 채운 1m이 판정할 때쯤 다시 문턱(2.5분)을 넘는다.
+    그래서 판정 직전에 **정지로 보이는 쌍만** 받는다(보통 1m 수십 개 · 수십 초).
+
+    기본 격자 쌍은 받지 않는다 — 방금 기동 백필이 채웠으니 그래도 정지면 진짜 정지다. 그 주 목록을
+    못 읽으면 받을 쌍이 없고 판정은 옛 동작 그대로다.
+    """
+
+    def refill(pairs: Sequence[tuple[str, str]]) -> int:
+        arm_pairs = set(
+            current_arm_pairs(
+                settings.db_path,
+                base_symbols=settings.symbols,
+                base_timeframes=settings.timeframes,
+                now_ms=now_ms(),
+            )
+        )
+        wanted = [p for p in pairs if p in arm_pairs]
+        if not wanted:
+            return 0
+        logger.info(
+            "정지로 보이는 팔 종목 시리즈 %d건의 꼬리를 판정 전에 받습니다(WAN-472)", len(wanted)
+        )
+        return backfill_pairs(
+            exchange,
+            store,
+            wanted,
+            lookback_days=settings.lookback_days_for,
+            pause_seconds=settings.universe_request_interval_seconds,
+            progress=progress,
+            now_ms=now_ms,
+        )
+
+    return refill
 
 
 def report_funding_task_exit(task: asyncio.Task[None]) -> None:
@@ -599,8 +655,23 @@ async def run_collector(
             # 보면 팔 목록에서 빠진 종목이 재시작마다 「🚨 수집 정지」로 울린다. 계획을 못
             # 읽으면 None → 옛 동작(전부 판정).
             scope = monitor_scope_for(settings)
+            # 정지로 보이는 팔 종목은 판정 전에 꼬리를 받는다(WAN-472) — 팔 종목의 기동 따라잡기는
+            # 이 판정보다 뒤(`arm.catch_up`)라, 꺼져 있던 몇 분이 「🚨 수집 정지」로 찍혔다.
+            # 팔이 꺼져 있으면 None → 옛 동작.
+            refill = (
+                _arm_tail_refill(settings, exchange, store, progress=partial(_beat_file, heartbeat))
+                if settings.universe_enabled
+                else None
+            )
             summary = await asyncio.to_thread(
-                partial(repair_all, exchange, store, lookback_ms=lookback_ms, scope=scope)
+                partial(
+                    repair_all,
+                    exchange,
+                    store,
+                    lookback_ms=lookback_ms,
+                    scope=scope,
+                    refill_stale=refill,
+                )
             )
             RepairStateStore(settings.repair_state_path).save(summary)
             logger.info(
