@@ -267,16 +267,88 @@ def test_repair_all_rejudges_only_the_stale_pairs(tmp_path: Path) -> None:
                 _bar(BTC, "1h", now // HOUR * HOUR - HOUR),
             ]
         )
-        asked: list[Sequence[tuple[str, str]]] = []
+        asked: list[list[tuple[str, str]]] = []
 
         def refill(pairs: Sequence[tuple[str, str]]) -> None:
             asked.append(list(pairs))
-            store.upsert_candles([_bar(ARM, "1m", now - MIN)])
+            if (ARM, "1m") in pairs:
+                store.upsert_candles([_bar(ARM, "1m", now - MIN)])
 
         summary = repair_all(_TailExchange(respond=False), store, refill_stale=refill)
 
-    assert sorted(asked[0]) == sorted([(ARM, "1m"), (BTC, "1m")])
+    # 쌍마다 한 번씩 부른다(받자마자 그 쌍만 판정) — 정지로 보인 두 쌍만, 신선한 1h는 안 부른다.
+    assert sorted(asked) == sorted([[(ARM, "1m")], [(BTC, "1m")]])
     assert [(s.symbol, s.timeframe) for s in summary.stale_series] == [(BTC, "1m")]
+
+
+# -- 2026-10-26 배포 재시작: 받기가 느려도 거짓 경보가 안 남는다 ------------------------------
+
+
+class _Clock:
+    """받기 한 번에 `step_ms`씩 흐르는 가짜 시계 — 느린 받기(긴 이력 채우기)를 흉내 낸다."""
+
+    def __init__(self, start_ms: int) -> None:
+        self.t = start_ms
+
+    def __call__(self) -> int:
+        return self.t
+
+
+def _slow_refill(store: OhlcvStore, clock: _Clock, *, step_ms: int, respond: bool = True) -> Any:
+    """요청 순간까지 닫힌 봉을 채우고(응답하면) 시계를 `step_ms` 흘린다(거래소 받기와 같은 모양)."""
+
+    def refill(pairs: Sequence[tuple[str, str]]) -> None:
+        asked_at = clock.t
+        if respond:
+            store.upsert_candles([_bar(sym, tf, asked_at // MIN * MIN - MIN) for sym, tf in pairs])
+        clock.t += step_ms
+
+    return refill
+
+
+SLOW_PAIRS = [("1000PEPE/USDT:USDT", "1m"), ("AAVE/USDT:USDT", "1m"), ("AGT/USDT:USDT", "1m")]
+
+
+def test_slow_refill_does_not_make_already_filled_series_stale_again(tmp_path: Path) -> None:
+    """2026-10-26 사고 모양 — 한 쌍 받는 데 3분 25초(AGT 742,949봉)가 걸려도 경보 0건.
+
+    옛 구현(전부 받은 뒤 한꺼번에 · 받은 「뒤」 시각으로 판정)은 앞에서 채운 1000PEPE·AAVE까지
+    다시 문턱(2.5분)을 넘겨 「🚨 수집 정지」 3건을 냈다. 판정 시각이 받기 「직전」이면 그 시리즈가
+    달라고 한 순간까지 따라왔는지만 본다.
+    """
+    start = _now_min() + 30_000  # 분 중간(닫힌 봉 경계와 겹치지 않게)
+    clock = _Clock(start)
+    with OhlcvStore(tmp_path / "x.db") as store:
+        store.upsert_candles(
+            [_bar(sym, tf, start // MIN * MIN - 9 * MIN) for sym, tf in SLOW_PAIRS]
+        )
+        summary = repair_all(
+            _TailExchange(respond=False),
+            store,
+            now_ms=clock,
+            refill_stale=_slow_refill(store, clock, step_ms=205_000),
+        )
+
+    assert summary.stale_series == []
+    assert clock.t - start == 3 * 205_000  # 정말 느렸다(테스트가 재는 것이 바뀌지 않았다)
+
+
+def test_slow_refill_that_returns_nothing_still_alerts(tmp_path: Path) -> None:
+    """받기가 느리고 **아무것도 안 오면** 판정 시각을 앞당겨도 셋 다 정지다(진짜 정지는 그대로)."""
+    start = _now_min() + 30_000
+    clock = _Clock(start)
+    with OhlcvStore(tmp_path / "x.db") as store:
+        store.upsert_candles(
+            [_bar(sym, tf, start // MIN * MIN - 9 * MIN) for sym, tf in SLOW_PAIRS]
+        )
+        summary = repair_all(
+            _TailExchange(respond=False),
+            store,
+            now_ms=clock,
+            refill_stale=_slow_refill(store, clock, step_ms=205_000, respond=False),
+        )
+
+    assert sorted((s.symbol, s.timeframe) for s in summary.stale_series) == sorted(SLOW_PAIRS)
 
 
 def test_repair_all_without_refill_is_unchanged(tmp_path: Path) -> None:

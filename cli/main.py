@@ -273,6 +273,10 @@ def format_status(view: HealthView, *, configured_symbols: Sequence[str] | None 
         if plan_untracked:
             # 팔 목록에서 빠진 종목 등 — 매주 교체의 정상 결과다(WAN-466).
             lines.append(f"  ℹ️ {format_plan_excluded(plan_untracked)}")
+        if rep.filling_series:
+            # 기동 때 받기엔 긴 꼬리 — 접속 뒤 따라잡기가 채운다(WAN-474 · 경보 아님).
+            names = ", ".join(f"{f.symbol} {f.timeframe}" for f in rep.filling_series)
+            lines.append(f"  ℹ️ 기동 시점에 채우는 중(접속 뒤 따라잡기에 넘김): {names}")
 
     return "\n".join(lines)
 

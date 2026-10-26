@@ -16,7 +16,7 @@ from common.heartbeat import HeartbeatStore
 from common.telegram import build_telegram_client
 from common.timefmt import kst_log_format, use_kst_logging
 from config.settings import Settings, get_settings
-from data.backfill import FetchOHLCV, backfill_all
+from data.backfill import DEFAULT_LIMIT, FetchOHLCV, backfill_all
 from data.collection_plan import (
     ArmCollection,
     CollectionPlan,
@@ -34,7 +34,7 @@ from data.funding import (
     run_funding_refresh,
 )
 from data.models import Candle, timeframe_to_ms
-from data.repair import RepairStateStore, alert_on_failure, repair_all
+from data.repair import RefillStale, RepairStateStore, alert_on_failure, repair_all
 from data.rest_poll import ClosedBarPoller, report_poller_task_exit
 from data.storage import OhlcvStore
 from data.stream import stream_kline_pairs, stream_klines
@@ -205,43 +205,66 @@ def _arm_tail_refill(
     *,
     progress: Callable[[], None] | None = None,
     now_ms: Callable[[], int] = lambda: int(time.time() * 1000),
-) -> Callable[[Sequence[tuple[str, str]]], int]:
-    """시작 갭 복구의 `refill_stale` — 정지로 보이는 **팔 쪽** 시리즈의 꼬리만 받는다(WAN-472).
+    sleeper: Callable[[float], None] = time.sleep,
+    max_bars: int = DEFAULT_LIMIT,
+) -> RefillStale:
+    """시작 갭 복구의 `refill_stale` — 정지로 보이는 **팔 쪽** 시리즈의 **짧은** 꼬리만 받는다.
 
-    기동 백필(`backfill_all`)은 기본 격자만 꼬리까지 채우고 팔 종목은 스트림 접속 직전
-    `arm.catch_up`에서야 채운다. 그 사이에 신선도를 재면 수집기가 꺼져 있던 몇 분이 「🚨 수집
-    정지」로 찍힌다(2026-10-23 · 1m 21건). 판정을 `arm.catch_up` 뒤로 미루면 안 되는 이유: 그
-    따라잡기는 279쌍 × 0.5초로 5분이 넘어, 앞에서 채운 1m이 판정할 때쯤 다시 문턱(2.5분)을 넘는다.
-    그래서 판정 직전에 **정지로 보이는 쌍만** 받는다(보통 1m 수십 개 · 수십 초).
+    팔 종목 꼬리는 접속 뒤 따라잡기(`TailCatchup`)가 채우는데, 시작 갭 복구는 그보다 먼저
+    신선도를 잰다. 그대로 재면 수집기가 꺼져 있던 몇 분이 「🚨 수집 정지」로 찍힌다(2026-10-23 ·
+    1m 21건 · WAN-472). 그래서 판정 직전에 **정지로 보이는 쌍만** 받는다(보통 1m 수십 개). 시작
+    갭 복구는 이 함수를 **쌍마다 한 번씩** 불러 받자마자 판정한다.
 
-    기본 격자 쌍은 받지 않는다 — 방금 기동 백필이 채웠으니 그래도 정지면 진짜 정지다. 그 주 목록을
-    못 읽으면 받을 쌍이 없고 판정은 옛 동작 그대로다.
+    🚨 **꼬리가 한 요청(`max_bars`봉)보다 길면 받지 않고 돌려준다(WAN-474) — 「채우는 중」.**
+    새로 들어온 종목의 이력이나 재시작에 끊긴 채우기는 수십만 봉이다(2026-10-26 AGT 1m
+    742,949봉 · 3분 25초). 그걸 여기서 받으면 웹소켓 접속이 그만큼 늦고 기본 격자까지 끊긴다.
+    긴 꼬리는 접속 뒤 따라잡기가 같은 데이터를 백그라운드로 받는다.
+
+    기본 격자 쌍은 받지도 돌려주지도 않는다 — 방금 기동 백필이 채웠으니 그래도 정지면 진짜
+    정지다. 그 주 목록을 못 읽으면 받을 쌍이 없고 판정은 옛 동작 그대로다.
     """
 
-    def refill(pairs: Sequence[tuple[str, str]]) -> int:
-        arm_pairs = set(
-            current_arm_pairs(
-                settings.db_path,
-                base_symbols=settings.symbols,
-                base_timeframes=settings.timeframes,
-                now_ms=now_ms(),
+    arm_pairs: set[tuple[str, str]] | None = None
+    calls = 0
+
+    def refill(pairs: Sequence[tuple[str, str]]) -> list[tuple[str, str]]:
+        # 시작 갭 복구가 쌍마다 한 번씩 부른다(받자마자 판정하려고) — 팔 목록은 한 번만 읽고,
+        # 거래소 요청 사이에는 팔 따라잡기와 같은 간격을 둔다.
+        nonlocal arm_pairs, calls
+        if arm_pairs is None:
+            arm_pairs = set(
+                current_arm_pairs(
+                    settings.db_path,
+                    base_symbols=settings.symbols,
+                    base_timeframes=settings.timeframes,
+                    now_ms=now_ms(),
+                )
             )
-        )
-        wanted = [p for p in pairs if p in arm_pairs]
-        if not wanted:
-            return 0
-        logger.info(
-            "정지로 보이는 팔 종목 시리즈 %d건의 꼬리를 판정 전에 받습니다(WAN-472)", len(wanted)
-        )
-        return backfill_pairs(
-            exchange,
-            store,
-            wanted,
-            lookback_days=settings.lookback_days_for,
-            pause_seconds=settings.universe_request_interval_seconds,
-            progress=progress,
-            now_ms=now_ms,
-        )
+        now = now_ms()
+        short: list[tuple[str, str]] = []
+        long: list[tuple[str, str]] = []
+        for pair in pairs:
+            if pair not in arm_pairs:
+                continue
+            last = store.last_open_time(*pair)
+            missing = None if last is None else (now - last) // timeframe_to_ms(pair[1])
+            (long if missing is None or missing > max_bars else short).append(pair)
+        if short:
+            if calls == 0:
+                logger.info("정지로 보이는 팔 종목 시리즈의 꼬리를 판정 전에 받습니다(WAN-472)")
+            elif settings.universe_request_interval_seconds > 0:
+                sleeper(settings.universe_request_interval_seconds)
+            calls += 1
+            backfill_pairs(
+                exchange,
+                store,
+                short,
+                lookback_days=settings.lookback_days_for,
+                pause_seconds=settings.universe_request_interval_seconds,
+                progress=progress,
+                now_ms=now_ms,
+            )
+        return long
 
     return refill
 
@@ -655,9 +678,9 @@ async def run_collector(
             # 보면 팔 목록에서 빠진 종목이 재시작마다 「🚨 수집 정지」로 울린다. 계획을 못
             # 읽으면 None → 옛 동작(전부 판정).
             scope = monitor_scope_for(settings)
-            # 정지로 보이는 팔 종목은 판정 전에 꼬리를 받는다(WAN-472) — 팔 종목의 기동 따라잡기는
-            # 이 판정보다 뒤(`arm.catch_up`)라, 꺼져 있던 몇 분이 「🚨 수집 정지」로 찍혔다.
-            # 팔이 꺼져 있으면 None → 옛 동작.
+            # 정지로 보이는 팔 종목은 판정 전에 짧은 꼬리를 받는다(WAN-472/474) — 팔 종목 꼬리는
+            # 접속 뒤 따라잡기가 채우므로 그대로 재면 꺼져 있던 몇 분이 「🚨 수집 정지」로 찍힌다.
+            # 긴 꼬리는 받지 않고 「채우는 중」으로 넘긴다. 팔이 꺼져 있으면 None → 옛 동작.
             refill = (
                 _arm_tail_refill(settings, exchange, store, progress=partial(_beat_file, heartbeat))
                 if settings.universe_enabled
@@ -749,16 +772,18 @@ async def run_collector(
             if arm is not None:
                 plan = arm.compute()
                 arm.adopt(plan)
-                # 접속 전이라 메시지가 없다 — 쌍마다 진행을 찍어 워치독이 죽이지 않게 한다(WAN-451).
-                filled = await asyncio.to_thread(arm.catch_up, _mark_startup)
-                # 이미 모으던 팔 종목의 이력을 뒤로 늘리는 일(오래된 존 기억, WAN-451)은 수 분~십수
-                # 분이라 스트림 접속을 막지 않게 백그라운드로 돈다(WAN-314 기동 지연 사고).
+                # 🚨 팔 종목 따라잡기를 여기(접속 전)서 돌리지 않는다(WAN-474). 279쌍 × 0.5초 + 새로
+                # 들어온 종목의 이력 전체라 교체 날엔 10분을 넘고, 그동안 웹소켓·REST 이중 수집이
+                # 안 붙어 **기본 격자까지** 새 봉이 끊긴다 — 2026-10-26 배포 재시작에서 13분 공백 →
+                # 외부 감시가 「수집기가 멎었다」로 다시 재시작했다. 같은 일은 접속 직후
+                # `TailCatchup`(`extra=_arm_catch_up`)가 접속 순간 스냅샷에서 백그라운드로 한다
+                # (WAN-456) — 받는 데이터는 같고 막히는 시간만 없어진다.
+                # 이력을 뒤로 늘리는 일(오래된 존 기억, WAN-451)도 백그라운드다(WAN-314).
                 history_task = asyncio.create_task(asyncio.to_thread(arm.extend_history))
                 logger.info(
-                    "팔 종목 수집 계획: 팔 %d종목 · 스트림 %d개 · 기동 백필 %d봉",
+                    "팔 종목 수집 계획: 팔 %d종목 · 스트림 %d개 — 따라잡기는 접속 뒤(WAN-474)",
                     len(plan.arm_symbols),
                     len(plan.pairs()),
-                    filled,
                 )
 
             # 접속 직후 꼬리 따라잡기(WAN-314) — 기동 백필~접속 사이·재접속 공백에
