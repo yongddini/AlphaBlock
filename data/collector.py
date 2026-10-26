@@ -127,6 +127,16 @@ class TailCatchup:
         self._extra_pairs = extra_pairs
         self._tasks: set[asyncio.Task[None]] = set()
         self._pending: LastOpenSnapshot | None = None
+        #: 끝까지 성공한 따라잡기 횟수 — 0이면 아직 기동 따라잡기 전이다(WAN-474).
+        self._completed = 0
+
+    def startup_pending(self) -> bool:
+        """기동 뒤 첫 따라잡기가 아직 안 끝났나 — REST 폴러가 긴 공백을 건드리지 않게(WAN-474).
+
+        첫 접속 전이면 스냅샷조차 안 찍혔다. 그때 폴러가 긴 공백 시리즈를 「최근 N봉만」 받으면
+        마지막 봉이 앞으로 뛰어, 뒤에 찍힐 스냅샷이 그 앞을 영구 구멍으로 남긴다.
+        """
+        return self._completed == 0
 
     def snapshot(self) -> LastOpenSnapshot:
         """지금 저장소의 시리즈별 마지막 봉(기본 격자 + 팔 쪽 쌍)."""
@@ -153,10 +163,12 @@ class TailCatchup:
     async def _run(self, snapshot: LastOpenSnapshot) -> None:
         current: LastOpenSnapshot | None = snapshot
         while current is not None:
-            await self._run_once(current)
+            if await self._run_once(current):
+                self._completed += 1
             current, self._pending = self._pending, None
 
-    async def _run_once(self, snapshot: LastOpenSnapshot) -> None:
+    async def _run_once(self, snapshot: LastOpenSnapshot) -> bool:
+        """한 번 따라잡는다 — 끝까지 돌았으면 True(실패는 로그만 남기고 False)."""
         try:
             results = await asyncio.to_thread(
                 backfill_all,
@@ -177,6 +189,8 @@ class TailCatchup:
                 )
         except Exception:  # noqa: BLE001 — 따라잡기 실패가 스트림을 죽이면 안 된다.
             logger.exception("꼬리 따라잡기 백필 실패 — 다음 (재)접속에서 다시 시도합니다")
+            return False
+        return True
 
 
 def _merge_snapshots(older: LastOpenSnapshot | None, newer: LastOpenSnapshot) -> LastOpenSnapshot:
@@ -535,6 +549,7 @@ def _build_rest_poller(
     arm: ArmCollection | None,
     *,
     on_progress: Callable[[], None],
+    hold_long_gaps: Callable[[], bool] | None = None,
 ) -> ClosedBarPoller:
     """확정봉 REST 이중 수집기(WAN-470 §0). 거래소 인스턴스는 따로 만든다(스레드 공유 회피).
 
@@ -560,6 +575,7 @@ def _build_rest_poller(
         offset_seconds=settings.collector_rest_poll_offset_seconds,
         max_bars=settings.collector_rest_poll_max_bars,
         on_progress=on_progress,
+        hold_long_gaps=hold_long_gaps,
         on_filled=_on_filled,
     )
 
@@ -804,7 +820,14 @@ async def run_collector(
             # 기동 백필이 끝난 뒤에 붙인다(그 전에 돌면 같은 꼬리를 두 번 받는다).
             poller_task: asyncio.Task[None] | None = None
             if settings.collector_rest_poll_enabled:
-                poller = _build_rest_poller(settings, store, arm, on_progress=_mark_data)
+                # 첫 따라잡기가 끝나기 전엔 긴 공백을 건드리지 않는다(WAN-474 — 영구 구멍 방지).
+                poller = _build_rest_poller(
+                    settings,
+                    store,
+                    arm,
+                    on_progress=_mark_data,
+                    hold_long_gaps=catchup.startup_pending,
+                )
                 poller_task = asyncio.create_task(poller.run())
                 poller_task.add_done_callback(report_poller_task_exit)
 

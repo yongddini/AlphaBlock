@@ -300,3 +300,152 @@ def test_refill_hook_returns_only_long_arm_pairs(tmp_path: Path) -> None:
 
     assert long_pairs == [(ARM, "1m")]  # 5봉 > 한도 3봉 → 넘긴다
     assert base == [] and exchange.calls == []  # 기본 격자는 받지도 넘기지도 않는다
+
+
+# -- (d) REST 폴러가 접속 스냅샷보다 먼저 돌아도 영구 구멍이 안 생긴다 (PM 변경 요청) ---------
+
+
+def _bars_between(db: Path, symbol: str, timeframe: str, start: int, end: int) -> list[int]:
+    import sqlite3
+
+    with sqlite3.connect(db) as conn:
+        rows = conn.execute(
+            "SELECT open_time FROM ohlcv WHERE symbol=? AND timeframe=?"
+            " AND open_time BETWEEN ? AND ? ORDER BY open_time",
+            (symbol, timeframe, start, end),
+        ).fetchall()
+    return [int(r[0]) for r in rows]
+
+
+def _poller_then_connect(tmp_path: Path, *, hold: bool) -> tuple[int, list[int], int]:
+    """새 종목 1m이 3,000분 비어 있는 채로 기동 — 폴러 첫 바퀴가 접속(스냅샷)보다 먼저 온다.
+
+    돌려주는 값: (원래 마지막 봉, 그 뒤 저장된 봉들, 따라잡기 뒤 마지막 봉).
+    """
+    from data.collection_plan import backfill_pairs
+    from data.rest_poll import ClosedBarPoller
+
+    now = _now_min()
+    old_last = now - 3_000 * MIN  # 폴러 깊이 상한(500)보다도, 기동 꼬리 한도(1,000)보다도 길다
+    db = tmp_path / "ohlcv.db"
+    with OhlcvStore(db) as store:
+        store.upsert_candles(
+            [_bar(BTC, "1h", now // HOUR * HOUR - HOUR), _bar(ARM, "1m", old_last)]
+        )
+    settings = _settings(tmp_path, collector_rest_poll_enabled=True)
+    exchange = _RecordingExchange()
+    pair = (ARM, "1m")
+
+    with OhlcvStore(db) as store:
+
+        def arm_catch_up(snapshot: Any) -> int:
+            return backfill_pairs(
+                exchange,
+                store,
+                [pair],
+                lookback_days=settings.lookback_days_for,
+                pause_seconds=0,
+                last_open_times=snapshot,
+            )
+
+        catchup = collector.TailCatchup(
+            exchange,
+            store,
+            settings,
+            extra=arm_catch_up,
+            extra_pairs=lambda: [pair],
+        )
+        poller = ClosedBarPoller(
+            exchange,
+            store,
+            lambda: [pair],
+            max_bars=500,
+            hold_long_gaps=catchup.startup_pending if hold else None,
+            sleeper=lambda _s: None,
+        )
+
+        first = poller.poll_once()  # 기동 직후 첫 바퀴 — 아직 접속 전(스냅샷 없음)
+        assert first.held == (1 if hold else 0)
+
+        async def connect_and_catch_up() -> None:
+            catchup.schedule()  # 접속 성립 — 접속 순간 스냅샷
+            await _wait_until(lambda: not catchup.startup_pending(), timeout=10)
+
+        asyncio.run(connect_and_catch_up())
+        poller.poll_once()  # 따라잡기 뒤의 평소 바퀴
+        last_after = store.last_open_time(*pair)
+
+    assert last_after is not None
+    return old_last, _bars_between(db, ARM, "1m", old_last, last_after), last_after
+
+
+def test_poller_before_connect_leaves_no_hole_in_a_long_gap(tmp_path: Path) -> None:
+    """(d) 폴러 켠 채로 첫 바퀴가 접속보다 먼저 와도, 따라잡기 뒤 그 시리즈에 내부 구멍이 없다."""
+    old_last, bars, last_after = _poller_then_connect(tmp_path, hold=True)
+
+    assert last_after >= _now_min() - 2 * MIN  # 현재까지 따라왔다
+    expected = (last_after - old_last) // MIN + 1
+    assert len(bars) == expected, f"구멍 {expected - len(bars)}봉"
+
+
+def test_without_the_hold_the_poller_would_leave_a_hole(tmp_path: Path) -> None:
+    """(d) 돌연변이 대조 — 기다림을 빼면(옛 동작) 최근 500봉만 들어가고 그 앞이 구멍으로 남는다."""
+    old_last, bars, last_after = _poller_then_connect(tmp_path, hold=False)
+
+    expected = (last_after - old_last) // MIN + 1
+    assert len(bars) < expected  # 이 모양이 이번 수정이 막는 영구 구멍이다
+
+
+def test_collector_hands_the_catchup_gate_to_the_poller(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(d) 배선 — 수집기는 폴러에 「첫 따라잡기 전」 신호를 넘기고, 따라잡기가 끝나면 풀린다."""
+    events: list[str] = []
+    arm = _SlowArm(events)
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(collector, "create_exchange", lambda settings: object())
+    monkeypatch.setattr(collector, "backfill_all", lambda *a, **k: {})
+    monkeypatch.setattr(collector, "_build_arm_collection", lambda settings, store: arm)
+
+    async def no_funding(settings: Settings, exchange: Any) -> None:
+        return None
+
+    async def idle_universe(settings: Settings, store: Any) -> None:
+        await asyncio.Event().wait()
+
+    class _IdlePoller:
+        async def run(self) -> None:
+            await asyncio.Event().wait()
+
+    def fake_build_poller(*a: Any, **kw: Any) -> _IdlePoller:
+        captured.update(kw)
+        return _IdlePoller()
+
+    monkeypatch.setattr(collector, "_backfill_funding", no_funding)
+    monkeypatch.setattr(collector, "_run_universe", idle_universe)
+    monkeypatch.setattr(collector, "_build_rest_poller", fake_build_poller)
+
+    observed: list[bool] = []
+
+    async def fake_stream(store: Any, arm_: Any, **kwargs: Any) -> None:
+        hold = captured["hold_long_gaps"]
+        observed.append(hold())  # 접속 전 — 첫 따라잡기 전이라 참
+        kwargs["on_connect"]()
+        await _wait_until(lambda: "catch_up_start" in events)
+        observed.append(hold())  # 따라잡기 도는 중 — 여전히 참
+        arm.release.set()
+        await _wait_until(lambda: not hold())  # 끝나면 풀린다
+        observed.append(hold())
+        raise RuntimeError("stop")
+
+    monkeypatch.setattr(collector, "_stream_arm_plan", fake_stream)
+    settings = _settings(tmp_path, collector_rest_poll_enabled=True)
+
+    try:
+        with pytest.raises(RuntimeError, match="stop"):
+            asyncio.run(collector.run_collector(settings, run_stream=True, repair_on_start=False))
+    finally:
+        arm.release.set()
+
+    assert observed == [True, True, False]
