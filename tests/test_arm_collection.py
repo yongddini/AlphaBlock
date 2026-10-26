@@ -410,12 +410,18 @@ def test_catch_up_marks_progress_per_pair_and_symbol(tmp_path: Path) -> None:
     universe.close()
 
 
-def test_collector_passes_watchdog_progress_to_startup_catch_up() -> None:
+def test_collector_no_longer_catches_up_arm_before_connecting() -> None:
+    """WAN-474: 팔 따라잡기는 접속 **뒤** `TailCatchup`이 한다 — 접속 전 동기 호출은 없다.
+
+    예전에는 여기서 `asyncio.to_thread(arm.catch_up, _mark_startup)`를 확인했다(WAN-470). 그 호출이
+    교체 날 10분 넘게 웹소켓 접속을 막아 기본 격자까지 끊겼고(2026-10-26), 외부 감시가 다시
+    재시작했다. 동작(접속이 먼저 붙는다)은 `tests/test_wan474_startup_order.py`가 고정한다.
+    """
     import inspect
 
-    src = inspect.getsource(collector)
-    # WAN-470: 기동 따라잡기는 두 워치독(데이터·웹소켓)을 함께 찍는 `_mark_startup`을 넘긴다.
-    assert "asyncio.to_thread(arm.catch_up, _mark_startup)" in src
+    src = inspect.getsource(collector.run_collector)
+    assert "to_thread(arm.catch_up" not in src
+    assert "extra=partial(_arm_catch_up, arm)" in src  # 접속 뒤 따라잡기가 팔 쪽을 맡는다
 
 
 def test_backfill_older_reads_only_the_missing_front(tmp_path: Path) -> None:

@@ -47,7 +47,7 @@ from __future__ import annotations
 import logging
 import os
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 from typing import Literal
 
@@ -151,6 +151,15 @@ class RepairSummary(BaseModel):
     늦춘다). 그러면 `gaps_found: 0`은 「전 구간 이상 없음」이 아니라 「이 창 안에서
     이상 없음」이다. 그 차이를 요약이 스스로 밝히지 않으면 WAN-156과 같은 종류의
     침묵이 된다 — 창 밖 갭은 `alphablock backfill --repair`/`verify`가 본다.
+    """
+    filling_series: list[StaleSeries] = []
+    """꼬리가 길게 비어 **접속 뒤 따라잡기에 넘긴** 시리즈(WAN-474) — 「채우는 중」.
+
+    ⚠️ **결함이 아니다** — `has_defect`·텔레그램에 안 들어간다. 새로 들어온 팔 종목의 이력이나
+    재시작에 끊긴 채우기처럼 수십만 봉짜리 공백을 기동 중에 받으면 웹소켓 접속이 몇 분씩 늦어
+    기본 격자까지 끊긴다(2026-10-26 AGT 1m 742,949봉 · 3분 25초). 그래서 짧은 꼬리만 기동 때
+    받고 긴 것은 여기 남겨 접속 뒤 따라잡기(`TailCatchup`)에 맡긴다. 그 뒤에도 안 따라오면
+    평소 감시(`alphablock watch`)가 잡는다.
     """
     untracked_series: list[UntrackedSeries] = []
     """저장돼 있으나 수집 대상 TF가 아닌 시리즈(WAN-157).
@@ -349,7 +358,7 @@ def repair_all(
     tracked_timeframes: Sequence[str] | None = None,
     lookback_ms: int | None = None,
     scope: MonitorScope | None = None,
-    refill_stale: Callable[[Sequence[tuple[str, str]]], object] | None = None,
+    refill_stale: RefillStale | None = None,
 ) -> RepairSummary:
     """저장된 모든(또는 지정한) 시리즈의 갭을 탐지·복구하고 꼬리 신선도를 판정한다.
 
@@ -375,12 +384,14 @@ def repair_all(
     같다). None이면(기본) 옛 동작이다. `tracked_timeframes`와 함께 주면 둘 다 적용된다(TF로
     먼저 거르고 남은 것을 계획으로 거른다).
 
-    `refill_stale`(WAN-472)을 주면 **정지로 보이는 OHLCV 시리즈의 꼬리를 그 함수로 한 번 받은
-    뒤 그 시리즈만 다시 판정한다** — 갭 복구는 봉 *사이* 구멍만 메우고 꼬리는 안 채우므로, 기동
-    백필(기본 격자)이 아직 안 닿은 시리즈(팔 종목)가 수집기가 꺼져 있던 몇 분 때문에 「🚨 수집
-    정지」로 찍힌다(2026-10-23 재시작 직후 21건). 받은 뒤에도 문턱을 넘으면 그대로 정지다(거래소
-    무응답 · 받기 실패) — 문턱은 안 바뀐다. 함수가 예외를 내면 로그만 남기고 저장분으로 판정한다
-    (실패를 「정상」으로 바꾸지 않는다). None이면(기본) 옛 동작이다.
+    `refill_stale`(WAN-472)을 주면 **정지로 보이는 OHLCV 시리즈의 꼬리를 그 함수로 하나씩
+    받고, 받자마자 그 시리즈만 다시 판정한다**. 갭 복구는 봉 *사이* 구멍만 메우고 꼬리는 안
+    채운다. 그래서 기동 백필(기본 격자)이 아직 안 닿은 시리즈(팔 종목)가, 수집기가 꺼져
+    있던 몇 분 때문에 「🚨 수집 정지」로 찍혔다(2026-10-23 재시작 직후 21건). 받은 뒤에도
+    문턱을 넘으면 그대로 정지다(거래소 무응답 · 받기 실패) — 문턱은 안 바뀐다. 함수가
+    예외를 내면 로그만 남기고 저장분으로 판정한다(실패를 「정상」으로 바꾸지 않는다).
+    함수가 「길어서 지금 안 받았다」고 돌려준 쌍은 정지가 아니라 `filling_series`
+    (「채우는 중」)로 간다(WAN-474). None이면(기본) 옛 동작이다.
     """
     stored = list(series) if series is not None else store.list_series()
     targets = stored
@@ -419,8 +430,9 @@ def repair_all(
         now_ms=ran_at,
         stale_multiplier=stale_multiplier,
     )
+    filling: list[StaleSeries] = []
     if refill_stale is not None and stale:
-        stale = _refill_and_rejudge(
+        stale, filling = _refill_and_rejudge(
             stale, refill_stale, store, now_ms=now_ms, stale_multiplier=stale_multiplier
         )
     stale += find_stale_funding(
@@ -458,49 +470,76 @@ def repair_all(
         ran_at_ms=ran_at,
         series=results,
         stale_series=stale,
+        filling_series=filling,
         untracked_series=untracked,
         lookback_ms=lookback_ms,
     )
 
 
+#: 시작 갭 복구의 「판정 전 꼬리 받기」 훅(WAN-472/474) — 쌍 하나씩 받는다. 길어서 지금 안 받고
+#: 접속 뒤 따라잡기에 넘긴 쌍을 돌려준다(없으면 None 또는 빈 목록).
+RefillStale = Callable[[Sequence[tuple[str, str]]], Iterable[tuple[str, str]] | None]
+
+
 def _refill_and_rejudge(
     stale: Sequence[StaleSeries],
-    refill: Callable[[Sequence[tuple[str, str]]], object],
+    refill: RefillStale,
     store: OhlcvStore,
     *,
     now_ms: Callable[[], int],
     stale_multiplier: float,
-) -> list[StaleSeries]:
-    """정지로 보이는 시리즈의 꼬리를 받고 그 시리즈만 다시 판정한다(WAN-472).
+) -> tuple[list[StaleSeries], list[StaleSeries]]:
+    """정지로 보이는 시리즈를 **하나씩** 받고, 받자마자 그 시리즈만 다시 판정한다(WAN-472).
 
-    다시 판정하는 것은 **방금 정지로 보인 시리즈뿐**이다 — 나머지는 이미 신선했다. 판정 시각은
-    받은 **뒤**의 지금이다(받는 데 걸린 시간만큼 문턱이 엄격해지지 느슨해지지 않는다).
+    다시 판정하는 것은 **방금 정지로 보인 시리즈뿐**이다 — 나머지는 이미 신선했다.
+
+    🚨 **판정 시각은 그 시리즈를 받기 「직전」이다** — 물음은 「거래소에 달라고 한 순간까지 이
+    시리즈가 따라왔나」다. 2026-10-26 배포 재시작에서 AGT(그날 주간 교체로 들어온 종목 · 이전
+    프로세스가 이력을 채우다 재시작에 끊김)의 1분봉을 받는 데 3분 25초(742,949봉)가 걸렸다. 받기
+    「뒤」의 시각으로 재면 그 3분 사이에 닫힌 봉 때문에 멀쩡히 따라온 시리즈가 다시 「정지」가 되고,
+    전부 받은 뒤 한꺼번에 재면 그 앞에서 채운 1000PEPE·AAVE까지 같이 걸렸다(「🚨 수집 정지」 3건).
+    거래소가 아무것도 안 주면(무응답 · 받기 실패) 꼬리가 그대로라 받기 직전 시각으로 재도 문턱을
+    넘는다 — 진짜 정지는 그대로 경보된다. 그 뒤의 공백은 팔 따라잡기·스트림 몫이다.
+
+    훅이 「길어서 안 받았다」고 돌려준 쌍은 다시 판정하지 않고 「채우는 중」으로 돌려준다
+    (WAN-474). 돌려주는 값은 (여전히 정지, 채우는 중)이다.
     """
-    pairs = [(s.symbol, s.timeframe) for s in stale]
-    try:
-        refill(pairs)
-    except Exception:  # noqa: BLE001 — 받기 실패는 정지 경보로 드러나야 한다(삼키지 않는다)
-        logger.exception(
-            "정지로 보이는 시리즈 %d건의 꼬리를 받지 못했습니다 — 저장분으로 판정합니다",
-            len(pairs),
+    still: list[StaleSeries] = []
+    filling: list[StaleSeries] = []
+    cleared: list[str] = []
+    for s in stale:
+        pair = (s.symbol, s.timeframe)
+        asked_at = now_ms()
+        try:
+            deferred = set(refill([pair]) or ())
+        except Exception:  # noqa: BLE001 — 받기 실패는 정지 경보로 드러나야 한다(삼키지 않는다)
+            logger.exception("%s %s 꼬리를 받지 못했습니다 — 저장분으로 판정합니다", *pair)
+            deferred = set()
+        if pair in deferred:
+            filling.append(s)
+            continue
+        judged = find_stale_series(
+            [(s.symbol, s.timeframe, store.last_open_time(s.symbol, s.timeframe))],
+            now_ms=asked_at,
+            stale_multiplier=stale_multiplier,
         )
-    rejudged = find_stale_series(
-        [(symbol, tf, store.last_open_time(symbol, tf)) for symbol, tf in pairs],
-        now_ms=now_ms(),
-        stale_multiplier=stale_multiplier,
-    )
-    cleared = len(pairs) - len(rejudged)
+        if judged:
+            still += judged
+        else:
+            cleared.append(f"{s.symbol} {s.timeframe}")
     if cleared:
         logger.info(
             "꼬리를 받아 정지에서 벗어난 시리즈 %d건(수집기가 꺼져 있던 공백): %s",
-            cleared,
-            ", ".join(
-                f"{sym} {tf}"
-                for sym, tf in pairs
-                if not any(r.symbol == sym and r.timeframe == tf for r in rejudged)
-            ),
+            len(cleared),
+            ", ".join(cleared),
         )
-    return rejudged
+    if filling:
+        logger.info(
+            "꼬리가 길어 접속 뒤 따라잡기에 넘긴 시리즈 %d건(채우는 중 · 경보 아님): %s",
+            len(filling),
+            ", ".join(f"{f.symbol} {f.timeframe}" for f in filling),
+        )
+    return still, filling
 
 
 # -- 오케스트레이션 (설정 배선 + 텔레그램 경고) --------------------------------

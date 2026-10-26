@@ -56,6 +56,12 @@ class PollResult:
     still_missing: int
     """돌고 난 뒤에도 닫힌 봉이 빠져 있는 시리즈 수(요청 실패·깊이 상한)."""
     errors: int
+    held: int = 0
+    """공백이 `max_bars`보다 길어 **이번엔 건드리지 않은** 시리즈 수(WAN-474).
+
+    기동 직후 접속 뒤 따라잡기가 아직 안 끝났을 때만 생긴다 — 그 시리즈는 따라잡기가 접속 순간
+    스냅샷부터 통째로 받는다. 빠짐(`still_missing`)으로 세지 않는다(받을 주체가 따로 있다).
+    """
 
     @property
     def progressed(self) -> bool:
@@ -115,6 +121,7 @@ class ClosedBarPoller:
         max_retries: int = 2,
         on_progress: Callable[[], None] | None = None,
         on_filled: Callable[[str, str, int], None] | None = None,
+        hold_long_gaps: Callable[[], bool] | None = None,
         now_ms: Callable[[], int] = lambda: int(time.time() * 1000),
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         sleeper: Callable[[float], None] = time.sleep,
@@ -130,13 +137,24 @@ class ClosedBarPoller:
         self._max_retries = max_retries
         self._on_progress = on_progress
         self._on_filled = on_filled
+        #: 참이면 공백이 `max_bars`보다 긴 시리즈를 건너뛴다(WAN-474) — None이면 예전 그대로.
+        self._hold_long_gaps = hold_long_gaps
         self._now_ms = now_ms
         self._sleep = sleep
         self._sleeper = sleeper
 
     def poll_once(self) -> PollResult:
-        """지금 빠진 확정봉을 한 번 받는다(동기 — 스레드에서 돈다)."""
-        checked = requested = filled = still_missing = errors = 0
+        """지금 빠진 확정봉을 한 번 받는다(동기 — 스레드에서 돈다).
+
+        🚨 `hold_long_gaps()`가 참이면 공백이 `max_bars`보다 긴 시리즈는 **건드리지 않는다**
+        (WAN-474). 평소처럼 「최근 `max_bars`봉만」 받으면 그 시리즈의 마지막 봉이 앞으로 뛰는데,
+        기동 직후엔 아직 접속 뒤 따라잡기의 스냅샷(접속 순간의 마지막 봉, WAN-456)이 안 찍혔다.
+        스냅샷이 그 뒤에 찍히면 따라잡기는 뛴 자리부터 받고, **그 앞 수십만 봉은 영구 내부
+        구멍**으로 남는다(새로 들어온 종목 · 재시작에 끊긴 이력 채우기). 짧은 공백은 그대로 받는다
+        — 웹소켓이 얼어도 매 분 봉이 들어오는 이중 수집(WAN-470)은 기동 중에도 유지된다.
+        """
+        checked = requested = filled = still_missing = errors = held = 0
+        holding = self._hold_long_gaps is not None and self._hold_long_gaps()
         for symbol, timeframe in dict.fromkeys(self._pairs()):
             last = self._store.last_open_time(symbol, timeframe)
             if last is None:
@@ -144,6 +162,9 @@ class ClosedBarPoller:
             checked += 1
             since = missing_since(last, timeframe, self._now_ms(), max_bars=self._max_bars)
             if since is None:
+                continue
+            if holding and since != last + timeframe_to_ms(timeframe):
+                held += 1  # 앞으로 당겨졌다 = 공백이 깊이 상한보다 길다 → 따라잡기 몫
                 continue
             requested += 1
             try:
@@ -177,6 +198,7 @@ class ClosedBarPoller:
             filled=filled,
             still_missing=still_missing,
             errors=errors,
+            held=held,
         )
 
     async def run_once(self) -> PollResult:
@@ -188,6 +210,11 @@ class ClosedBarPoller:
                 result.requested,
                 result.filled,
                 f" · 아직 빠짐 {result.still_missing}" if result.still_missing else "",
+            )
+        if result.held:
+            logger.info(
+                "REST 확정봉 수집: 공백이 긴 %d개 시리즈는 접속 뒤 따라잡기에 맡김(WAN-474)",
+                result.held,
             )
         if result.progressed and self._on_progress is not None:
             self._on_progress()
