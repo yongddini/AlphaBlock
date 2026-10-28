@@ -49,3 +49,22 @@ def create_exchange(settings: Settings | None = None) -> ccxt.binance:
         config["secret"] = settings.binance_api_secret
 
     return ccxt.binance(config)
+
+
+#: 후보 풀이 받는 시장 종류 — USDⓈ-M(`linear`)뿐이다(WAN-476).
+POOL_MARKET_TYPES: tuple[str, ...] = ("linear",)
+
+
+def create_pool_exchange(settings: Settings | None = None) -> ccxt.binance:
+    """후보 풀 갱신 전용 인스턴스 — 시장 목록을 **USDⓈ-M만** 받고 화폐 목록은 안 받는다(WAN-476).
+
+    `create_exchange`의 바이낸스는 `load_markets()` 때 현물·USDⓈ-M·COIN-M 시장을 전부 받고, 키가
+    있으면 화폐 목록(`sapi` 전 코인 정보)까지 받아 파이썬 객체로 만든다. 후보 풀
+    (`data.universe_pool.pool_symbols`)이 쓰는 것은 USDT 무기한(`swap` · `linear`)뿐이고, 매일
+    09:02 KST 강제 재로딩이 그 전부를 메모리에 올려 서버(764MB)가 스왑에 빠졌다(2026-10-27).
+    빼는 시장은 `pool_symbols`가 어차피 버리는 것들이라 풀은 그대로다(회귀 테스트가 고정).
+    """
+    exchange = create_exchange(settings)
+    exchange.options["fetchMarkets"] = {"types": list(POOL_MARKET_TYPES)}
+    exchange.options["fetchCurrencies"] = False
+    return exchange

@@ -26,7 +26,7 @@ from data.collection_plan import (
     monitor_scope_for,
 )
 from data.derived_bars import build_derived
-from data.exchange import create_exchange
+from data.exchange import create_exchange, create_pool_exchange
 from data.funding import (
     FundingRateSource,
     FundingRateStore,
@@ -332,7 +332,8 @@ async def _run_universe(settings: Settings, store: OhlcvStore) -> None:
     universe = UniverseStore(settings.db_path)
     try:
         await run_universe_loop(
-            create_exchange(settings),
+            # USDⓈ-M만 받는 인스턴스 — 매일 강제 재로딩이 현물·COIN-M까지 올리지 않게(WAN-476).
+            create_pool_exchange(settings),
             store,
             universe,
             lookback_days=settings.lookback_days_for("1d"),
