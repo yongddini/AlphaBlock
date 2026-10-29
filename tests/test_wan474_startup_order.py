@@ -130,7 +130,7 @@ def test_stream_connects_before_the_slow_arm_catch_up(
     events: list[str] = []
     arm = _SlowArm(events)
 
-    monkeypatch.setattr(collector, "create_exchange", lambda settings: object())
+    monkeypatch.setattr(collector, "create_collector_exchange", lambda settings: object())
     monkeypatch.setattr(collector, "backfill_all", lambda *a, **k: {})
     monkeypatch.setattr(collector, "_build_arm_collection", lambda settings, store: arm)
 
@@ -225,7 +225,7 @@ def _run_startup(
 ) -> tuple[list[str], _RecordingExchange, Settings]:
     exchange = _RecordingExchange()
     sent: list[str] = []
-    monkeypatch.setattr(collector, "create_exchange", lambda settings: exchange)
+    monkeypatch.setattr(collector, "create_collector_exchange", lambda settings: exchange)
     monkeypatch.setattr(collector, "backfill_all", lambda *a, **k: {})
     monkeypatch.setattr("data.repair.build_telegram_client", lambda settings: _FakeTelegram(sent))
 
@@ -404,7 +404,7 @@ def test_collector_hands_the_catchup_gate_to_the_poller(
     arm = _SlowArm(events)
     captured: dict[str, Any] = {}
 
-    monkeypatch.setattr(collector, "create_exchange", lambda settings: object())
+    monkeypatch.setattr(collector, "create_collector_exchange", lambda settings: object())
     monkeypatch.setattr(collector, "backfill_all", lambda *a, **k: {})
     monkeypatch.setattr(collector, "_build_arm_collection", lambda settings, store: arm)
 

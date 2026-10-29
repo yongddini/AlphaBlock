@@ -64,7 +64,32 @@ def create_pool_exchange(settings: Settings | None = None) -> ccxt.binance:
     09:02 KST 강제 재로딩이 그 전부를 메모리에 올려 서버(764MB)가 스왑에 빠졌다(2026-10-27).
     빼는 시장은 `pool_symbols`가 어차피 버리는 것들이라 풀은 그대로다(회귀 테스트가 고정).
     """
-    exchange = create_exchange(settings)
+    return restrict_to_usdm(create_exchange(settings))
+
+
+def restrict_to_usdm(exchange: ccxt.binance) -> ccxt.binance:
+    """`load_markets()`가 USDⓈ-M 시장만 받고 화폐 목록(`sapi`)은 안 받게 한다(WAN-476/477).
+
+    옵션은 **인스턴스의** `options` dict에만 쓴다 — ccxt가 인스턴스마다 깊은 복사를 해 두므로
+    다른 인스턴스로 새지 않는다(회귀 테스트가 고정).
+    """
     exchange.options["fetchMarkets"] = {"types": list(POOL_MARKET_TYPES)}
     exchange.options["fetchCurrencies"] = False
     return exchange
+
+
+def create_collector_exchange(settings: Settings | None = None) -> ccxt.binance:
+    """수집기 연결(기동 백필·펀딩·꼬리 따라잡기 · 팔 수집 · REST 이중 수집)용 인스턴스(WAN-477).
+
+    수집기는 USDⓈ-M 무기한(`BTC/USDT:USDT` 표기)의 봉과 펀딩만 받는다 — 쓰는 메서드는
+    `fetch_ohlcv` · `fetch_funding_rate` · `fetch_funding_rate_history` 셋뿐이고 셋 다 USDⓈ-M
+    시장 하나만 찾는다. 그런데 `create_exchange`는 첫 호출 때 현물·COIN-M 시장까지 전부 올려
+    **연결마다** 들고 있다. 후보 풀(`create_pool_exchange`)과 같은 제한을 건다.
+
+    ⚠️ 현물 설정(`market_type="spot"`)에서는 제한을 걸지 않는다 — 그 시장이 바로 빠지기 때문이다.
+    """
+    settings = settings or get_settings()
+    exchange = create_exchange(settings)
+    if settings.market_type != "future":
+        return exchange
+    return restrict_to_usdm(exchange)
