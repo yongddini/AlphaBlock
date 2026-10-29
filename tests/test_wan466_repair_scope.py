@@ -135,7 +135,9 @@ class _NoFetchExchange:
 def _stub_collector(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """거래소·백필·펀딩을 걷어내되 **진짜** `repair_all`·`alert_on_failure`를 돌린다."""
     sent: list[str] = []
-    monkeypatch.setattr("data.collector.create_exchange", lambda settings: _NoFetchExchange())
+    monkeypatch.setattr(
+        "data.collector.create_collector_exchange", lambda settings: _NoFetchExchange()
+    )
     monkeypatch.setattr("data.collector.backfill_all", lambda *a, **k: {})
     monkeypatch.setattr("data.repair.build_telegram_client", lambda settings: _FakeTelegram(sent))
 

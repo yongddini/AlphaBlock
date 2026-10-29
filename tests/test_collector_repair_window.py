@@ -41,7 +41,7 @@ def _stub_collector(monkeypatch: pytest.MonkeyPatch) -> list[int | None]:
         seen.append(kwargs.get("lookback_ms"))
         return RepairSummary(ran_at_ms=0, series=[], lookback_ms=kwargs.get("lookback_ms"))
 
-    monkeypatch.setattr("data.collector.create_exchange", lambda settings: object())
+    monkeypatch.setattr("data.collector.create_collector_exchange", lambda settings: object())
     monkeypatch.setattr("data.collector.backfill_all", lambda *a, **k: {})
     monkeypatch.setattr("data.collector.repair_all", fake_repair_all)
     monkeypatch.setattr("data.collector.alert_on_failure", lambda summary, settings: False)

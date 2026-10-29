@@ -141,7 +141,7 @@ class _TailExchange:
 def _stub_collector(monkeypatch: pytest.MonkeyPatch, exchange: _TailExchange) -> list[str]:
     """백필·펀딩만 걷어내고 **진짜** `repair_all`·`alert_on_failure`·꼬리 받기를 돌린다."""
     sent: list[str] = []
-    monkeypatch.setattr("data.collector.create_exchange", lambda settings: exchange)
+    monkeypatch.setattr("data.collector.create_collector_exchange", lambda settings: exchange)
     monkeypatch.setattr("data.collector.backfill_all", lambda *a, **k: {})
     monkeypatch.setattr("data.repair.build_telegram_client", lambda settings: _FakeTelegram(sent))
 

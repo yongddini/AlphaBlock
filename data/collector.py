@@ -26,13 +26,14 @@ from data.collection_plan import (
     monitor_scope_for,
 )
 from data.derived_bars import build_derived
-from data.exchange import create_exchange, create_pool_exchange
+from data.exchange import create_collector_exchange, create_pool_exchange
 from data.funding import (
     FundingRateSource,
     FundingRateStore,
     backfill_funding_all,
     run_funding_refresh,
 )
+from data.gc_watch import freeze_startup_objects, install_gc_pause_logging
 from data.models import Candle, timeframe_to_ms
 from data.repair import RefillStale, RepairStateStore, alert_on_failure, repair_all
 from data.rest_poll import ClosedBarPoller, report_poller_task_exit
@@ -348,7 +349,8 @@ async def _run_universe(settings: Settings, store: OhlcvStore) -> None:
 def _build_arm_collection(settings: Settings, store: OhlcvStore) -> ArmCollection:
     """팔 수집 관리 객체 — 거래소 인스턴스는 따로 만든다(스레드에서 기본 격자와 겹쳐 돈다)."""
     return ArmCollection(
-        exchange=create_exchange(settings),
+        # USDⓈ-M만 받는 연결 — 현물·COIN-M 시장을 상시로 들고 있지 않게(WAN-477).
+        exchange=create_collector_exchange(settings),
         store=store,
         universe=UniverseStore(settings.db_path),
         db_path=settings.db_path,
@@ -570,7 +572,7 @@ def _build_rest_poller(
                 build_derived(store, symbol, target)
 
     return ClosedBarPoller(
-        create_exchange(settings),
+        create_collector_exchange(settings),  # USDⓈ-M만(WAN-477)
         store,
         _pairs,
         offset_seconds=settings.collector_rest_poll_offset_seconds,
@@ -650,9 +652,12 @@ async def run_collector(
 
     # 멎은 것 같으면 `kill -USR1 <pid>`로 태스크 스택을 로그에 받는다(WAN-470 · pid는 하트비트).
     install_task_dump_signal(asyncio.get_running_loop())
+    # GC 전체 수거 시간 로그(WAN-477 · 기본 꺼짐 · 측정용).
+    install_gc_pause_logging(settings.collector_gc_log_min_ms)
 
     do_repair = settings.repair_on_start if repair_on_start is None else repair_on_start
-    exchange = create_exchange(settings)
+    # 기동 백필·갭 복구·펀딩·꼬리 따라잡기가 함께 쓰는 연결 — USDⓈ-M만 받는다(WAN-477).
+    exchange = create_collector_exchange(settings)
     store = OhlcvStore(settings.db_path)
     heartbeat = HeartbeatStore(
         settings.collector_heartbeat_path,
@@ -727,6 +732,9 @@ async def run_collector(
         await _backfill_funding(settings, exchange)
 
         heartbeat.beat()  # 백필 완료 = 첫 하트비트(스트림 접속 전에도 생존 표시).
+
+        if settings.collector_gc_freeze_after_start:
+            freeze_startup_objects()  # WAN-477 손잡이(기본 꺼짐)
 
         # 진행 신호(WAN-470) — 메시지가 아니라 **새 봉**이 진행이다(`ProgressSignals`).
         signals = ProgressSignals(heartbeat)

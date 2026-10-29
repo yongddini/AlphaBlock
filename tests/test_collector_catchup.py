@@ -129,7 +129,9 @@ def test_run_collector_wires_catchup_into_stream_on_connect(
         return {}
 
     monkeypatch.setattr("data.collector.backfill_all", fake_backfill)
-    monkeypatch.setattr("data.collector.create_exchange", lambda settings: _NullExchange())
+    monkeypatch.setattr(
+        "data.collector.create_collector_exchange", lambda settings: _NullExchange()
+    )
 
     async def no_funding(settings: Settings, exchange: Any) -> None:
         return None

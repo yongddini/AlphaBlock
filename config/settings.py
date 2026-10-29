@@ -333,6 +333,14 @@ class Settings(BaseSettings):
     # 한 시리즈를 한 번에 거슬러 받는 최대 봉 수(그보다 긴 구멍은 접속 직후 따라잡기·갭 복구 몫).
     collector_rest_poll_max_bars: int = Field(default=500, ge=1)
 
+    # GC 진단·손잡이(WAN-477) — 둘 다 기본 꺼짐 · 수집 결과 불변.
+    # (1) 세대 2(전체) 수거가 이 시간(ms) 이상 걸리면 WARNING 한 줄(None = 끔). 서버 09:03 「43초
+    #     동시 공백」이 GC 전체 수거(스왑 재읽기)인지 가리는 측정용이다.
+    collector_gc_log_min_ms: float | None = Field(default=None, ge=0)
+    # (2) 기동 백필이 끝나면 그때까지의 객체를 `gc.freeze()`로 얼린다 — 이후 전체 수거가 건드리지
+    #     않는다. 얼린 객체의 순환 쓰레기는 수거되지 않으므로 손잡이로만 둔다.
+    collector_gc_freeze_after_start: bool = Field(default=False)
+
     # OHLCV 갭 자동 탐지·복구 백필(WAN-35). 저장된 시리즈의 내부 누락 봉을 찾아 그
     # 구간만 재수집한다. 수집 데몬(`alphablock collect`) 시작 시 1회 자동 점검을 켜는
     # 기본값(repair_on_start=True)과, 마지막 복구 요약을 남겨 Health 뷰가 읽는 파일 경로.
